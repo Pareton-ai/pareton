@@ -194,7 +194,7 @@ def download(
         for fut in as_completed(futs):
             fut.result()
 
-    logger.info("☁️  S3 download: %d file(s) <- s3://%s/%s", len(files), bucket, prefix)
+    logger.info("☁️ S3 download: %d file(s) <- s3://%s/%s", len(files), bucket, prefix)
     return len(files)
 
 

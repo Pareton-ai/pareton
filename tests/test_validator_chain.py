@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 import pytest
 
 from validator.chain import (
     CommitmentRecord,
     NotRegisteredError,
+    PaymentVerifyOutcome,
+    PaymentVerifyResult,
+    _call_args_dict,
     _decode_raw_commitment,
+    _decode_remark_bytes,
+    _flatten_calls,
+    _payment_calls_valid,
+    _payment_events_valid,
     build_commitments,
     build_competition_weights,
+    extract_payment_fields,
     parse_commitment_data,
     preflight_check,
     unique_hotkeys,
+    verify_submission_payment,
 )
 
 pytestmark = pytest.mark.unit
@@ -24,6 +34,7 @@ pytestmark = pytest.mark.unit
 @dataclass
 class FakeMetagraph:
     hotkeys: list[str]
+    coldkeys: list[str] | None = None
 
 
 _DIGEST_A = "sha256:" + "a" * 64
@@ -135,6 +146,279 @@ class TestParseCommitmentData:
         assert parse_commitment_data(raw) is None
 
 
+_TX_A = "0x" + "a" * 64
+_BLK_A = "0x" + "b" * 64
+
+
+class TestPaymentCallHelpers:
+    def test_flatten_batch_calls(self):
+        top = {
+            "call_module": "Utility",
+            "call_function": "batch",
+            "call_args": [
+                {
+                    "name": "calls",
+                    "value": [
+                        {
+                            "call_module": "Balances",
+                            "call_function": "transfer_keep_alive",
+                            "call_args": {"dest": "5Dest", "value": 100},
+                        },
+                        {
+                            "call_module": "System",
+                            "call_function": "remark",
+                            "call_args": {"remark": b"cacheon:hk1:sha256:aaa"},
+                        },
+                    ],
+                }
+            ],
+        }
+        flat = _flatten_calls(top)
+        assert len(flat) == 2
+        assert flat[0]["call_module"] == "Balances"
+
+    def test_payment_calls_valid(self):
+        calls = [
+            {
+                "call_module": "Balances",
+                "call_function": "transfer_keep_alive",
+                "call_args": {"dest": "5Dest", "value": 100_000_000},
+            },
+            {
+                "call_module": "System",
+                "call_function": "remark",
+                "call_args": {"remark": b"cacheon:hk1:sha256:abc"},
+            },
+        ]
+        ok_t, ok_r = _payment_calls_valid(
+            calls,
+            payment_address="5Dest",
+            min_fee_rao=100_000_000,
+            remark_needle=b"cacheon:hk1:sha256:abc",
+        )
+        assert ok_t and ok_r
+
+    def test_payment_calls_valid_rejects_substring_remark(self):
+        calls = [
+            {
+                "call_module": "System",
+                "call_function": "remark",
+                "call_args": {
+                    "remark": b"cacheon:hk1:sha256:abc" + b"cacheon:hk2:sha256:xyz",
+                },
+            },
+        ]
+        _, ok_r = _payment_calls_valid(
+            calls,
+            payment_address="5Dest",
+            min_fee_rao=100_000_000,
+            remark_needle=b"cacheon:hk1:sha256:abc",
+        )
+        assert ok_r is False
+
+    def test_call_args_dict_from_list(self):
+        args = _call_args_dict(
+            [{"name": "dest", "value": "5X"}, {"name": "value", "value": 42}]
+        )
+        assert args == {"dest": "5X", "value": 42}
+
+    def test_decode_remark_hex(self):
+        assert _decode_remark_bytes("0x63616368656f6e") == b"cacheon"
+
+
+class TestPaymentEventHelpers:
+    _COLDKEY = "5Coldkey"
+    _PAYMENT = "5Dest"
+    _FEE = 100_000_000
+
+    def _transfer_event(self, *, from_acct: str, to_acct: str, amount: int):
+        return {
+            "module_id": "Balances",
+            "event_id": "Transfer",
+            "attributes": {
+                "from": from_acct,
+                "to": to_acct,
+                "amount": amount,
+            },
+        }
+
+    def test_transfer_event_accepted(self):
+        ok, batch_ok = _payment_events_valid(
+            [
+                self._transfer_event(
+                    from_acct=self._COLDKEY, to_acct=self._PAYMENT, amount=self._FEE
+                )
+            ],
+            expected_coldkey=self._COLDKEY,
+            payment_address=self._PAYMENT,
+            min_fee_rao=self._FEE,
+        )
+        assert ok and batch_ok
+
+    def test_transfer_event_tuple_attributes(self):
+        ok, batch_ok = _payment_events_valid(
+            [
+                {
+                    "module_id": "Balances",
+                    "event_id": "Transfer",
+                    "attributes": (self._COLDKEY, self._PAYMENT, self._FEE),
+                }
+            ],
+            expected_coldkey=self._COLDKEY,
+            payment_address=self._PAYMENT,
+            min_fee_rao=self._FEE,
+        )
+        assert ok and batch_ok
+
+    def test_batch_interrupted_rejected(self):
+        events = [
+            self._transfer_event(
+                from_acct=self._COLDKEY,
+                to_acct=self._PAYMENT,
+                amount=self._FEE,
+            ),
+            {
+                "module_id": "Utility",
+                "event_id": "BatchInterrupted",
+                "attributes": {"index": 1, "error": {}},
+            },
+        ]
+        ok, batch_ok = _payment_events_valid(
+            events,
+            expected_coldkey=self._COLDKEY,
+            payment_address=self._PAYMENT,
+            min_fee_rao=self._FEE,
+        )
+        assert ok
+        assert not batch_ok
+
+    def test_wrong_destination_rejected(self):
+        ok, batch_ok = _payment_events_valid(
+            [
+                self._transfer_event(
+                    from_acct=self._COLDKEY, to_acct="5Other", amount=self._FEE
+                )
+            ],
+            expected_coldkey=self._COLDKEY,
+            payment_address=self._PAYMENT,
+            min_fee_rao=self._FEE,
+        )
+        assert not ok and batch_ok
+
+    def test_insufficient_amount_rejected(self):
+        ok, batch_ok = _payment_events_valid(
+            [
+                self._transfer_event(
+                    from_acct=self._COLDKEY,
+                    to_acct=self._PAYMENT,
+                    amount=self._FEE - 1,
+                )
+            ],
+            expected_coldkey=self._COLDKEY,
+            payment_address=self._PAYMENT,
+            min_fee_rao=self._FEE,
+        )
+        assert not ok and batch_ok
+
+    def test_account_id_dict_form(self):
+        ok, batch_ok = _payment_events_valid(
+            [
+                {
+                    "module_id": "Balances",
+                    "event_id": "Transfer",
+                    "attributes": {
+                        "from": {"Id": self._COLDKEY},
+                        "to": {"Id": self._PAYMENT},
+                        "amount": self._FEE,
+                    },
+                }
+            ],
+            expected_coldkey=self._COLDKEY,
+            payment_address=self._PAYMENT,
+            min_fee_rao=self._FEE,
+        )
+        assert ok and batch_ok
+
+
+class TestPaymentVerifyResult:
+    def test_lookup_error_is_deferred(self, monkeypatch):
+        class FakeSubtensor:
+            substrate = MagicMock()
+
+        FakeSubtensor.substrate.retrieve_extrinsic_by_hash.side_effect = RuntimeError(
+            "rpc down"
+        )
+        result = verify_submission_payment(
+            FakeSubtensor(),
+            payment_tx=_TX_A,
+            payment_block=_BLK_A,
+            expected_coldkey="5Cold",
+            expected_hotkey="5Hot",
+            expected_digest=_DIGEST_A,
+            payment_address="5Dest",
+            min_fee_rao=100,
+        )
+        assert result.outcome is PaymentVerifyOutcome.DEFER
+        assert "rpc down" in (result.reason or "")
+
+
+class TestExtractPaymentFields:
+    def test_valid_fields(self):
+        raw = json.dumps(
+            {
+                "image": "u/r:v1",
+                "digest": _DIGEST_A,
+                "payment_tx": _TX_A,
+                "payment_block": _BLK_A,
+            }
+        )
+        assert extract_payment_fields(raw) == (_TX_A, _BLK_A)
+
+    def test_missing_payment_tx(self):
+        raw = json.dumps({"image": "u/r:v1", "payment_block": _BLK_A})
+        assert extract_payment_fields(raw) is None
+
+    def test_missing_payment_block(self):
+        raw = json.dumps({"image": "u/r:v1", "payment_tx": _TX_A})
+        assert extract_payment_fields(raw) is None
+
+    def test_both_absent(self):
+        raw = json.dumps({"image": "u/r:v1", "digest": _DIGEST_A})
+        assert extract_payment_fields(raw) is None
+
+    def test_tx_wrong_length(self):
+        raw = json.dumps({"payment_tx": "0x" + "a" * 63, "payment_block": _BLK_A})
+        assert extract_payment_fields(raw) is None
+
+    def test_tx_no_0x_prefix(self):
+        raw = json.dumps({"payment_tx": "a" * 64, "payment_block": _BLK_A})
+        assert extract_payment_fields(raw) is None
+
+    def test_tx_uppercase_normalized(self):
+        upper = "0x" + "A" * 64
+        raw = json.dumps({"payment_tx": upper, "payment_block": _BLK_A})
+        assert extract_payment_fields(raw) == (upper.lower(), _BLK_A)
+
+    def test_strips_whitespace(self):
+        raw = json.dumps(
+            {"payment_tx": f"  {_TX_A}  ", "payment_block": f"  {_BLK_A}  "}
+        )
+        assert extract_payment_fields(raw) == (_TX_A, _BLK_A)
+
+    def test_non_string_tx(self):
+        raw = json.dumps({"payment_tx": 123, "payment_block": _BLK_A})
+        assert extract_payment_fields(raw) is None
+
+    def test_empty_string(self):
+        assert extract_payment_fields("") is None
+
+    def test_none_input(self):
+        assert extract_payment_fields(None) is None  # type: ignore[arg-type]
+
+    def test_non_json(self):
+        assert extract_payment_fields("not json") is None
+
+
 class TestDecodeRawCommitment:
     """Test the three on-chain commitment formats we've observed."""
 
@@ -224,7 +508,9 @@ class TestDecodeRawCommitment:
 
 class TestBuildCommitments:
     def test_single_commitment(self):
-        mg = FakeMetagraph(hotkeys=["hk0", "hk1", "hk2"])
+        mg = FakeMetagraph(
+            hotkeys=["hk0", "hk1", "hk2"], coldkeys=["ck0", "ck1", "ck2"]
+        )
         raw = json.dumps({"image": "user/repo:v1", "digest": _DIGEST_A})
         revealed = {"hk1": [(100, raw)]}
         out = build_commitments(mg, revealed)
@@ -232,10 +518,17 @@ class TestBuildCommitments:
         rec = out[1]
         assert rec.uid == 1
         assert rec.hotkey == "hk1"
+        assert rec.coldkey == "ck1"
         assert rec.commit_block == 100
         assert rec.image == "user/repo:v1"
         assert rec.digest == _DIGEST_A
         assert rec.raw == raw
+
+    def test_coldkey_falls_back_to_empty_when_metagraph_lacks_coldkeys(self):
+        mg = FakeMetagraph(hotkeys=["hk0"])  # no coldkeys attribute
+        raw = json.dumps({"image": "user/repo:v1", "digest": _DIGEST_A})
+        out = build_commitments(mg, {"hk0": [(10, raw)]})
+        assert out[0].coldkey == ""
 
     def test_picks_latest_block_when_multiple_reveals(self):
         mg = FakeMetagraph(hotkeys=["hk0"])
@@ -290,10 +583,36 @@ class TestBuildCommitments:
         out = build_commitments(FakeMetagraph(hotkeys=[]), {})
         assert out == {}
 
+    def test_payment_fields_propagated(self):
+        mg = FakeMetagraph(hotkeys=["hk0"])
+        raw = json.dumps(
+            {
+                "image": "user/repo:v1",
+                "digest": _DIGEST_A,
+                "payment_tx": _TX_A,
+                "payment_block": _BLK_A,
+            }
+        )
+        out = build_commitments(mg, {"hk0": [(100, raw)]})
+        rec = out[0]
+        assert rec.payment_tx == _TX_A
+        assert rec.payment_block == _BLK_A
+        assert rec.has_payment is True
+
+    def test_payment_fields_absent_when_not_in_json(self):
+        mg = FakeMetagraph(hotkeys=["hk0"])
+        raw = json.dumps({"image": "user/repo:v1", "digest": _DIGEST_A})
+        out = build_commitments(mg, {"hk0": [(100, raw)]})
+        rec = out[0]
+        assert rec.payment_tx is None
+        assert rec.payment_block is None
+        assert rec.has_payment is False
+
     def test_as_eval_key(self):
         rec = CommitmentRecord(
             uid=1,
             hotkey="hk1",
+            coldkey="ck1",
             commit_block=100,
             image="m:v1",
             digest=_DIGEST_A,
@@ -380,6 +699,7 @@ class TestUniqueHotkeys:
             CommitmentRecord(
                 uid=0,
                 hotkey="hk1",
+                coldkey="ck1",
                 commit_block=1,
                 image="m:v1",
                 digest=_DIGEST_A,
@@ -388,6 +708,7 @@ class TestUniqueHotkeys:
             CommitmentRecord(
                 uid=1,
                 hotkey="hk2",
+                coldkey="ck2",
                 commit_block=1,
                 image="m:v1",
                 digest=_DIGEST_B,
@@ -396,6 +717,7 @@ class TestUniqueHotkeys:
             CommitmentRecord(
                 uid=2,
                 hotkey="hk1",
+                coldkey="ck1",
                 commit_block=2,
                 image="m:v1",
                 digest=_DIGEST_C,

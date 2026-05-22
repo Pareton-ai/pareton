@@ -29,13 +29,16 @@ from pathlib import Path
 from . import config as validator_config
 from .chain import (
     ChainError,
+    CommitmentRecord,
     NotRegisteredError,
+    PaymentVerifyOutcome,
     build_commitments,
     build_competition_weights,
     fetch_metagraph,
     fetch_revealed_commitments,
     preflight_check,
     set_weights,
+    verify_submission_payment,
 )
 from .challengers import select_challengers
 from .eval_schema import ChallengerInfo, EvalJob
@@ -170,6 +173,103 @@ def _clean_stale_eval_job(state: ValidatorState, state_dir: str) -> bool:
     return False
 
 
+def _gate_unpaid_commitments(
+    subtensor,
+    state: ValidatorState,
+    commitments: dict[int, CommitmentRecord],
+) -> tuple[dict[int, CommitmentRecord], list[tuple[CommitmentRecord, str]]]:
+    """Filter out commitments that don't have a valid submission payment.
+
+    Active when SUBMISSION_FEE_RAO > 0. Returns (valid_commitments, rejected_list).
+
+    Skips RPC for ``(hotkey, commit_block)`` pairs already evaluated or
+    tombstoned. Transient RPC failures defer to the next tick without
+    recording a precheck failure.
+    """
+    payment_address = validator_config.PAYMENT_ADDRESS
+    fee_rao = validator_config.SUBMISSION_FEE_RAO
+
+    if fee_rao <= 0:
+        return commitments, []
+
+    valid: dict[int, CommitmentRecord] = {}
+    rejected: list[tuple[CommitmentRecord, str]] = []
+    deferred = 0
+
+    for uid, com in commitments.items():
+        if state.has_evaluation(com.hotkey, com.commit_block):
+            valid[uid] = com
+            continue
+        if state.has_precheck_failure(com.hotkey, com.commit_block):
+            continue
+
+        if not com.has_payment:
+            reason = "missing payment: no payment_tx/payment_block in commitment"
+            logger.info(
+                "UID %d (%s) rejected: %s",
+                com.uid,
+                com.hotkey[:16] + "...",
+                reason,
+            )
+            rejected.append((com, reason))
+            continue
+
+        if not com.coldkey:
+            reason = "missing coldkey: cannot verify payment signer"
+            logger.warning(
+                "UID %d (%s) rejected: %s",
+                com.uid,
+                com.hotkey[:16] + "...",
+                reason,
+            )
+            rejected.append((com, reason))
+            continue
+
+        result = verify_submission_payment(
+            subtensor,
+            payment_tx=com.payment_tx,
+            payment_block=com.payment_block,
+            expected_coldkey=com.coldkey,
+            expected_hotkey=com.hotkey,
+            expected_digest=com.digest,
+            payment_address=payment_address,
+            min_fee_rao=fee_rao,
+        )
+        if result.outcome is PaymentVerifyOutcome.OK:
+            valid[uid] = com
+        elif result.outcome is PaymentVerifyOutcome.DEFER:
+            deferred += 1
+            logger.warning(
+                "UID %d (%s) payment verify deferred: %s",
+                com.uid,
+                com.hotkey[:16] + "...",
+                result.reason or "lookup failed",
+            )
+        else:
+            reason = result.reason or (
+                f"payment verification failed for tx {com.payment_tx[:18]}..."
+            )
+            logger.warning(
+                "UID %d (%s) rejected: %s",
+                com.uid,
+                com.hotkey[:16] + "...",
+                reason,
+            )
+            rejected.append((com, reason))
+
+    if rejected or deferred:
+        logger.info(
+            "Payment gate: %d paid, %d rejected, %d deferred (address=%s, fee=%d RAO)",
+            len(valid),
+            len(rejected),
+            deferred,
+            payment_address[:16] + "...",
+            fee_rao,
+        )
+
+    return valid, rejected
+
+
 def _hotkey_is_registered(metagraph, uid: int, hotkey: str) -> bool:
     """True if `uid` is in range and the on-chain hotkey matches."""
     if uid < 0 or uid >= len(metagraph.hotkeys):
@@ -242,6 +342,13 @@ def run_tick(
         len(metagraph.hotkeys),
         len(commitments),
     )
+
+    # Payment gate: drop any commitment that hasn't paid the submission fee.
+    commitments, payment_rejected = _gate_unpaid_commitments(
+        subtensor, state, commitments
+    )
+    for com, rej_reason in payment_rejected:
+        state.record_precheck_failure(com.hotkey, com.commit_block, rej_reason)
 
     # Winner UID recycling / deregistration guard
     if state.winner is not None:
@@ -541,7 +648,9 @@ def main(argv: list[str] | None = None) -> int:
         args.poll_interval,
     )
 
-    subtensor = bt.Subtensor(network=args.network)
+    subtensor = bt.Subtensor(
+        network="archive" if args.network == "finney" else args.network
+    )
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
 
     try:
