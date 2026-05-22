@@ -631,82 +631,22 @@ class TestRerankRound:
 
 
 class TestRunnerUp:
-    def test_persisted_runner_up_preferred(self):
-        """When runner_up_record is set, the property returns it directly."""
+    def test_no_record_returns_none(self):
+        state = ValidatorState()
+        assert state.runner_up is None
+
+    def test_persisted_runner_up_returned(self):
         state = ValidatorState()
         ev = _make_eval(uid=5, hotkey="hk5", score=0.4, commit_block=500)
         state.runner_up_record = WinnerRecord.from_evaluation(ev, won_at_block=510)
         assert state.runner_up is not None
         assert state.runner_up.uid == 5
 
-    def test_no_evaluations_returns_none(self):
-        state = ValidatorState()
-        assert state.runner_up is None
-
-    def test_single_eval_is_winner_returns_none(self):
-        state = ValidatorState()
-        _record_as_winner(state, _make_eval(uid=1, hotkey="hk1", score=0.5))
-        assert state.winner is not None
-        assert state.runner_up is None
-
-    def test_two_hotkeys_returns_non_winner(self):
+    def test_evaluations_without_record_returns_none(self):
+        """Past eval scores do not infer a runner-up; only rerank_round crowns one."""
         state = ValidatorState()
         _record_as_winner(state, _make_eval(uid=1, hotkey="hk1", score=0.5))
         _record(state, _make_eval(uid=2, hotkey="hk2", commit_block=200, score=0.3))
-        assert state.runner_up is not None
-        assert state.runner_up.uid == 2
-        assert state.runner_up.hotkey == "hk2"
-
-    def test_dq_eval_excluded(self):
-        state = ValidatorState()
-        _record_as_winner(state, _make_eval(uid=1, hotkey="hk1", score=0.5))
-        _record(
-            state,
-            _make_eval(
-                uid=2,
-                hotkey="hk2",
-                commit_block=200,
-                score=0.0,
-                disqualified=True,
-                reason="bad",
-            ),
-        )
-        assert state.runner_up is None
-
-    def test_same_hotkey_multiple_commits_grouped(self):
-        """Winner's hotkey excluded even with multiple commits."""
-        state = ValidatorState()
-        _record_as_winner(
-            state, _make_eval(uid=1, hotkey="hk1", score=0.5, commit_block=100)
-        )
-        _record(state, _make_eval(uid=1, hotkey="hk1", score=0.3, commit_block=200))
-        _record(state, _make_eval(uid=2, hotkey="hk2", score=0.2, commit_block=300))
-        assert state.runner_up is not None
-        assert state.runner_up.hotkey == "hk2"
-
-    def test_best_score_per_hotkey_selected(self):
-        state = ValidatorState()
-        _record_as_winner(
-            state, _make_eval(uid=1, hotkey="hk1", score=0.5, commit_block=100)
-        )
-        _record(state, _make_eval(uid=2, hotkey="hk2", score=0.2, commit_block=200))
-        _record(state, _make_eval(uid=2, hotkey="hk2", score=0.4, commit_block=300))
-        _record(state, _make_eval(uid=3, hotkey="hk3", score=0.35, commit_block=400))
-        ru = state.runner_up
-        assert ru is not None
-        assert ru.hotkey == "hk2"
-        assert ru.score == 0.4
-
-    def test_zero_score_excluded(self):
-        state = ValidatorState()
-        _record_as_winner(state, _make_eval(uid=1, hotkey="hk1", score=0.5))
-        _record(state, _make_eval(uid=2, hotkey="hk2", commit_block=200, score=0.0))
-        assert state.runner_up is None
-
-    def test_negative_score_excluded(self):
-        state = ValidatorState()
-        _record_as_winner(state, _make_eval(uid=1, hotkey="hk1", score=0.5))
-        _record(state, _make_eval(uid=2, hotkey="hk2", commit_block=200, score=-0.1))
         assert state.runner_up is None
 
 

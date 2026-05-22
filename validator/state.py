@@ -280,32 +280,9 @@ class ValidatorState:
         return sorted(matches, key=lambda e: e.commit_block)
 
     @property
-    def runner_up(self) -> EvaluationRecord | WinnerRecord | None:
-        """The runner-up. Returns the persisted ``runner_up_record`` when
-        set (populated by ``rerank_round``), otherwise falls back to
-        scanning ``evaluations`` for the highest-scoring non-winner hotkey.
-        """
-        if self.runner_up_record is not None:
-            return self.runner_up_record
-        return self._compute_runner_up()
-
-    def _compute_runner_up(self) -> EvaluationRecord | None:
-        """Scan evaluations for the best non-winner hotkey (fallback)."""
-        if not self.evaluations:
-            return None
-        winner_hotkey = self.winner.hotkey if self.winner else None
-        best_per_hotkey: dict[str, EvaluationRecord] = {}
-        for ev in self.evaluations.values():
-            if ev.disqualified or ev.score <= 0.0 or not math.isfinite(ev.score):
-                continue
-            if ev.hotkey == winner_hotkey:
-                continue
-            prev = best_per_hotkey.get(ev.hotkey)
-            if prev is None or ev.score > prev.score:
-                best_per_hotkey[ev.hotkey] = ev
-        if not best_per_hotkey:
-            return None
-        return max(best_per_hotkey.values(), key=lambda e: e.score)
+    def runner_up(self) -> WinnerRecord | None:
+        """The crowned runner-up from the last completed GPU round."""
+        return self.runner_up_record
 
     # ------------------------------------------------------------------ #
     # Mutators -- all side-effect-free w.r.t. disk; caller calls save()

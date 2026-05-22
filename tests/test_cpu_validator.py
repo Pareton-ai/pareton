@@ -468,6 +468,7 @@ class TestRunTickWinnerDereg:
             evaluation_block=600,
         )
         state.record_evaluation(rec_ru, current_block=600)
+        state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
         state.save(tmp_path)
 
         assert state.winner.uid == 1
@@ -512,6 +513,7 @@ class TestRunTickWinnerDereg:
             evaluation_block=600,
         )
         state.record_evaluation(rec_ru, current_block=600)
+        state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
         state.save(tmp_path)
 
         summary = run_tick(

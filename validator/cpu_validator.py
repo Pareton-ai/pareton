@@ -478,7 +478,7 @@ def run_tick(
                     state.winner.image,
                 )
 
-            ru = state.runner_up
+            ru = state.runner_up_record if state.winner is not None else None
             ru_info = None
             if ru is not None:
                 ru_info = ChallengerInfo(
