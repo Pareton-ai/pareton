@@ -139,3 +139,7 @@ collision."""
 LOG_RETENTION_DAYS: int = int(os.environ.get("CACHEON_LOG_RETENTION_DAYS", "10"))
 """Delete log files in ``state/logs/`` older than this many days (by filename
 timestamp). 0 disables pruning."""
+
+# Submission payment gate (SUBMISSION_FEE_RAO=0 disables verification)
+PAYMENT_ADDRESS = "5HKd9UwXBHdAouKvxL73beBhfoW8LyNuMVkUBisboC4CYU41"
+SUBMISSION_FEE_RAO: int = int(os.environ.get("CACHEON_SUBMISSION_FEE_RAO", "0"))

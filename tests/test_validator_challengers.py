@@ -28,6 +28,7 @@ def _commit(
     return CommitmentRecord(
         uid=uid,
         hotkey=hotkey,
+        coldkey=f"ck_{hotkey}",
         commit_block=block,
         image=image,
         digest=digest,
@@ -66,23 +67,23 @@ class TestSelectChallengers:
         assert len(result.already_known) == 1
         assert result.already_known[0].uid == 1
 
-    def test_new_commit_block_for_known_hotkey_is_filtered(self):
-        """One shot per hotkey -- re-commit at a new block is still known."""
+    def test_new_commit_block_for_known_hotkey_becomes_challenger(self):
+        """Each (hotkey, commit_block) is tracked separately."""
         state = ValidatorState()
         _record(state, _make_eval(hotkey="hk1", commit_block=20))
         commits = [_commit(1, "hk1", 50)]  # same hotkey, new block
         result = select_challengers(state, commits)
-        assert len(result.challengers) == 0
-        assert len(result.already_known) == 1
+        assert len(result.challengers) == 1
+        assert result.challengers[0].commit_block == 50
+        assert result.already_known == []
 
-    def test_precheck_failed_hotkey_blocked_at_new_block(self):
-        """Precheck failure on one block blocks the same hotkey at any later block."""
+    def test_precheck_failed_at_old_block_allows_new_block(self):
         state = ValidatorState()
         state.record_precheck_failure("hk1", 20, "blocked import: os")
         commits = [_commit(1, "hk1", 50)]  # same hotkey, new block
         result = select_challengers(state, commits)
-        assert len(result.challengers) == 0
-        assert len(result.already_known) == 1
+        assert len(result.challengers) == 1
+        assert result.challengers[0].commit_block == 50
 
     def test_precheck_rejects_commitment(self):
         state = ValidatorState()

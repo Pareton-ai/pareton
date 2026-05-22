@@ -653,6 +653,7 @@ def _make_commitment(**overrides) -> CommitmentRecord:
     defaults = dict(
         uid=1,
         hotkey="hk_miner1",
+        coldkey="ck_miner1",
         commit_block=100,
         image=_IMAGE,
         digest=_DIGEST,

@@ -17,6 +17,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Protocol
 
 if TYPE_CHECKING:
@@ -39,6 +40,10 @@ class CommitmentRecord:
     On-chain format (encoded with `subtensor.set_reveal_commitment`):
         {"image": "registry/repo:tag", "digest": "sha256:<64-char hex>"}
 
+    Optional payment fields (present when the miner paid the submission fee):
+        "payment_tx":    extrinsic hash of the fee batch call (0x + 64 hex chars)
+        "payment_block": block hash where that extrinsic was included
+
     `image` is a Docker image reference (registry/repo:tag or repo:tag).
     `digest` is the image manifest digest (sha256:...) that pins the exact
     image content regardless of tag mutations.
@@ -46,10 +51,17 @@ class CommitmentRecord:
 
     uid: int
     hotkey: str
+    coldkey: str
     commit_block: int
     image: str
     digest: str
     raw: str  # original JSON string, kept for diagnostics
+    payment_tx: str | None = None
+    payment_block: str | None = None
+
+    @property
+    def has_payment(self) -> bool:
+        return self.payment_tx is not None and self.payment_block is not None
 
     def as_eval_key(self) -> tuple[str, int]:
         return (self.hotkey, self.commit_block)
@@ -70,6 +82,7 @@ class _MetagraphLike(Protocol):
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._/:-]*$")
 _TAG_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_HEX64_RE = re.compile(r"^0x[0-9a-f]{64}$")
 
 
 def is_valid_docker_image(image: str) -> bool:
@@ -121,6 +134,31 @@ def parse_commitment_data(raw: str) -> tuple[str, str] | None:
     return image, digest
 
 
+def extract_payment_fields(raw: str) -> tuple[str, str] | None:
+    """Extract ``(payment_tx, payment_block)`` from a commitment JSON string.
+
+    Both fields must be 0x-prefixed 64-char lowercase hex strings.
+    Returns None when either is absent, the wrong format, or parsing fails.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    tx = obj.get("payment_tx")
+    blk = obj.get("payment_block")
+    if not isinstance(tx, str) or not isinstance(blk, str):
+        return None
+    tx = tx.strip().lower()
+    blk = blk.strip().lower()
+    if not _HEX64_RE.match(tx) or not _HEX64_RE.match(blk):
+        return None
+    return tx, blk
+
+
 def build_commitments(
     metagraph: _MetagraphLike,
     revealed: dict[str, list[tuple[int, str]]],
@@ -140,6 +178,7 @@ def build_commitments(
     """
     out: dict[int, CommitmentRecord] = {}
     hotkeys = list(metagraph.hotkeys)
+    coldkeys = list(getattr(metagraph, "coldkeys", []) or [])
 
     for uid, hotkey in enumerate(hotkeys):
         hotkey_str = str(hotkey)
@@ -158,13 +197,18 @@ def build_commitments(
             )
             continue
         image, digest = parsed
+        payment = extract_payment_fields(raw)
+        coldkey_str = str(coldkeys[uid]) if uid < len(coldkeys) else ""
         out[uid] = CommitmentRecord(
             uid=uid,
             hotkey=hotkey_str,
+            coldkey=coldkey_str,
             commit_block=int(block),
             image=image,
             digest=digest,
             raw=raw,
+            payment_tx=payment[0] if payment else None,
+            payment_block=payment[1] if payment else None,
         )
 
     return out
@@ -479,6 +523,229 @@ def set_weights(
             time.sleep(delay_s)
 
     raise ChainError(f"set_weights failed after {attempts} attempts: {last_reason}")
+
+
+def _call_args_dict(call_args: Any) -> dict[str, Any]:
+    """Normalize call_args from dict or [{name, value}, ...] list."""
+    if isinstance(call_args, dict):
+        return call_args
+    if isinstance(call_args, list):
+        out: dict[str, Any] = {}
+        for item in call_args:
+            if isinstance(item, dict) and item.get("name") is not None:
+                out[str(item["name"])] = item.get("value")
+        return out
+    return {}
+
+
+def _normalize_call(call: Any) -> dict[str, Any]:
+    if isinstance(call, dict):
+        return call
+    val = getattr(call, "value", None)
+    return val if isinstance(val, dict) else {}
+
+
+def _flatten_calls(top_call: dict[str, Any]) -> list[dict[str, Any]]:
+    fn = (top_call.get("call_function") or "").lower()
+    if fn in ("batch", "batch_all"):
+        inner = _call_args_dict(top_call.get("call_args")).get("calls") or []
+        return [_normalize_call(c) for c in inner]
+    return [top_call]
+
+
+def _decode_remark_bytes(raw: Any) -> bytes:
+    if raw is None:
+        return b""
+    if isinstance(raw, bytes):
+        return raw
+    if isinstance(raw, str):
+        hex_str = raw[2:] if raw.startswith("0x") else raw
+        try:
+            return bytes.fromhex(hex_str)
+        except ValueError:
+            return raw.encode()
+    return bytes(raw)
+
+
+def _normalize_account_id(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return str(value.get("Id") or value.get("id") or "")
+    return str(value)
+
+
+def _event_payload(event: Any) -> dict[str, Any]:
+    val = getattr(event, "value", None)
+    if isinstance(val, dict):
+        return val
+    if isinstance(event, dict):
+        return event
+    return {}
+
+
+def _event_attributes(attrs: Any) -> dict[str, Any]:
+    if isinstance(attrs, dict):
+        return attrs
+    if isinstance(attrs, (list, tuple)) and len(attrs) >= 3:
+        return {"from": attrs[0], "to": attrs[1], "amount": attrs[2]}
+    return {}
+
+
+def _payment_events_valid(
+    events: list[Any],
+    *,
+    expected_coldkey: str,
+    payment_address: str,
+    min_fee_rao: int,
+) -> tuple[bool, bool]:
+    """Return (transfer_executed, batch_not_interrupted) from extrinsic events."""
+    has_transfer = False
+    batch_interrupted = False
+    for event in events:
+        payload = _event_payload(event)
+        module_id = str(payload.get("module_id") or "")
+        event_id = str(payload.get("event_id") or "")
+        if module_id == "Utility" and event_id == "BatchInterrupted":
+            batch_interrupted = True
+        if module_id != "Balances" or event_id != "Transfer":
+            continue
+        attrs = _event_attributes(payload.get("attributes"))
+        from_acct = _normalize_account_id(attrs.get("from"))
+        to_acct = _normalize_account_id(
+            attrs.get("to") or attrs.get("dest") or attrs.get("destination")
+        )
+        amount = int(attrs.get("amount") or attrs.get("value") or 0)
+        if (
+            from_acct == _normalize_account_id(expected_coldkey)
+            and to_acct == _normalize_account_id(payment_address)
+            and amount >= min_fee_rao
+        ):
+            has_transfer = True
+    return has_transfer, not batch_interrupted
+
+
+class PaymentVerifyOutcome(str, Enum):
+    OK = "ok"
+    REJECT = "reject"
+    DEFER = "defer"
+
+
+@dataclass(frozen=True)
+class PaymentVerifyResult:
+    outcome: PaymentVerifyOutcome
+    reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is PaymentVerifyOutcome.OK
+
+
+def _payment_calls_valid(
+    calls: list[dict[str, Any]],
+    *,
+    payment_address: str,
+    min_fee_rao: int,
+    remark_needle: bytes,
+) -> tuple[bool, bool]:
+    has_transfer = False
+    has_remark = False
+    for call in calls:
+        module = (call.get("call_module") or "").lower()
+        fn = (call.get("call_function") or "").lower()
+        args = _call_args_dict(call.get("call_args"))
+        if module == "balances" and fn.startswith("transfer"):
+            dest = args.get("dest") or ""
+            if isinstance(dest, dict):
+                dest = str(dest.get("Id") or "")
+            if (
+                str(dest) == payment_address
+                and int(args.get("value") or 0) >= min_fee_rao
+            ):
+                has_transfer = True
+        if module == "system" and fn == "remark":
+            if _decode_remark_bytes(args.get("remark")) == remark_needle:
+                has_remark = True
+    return has_transfer, has_remark
+
+
+def verify_submission_payment(
+    subtensor: bt.Subtensor,
+    payment_tx: str,
+    payment_block: str,
+    expected_coldkey: str,
+    expected_hotkey: str,
+    expected_digest: str,
+    payment_address: str,
+    min_fee_rao: int,
+) -> PaymentVerifyResult:
+    """Verify payment via ``substrate.retrieve_extrinsic_by_hash``.
+
+    Checks signer (coldkey), executed Balances.Transfer event, no
+    Utility.BatchInterrupted, and remark call ``cacheon:<hotkey>:<digest>``.
+
+    RPC/lookup failures return ``DEFER`` so callers can retry next tick
+    without tombstoning the miner.
+    """
+    try:
+        receipt = subtensor.substrate.retrieve_extrinsic_by_hash(
+            block_hash=payment_block,
+            extrinsic_hash=payment_tx,
+        )
+        receipt.retrieve_extrinsic()
+        ext = getattr(receipt, "_ExtrinsicReceipt__extrinsic", None)
+    except Exception as exc:
+        logger.warning("verify_submission_payment: lookup failed: %s", exc)
+        return PaymentVerifyResult(
+            outcome=PaymentVerifyOutcome.DEFER,
+            reason=str(exc),
+        )
+
+    if ext is None:
+        reason = f"tx {payment_tx[:18]}... not in block {payment_block[:18]}..."
+        logger.warning("verify_submission_payment: %s", reason)
+        return PaymentVerifyResult(outcome=PaymentVerifyOutcome.REJECT, reason=reason)
+
+    if not receipt.is_success:
+        reason = f"tx {payment_tx[:18]}... extrinsic failed"
+        logger.warning("verify_submission_payment: %s", reason)
+        return PaymentVerifyResult(outcome=PaymentVerifyOutcome.REJECT, reason=reason)
+
+    body = ext.value if hasattr(ext, "value") else {}
+    signer = _normalize_account_id(body.get("address"))
+    if signer != _normalize_account_id(expected_coldkey):
+        reason = f"signer {signer[:16]}... != expected coldkey"
+        logger.warning("verify_submission_payment: %s", reason)
+        return PaymentVerifyResult(outcome=PaymentVerifyOutcome.REJECT, reason=reason)
+
+    transfer_executed, batch_ok = _payment_events_valid(
+        receipt.triggered_events,
+        expected_coldkey=expected_coldkey,
+        payment_address=payment_address,
+        min_fee_rao=min_fee_rao,
+    )
+    if not batch_ok:
+        reason = f"tx {payment_tx[:18]}... batch interrupted"
+        logger.warning("verify_submission_payment: %s", reason)
+        return PaymentVerifyResult(outcome=PaymentVerifyOutcome.REJECT, reason=reason)
+    if not transfer_executed:
+        reason = f"tx {payment_tx[:18]}... missing transfer event"
+        logger.warning("verify_submission_payment: %s", reason)
+        return PaymentVerifyResult(outcome=PaymentVerifyOutcome.REJECT, reason=reason)
+
+    calls = _flatten_calls(_normalize_call(body.get("call")))
+    remark_needle = f"cacheon:{expected_hotkey}:{expected_digest}".encode()
+    _, has_remark = _payment_calls_valid(
+        calls,
+        payment_address=payment_address,
+        min_fee_rao=min_fee_rao,
+        remark_needle=remark_needle,
+    )
+    if not has_remark:
+        reason = f"tx {payment_tx[:18]}... remark missing in call data"
+        logger.warning("verify_submission_payment: %s", reason)
+        return PaymentVerifyResult(outcome=PaymentVerifyOutcome.REJECT, reason=reason)
+    return PaymentVerifyResult(outcome=PaymentVerifyOutcome.OK)
 
 
 def unique_hotkeys(

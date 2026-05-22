@@ -22,7 +22,7 @@ Cacheon is a Bittensor subnet (SN14) that runs an open competition for **product
 
 ## How It Works
 
-1. **Miners** build an inference server, package it as a Docker image, and then commit the image reference and image digest on-chain.
+1. **Miners** build an inference server, package it as a Docker image, pay the submission fee, and commit the image reference, digest, and payment proof on-chain.
 2. **Validators** scan the chain for new commitments, pull the image, and run it with model weights mounted at `/models`.
 3. **Scoring** measures TTFT and throughput improvement over the vLLM baseline. Correctness is checked first; fail it and the score is zero.
 4. **The fastest correct server** becomes the winner and earns 80% of the competition pool. The runner-up earns 20%. Total pool scales with the winner's score relative to a target improvement.
@@ -41,21 +41,22 @@ else:
 
 ## For Miners
 
-Build an inference server that serves `Qwen2.5-72B-Instruct` via `/v1/chat/completions` with streaming and logprobs. Package it as a Docker image (maximum 20 GB; model weights are mounted at runtime, not baked into the image). Push it to a public registry and commit on-chain.
+Build an inference server that serves `Qwen2.5-72B-Instruct` via `/v1/chat/completions` with streaming and logprobs. Package it as a Docker image (maximum 20 GB; model weights are mounted at runtime, not baked into the image). Push it to a public registry, then run `miner/commit.py` to pay the submission fee and commit on-chain in one flow.
 
-**Requirements:** public container registry, Bittensor wallet registered on SN14. GPU hardware is only needed for local testing.
+**Requirements:** public container registry, Bittensor wallet registered on SN14, coldkey balance for the submission fee. GPU hardware is only needed for local testing.
 
 ```bash
 # Push your image
 docker tag my-server:latest docker.io/myuser/cacheon-miner:v1
 docker push docker.io/myuser/cacheon-miner:v1
 
-# Commit on-chain (one shot per hotkey -- test locally first)
+# Pay fee + commit on-chain (test locally first)
 python miner/commit.py \
   --wallet-name <wallet> \
   --wallet-hotkey <hotkey> \
   --image "docker.io/myuser/cacheon-miner:v1" \
   --digest "sha256:..." \
+  --fee 0.1 \
   --network finney \
   --netuid 14
 ```
