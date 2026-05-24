@@ -38,6 +38,7 @@ class TargonProvider:
     """GpuProvider backed by the Targon v2 REST API."""
 
     name = "targon"
+    READY_TIMEOUT_S = 120
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
@@ -215,7 +216,9 @@ class TargonProvider:
             raw={"resource_name": resource_name},
         )
 
-    def wait_ready(self, handle: PodHandle, timeout_s: int = 600) -> PodHandle:
+    def wait_ready(
+        self, handle: PodHandle, timeout_s: int = READY_TIMEOUT_S
+    ) -> PodHandle:
         deadline = time.monotonic() + timeout_s
         poll_count = 0
         while time.monotonic() < deadline:
