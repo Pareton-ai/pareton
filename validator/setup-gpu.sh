@@ -97,22 +97,29 @@ mkdir -p /etc/cdi
 nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 echo "CDI specs generated at /etc/cdi/nvidia.yaml"
 
-# Nested-container fixes (Lium / Targon DinD pods):
-# 1) no-cgroups: skip BPF cgroup device filters that fail inside a nested cgroup namespace
-if grep -q '^#no-cgroups = false' /etc/nvidia-container-runtime/config.toml 2>/dev/null; then
-  echo "Enabling no-cgroups for nested container GPU passthrough..."
-  sed -i 's/^#no-cgroups = false/no-cgroups = true/' /etc/nvidia-container-runtime/config.toml
-elif ! grep -q '^no-cgroups = true' /etc/nvidia-container-runtime/config.toml 2>/dev/null; then
-  echo "WARNING: could not find no-cgroups line in config.toml; GPU passthrough may fail in nested containers."
-fi
+# DinD vs bare VM: Lium/Targon need nested fixes; Shadeform bare VMs need no-cgroups=false.
+CACHEON_NESTED_DIN="${CACHEON_NESTED_DIN:-0}"
 
-# 2) runc 1.1.x: runc 1.2+ rejects /proc mounts from the outer container ("unsafe procfs")
-RUNC_VER="$(runc --version 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d]+' | head -1 || true)"
-if [[ "$RUNC_VER" == "1.2" || "$RUNC_VER" == "1.3" ]]; then
-  echo "Downgrading runc from $RUNC_VER.x to 1.1.15 for nested container compatibility..."
-  curl -fsSL -o /usr/sbin/runc https://github.com/opencontainers/runc/releases/download/v1.1.15/runc.amd64
-  chmod +x /usr/sbin/runc
-  echo "runc: $(runc --version | head -1)"
+if [[ "$CACHEON_NESTED_DIN" == "1" ]]; then
+  echo "Nested DinD mode (CACHEON_NESTED_DIN=1): enabling no-cgroups, runc 1.1.x"
+  if grep -q '^#no-cgroups = false' /etc/nvidia-container-runtime/config.toml 2>/dev/null; then
+    sed -i 's/^#no-cgroups = false/no-cgroups = true/' /etc/nvidia-container-runtime/config.toml
+  elif ! grep -q '^no-cgroups = true' /etc/nvidia-container-runtime/config.toml 2>/dev/null; then
+    echo "WARNING: could not find no-cgroups line in config.toml; GPU passthrough may fail in nested containers."
+  fi
+  RUNC_VER="$(runc --version 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d]+' | head -1 || true)"
+  if [[ "$RUNC_VER" == "1.2" || "$RUNC_VER" == "1.3" ]]; then
+    echo "Downgrading runc from $RUNC_VER.x to 1.1.15 for nested container compatibility..."
+    curl -fsSL -o /usr/sbin/runc https://github.com/opencontainers/runc/releases/download/v1.1.15/runc.amd64
+    chmod +x /usr/sbin/runc
+    echo "runc: $(runc --version | head -1)"
+  fi
+else
+  echo "Bare VM mode (CACHEON_NESTED_DIN=0): keeping no-cgroups disabled"
+  if grep -q '^no-cgroups = true' /etc/nvidia-container-runtime/config.toml 2>/dev/null; then
+    sed -i 's/^no-cgroups = true/no-cgroups = false/' /etc/nvidia-container-runtime/config.toml
+    nvidia-ctk runtime configure --runtime=docker
+  fi
 fi
 
 # Restart dockerd to pick up runtime config + runc changes

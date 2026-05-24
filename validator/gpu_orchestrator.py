@@ -24,15 +24,16 @@ from .providers import GpuInstance, GpuProvider, PodHandle, search_all_providers
 
 logger = logging.getLogger(__name__)
 
-SETUP_BRANCH = "main"
+SETUP_BRANCH = "feat/shadeform-validator-docs"  # TODO: switch to main before merging
 SETUP_SCRIPT_URL = f"https://raw.githubusercontent.com/latent-to/cacheon/{SETUP_BRANCH}/validator/setup-gpu.sh"
 
 
 def _build_providers() -> list[GpuProvider]:
     """Instantiate providers that have API keys configured.
 
-    When ``CACHEON_PREFERRED_PROVIDER`` is set (e.g. 'targon' or 'lium'),
-    only that provider is instantiated even if both keys exist.
+    When ``CACHEON_PREFERRED_PROVIDER`` is set (e.g. 'targon', 'lium', or
+    'shadeform'), only that provider is instantiated even if multiple keys
+    exist.
     """
     pref = validator_config.PREFERRED_PROVIDER.lower().strip()
     providers: list[GpuProvider] = []
@@ -46,6 +47,11 @@ def _build_providers() -> list[GpuProvider]:
         from .providers.targon_provider import TargonProvider
 
         providers.append(TargonProvider(validator_config.TARGON_API_KEY))
+
+    if validator_config.SHADEFORM_API_KEY and pref in ("", "shadeform"):
+        from .providers.shadeform_provider import ShadeformProvider
+
+        providers.append(ShadeformProvider(validator_config.SHADEFORM_API_KEY))
 
     if pref and not providers:
         logger.warning(
@@ -86,6 +92,7 @@ def _build_env_exports(handle: PodHandle) -> str:
         "CACHEON_GPU_COUNT": str(handle.gpu_count),
         "CACHEON_MODEL_VOLUME": "/workspace/models/Qwen2.5-72B-Instruct",
         "CACHEON_BASELINE_IMAGE": "vllm/vllm-openai:latest",
+        "CACHEON_NESTED_DIN": "0" if handle.provider == "shadeform" else "1",
     }
     hf_token = validator_config.HF_TOKEN
     if hf_token:
@@ -110,12 +117,24 @@ def _extract_chunk_text(chunk: dict[str, str]) -> str:
 _HEARTBEAT_INTERVAL = 30  # seconds
 
 
+def _remote_shell_pipe(script_url: str, handle: PodHandle) -> str:
+    """Shadeform SSH sessions are non-root; setup needs sudo for apt-get/docker install."""
+    if handle.provider == "shadeform":
+        return f'curl -fsSL "{script_url}" | sudo -E bash'
+    return f'curl -fsSL "{script_url}" | bash'
+
+
+def _remote_docker_cmd(handle: PodHandle) -> str:
+    """Prefix docker when the remote user is not in the docker group (Shadeform)."""
+    return "sudo -E docker" if handle.provider == "shadeform" else "docker"
+
+
 def _remote_setup(provider: GpuProvider, handle: PodHandle, state_dir: str) -> bool:
     """Run setup-gpu.sh on the remote pod, streaming progress to logs."""
     logger.info("⏳ Running setup.sh on remote pod %s", handle.pod_id)
 
     env_exports = _build_env_exports(handle)
-    setup_cmd = f'{env_exports} && curl -fsSL "{SETUP_SCRIPT_URL}" | bash'
+    setup_cmd = f"{env_exports} && {_remote_shell_pipe(SETUP_SCRIPT_URL, handle)}"
 
     t0 = time.monotonic()
     last_heartbeat = t0
@@ -180,11 +199,12 @@ def _remote_run_eval(
 
     env_exports = _build_env_exports(handle)
     timeout_s = timeout_min * 60
+    docker = _remote_docker_cmd(handle)
     cmd = (
         f"{env_exports} && "
         f"cd ~/cacheon/validator && "
         f"timeout --signal=KILL {timeout_s} "
-        f"docker compose -f gpu-compose.yml up --build 2>&1"
+        f"{docker} compose -f gpu-compose.yml up --build --exit-code-from gpu-eval 2>&1"
     )
 
     result = provider.exec(handle, cmd)
@@ -241,7 +261,8 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
     providers = _build_providers()
     if not providers:
         logger.error(
-            "❌ No GPU provider API keys configured (LIUM_API_KEY / TARGON_API_KEY)"
+            "❌ No GPU provider API keys configured "
+            "(LIUM_API_KEY / TARGON_API_KEY / SHADEFORM_API_KEY)"
         )
         return False
 
@@ -305,8 +326,8 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
             state_dir, phase="gpu_renting", gpu=gpu_info, pod_id=handle.pod_id
         )
 
-        # Wait ready
-        handle = provider.wait_ready(handle, timeout_s=240)
+        # Wait ready (provider-specific)
+        handle = provider.wait_ready(handle, timeout_s=provider.READY_TIMEOUT_S)
         logger.info("☑️ Pod %s is ready", handle.pod_id)
         update_progress(state_dir, phase="gpu_ready", pod_id=handle.pod_id)
 

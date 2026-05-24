@@ -1,6 +1,6 @@
 """GPU cloud provider abstraction for automated pod rental.
 
-Provides a uniform interface over Lium and Targon so the orchestrator
+Provides a uniform interface over Lium, Targon, and Shadeform so the orchestrator
 can search, rent, execute commands, and teardown pods without caring
 which provider won the price auction.
 """

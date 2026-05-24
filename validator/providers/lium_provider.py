@@ -20,6 +20,7 @@ class LiumProvider:
     """GpuProvider backed by ``lium-sdk``."""
 
     name = "lium"
+    READY_TIMEOUT_S = 120
 
     def __init__(self, api_key: str) -> None:
         from lium.sdk import Lium, Config
@@ -135,7 +136,9 @@ class LiumProvider:
             raw=pod_data,
         )
 
-    def wait_ready(self, handle: PodHandle, timeout_s: int = 600) -> PodHandle:
+    def wait_ready(
+        self, handle: PodHandle, timeout_s: int = READY_TIMEOUT_S
+    ) -> PodHandle:
         logger.info(
             "⏳ Waiting for Lium pod %s to be ready (timeout=%ds)...",
             handle.pod_id,
