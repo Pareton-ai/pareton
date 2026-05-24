@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, Generator
 
 from . import GpuInstance, GpuProvider, PodHandle, lookup_vram
+from .ssh_keys import discover_ssh_private_key, discover_ssh_public_key
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +14,6 @@ LIUM_DASHBOARD = "https://lium.io/your-pods"
 
 VOLUME_NAME = "cacheon-sn14-volume"
 SSH_KEY_NAME = "cacheon-cpu-validator"
-SSH_KEY_PATHS = [
-    Path.home() / ".ssh" / "id_ed25519.pub",
-    Path.home() / ".ssh" / "id_rsa.pub",
-]
 
 
 class LiumProvider:
@@ -29,11 +25,10 @@ class LiumProvider:
         from lium.sdk import Lium, Config
 
         ssh_key_path = None
-        for name in ("id_ed25519", "id_rsa", "id_ecdsa"):
-            p = Path.home() / ".ssh" / name
-            if p.exists():
-                ssh_key_path = p
-                break
+        try:
+            ssh_key_path, _pkey = discover_ssh_private_key()
+        except RuntimeError:
+            pass
 
         self._client = Lium(config=Config(api_key=api_key, ssh_key_path=ssh_key_path))
         if ssh_key_path:
@@ -97,17 +92,10 @@ class LiumProvider:
 
     def _ensure_ssh_key(self) -> str | None:
         """Ensure our SSH public key is registered with Lium. Returns the key string."""
-        pub_key = None
-        for path in SSH_KEY_PATHS:
-            if path.exists():
-                pub_key = path.read_text().strip()
-                break
-
-        if not pub_key:
-            logger.warning(
-                "No SSH public key found at %s",
-                " or ".join(str(p) for p in SSH_KEY_PATHS),
-            )
+        try:
+            _pub_path, pub_key = discover_ssh_public_key()
+        except RuntimeError:
+            logger.warning("No SSH public key found in ~/.ssh")
             return None
 
         existing = self._client.list_ssh_keys()

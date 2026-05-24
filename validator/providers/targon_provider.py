@@ -18,6 +18,7 @@ import paramiko
 import requests
 
 from . import GpuInstance, GpuProvider, PodHandle, lookup_vram
+from .ssh_keys import discover_ssh_private_key
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +47,11 @@ class TargonProvider:
         }
         self._ssh_key_uid: str | None = None
         self._ssh_key_path: Path | None = None
-
-        for name in ("id_ed25519", "id_rsa", "id_ecdsa"):
-            p = Path.home() / ".ssh" / name
-            if p.exists():
-                self._ssh_key_path = p
-                break
+        self._ssh_pkey: paramiko.PKey | None = None
+        try:
+            self._ssh_key_path, self._ssh_pkey = discover_ssh_private_key()
+        except RuntimeError:
+            pass
 
     # -- HTTP helpers ------------------------------------------------------
 
@@ -96,7 +96,7 @@ class TargonProvider:
         if not self._ssh_key_path:
             raise RuntimeError("No SSH private key found in ~/.ssh")
 
-        pub_path = self._ssh_key_path.with_suffix(".pub")
+        pub_path = self._ssh_key_path.with_name(f"{self._ssh_key_path.name}.pub")
         if not pub_path.exists():
             raise RuntimeError(f"No public key at {pub_path}")
         pub_key = pub_path.read_text().strip()
@@ -251,15 +251,10 @@ class TargonProvider:
         )
 
     def _load_private_key(self) -> paramiko.PKey:
-        """Load the host's private key via paramiko."""
-        if not self._ssh_key_path:
-            raise RuntimeError("No SSH private key found in ~/.ssh")
-        for key_type in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
-            try:
-                return key_type.from_private_key_file(str(self._ssh_key_path))
-            except (paramiko.SSHException, FileNotFoundError, PermissionError):
-                continue
-        raise RuntimeError(f"Could not load private key from {self._ssh_key_path}")
+        if self._ssh_pkey is not None:
+            return self._ssh_pkey
+        self._ssh_key_path, self._ssh_pkey = discover_ssh_private_key()
+        return self._ssh_pkey
 
     def _ssh_connect(self, handle: PodHandle) -> paramiko.SSHClient:
         """Open an SSH connection, retrying up to 3 times for key propagation."""
