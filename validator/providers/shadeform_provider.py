@@ -350,21 +350,33 @@ class ShadeformProvider:
         return f"""set -euo pipefail
 MIN_KB={min_kb}
 
-if mountpoint -q /workspace 2>/dev/null; then
-  ws_kb=$(df -Pk /workspace | awk 'NR==2 {{print $2}}')
-  if [ "$ws_kb" -ge "$MIN_KB" ]; then
-    echo "OK: /workspace already mounted (${{ws_kb}}KB)"
-    df -h /workspace
-    exit 0
-  fi
-fi
+workspace_kb() {{
+  df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $2}}'
+}}
+
+workspace_ready() {{
+  local kb
+  kb="$(workspace_kb)"
+  [ -n "$kb" ] && [ "$kb" -ge "$MIN_KB" ]
+}}
+
 sudo mkdir -p /workspace
+
+if workspace_ready; then
+  echo "OK: /workspace ready ($(workspace_kb)KB on backing fs)"
+  df -h /workspace
+  exit 0
+fi
 
 is_system_mount() {{
   case "$1" in
     /|/boot|/boot/efi|/var/lib/docker/*|/snap/*) return 0 ;;
   esac
   return 1
+}}
+
+disk_has_partitions() {{
+  lsblk -rpno NAME,TYPE "$1" 2>/dev/null | awk -v d="$1" '$1 != d && $2=="part" {{ exit 0 }} END {{ exit 1 }}'
 }}
 
 uses_system_storage() {{
@@ -374,48 +386,33 @@ uses_system_storage() {{
   '
 }}
 
+bind_to_workspace() {{
+  local src="$1"
+  if ! mountpoint -q "$src" 2>/dev/null; then
+    return 1
+  fi
+  sudo mount --bind "$src" /workspace
+  sudo chmod 1777 /workspace
+  echo "OK: bind-mounted $src to /workspace"
+  df -h /workspace
+}}
+
 mount_blockdev() {{
   local dev="$1"
+  if disk_has_partitions "$dev"; then
+    echo "skip whole disk with partitions: $dev"
+    return 1
+  fi
   if ! sudo blkid "$dev" >/dev/null 2>&1; then
     sudo mkfs.ext4 -F "$dev"
   fi
-  if ! sudo mount "$dev" /workspace; then
-    mountpoint -q /workspace 2>/dev/null || return 1
-  fi
+  sudo mount "$dev" /workspace
   sudo chmod 1777 /workspace
   echo "OK: mounted $dev on /workspace"
   df -h /workspace
 }}
 
-# Prefer the largest unmounted disk/partition at or above MIN_KB (Shadeform volume attach).
-best_dev=""
-best_dev_kb=0
-while read -r name type size mount; do
-  if [ "$type" != "disk" ] && [ "$type" != "part" ]; then
-    continue
-  fi
-  if [ -n "${{mount:-}}" ]; then
-    continue
-  fi
-  if uses_system_storage "$name"; then
-    continue
-  fi
-  size_kb=$((size / 1024))
-  if [ "$size_kb" -lt "$MIN_KB" ]; then
-    continue
-  fi
-  if [ "$size_kb" -gt "$best_dev_kb" ]; then
-    best_dev_kb=$size_kb
-    best_dev="$name"
-  fi
-done < <(lsblk -b -rpno NAME,TYPE,SIZE,MOUNTPOINT)
-
-if [ -n "$best_dev" ]; then
-  mount_blockdev "$best_dev"
-  exit 0
-fi
-
-# Else bind-mount the largest eligible filesystem already mounted elsewhere.
+# Bind an existing volume mount (/mnt/vdb, /ephemeral, etc.) before raw block mounts.
 best_mp=""
 best_mp_kb=0
 while read -r mp size_kb; do
@@ -432,10 +429,38 @@ while read -r mp size_kb; do
 done < <(df -Pk | awk 'NR>1 {{print $6, $2}}')
 
 if [ -n "$best_mp" ]; then
-  sudo mount --bind "$best_mp" /workspace
-  sudo chmod 1777 /workspace
-  echo "OK: bind-mounted $best_mp to /workspace"
-  df -h /workspace
+  bind_to_workspace "$best_mp"
+  exit 0
+fi
+
+# Mount an unmounted block device (never a partitioned whole disk like vda).
+best_dev=""
+best_dev_kb=0
+while read -r name type size mount; do
+  if [ "$type" != "disk" ] && [ "$type" != "part" ]; then
+    continue
+  fi
+  if [ -n "${{mount:-}}" ]; then
+    continue
+  fi
+  if uses_system_storage "$name"; then
+    continue
+  fi
+  if [ "$type" = "disk" ] && disk_has_partitions "$name"; then
+    continue
+  fi
+  size_kb=$((size / 1024))
+  if [ "$size_kb" -lt "$MIN_KB" ]; then
+    continue
+  fi
+  if [ "$size_kb" -gt "$best_dev_kb" ]; then
+    best_dev_kb=$size_kb
+    best_dev="$name"
+  fi
+done < <(lsblk -b -rpno NAME,TYPE,SIZE,MOUNTPOINT)
+
+if [ -n "$best_dev" ]; then
+  mount_blockdev "$best_dev"
   exit 0
 fi
 
@@ -528,9 +553,13 @@ exit 1
     ) -> Generator[dict[str, str], None, None]:
         client = self._ssh_connect(handle)
         try:
-            _stdin, stdout, _stderr = client.exec_command(command, timeout=10800)
+            _stdin, stdout, stderr = client.exec_command(command, timeout=10800)
             for line in iter(stdout.readline, ""):
                 yield {"type": "stdout", "data": line}
+            err = stderr.read().decode("utf-8", errors="replace")
+            if err:
+                for line in err.splitlines(keepends=True):
+                    yield {"type": "stderr", "data": line}
         finally:
             client.close()
 

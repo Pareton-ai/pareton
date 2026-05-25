@@ -24,7 +24,7 @@ from .providers import GpuInstance, GpuProvider, PodHandle, search_all_providers
 
 logger = logging.getLogger(__name__)
 
-SETUP_BRANCH = "feat/shadeform-validator-docs"  # TODO: switch to main before merging
+SETUP_BRANCH = "main"
 SETUP_SCRIPT_URL = f"https://raw.githubusercontent.com/latent-to/cacheon/{SETUP_BRANCH}/validator/setup-gpu.sh"
 
 
@@ -119,8 +119,15 @@ _HEARTBEAT_INTERVAL = 30  # seconds
 
 def _remote_shell_pipe(script_url: str, handle: PodHandle) -> str:
     """Shadeform SSH sessions are non-root; setup needs sudo for apt-get/docker install."""
+    pipe = f'curl -fsSL "{script_url}" | sudo -E DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a bash'
     if handle.provider == "shadeform":
-        return f'curl -fsSL "{script_url}" | sudo -E bash'
+        bootstrap = (
+            "command -v curl >/dev/null 2>&1 || "
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && "
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+            "curl ca-certificates"
+        )
+        return f"{bootstrap} && {pipe}"
     return f'curl -fsSL "{script_url}" | bash'
 
 
@@ -153,6 +160,8 @@ def _remote_setup(provider: GpuProvider, handle: PodHandle, state_dir: str) -> b
                 update_progress(state_dir, phase="gpu_setup", step=step_name)
             elif stripped.startswith("ERROR"):
                 logger.warning("  [setup] %s", stripped)
+            elif chunk.get("type") == "stderr" and stripped:
+                logger.warning("  [setup:stderr] %s", stripped)
         now = time.monotonic()
         if now - last_heartbeat >= _HEARTBEAT_INTERVAL:
             logger.info("  [setup] still running (%.0fs elapsed)...", now - t0)
