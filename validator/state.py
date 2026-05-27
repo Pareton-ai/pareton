@@ -499,10 +499,18 @@ class ValidatorState:
         _quarantine_corrupt_state(path)
         return cls()
 
-    def save(self, state_dir: str | os.PathLike) -> None:
-        """Atomically write state to `<state_dir>/state.json`."""
+    def save(self, state_dir: str | os.PathLike) -> bool:
+        """Atomically write state to `<state_dir>/state.json`. Returns False on I/O failure."""
         path = Path(state_dir) / STATE_FILE_NAME
-        _atomic_write_json(path, self.to_dict())
+        try:
+            _atomic_write_json(path, self.to_dict())
+        except OSError as exc:
+            logger.error(
+                "state.save failed (disk full?): %s",
+                exc,
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Copy helpers (useful in tests)

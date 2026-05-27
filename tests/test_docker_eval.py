@@ -17,9 +17,13 @@ from validator.docker_eval import (
     capture_container_logs,
     ensure_eval_network,
     evaluate_challenger,
+    pause_scoring_baseline,
     pull_image,
+    remove_image,
     reset_gpu_state,
+    resume_scoring_baseline,
     run_baseline_if_needed,
+    score_challenger_teacher_forcing,
     send_prompt,
     start_container,
     stop_and_remove,
@@ -61,6 +65,30 @@ class TestPullImage:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker pull", timeout=300)
         with pytest.raises(subprocess.TimeoutExpired):
             pull_image(_IMAGE, _DIGEST, timeout_s=300)
+
+
+# --------------------------------------------------------------------------- #
+# remove_image
+# --------------------------------------------------------------------------- #
+
+
+class TestRemoveImage:
+    @patch("validator.docker_eval.subprocess.run")
+    def test_success(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        remove_image(_IMAGE, _DIGEST)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0:3] == ["docker", "rmi", f"{_IMAGE}@{_DIGEST}"]
+
+    @patch("validator.docker_eval.subprocess.run")
+    def test_failure_does_not_raise(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="in use")
+        remove_image(_IMAGE, _DIGEST)
+
+    @patch("validator.docker_eval.subprocess.run")
+    def test_exception_does_not_raise(self, mock_run):
+        mock_run.side_effect = OSError("docker not found")
+        remove_image(_IMAGE, _DIGEST)
 
 
 # --------------------------------------------------------------------------- #
@@ -143,8 +171,8 @@ class TestStartContainer:
     @patch("validator.docker_eval._get_container_ip", return_value="172.18.0.2")
     @patch("validator.docker_eval.ensure_eval_network")
     @patch("validator.docker_eval.subprocess.run")
-    def test_gpus_always_all(self, mock_run, _mock_net, _mock_ip):
-        """V1 hardcodes --gpus all."""
+    def test_gpu_passthrough(self, mock_run, _mock_net, _mock_ip):
+        """Uses both --gpus all and CDI --device for broad compatibility."""
         mock_run.return_value = MagicMock(
             returncode=0, stdout="container_id\n", stderr=""
         )
@@ -154,8 +182,10 @@ class TestStartContainer:
             model_volume="/mnt/models",
         )
         cmd = mock_run.call_args[0][0]
-        gpus_idx = cmd.index("--gpus") + 1
-        assert cmd[gpus_idx] == "all"
+        assert "--gpus" in cmd
+        assert cmd[cmd.index("--gpus") + 1] == "all"
+        assert "--device" in cmd
+        assert cmd[cmd.index("--device") + 1] == "nvidia.com/gpu=all"
 
     @patch("validator.docker_eval.ensure_eval_network")
     @patch("validator.docker_eval.subprocess.run")
@@ -316,8 +346,74 @@ class TestSendPromptStreaming:
         assert result.output_tokens == 3
         assert result.ttft_s == pytest.approx(0.1)
         assert result.throughput_tps == pytest.approx(3 / 0.2)
+        assert result.decode_elapsed_secs == pytest.approx([0.0, 0.1, 0.2])
         assert result.error is None
         assert result.top_logprobs is None
+
+    @patch("validator.docker_eval.time.monotonic")
+    @patch("validator.docker_eval.urlopen")
+    def test_stream_stops_at_max_tokens(self, mock_urlopen, mock_mono):
+        chunks = [
+            {"choices": [{"delta": {"content": "a"}}]},
+            {"choices": [{"delta": {"content": "b"}}]},
+            {"choices": [{"delta": {"content": "c"}}]},
+            {"choices": [{"delta": {"content": "d"}}]},
+            {"choices": [{"delta": {"content": "e"}}]},
+        ]
+        mock_urlopen.return_value = _make_sse_response(chunks)
+        mock_mono.side_effect = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+
+        result = send_prompt(
+            "http://172.18.0.2:8000",
+            [{"role": "user", "content": "hi"}],
+            stream=True,
+            max_tokens=3,
+        )
+
+        assert result.tokens == ["a", "b", "c"]
+        assert result.output_tokens == 3
+        assert result.error is None
+
+    @patch("validator.docker_eval.time.monotonic")
+    @patch("validator.docker_eval.urlopen")
+    def test_capped_logprob_chunk_still_appends_content(self, mock_urlopen, mock_mono):
+        """When cap fires in the logprob loop, output_text still includes chunk content."""
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {"content": "AB"},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "A",
+                                    "top_logprobs": [{"token": "A", "logprob": -0.1}],
+                                },
+                                {
+                                    "token": "B",
+                                    "top_logprobs": [{"token": "B", "logprob": -0.2}],
+                                },
+                            ]
+                        },
+                    }
+                ],
+            },
+            {"choices": [{"delta": {"content": "ignored"}}]},
+        ]
+        mock_urlopen.return_value = _make_sse_response(chunks)
+        mock_mono.side_effect = [0.0, 0.1, 0.2, 0.3]
+
+        result = send_prompt(
+            "http://172.18.0.2:8000",
+            [{"role": "user", "content": "hi"}],
+            stream=True,
+            logprobs=True,
+            max_tokens=2,
+        )
+
+        assert result.error is None
+        assert result.tokens == ["A", "B"]
+        assert result.output_text == "AB"
 
     @patch("validator.docker_eval.time.monotonic")
     @patch("validator.docker_eval.urlopen")
@@ -403,7 +499,7 @@ class TestSendPromptStreaming:
             },
         ]
         mock_urlopen.return_value = _make_sse_response(chunks)
-        mock_mono.side_effect = [0.0, 0.1]
+        mock_mono.side_effect = [0.0, 0.1, 0.2, 0.3]
 
         result = send_prompt(
             "http://172.18.0.2:8000",
@@ -459,7 +555,7 @@ class TestSendPromptStreaming:
             },
         ]
         mock_urlopen.return_value = _make_sse_response(chunks)
-        mock_mono.side_effect = [0.0, 0.1]
+        mock_mono.side_effect = [0.0, 0.1, 0.2, 0.3]
 
         result = send_prompt(
             "http://172.18.0.2:8000",
@@ -674,19 +770,35 @@ def _make_baseline(n_prompts: int = 2) -> BaselineCache:
                     [{"token": " world", "logprob": -0.02}],
                 ],
                 ttft_s=1.0,
-                throughput_tps=100.0,
+                throughput_tps=2.0,
                 output_tokens=2,
+                decode_elapsed_secs=[0.0, 1.0],
             )
             for _ in range(n_prompts)
         ],
     )
 
 
-def _make_prompts(n: int = 2, n_warmup: int = 2) -> list[Prompt]:
+def _make_stress_prompts(n: int = 2, n_warmup: int = 2) -> list[Prompt]:
     return [
-        Prompt(messages=[ChatMessage(role="user", content=f"Q{i}")], max_tokens=256)
+        Prompt(
+            messages=[ChatMessage(role="user", content=f"stress-{i}")], max_tokens=512
+        )
         for i in range(n + n_warmup)
     ]
+
+
+def _make_audit_prompts(n: int = 8) -> list[Prompt]:
+    return [
+        Prompt(
+            messages=[ChatMessage(role="user", content=f"audit-{i}")], max_tokens=256
+        )
+        for i in range(n)
+    ]
+
+
+def _make_prompts(n: int = 2, n_warmup: int = 2) -> list[Prompt]:
+    return _make_stress_prompts(n=n, n_warmup=n_warmup)
 
 
 class TestCaptureContainerLogs:
@@ -746,6 +858,7 @@ class TestEvaluateChallenger:
             ttft_s=0.5,
             throughput_tps=150.0,
             output_tokens=2,
+            decode_elapsed_secs=[0.0, 0.5],
         )
         warmup_r = RawPromptResult(
             prompt_index=0,
@@ -763,11 +876,12 @@ class TestEvaluateChallenger:
             warmup_r,
             scored_r,
             scored_r,
-        ]
+        ] + [scored_r] * 8
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_prompts(n=2, n_warmup=2),
+            _make_stress_prompts(n=2, n_warmup=2),
+            _make_audit_prompts(n=8),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -785,11 +899,74 @@ class TestEvaluateChallenger:
         assert record.per_prompt is not None
         assert len(record.per_prompt) == 2
         assert record.per_prompt[0]["ttft_s"] == 0.5
-        assert record.per_prompt[0]["throughput_tps"] == 150.0
+        assert record.per_prompt[0]["throughput_tps"] == pytest.approx(4.0)
         mock_pull.assert_called_once()
         mock_stop.assert_called_once_with("cid123")
         mock_reset.assert_called_once()
         mock_capture_logs.assert_called_once()
+
+    @patch("validator.docker_eval.capture_container_logs")
+    @patch("validator.docker_eval.reset_gpu_state")
+    @patch("validator.docker_eval.stop_and_remove")
+    @patch("validator.docker_eval.send_prompt")
+    @patch("validator.docker_eval.wait_for_health")
+    @patch(
+        "validator.docker_eval.start_container",
+        return_value=("cid123", "http://172.18.0.2:8000"),
+    )
+    @patch("validator.docker_eval.pull_image")
+    def test_incomplete_stream_zero_throughput_not_dq(
+        self,
+        mock_pull,
+        mock_start,
+        mock_health,
+        mock_send,
+        mock_stop,
+        mock_reset,
+        mock_capture_logs,
+    ):
+        """Miner stops before baseline length: 0 TPS credit, no auto-DQ."""
+        short_r = RawPromptResult(
+            prompt_index=0,
+            output_text="Hello world",
+            tokens=["Hello", " world"],
+            top_logprobs=[
+                [{"token": "Hello", "logprob": -0.01}],
+                [{"token": " world", "logprob": -0.02}],
+            ],
+            ttft_s=0.1,
+            throughput_tps=999.0,
+            output_tokens=2,
+            decode_elapsed_secs=[0.0],
+        )
+        warmup_r = RawPromptResult(
+            prompt_index=0,
+            output_text="w",
+            tokens=["w"],
+            top_logprobs=[[{"token": "w", "logprob": -0.1}]],
+            ttft_s=1.0,
+            throughput_tps=50.0,
+            output_tokens=1,
+            decode_elapsed_secs=[0.0],
+        )
+        mock_send.side_effect = [warmup_r, warmup_r, short_r, short_r] + [short_r] * 8
+
+        record = evaluate_challenger(
+            _make_commitment(),
+            _make_stress_prompts(n=2, n_warmup=2),
+            _make_audit_prompts(n=8),
+            _make_baseline(n_prompts=2),
+            model_volume="/models",
+            startup_timeout_s=600,
+            per_prompt_timeout_s=120,
+            n_warmup=2,
+            current_block=500,
+        )
+
+        assert record.disqualified is False
+        assert record.per_prompt is not None
+        assert record.per_prompt[0]["throughput_tps"] == 0.0
+        assert record.throughput_improvement == 0.0
 
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
@@ -813,7 +990,8 @@ class TestEvaluateChallenger:
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_prompts(),
+            _make_stress_prompts(),
+            _make_audit_prompts(),
             _make_baseline(),
             model_volume="/models",
             startup_timeout_s=600,
@@ -838,7 +1016,7 @@ class TestEvaluateChallenger:
         return_value=("cid123", "http://172.18.0.2:8000"),
     )
     @patch("validator.docker_eval.pull_image")
-    def test_correctness_fail_dqs(
+    def test_pass1_match_dq_below_threshold(
         self,
         mock_pull,
         mock_start,
@@ -850,37 +1028,29 @@ class TestEvaluateChallenger:
     ):
         wrong_r = RawPromptResult(
             prompt_index=0,
-            output_text="WRONG tokens",
-            tokens=["WRONG", " tokens"],
-            top_logprobs=[
-                [{"token": "WRONG", "logprob": -0.01}],
-                [{"token": " tokens", "logprob": -0.02}],
-            ],
+            output_text="WRONG",
+            tokens=["WRONG"],
+            top_logprobs=[[{"token": "WRONG", "logprob": -0.01}]],
             ttft_s=0.5,
             throughput_tps=150.0,
-            output_tokens=2,
+            output_tokens=1,
+            decode_elapsed_secs=[0.0],
         )
         warmup_r = RawPromptResult(
             prompt_index=0,
             output_text="w",
             tokens=["w"],
-            top_logprobs=[
-                [{"token": "w", "logprob": -0.1}],
-            ],
+            top_logprobs=[[{"token": "w", "logprob": -0.1}]],
             ttft_s=1.0,
             throughput_tps=50.0,
             output_tokens=1,
         )
-        mock_send.side_effect = [
-            warmup_r,
-            warmup_r,
-            wrong_r,
-            wrong_r,
-        ]
+        mock_send.side_effect = [warmup_r, warmup_r, wrong_r, wrong_r] + [wrong_r] * 8
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_prompts(n=2, n_warmup=2),
+            _make_stress_prompts(n=2, n_warmup=2),
+            _make_audit_prompts(n=8),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -890,8 +1060,129 @@ class TestEvaluateChallenger:
         )
 
         assert record.disqualified is True
-        assert "correctness_fail" in (record.disqualify_reason or "")
-        assert record.score == 0.0
+        assert (record.disqualify_reason or "").startswith("pass1_match_fail:")
+        assert record.token_match_rate < 0.25
+
+    @patch("validator.docker_eval.capture_container_logs")
+    @patch("validator.docker_eval.reset_gpu_state")
+    @patch("validator.docker_eval.stop_and_remove")
+    @patch("validator.docker_eval.send_prompt")
+    @patch("validator.docker_eval.wait_for_health")
+    @patch(
+        "validator.docker_eval.start_container",
+        return_value=("cid123", "http://172.18.0.2:8000"),
+    )
+    @patch("validator.docker_eval.pull_image")
+    def test_pass1_match_passes_at_threshold(
+        self,
+        mock_pull,
+        mock_start,
+        mock_health,
+        mock_send,
+        mock_stop,
+        mock_reset,
+        mock_capture_logs,
+    ):
+        partial_r = RawPromptResult(
+            prompt_index=0,
+            output_text="Hello world",
+            tokens=["Hello", " world"],
+            top_logprobs=[
+                [{"token": "Hello", "logprob": -0.01}],
+                [{"token": " world", "logprob": -0.02}],
+            ],
+            ttft_s=0.5,
+            throughput_tps=150.0,
+            output_tokens=2,
+            decode_elapsed_secs=[0.0, 0.5],
+        )
+        wrong_r = RawPromptResult(
+            prompt_index=0,
+            output_text="x",
+            tokens=["x"],
+            top_logprobs=[[{"token": "x", "logprob": -0.01}]],
+            ttft_s=0.5,
+            throughput_tps=150.0,
+            output_tokens=1,
+            decode_elapsed_secs=[0.0],
+        )
+        warmup_r = RawPromptResult(
+            prompt_index=0,
+            output_text="w",
+            tokens=["w"],
+            top_logprobs=[[{"token": "w", "logprob": -0.1}]],
+            ttft_s=1.0,
+            throughput_tps=50.0,
+            output_tokens=1,
+        )
+        mock_send.side_effect = [warmup_r, warmup_r, partial_r, wrong_r] + [
+            partial_r
+        ] * 8
+
+        record = evaluate_challenger(
+            _make_commitment(),
+            _make_stress_prompts(n=2, n_warmup=2),
+            _make_audit_prompts(n=8),
+            _make_baseline(n_prompts=2),
+            model_volume="/models",
+            startup_timeout_s=600,
+            per_prompt_timeout_s=120,
+            n_warmup=2,
+            current_block=500,
+        )
+
+        assert record.disqualified is False
+        assert record.token_match_rate == pytest.approx(0.5)
+
+    @patch("validator.docker_eval.capture_container_logs")
+    @patch("validator.docker_eval.reset_gpu_state")
+    @patch("validator.docker_eval.stop_and_remove")
+    @patch("validator.docker_eval.send_prompt")
+    @patch("validator.docker_eval.wait_for_health")
+    @patch(
+        "validator.docker_eval.start_container",
+        return_value=("cid123", "http://172.18.0.2:8000"),
+    )
+    @patch("validator.docker_eval.pull_image")
+    @patch("validator.docker_eval.score_miner_output")
+    def test_score_challenger_teacher_forcing_infra_fail(
+        self,
+        mock_score,
+        mock_pull,
+        mock_start,
+        mock_health,
+        mock_send,
+        mock_stop,
+        mock_reset,
+        mock_capture_logs,
+    ):
+        mock_score.return_value = []
+        passed, fail_reasons, _ = score_challenger_teacher_forcing(
+            "http://scoring:8000",
+            _make_audit_prompts(n=1),
+            ["out"],
+            [["a", "b"]],
+        )
+        assert passed is False
+        assert any("scoring_infra_fail:" in r for r in fail_reasons)
+
+    @patch("validator.docker_eval.score_miner_output")
+    def test_score_challenger_teacher_forcing_incomplete_coverage(
+        self,
+        mock_score,
+    ):
+        """Simulates early EOS: few logprobs scored vs full streamed token list."""
+        mock_score.return_value = [-0.3, -0.5]
+        miner_tokens = [f"t{i}" for i in range(20)]
+        passed, fail_reasons, _ = score_challenger_teacher_forcing(
+            "http://scoring:8000",
+            _make_audit_prompts(n=1),
+            ["prefix only"],
+            [miner_tokens],
+        )
+        assert passed is False
+        assert any("correctness_fail:" in r for r in fail_reasons)
+        assert any("2/20" in r for r in fail_reasons)
 
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
@@ -939,11 +1230,12 @@ class TestEvaluateChallenger:
             warmup_r,
             error_r,
             error_r,
-        ]
+        ] + [error_r] * 8
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_prompts(n=2, n_warmup=2),
+            _make_stress_prompts(n=2, n_warmup=2),
+            _make_audit_prompts(n=8),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -954,6 +1246,28 @@ class TestEvaluateChallenger:
 
         assert record.disqualified is True
         assert "prompt_errors" in (record.disqualify_reason or "")
+
+
+class TestPauseResumeScoring:
+    @patch("validator.docker_eval.subprocess.run")
+    def test_pause_stops_container(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        pause_scoring_baseline("cid-scoring")
+        mock_run.assert_called_once_with(
+            ["docker", "stop", "cid-scoring"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    @patch("validator.docker_eval.wait_for_health")
+    @patch("validator.docker_eval._get_container_ip", return_value="172.18.0.9")
+    @patch("validator.docker_eval.subprocess.run")
+    def test_resume_starts_and_waits_for_health(self, mock_run, mock_ip, mock_health):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        url = resume_scoring_baseline("cid-scoring")
+        assert url == "http://172.18.0.9:8000"
+        mock_health.assert_called_once()
 
 
 # --------------------------------------------------------------------------- #

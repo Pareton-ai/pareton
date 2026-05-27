@@ -31,24 +31,31 @@ class BaselinePromptResult:
     ttft_s: float
     throughput_tps: float
     output_tokens: int
+    decode_elapsed_secs: list[float] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "tokens": self.tokens,
             "top_logprobs": self.top_logprobs,
             "ttft_s": self.ttft_s,
             "throughput_tps": self.throughput_tps,
             "output_tokens": self.output_tokens,
         }
+        if self.decode_elapsed_secs is not None:
+            out["decode_elapsed_secs"] = self.decode_elapsed_secs
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BaselinePromptResult:
+        raw_elapsed = data.get("decode_elapsed_secs")
+        decode_elapsed_secs = list(raw_elapsed) if raw_elapsed is not None else []
         return cls(
             tokens=list(data["tokens"]),
             top_logprobs=list(data["top_logprobs"]),
             ttft_s=float(data["ttft_s"]),
             throughput_tps=float(data["throughput_tps"]),
             output_tokens=int(data["output_tokens"]),
+            decode_elapsed_secs=decode_elapsed_secs,
         )
 
 
@@ -73,16 +80,21 @@ class BaselineCache:
         )
 
 
-def derive_cache_key(block_hash: str, baseline_digest: str = "") -> str:
-    """SHA-256 of block_hash + baseline_digest + prompt engine version.
+def derive_cache_key(
+    block_hash: str,
+    baseline_digest: str = "",
+    regime: str = "stress",
+) -> str:
+    """SHA-256 of block_hash + baseline_digest + prompt engine version + regime.
 
     Including the baseline digest ensures a cache miss when the pinned
     vLLM image changes. Including the prompt engine version invalidates
-    the cache when templates or sampling logic change.
+    the cache when templates or sampling logic change. The regime suffix
+    keeps stress and audit baseline caches separate.
     """
     from .prompts import PROMPT_ENGINE_VERSION
 
-    raw = f"{block_hash}:{baseline_digest}:v{PROMPT_ENGINE_VERSION}"
+    raw = f"{block_hash}:{baseline_digest}:v{PROMPT_ENGINE_VERSION}:{regime}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 

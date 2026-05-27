@@ -4,6 +4,10 @@ Prompts are deterministic: same block hash always produces the same set.
 Passages are sampled from PG19 (Project Gutenberg books), paired with
 instruction templates, and wrapped as OpenAI chat messages.
 
+Two regimes:
+  - Stress (Pass 1): long context, 512 output tokens, 10 scored prompts.
+  - Audit (Pass 2): ~4k context, 256 output tokens, 8 prompts.
+
 PG19 must be pre-downloaded to the local HuggingFace cache. The validator
 fails fast at startup if the dataset is missing rather than attempting an
 11 GB download mid-evaluation.
@@ -20,7 +24,7 @@ from .eval_schema import ChatMessage, Prompt
 
 logger = logging.getLogger(__name__)
 
-PROMPT_ENGINE_VERSION: int = 1
+PROMPT_ENGINE_VERSION: int = 2
 
 DATASET_NAME: str = "emozilla/pg19"
 DATASET_SPLIT: str = "train"
@@ -28,6 +32,13 @@ DATASET_SPLIT: str = "train"
 MIN_CONTEXT_CHARS: int = 16_000
 MAX_CONTEXT_CHARS: int = 131_072
 MAX_SAMPLE_ATTEMPTS: int = 1_000
+
+AUDIT_MIN_CONTEXT_CHARS: int = 4_000
+AUDIT_CONTEXT_TOKENS: int = 4096
+AUDIT_MAX_OUTPUT_TOKENS: int = 256
+AUDIT_PROMPT_COUNT: int = 8
+
+STRESS_MAX_OUTPUT_TOKENS: int = 512
 
 CHARS_PER_TOKEN: float = 3.2
 """Conservative chars/token for English prose with the Qwen2.5 tokenizer.
@@ -39,8 +50,13 @@ OVERHEAD_TOKENS: int = 300
 The instruction templates are short (~30-50 tokens) but the chat template
 wraps the message with role markers, BOS/EOS, etc."""
 
-MAX_OUTPUT_TOKENS: int = 256
-"""Output tokens requested per prompt (must match Prompt.max_tokens)."""
+SCORING_MAX_MODEL_LEN: int = (
+    AUDIT_CONTEXT_TOKENS + OVERHEAD_TOKENS + AUDIT_MAX_OUTPUT_TOKENS
+)
+"""vLLM ``--max-model-len`` for Pass 2 teacher-forcing only (~4.5k, not 128k)."""
+
+MAX_OUTPUT_TOKENS: int = STRESS_MAX_OUTPUT_TOKENS
+"""Default output tokens for stress prompts (backward compat)."""
 
 MIN_ALPHA_RATIO: float = 0.5
 MAX_WHITESPACE_RATIO: float = 0.35
@@ -110,9 +126,9 @@ def _load_pg19() -> list[str]:
     return rows
 
 
-def _is_valid_passage(text: str) -> bool:
+def _is_valid_passage(text: str, *, min_chars: int = MIN_CONTEXT_CHARS) -> bool:
     """Cheap quality filter for PG19 passages."""
-    if len(text) < MIN_CONTEXT_CHARS:
+    if len(text) < min_chars:
         return False
     alpha_count = sum(c.isalpha() for c in text)
     ws_count = sum(c.isspace() for c in text)
@@ -126,7 +142,12 @@ def _is_valid_passage(text: str) -> bool:
     return True
 
 
-def max_passage_chars(max_context_tokens: int | None = None) -> int:
+def max_passage_chars(
+    max_context_tokens: int | None = None,
+    *,
+    output_tokens: int = MAX_OUTPUT_TOKENS,
+    min_context_chars: int = MIN_CONTEXT_CHARS,
+) -> int:
     """Compute the safe passage character limit for a given context window.
 
     ``max_context_tokens`` is the vLLM ``--max-model-len`` value.  We
@@ -137,14 +158,16 @@ def max_passage_chars(max_context_tokens: int | None = None) -> int:
     """
     if max_context_tokens is None:
         return MAX_CONTEXT_CHARS
-    passage_tokens = max_context_tokens - MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS
-    return max(MIN_CONTEXT_CHARS, int(passage_tokens * CHARS_PER_TOKEN))
+    passage_tokens = max_context_tokens - output_tokens - OVERHEAD_TOKENS
+    return max(min_context_chars, int(passage_tokens * CHARS_PER_TOKEN))
 
 
 def _sample_passage(
     rng: random.Random,
     rows: Sequence[str],
     max_chars: int = MAX_CONTEXT_CHARS,
+    *,
+    min_chars: int = MIN_CONTEXT_CHARS,
 ) -> str:
     """Sample a single long passage from PG19 with quality filtering.
 
@@ -156,25 +179,25 @@ def _sample_passage(
     for _ in range(MAX_SAMPLE_ATTEMPTS):
         idx = rng.randrange(n_rows)
         row_text = rows[idx]
-        if len(row_text) < MIN_CONTEXT_CHARS:
+        if len(row_text) < min_chars:
             continue
 
-        max_start = max(0, len(row_text) - MIN_CONTEXT_CHARS)
+        max_start = max(0, len(row_text) - min_chars)
         start = rng.randint(0, max_start) if max_start > 0 else 0
         end = min(start + max_chars, len(row_text))
 
         passage = row_text[start:end]
 
         space_idx = passage.rfind(" ", 0, len(passage))
-        if space_idx > MIN_CONTEXT_CHARS:
+        if space_idx > min_chars:
             passage = passage[:space_idx]
 
-        if _is_valid_passage(passage):
+        if _is_valid_passage(passage, min_chars=min_chars):
             return passage
 
     raise RuntimeError(
         f"Could not sample a valid PG19 passage after {MAX_SAMPLE_ATTEMPTS} "
-        f"attempts (min_chars={MIN_CONTEXT_CHARS}). The dataset may be "
+        f"attempts (min_chars={min_chars}). The dataset may be "
         f"too small or too noisy."
     )
 
@@ -185,6 +208,78 @@ def derive_seed(block_hash: str) -> int:
     return int.from_bytes(h[:8], "big")
 
 
+def _build_prompts(
+    block_hash: str,
+    n: int,
+    *,
+    seed_suffix: str = "",
+    max_context_tokens: int | None,
+    output_tokens: int,
+    min_context_chars: int,
+    _rows: list[str] | None = None,
+) -> list[Prompt]:
+    rows = _rows if _rows is not None else _load_pg19()
+    seed_input = f"{block_hash}{seed_suffix}"
+    seed = derive_seed(seed_input)
+    rng = random.Random(seed)
+
+    mc = max_passage_chars(
+        max_context_tokens,
+        output_tokens=output_tokens,
+        min_context_chars=min_context_chars,
+    )
+
+    prompts: list[Prompt] = []
+    for _ in range(n):
+        passage = _sample_passage(rng, rows, max_chars=mc, min_chars=min_context_chars)
+        template = rng.choice(TEMPLATES)
+        content = template.format(context=passage)
+        prompts.append(
+            Prompt(
+                messages=[ChatMessage(role="user", content=content)],
+                max_tokens=output_tokens,
+            )
+        )
+    return prompts
+
+
+def sample_stress_prompts(
+    block_hash: str,
+    n: int = 10,
+    *,
+    max_context_tokens: int | None = None,
+    _rows: list[str] | None = None,
+) -> list[Prompt]:
+    """Sample long-context stress prompts (Pass 1): 512 output tokens."""
+    return _build_prompts(
+        block_hash,
+        n,
+        max_context_tokens=max_context_tokens,
+        output_tokens=STRESS_MAX_OUTPUT_TOKENS,
+        min_context_chars=MIN_CONTEXT_CHARS,
+        _rows=_rows,
+    )
+
+
+def sample_audit_prompts(
+    block_hash: str,
+    n: int = AUDIT_PROMPT_COUNT,
+    *,
+    max_context_tokens: int = AUDIT_CONTEXT_TOKENS,
+    _rows: list[str] | None = None,
+) -> list[Prompt]:
+    """Sample short-context audit prompts (Pass 2): ~4k input, 256 output."""
+    return _build_prompts(
+        block_hash,
+        n,
+        seed_suffix=":audit",
+        max_context_tokens=max_context_tokens,
+        output_tokens=AUDIT_MAX_OUTPUT_TOKENS,
+        min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
+        _rows=_rows,
+    )
+
+
 def sample_prompts(
     block_hash: str,
     n: int = 10,
@@ -192,30 +287,10 @@ def sample_prompts(
     max_context_tokens: int | None = None,
     _rows: list[str] | None = None,
 ) -> list[Prompt]:
-    """Sample n deterministic prompts seeded by block hash.
-
-    Each prompt pairs a random PG19 passage with a random instruction
-    template, formatted as an OpenAI chat message.
-
-    ``max_context_tokens`` is the vLLM ``--max-model-len``.  When
-    provided, passage length is capped to fit inside the context window.
-    Pass ``_rows`` to override the PG19 dataset (used in tests).
-    """
-    rows = _rows if _rows is not None else _load_pg19()
-    seed = derive_seed(block_hash)
-    rng = random.Random(seed)
-
-    mc = max_passage_chars(max_context_tokens)
-
-    prompts: list[Prompt] = []
-    for _ in range(n):
-        passage = _sample_passage(rng, rows, max_chars=mc)
-        template = rng.choice(TEMPLATES)
-        content = template.format(context=passage)
-        prompts.append(
-            Prompt(
-                messages=[ChatMessage(role="user", content=content)],
-                max_tokens=MAX_OUTPUT_TOKENS,
-            )
-        )
-    return prompts
+    """Backward-compatible alias for ``sample_stress_prompts``."""
+    return sample_stress_prompts(
+        block_hash,
+        n=n,
+        max_context_tokens=max_context_tokens,
+        _rows=_rows,
+    )

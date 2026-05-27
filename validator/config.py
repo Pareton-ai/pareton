@@ -56,6 +56,10 @@ BASELINE_IMAGE: str = os.environ.get(
 )
 BASELINE_DIGEST: str = os.environ.get("CACHEON_BASELINE_DIGEST", "")
 
+SCORING_IMAGE: str = os.environ.get("CACHEON_SCORING_IMAGE", "vllm/vllm-openai:v0.9.2")
+"""vLLM image used only for Pass 2 audit teacher-forcing (prompt_logprobs).
+Pinned to v0.9.2 for B200 (sm_100) support; audit prompts are ~4k context."""
+
 GPU_COUNT: int = int(os.environ.get("CACHEON_GPU_COUNT", "8"))
 """Number of GPUs on the host. Set to 8 for 8x H200/B200/B300 (the standard eval tier)."""
 
@@ -132,6 +136,35 @@ BURN_UID: int = int(os.environ.get("CACHEON_BURN_UID", "29"))
 is below SCORE_EMISSION_TARGET. Must not collide with the winner or
 runner-up UID; the weight builder folds burn weight into the winner on
 collision."""
+
+# --------------------------------------------------------------------------- #
+# Teacher-forcing correctness gate
+# --------------------------------------------------------------------------- #
+
+MEAN_LOGPROB_THRESHOLD: float = float(
+    os.environ.get("CACHEON_MEAN_LOGPROB_THRESHOLD", "-4.0")
+)
+"""Mean per-token logprob (from baseline scoring pass) below which a miner
+is DQ'd. Legitimate cross-model outputs score -0.5 to -2.0; garbage scores
+below -10."""
+
+MIN_LOGPROB_THRESHOLD: float = float(
+    os.environ.get("CACHEON_MIN_LOGPROB_THRESHOLD", "-12.0")
+)
+"""Floor logprob for any single token. Catches isolated garbage tokens."""
+
+PASS1_MATCH_DQ_THRESHOLD: float = float(
+    os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.25")
+)
+"""Pass 1 hard DQ: aggregate token match vs stress baseline must be at or
+above this fraction (default 25%). Below threshold, miner is DQ'd before
+Pass 2 teacher-forcing."""
+
+VLLM_COMPILE_CACHE_DIR: str = os.environ.get(
+    "CACHEON_VLLM_CACHE_DIR", "/workspace/vllm-cache"
+)
+"""Host directory mounted into baseline container at /root/.cache/vllm.
+Persists torch.compile artifacts across container restarts."""
 
 # --------------------------------------------------------------------------- #
 # Housekeeping

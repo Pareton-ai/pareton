@@ -6,13 +6,40 @@ import pytest
 
 from validator.scoring import (
     CorrectnessVerdict,
-    check_logprob_sanity,
+    compute_aligned_throughput_tps,
     compute_correctness,
     compute_improvements,
+    compute_pass1_aggregate_match,
+    compute_teacher_forcing_verdict,
     compute_token_match_rate,
+    pass1_match_passes,
 )
 
 pytestmark = pytest.mark.unit
+
+
+# --------------------------------------------------------------------------- #
+# compute_aligned_throughput_tps
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeAlignedThroughputTps:
+    def test_complete_stream(self):
+        elapsed = [0.0, 0.05, 0.1, 0.2]
+        assert compute_aligned_throughput_tps(4, elapsed) == pytest.approx(4 / 0.2)
+
+    def test_early_stop_returns_zero(self):
+        elapsed = [0.0, 0.05]
+        assert compute_aligned_throughput_tps(4, elapsed) == 0.0
+
+    def test_target_less_than_two_returns_zero(self):
+        assert compute_aligned_throughput_tps(1, [0.0, 0.1]) == 0.0
+
+    def test_zero_elapsed_returns_zero(self):
+        assert compute_aligned_throughput_tps(3, [0.0, 0.0, 0.0]) == 0.0
+
+    def test_empty_elapsed_returns_zero(self):
+        assert compute_aligned_throughput_tps(3, []) == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -57,218 +84,153 @@ class TestTokenMatchRate:
 
 
 # --------------------------------------------------------------------------- #
-# check_logprob_sanity
+# Pass 1 match gate
 # --------------------------------------------------------------------------- #
 
 
-class TestLogprobSanity:
-    def test_baseline_in_top1(self):
-        lp = [{"token": "the", "logprob": -0.01}, {"token": "a", "logprob": -0.03}]
-        assert check_logprob_sanity("the", lp) is True
+class TestPass1MatchGate:
+    def test_aggregate_match_mean(self):
+        base = [["a", "b"], ["x", "y"]]
+        miner = [["a", "b"], ["x", "z"]]
+        assert compute_pass1_aggregate_match(base, miner) == pytest.approx(0.75)
 
-    def test_baseline_in_top2(self):
-        lp = [{"token": "a", "logprob": -0.10}, {"token": "the", "logprob": -0.12}]
-        assert check_logprob_sanity("the", lp) is True
+    def test_pass_at_threshold(self):
+        assert pass1_match_passes(0.25, 0.25) is True
 
-    def test_baseline_in_top5(self):
-        lp = [
-            {"token": "a", "logprob": -0.10},
-            {"token": "b", "logprob": -0.20},
-            {"token": "c", "logprob": -0.30},
-            {"token": "d", "logprob": -0.40},
-            {"token": "the", "logprob": -0.45},
-        ]
-        assert check_logprob_sanity("the", lp) is True
-
-    def test_baseline_not_in_top5(self):
-        lp = [
-            {"token": "a", "logprob": -0.10},
-            {"token": "b", "logprob": -0.20},
-            {"token": "c", "logprob": -0.30},
-            {"token": "d", "logprob": -0.40},
-            {"token": "e", "logprob": -0.50},
-        ]
-        assert check_logprob_sanity("the", lp) is False
-
-    def test_gap_within_threshold(self):
-        lp = [{"token": "a", "logprob": -0.10}, {"token": "the", "logprob": -0.50}]
-        assert check_logprob_sanity("the", lp) is True
-
-    def test_gap_too_large(self):
-        lp = [{"token": "a", "logprob": -0.10}, {"token": "the", "logprob": -0.70}]
-        assert check_logprob_sanity("the", lp) is False
-
-    def test_gap_exactly_at_threshold(self):
-        lp = [{"token": "a", "logprob": -0.10}, {"token": "the", "logprob": -0.60}]
-        assert check_logprob_sanity("the", lp, max_gap=0.5) is True
-
-    def test_gap_just_over_threshold(self):
-        lp = [{"token": "a", "logprob": -0.10}, {"token": "the", "logprob": -0.61}]
-        assert check_logprob_sanity("the", lp, max_gap=0.5) is False
-
-    def test_empty_logprobs(self):
-        assert check_logprob_sanity("x", []) is False
-
-    def test_single_entry_is_baseline(self):
-        lp = [{"token": "the", "logprob": -0.01}]
-        assert check_logprob_sanity("the", lp) is True
-
-    def test_tp_noise_real_example(self):
-        """Based on real TP=2 logs: ' reveal' vs ' fully' with identical logprobs."""
-        lp = [
-            {"token": " fully", "logprob": -0.843},
-            {"token": " reveal", "logprob": -0.843},
-            {"token": " disclose", "logprob": -2.468},
-        ]
-        assert check_logprob_sanity(" reveal", lp) is True
-
-    def test_quantized_model_fails(self):
-        """Quantized model: baseline token far from top-1."""
-        lp = [
-            {"token": "wrong", "logprob": -0.10},
-            {"token": "also_wrong", "logprob": -0.50},
-            {"token": "nope", "logprob": -1.00},
-            {"token": "nah", "logprob": -1.50},
-            {"token": "the", "logprob": -2.00},
-        ]
-        assert check_logprob_sanity("the", lp) is False
+    def test_fail_below_threshold(self):
+        assert pass1_match_passes(0.24, 0.25) is False
 
 
 # --------------------------------------------------------------------------- #
-# compute_correctness
+# compute_teacher_forcing_verdict (Pass 2 audit)
+# --------------------------------------------------------------------------- #
+
+
+class TestComputeTeacherForcingVerdict:
+    def test_high_logprobs_pass(self):
+        v = compute_teacher_forcing_verdict(["a", "b"], [-0.3, -0.5])
+        assert v.passed is True
+        assert v.token_match_rate == 0.0
+
+    def test_empty_logprobs_infra_fail(self):
+        v = compute_teacher_forcing_verdict(["a", "b"], [])
+        assert v.passed is False
+        assert (v.reason or "").startswith("scoring_infra_fail:")
+
+    def test_garbage_fails_mean(self):
+        v = compute_teacher_forcing_verdict(["a", "b"], [-15.0, -20.0])
+        assert v.passed is False
+        assert "mean_logprob" in (v.reason or "")
+
+    def test_incomplete_coverage_fails_even_with_high_logprobs(self):
+        """Early EOS / truncated scoring: short logprob list vs long stream."""
+        miner = [f"t{i}" for i in range(50)]
+        logprobs = [-0.5] * 10
+        v = compute_teacher_forcing_verdict(miner, logprobs)
+        assert v.passed is False
+        assert (v.reason or "").startswith("correctness_fail:")
+        assert "10/50" in (v.reason or "")
+
+    def test_equal_length_passes(self):
+        tokens = ["a", "b", "c"]
+        logprobs = [-0.3, -0.5, -0.4]
+        v = compute_teacher_forcing_verdict(tokens, logprobs)
+        assert v.passed is True
+
+    def test_scoring_longer_than_stream_passes(self):
+        """Under-score only: extra scored positions do not auto-fail."""
+        v = compute_teacher_forcing_verdict(["a", "b"], [-0.3, -0.5, -0.4])
+        assert v.passed is True
+
+
+# --------------------------------------------------------------------------- #
+# compute_correctness (teacher-forcing gate)
 # --------------------------------------------------------------------------- #
 
 
 class TestComputeCorrectness:
-    def test_perfect_match_passes(self):
-        tokens = ["a", "b", "c", "d", "e"]
-        v = compute_correctness(tokens, tokens, None)
+    def test_high_logprobs_pass(self):
+        """Legitimate miner: baseline assigns high logprob to each token."""
+        base = ["a", "b", "c", "d", "e"]
+        miner = ["a", "b", "c", "d", "e"]
+        logprobs = [-0.3, -0.5, -0.2, -0.8, -0.4]
+        v = compute_correctness(base, miner, logprobs)
         assert v.passed is True
-        assert v.token_match_rate == 1.0
-        assert v.first_mismatch_index is None
+        assert v.mean_logprob == pytest.approx(-0.44)
+        assert v.min_logprob == pytest.approx(-0.8)
 
-    def test_tp_noise_divergence_passes(self):
-        """Sequence diverges at index 2 due to TP noise -- should pass."""
+    def test_tp_cascade_still_passes(self):
+        """TP cascade: tokens diverge but baseline still scores them well."""
         base = ["a", "b", "c", "d", "e"]
         miner = ["a", "b", "X", "Y", "Z"]
-        lp = [
-            [{"token": "a", "logprob": -0.01}],
-            [{"token": "b", "logprob": -0.01}],
-            [{"token": "X", "logprob": -0.50}, {"token": "c", "logprob": -0.52}],
-            [{"token": "Y", "logprob": -0.01}],
-            [{"token": "Z", "logprob": -0.01}],
-        ]
-        v = compute_correctness(base, miner, lp)
+        logprobs = [-0.3, -0.5, -1.2, -1.5, -1.8]
+        v = compute_correctness(base, miner, logprobs)
         assert v.passed is True
-        assert v.first_mismatch_index == 2
         assert v.token_match_rate == pytest.approx(2 / 5)
 
-    def test_wrong_model_fails(self):
-        """Baseline token not in miner's top-5 -- wrong model."""
-        base = ["a", "b", "c"]
-        miner = ["a", "WRONG", "c"]
-        lp = [
-            [{"token": "a", "logprob": -0.01}],
-            [
-                {"token": "WRONG", "logprob": -0.01},
-                {"token": "x", "logprob": -0.50},
-                {"token": "y", "logprob": -1.00},
-                {"token": "z", "logprob": -1.50},
-                {"token": "w", "logprob": -2.00},
-            ],
-            [{"token": "c", "logprob": -0.01}],
-        ]
-        v = compute_correctness(base, miner, lp)
+    def test_garbage_output_fails_mean_threshold(self):
+        """Gaming miner: garbage tokens score extremely low."""
+        base = ["a", "b", "c", "d", "e"]
+        miner = ["a", "XX", "$$", "AB", "!!"]
+        logprobs = [-0.3, -8.0, -15.0, -20.0, -18.0]
+        v = compute_correctness(base, miner, logprobs)
         assert v.passed is False
-        assert v.first_mismatch_index == 1
-        assert "first_mismatch_fail" in (v.reason or "")
+        assert "mean_logprob" in (v.reason or "")
 
-    def test_gap_too_large_fails(self):
-        """Baseline token in top-5 but logprob gap too large -- quantized model."""
-        base = ["a", "b", "c"]
-        miner = ["a", "X", "c"]
-        lp = [
-            [{"token": "a", "logprob": -0.01}],
-            [{"token": "X", "logprob": -0.10}, {"token": "b", "logprob": -0.80}],
-            [{"token": "c", "logprob": -0.01}],
-        ]
-        v = compute_correctness(base, miner, lp)
+    def test_single_garbage_token_fails_min_threshold(self):
+        """One injected garbage token triggers min_logprob gate."""
+        base = ["a", "b", "c", "d", "e"]
+        miner = ["a", "b", "c", "GARBAGE", "e"]
+        logprobs = [-0.3, -0.5, -0.2, -15.0, -0.4]
+        v = compute_correctness(base, miner, logprobs)
         assert v.passed is False
-        assert v.first_mismatch_index == 1
+        assert "min_logprob" in (v.reason or "")
 
-    def test_logprob_sanity_pass_at_first_mismatch(self):
-        base = ["a", "b", "c"]
-        miner = ["a", "X", "c"]
-        lp = [
-            [{"token": "a", "logprob": -0.01}],
-            [{"token": "X", "logprob": -0.10}, {"token": "b", "logprob": -0.12}],
-            [{"token": "c", "logprob": -0.01}],
-        ]
-        v = compute_correctness(base, miner, lp)
-        assert v.passed is True
-        assert v.first_mismatch_index == 1
-
-    def test_no_logprobs_with_divergence_fails(self):
-        """Miner omitting logprobs on a divergent response is non-compliant."""
-        base = ["a", "b", "c"]
-        miner = ["a", "X", "c"]
-        v = compute_correctness(base, miner, None)
-        assert v.passed is False
-        assert v.first_mismatch_index == 1
-        assert "logprobs missing" in (v.reason or "")
-
-    def test_no_logprobs_perfect_match_passes(self):
-        """Perfect match without logprobs is fine -- no divergence to check."""
-        tokens = ["a", "b", "c"]
-        v = compute_correctness(tokens, tokens, None)
-        assert v.passed is True
-
-    def test_empty_miner_with_logprobs_fails(self):
+    def test_empty_logprobs_fails(self):
+        """No scoring data available: deny by default."""
         base = ["a", "b"]
-        miner: list[str] = []
+        miner = ["a", "b"]
         v = compute_correctness(base, miner, [])
         assert v.passed is False
-        assert v.first_mismatch_index == 0
-        assert v.baseline_token_at_mismatch == "a"
-        assert v.miner_token_at_mismatch == ""
+        assert "no baseline scoring logprobs" in (v.reason or "")
 
-    def test_empty_miner_without_logprobs_fails(self):
-        base = ["a", "b"]
-        miner: list[str] = []
-        v = compute_correctness(base, miner, None)
-        assert v.passed is False
-        assert "logprobs missing" in (v.reason or "")
-
-    def test_non_greedy_miner_fails(self):
-        """Miner's chosen token != its own top-1 -- sampling detected."""
+    def test_custom_thresholds(self):
+        """Thresholds are configurable."""
         base = ["a", "b", "c"]
-        miner = ["a", "X", "c"]
-        lp = [
-            [{"token": "a", "logprob": -0.01}],
-            [{"token": "b", "logprob": -0.10}, {"token": "X", "logprob": -0.12}],
-            [{"token": "c", "logprob": -0.01}],
-        ]
-        v = compute_correctness(base, miner, lp)
-        assert v.passed is False
-        assert "non_greedy" in (v.reason or "")
-
-    def test_real_tp_noise_example(self):
-        """Real data from TP=2 eval: 'you' vs 'provided' with gap 0.125."""
-        base = ["The", " passage", " you"]
-        miner = ["The", " passage", " provided"]
-        lp = [
-            [{"token": "The", "logprob": -0.01}],
-            [{"token": " passage", "logprob": -0.01}],
-            [
-                {"token": " provided", "logprob": -1.051},
-                {"token": " you", "logprob": -1.176},
-                {"token": " from", "logprob": -1.551},
-                {"token": " is", "logprob": -3.176},
-                {"token": " has", "logprob": -4.051},
-            ],
-        ]
-        v = compute_correctness(base, miner, lp)
+        miner = ["a", "b", "c"]
+        logprobs = [-3.0, -3.5, -3.2]
+        # Default threshold -4.0 → passes
+        v = compute_correctness(base, miner, logprobs)
         assert v.passed is True
+        # Stricter threshold → fails
+        v = compute_correctness(base, miner, logprobs, mean_logprob_threshold=-2.0)
+        assert v.passed is False
+
+    def test_borderline_mean_passes(self):
+        """Exactly at threshold passes (threshold is exclusive lower bound)."""
+        base = ["a", "b"]
+        miner = ["a", "b"]
+        logprobs = [-4.0, -4.0]
+        v = compute_correctness(base, miner, logprobs)
+        assert v.passed is True  # -4.0 is not < -4.0
+
+    def test_borderline_mean_fails(self):
+        """Just below threshold fails."""
+        base = ["a", "b"]
+        miner = ["a", "b"]
+        logprobs = [-4.0, -4.01]
+        v = compute_correctness(base, miner, logprobs)
+        assert v.passed is False
+
+    def test_real_exploit_scenario(self):
+        """Reproduce the actual gaming attack: 2 correct tokens, 254 garbage."""
+        base = ["The", "Roman"] + [f"t{i}" for i in range(254)]
+        miner = ["The", "Roman"] + ["GARBAGE"] * 254
+        # First 2 tokens score well, rest are garbage
+        logprobs = [-0.1, -0.2] + [-25.0] * 254
+        v = compute_correctness(base, miner, logprobs)
+        assert v.passed is False
+        assert v.mean_logprob < -20.0
 
 
 # --------------------------------------------------------------------------- #

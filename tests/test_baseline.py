@@ -39,12 +39,25 @@ def _sample_result(**overrides) -> BaselinePromptResult:
 
 class TestBaselinePromptResult:
     def test_round_trip(self):
-        r = _sample_result()
+        r = _sample_result(decode_elapsed_secs=[0.0, 0.5])
         restored = BaselinePromptResult.from_dict(r.to_dict())
         assert restored.tokens == r.tokens
         assert restored.ttft_s == r.ttft_s
         assert restored.throughput_tps == r.throughput_tps
         assert restored.output_tokens == r.output_tokens
+        assert restored.decode_elapsed_secs == [0.0, 0.5]
+
+    def test_from_dict_without_decode_elapsed_defaults_empty(self):
+        r = _sample_result()
+        data = {
+            "tokens": r.tokens,
+            "top_logprobs": r.top_logprobs,
+            "ttft_s": r.ttft_s,
+            "throughput_tps": r.throughput_tps,
+            "output_tokens": r.output_tokens,
+        }
+        restored = BaselinePromptResult.from_dict(data)
+        assert restored.decode_elapsed_secs == []
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +104,11 @@ class TestDeriveCacheKey:
 
     def test_length_is_16(self):
         assert len(derive_cache_key("anything")) == 16
+
+    def test_different_regimes_differ(self):
+        k_stress = derive_cache_key("0xabc123", regime="stress")
+        k_audit = derive_cache_key("0xabc123", regime="audit")
+        assert k_stress != k_audit
 
     def test_hex_chars_only(self):
         key = derive_cache_key("test")
