@@ -7,6 +7,10 @@ import random
 import pytest
 
 from validator.prompts import (
+    AUDIT_CONTEXT_TOKENS,
+    AUDIT_MAX_OUTPUT_TOKENS,
+    AUDIT_MIN_CONTEXT_CHARS,
+    AUDIT_PROMPT_COUNT,
     CHARS_PER_TOKEN,
     MAX_CONTEXT_CHARS,
     MAX_OUTPUT_TOKENS,
@@ -15,12 +19,15 @@ from validator.prompts import (
     MIN_CONTEXT_CHARS,
     OVERHEAD_TOKENS,
     PROMPT_ENGINE_VERSION,
+    STRESS_MAX_OUTPUT_TOKENS,
     TEMPLATES,
     _is_valid_passage,
     _sample_passage,
     derive_seed,
     max_passage_chars,
+    sample_audit_prompts,
     sample_prompts,
+    sample_stress_prompts,
 )
 
 pytestmark = pytest.mark.unit
@@ -166,8 +173,8 @@ class TestSamplePrompts:
         assert len(prompts[0].messages[0].content) > 0
 
     def test_max_tokens_default(self):
-        prompts = sample_prompts("0xtest", n=1, _rows=FAKE_ROWS)
-        assert prompts[0].max_tokens == 256
+        prompts = sample_stress_prompts("0xtest", n=1, _rows=FAKE_ROWS)
+        assert prompts[0].max_tokens == STRESS_MAX_OUTPUT_TOKENS
 
     def test_template_applied(self):
         prompts = sample_prompts("0xtest", n=10, _rows=FAKE_ROWS)
@@ -177,6 +184,38 @@ class TestSamplePrompts:
                 content.startswith(t.split("{context}")[0]) for t in TEMPLATES
             )
             assert has_template, f"No template prefix found in: {content[:80]}..."
+
+
+class TestSampleAuditPrompts:
+    def test_returns_eight_by_default(self):
+        prompts = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
+        assert len(prompts) == AUDIT_PROMPT_COUNT
+
+    def test_deterministic(self):
+        p1 = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
+        p2 = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
+        assert p1[0].messages[0].content == p2[0].messages[0].content
+
+    def test_different_from_stress_seed(self):
+        stress = sample_stress_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
+        audit = sample_audit_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
+        assert stress[0].messages[0].content != audit[0].messages[0].content
+
+    def test_audit_max_tokens(self):
+        prompts = sample_audit_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
+        assert prompts[0].max_tokens == AUDIT_MAX_OUTPUT_TOKENS
+
+    def test_audit_passage_fits_budget(self):
+        prompts = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
+        max_passage = max_passage_chars(
+            AUDIT_CONTEXT_TOKENS,
+            output_tokens=AUDIT_MAX_OUTPUT_TOKENS,
+            min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
+        )
+        for p in prompts:
+            content = p.messages[0].content
+            # Passage is embedded in template; upper bound check on content length
+            assert len(content) <= max_passage + 500
 
 
 # --------------------------------------------------------------------------- #
@@ -189,15 +228,32 @@ class TestMaxPassageChars:
         assert max_passage_chars(None) == MAX_CONTEXT_CHARS
 
     def test_32k_context(self):
-        result = max_passage_chars(32_768)
-        expected = int((32_768 - MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN)
+        result = max_passage_chars(32_768, output_tokens=STRESS_MAX_OUTPUT_TOKENS)
+        expected = int(
+            (32_768 - STRESS_MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN
+        )
         assert result == expected
         assert result < MAX_CONTEXT_CHARS
 
     def test_65k_context(self):
-        result = max_passage_chars(65_536)
-        expected = int((65_536 - MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN)
+        result = max_passage_chars(65_536, output_tokens=STRESS_MAX_OUTPUT_TOKENS)
+        expected = int(
+            (65_536 - STRESS_MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN
+        )
         assert result == expected
+
+    def test_audit_4k_budget(self):
+        result = max_passage_chars(
+            AUDIT_CONTEXT_TOKENS,
+            output_tokens=AUDIT_MAX_OUTPUT_TOKENS,
+            min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
+        )
+        expected = int(
+            (AUDIT_CONTEXT_TOKENS - AUDIT_MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS)
+            * CHARS_PER_TOKEN
+        )
+        assert result == expected
+        assert result >= AUDIT_MIN_CONTEXT_CHARS
 
     def test_never_below_min(self):
         result = max_passage_chars(600)
@@ -206,10 +262,13 @@ class TestMaxPassageChars:
 
 class TestConstants:
     def test_prompt_engine_version_positive(self):
-        assert PROMPT_ENGINE_VERSION >= 1
+        assert PROMPT_ENGINE_VERSION >= 2
 
     def test_min_context_chars(self):
         assert MIN_CONTEXT_CHARS == 16_000
+
+    def test_audit_prompt_count(self):
+        assert AUDIT_PROMPT_COUNT == 8
 
     def test_max_context_chars(self):
         assert MAX_CONTEXT_CHARS == 131_072

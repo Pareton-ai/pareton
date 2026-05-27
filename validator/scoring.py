@@ -13,19 +13,37 @@ from typing import Any
 
 @dataclass(frozen=True)
 class CorrectnessVerdict:
-    """Result of the greedy-token agreement gate + logprob sanity check.
+    """Result of teacher-forcing correctness gate.
 
-    On failure, ``first_mismatch_*`` fields capture the first divergent
-    position so operators can debug false DQs without re-running the eval.
+    The baseline model independently scores the miner's output tokens.
+    If the mean or min logprob falls below thresholds, the output is
+    implausible under the real model and the miner is DQ'd.
     """
 
     passed: bool
     token_match_rate: float
+    mean_logprob: float = 0.0
+    min_logprob: float = 0.0
     reason: str | None = None
-    first_mismatch_index: int | None = None
-    baseline_token_at_mismatch: str | None = None
-    miner_token_at_mismatch: str | None = None
-    miner_logprobs_at_mismatch: list[dict[str, Any]] | None = None
+
+
+def compute_aligned_throughput_tps(
+    target_token_count: int,
+    decode_elapsed_secs: list[float],
+) -> float:
+    """Throughput using a fixed token budget (baseline output length).
+
+    TPS = target_token_count / time from first to target_token_count-th token.
+    Returns 0.0 if the stream ended early, target < 2, or elapsed <= 0.
+    """
+    if target_token_count < 2:
+        return 0.0
+    if len(decode_elapsed_secs) < target_token_count:
+        return 0.0
+    elapsed = decode_elapsed_secs[target_token_count - 1] - decode_elapsed_secs[0]
+    if elapsed <= 0:
+        return 0.0
+    return target_token_count / elapsed
 
 
 def compute_token_match_rate(
@@ -43,145 +61,155 @@ def compute_token_match_rate(
     return matches / total
 
 
-def check_logprob_sanity(
-    baseline_token: str,
-    miner_top_logprobs: list[dict[str, Any]],
-    max_gap: float = 0.5,
-    top_k: int = 5,
-) -> bool:
-    """Check that a divergent position is explainable by TP numerical noise.
+def compute_pass1_aggregate_match(
+    baseline_tokens_list: list[list[str]],
+    miner_tokens_list: list[list[str]],
+) -> float:
+    """Mean token match rate across Pass 1 stress prompt pairs."""
+    if not baseline_tokens_list or not miner_tokens_list:
+        return 0.0
+    n = min(len(baseline_tokens_list), len(miner_tokens_list))
+    rates = [
+        compute_token_match_rate(baseline_tokens_list[i], miner_tokens_list[i])
+        for i in range(n)
+    ]
+    return statistics.mean(rates)
 
-    Returns True (sane) when:
-      1. The baseline's token appears in the miner's top-k.
-      2. The logprob gap between the miner's top-1 and the baseline token
-         is <= ``max_gap``.
 
-    Greedy-decoding verification (miner's chosen token == its own top-1)
-    is checked separately in ``compute_correctness``.
+def pass1_match_passes(aggregate_match: float, threshold: float) -> bool:
+    """Return True when aggregate match meets or exceeds the Pass 1 gate."""
+    return aggregate_match >= threshold
+
+
+def compute_teacher_forcing_verdict(
+    miner_tokens: list[str],
+    scoring_logprobs: list[float],
+    *,
+    mean_logprob_threshold: float = -4.0,
+    min_logprob_threshold: float = -12.0,
+) -> CorrectnessVerdict:
+    """Pass 2 audit gate: teacher-forcing logprobs only (no baseline token match).
+
+    Empty logprobs indicate scoring infra failure (OOM, HTTP 500), not
+    miner correctness failure.
     """
-    if not miner_top_logprobs:
-        return False
-    topk_tokens = [entry.get("token", "") for entry in miner_top_logprobs[:top_k]]
-    if baseline_token not in topk_tokens:
-        return False
-    top1_lp = float(miner_top_logprobs[0].get("logprob", float("-inf")))
-    for entry in miner_top_logprobs[:top_k]:
-        if entry.get("token") == baseline_token:
-            baseline_lp = float(entry.get("logprob", float("-inf")))
-            return abs(top1_lp - baseline_lp) <= max_gap
-    return False
+    if not scoring_logprobs:
+        return CorrectnessVerdict(
+            passed=False,
+            token_match_rate=0.0,
+            reason="scoring_infra_fail: no baseline scoring logprobs available",
+        )
+
+    if len(scoring_logprobs) < len(miner_tokens):
+        return CorrectnessVerdict(
+            passed=False,
+            token_match_rate=0.0,
+            reason=(
+                "correctness_fail: teacher-forcing covered "
+                f"{len(scoring_logprobs)}/{len(miner_tokens)} streamed tokens"
+            ),
+        )
+
+    mean_lp = statistics.mean(scoring_logprobs)
+    min_lp = min(scoring_logprobs)
+
+    if mean_lp < mean_logprob_threshold:
+        return CorrectnessVerdict(
+            passed=False,
+            token_match_rate=0.0,
+            mean_logprob=mean_lp,
+            min_logprob=min_lp,
+            reason=(
+                f"mean_logprob {mean_lp:.3f} below threshold {mean_logprob_threshold}"
+            ),
+        )
+
+    if min_lp < min_logprob_threshold:
+        return CorrectnessVerdict(
+            passed=False,
+            token_match_rate=0.0,
+            mean_logprob=mean_lp,
+            min_logprob=min_lp,
+            reason=(
+                f"min_logprob {min_lp:.3f} below threshold {min_logprob_threshold}"
+            ),
+        )
+
+    return CorrectnessVerdict(
+        passed=True,
+        token_match_rate=0.0,
+        mean_logprob=mean_lp,
+        min_logprob=min_lp,
+    )
 
 
 def compute_correctness(
     baseline_tokens: list[str],
     miner_tokens: list[str],
-    miner_top_logprobs: list[list[dict[str, Any]]] | None,
+    baseline_scoring_logprobs: list[float],
+    *,
+    mean_logprob_threshold: float = -4.0,
+    min_logprob_threshold: float = -12.0,
 ) -> CorrectnessVerdict:
-    """First-mismatch correctness gate for TP-safe greedy decoding.
+    """Teacher-forcing correctness gate.
 
-    With tensor parallelism, greedy outputs are non-deterministic at
-    positions where two tokens have near-identical probabilities.  Once
-    one token flips, the entire rest of the sequence cascades, making
-    token-match-rate useless.
+    After the miner streams its output, the baseline model scores
+    each miner token in a single forward pass (teacher-forced). This
+    returns the per-token logprob assigned by the baseline to each of
+    the miner's tokens given the miner's own preceding context.
 
-    Instead we check only the **first** divergence point:
-      1. No divergence at all -> pass.
-      2. Divergence exists but logprobs are unavailable -> fail. Without
-         logprobs we can't apply the TP-noise tolerance check, and the
-         API contract requires miners to stream ``top_logprobs`` so any
-         divergence can be justified.
-      3. Divergence with logprobs -> ``check_logprob_sanity``.  If the
-         baseline token is in the miner's top-5 with a small gap, the
-         flip is explainable by TP noise -> pass.  Otherwise -> fail.
+    A legitimate miner running the same model will produce tokens that
+    the baseline assigns high probability to. A gaming miner dumping
+    garbage tokens will produce tokens the baseline assigns near-zero
+    probability.
+
+    Thresholds:
+      - mean_logprob_threshold: average logprob across all miner tokens
+        must be above this. Real cross-model outputs typically score
+        -0.5 to -2.0; garbage scores -15 to -30.
+      - min_logprob_threshold: no single token may score below this.
+        Catches isolated garbage tokens injected into otherwise-valid
+        output.
     """
     rate = compute_token_match_rate(baseline_tokens, miner_tokens)
 
-    first_mm_idx: int | None = None
-    first_mm_baseline: str | None = None
-    first_mm_miner: str | None = None
-    first_mm_lp: list[dict[str, Any]] | None = None
-
-    total = max(len(baseline_tokens), len(miner_tokens))
-    for i in range(total):
-        bt = baseline_tokens[i] if i < len(baseline_tokens) else ""
-        mt = miner_tokens[i] if i < len(miner_tokens) else ""
-        if bt != mt:
-            first_mm_idx = i
-            first_mm_baseline = bt
-            first_mm_miner = mt
-            if miner_top_logprobs and i < len(miner_top_logprobs):
-                first_mm_lp = miner_top_logprobs[i]
-            break
-
-    if first_mm_idx is None:
-        return CorrectnessVerdict(
-            passed=True,
-            token_match_rate=rate,
-        )
-
-    if miner_top_logprobs is None:
+    if not baseline_scoring_logprobs:
         return CorrectnessVerdict(
             passed=False,
             token_match_rate=rate,
-            reason=(
-                f"first_mismatch_fail at index {first_mm_idx}: "
-                f"logprobs missing from response"
-            ),
-            first_mismatch_index=first_mm_idx,
-            baseline_token_at_mismatch=first_mm_baseline,
-            miner_token_at_mismatch=first_mm_miner,
+            reason="no baseline scoring logprobs available",
         )
 
-    if first_mm_lp is None:
+    mean_lp = statistics.mean(baseline_scoring_logprobs)
+    min_lp = min(baseline_scoring_logprobs)
+
+    if mean_lp < mean_logprob_threshold:
         return CorrectnessVerdict(
             passed=False,
             token_match_rate=rate,
+            mean_logprob=mean_lp,
+            min_logprob=min_lp,
             reason=(
-                f"first_mismatch_fail at index {first_mm_idx}: "
-                f"no logprobs available at divergence point"
+                f"mean_logprob {mean_lp:.3f} below threshold {mean_logprob_threshold}"
             ),
-            first_mismatch_index=first_mm_idx,
-            baseline_token_at_mismatch=first_mm_baseline,
-            miner_token_at_mismatch=first_mm_miner,
         )
 
-    miner_top1 = first_mm_lp[0].get("token") if first_mm_lp else None
-    if miner_top1 is not None and miner_top1 != first_mm_miner:
+    if min_lp < min_logprob_threshold:
         return CorrectnessVerdict(
             passed=False,
             token_match_rate=rate,
+            mean_logprob=mean_lp,
+            min_logprob=min_lp,
             reason=(
-                f"non_greedy at index {first_mm_idx}: miner chose "
-                f"{first_mm_miner!r} but top-1 is {miner_top1!r}"
+                f"min_logprob {min_lp:.3f} below threshold {min_logprob_threshold}"
             ),
-            first_mismatch_index=first_mm_idx,
-            baseline_token_at_mismatch=first_mm_baseline,
-            miner_token_at_mismatch=first_mm_miner,
-            miner_logprobs_at_mismatch=first_mm_lp,
-        )
-
-    if check_logprob_sanity(first_mm_baseline or "", first_mm_lp):
-        return CorrectnessVerdict(
-            passed=True,
-            token_match_rate=rate,
-            first_mismatch_index=first_mm_idx,
-            baseline_token_at_mismatch=first_mm_baseline,
-            miner_token_at_mismatch=first_mm_miner,
-            miner_logprobs_at_mismatch=first_mm_lp,
         )
 
     return CorrectnessVerdict(
-        passed=False,
+        passed=True,
         token_match_rate=rate,
-        reason=(
-            f"first_mismatch_fail at index {first_mm_idx}: "
-            f"baseline={first_mm_baseline!r} not in miner top-5 "
-            f"or logprob gap > 0.5"
-        ),
-        first_mismatch_index=first_mm_idx,
-        baseline_token_at_mismatch=first_mm_baseline,
-        miner_token_at_mismatch=first_mm_miner,
-        miner_logprobs_at_mismatch=first_mm_lp,
+        mean_logprob=mean_lp,
+        min_logprob=min_lp,
     )
 
 

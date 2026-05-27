@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -702,6 +703,12 @@ class TestPersistence:
         assert reloaded.runner_up_record is not None
         assert reloaded.runner_up_record.uid == 1
         assert reloaded.runner_up_record.score == 0.4
+
+    @patch("validator.state._atomic_write_json")
+    def test_save_returns_false_on_enospc(self, mock_write, tmp_path):
+        mock_write.side_effect = OSError(28, "No space left on device")
+        state = ValidatorState()
+        assert state.save(tmp_path) is False
 
     def test_load_missing_file_returns_empty_state(self, tmp_path):
         loaded = ValidatorState.load(tmp_path)

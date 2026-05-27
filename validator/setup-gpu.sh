@@ -63,18 +63,6 @@ else
   curl -fsSL https://get.docker.com | sh
 fi
 
-# Ensure dockerd is running (systemctl may not work in containers)
-if ! docker info >/dev/null 2>&1; then
-  echo "Docker daemon not running, starting manually..."
-  nohup dockerd > /var/log/dockerd.log 2>&1 &
-  sleep 5
-  if ! docker info >/dev/null 2>&1; then
-    echo "ERROR: dockerd failed to start. Check /var/log/dockerd.log"
-    exit 1
-  fi
-  echo "dockerd started (PID $(pgrep -x dockerd))"
-fi
-
 # -- NVIDIA Container Toolkit --
 echo ""
 echo "=== NVIDIA Container Toolkit ==="
@@ -122,19 +110,45 @@ else
   fi
 fi
 
-# Restart dockerd to pick up runtime config + runc changes
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active docker >/dev/null 2>&1; then
-  systemctl restart docker
+# -- Docker data-root on /workspace (large block volume) --
+echo ""
+echo "=== Docker data-root ==="
+DOCKER_DATA_ROOT="/workspace/docker"
+if ! mountpoint -q /workspace 2>/dev/null && ! df -Pk /workspace >/dev/null 2>&1; then
+  echo "ERROR: /workspace is not mounted. Attach the model volume before running setup."
+  exit 1
+fi
+mkdir -p "$DOCKER_DATA_ROOT" /etc/docker
+if [[ -f /etc/docker/daemon.json ]]; then
+  jq '. + {"data-root": "'"$DOCKER_DATA_ROOT"'"}' /etc/docker/daemon.json \
+    > /etc/docker/daemon.json.tmp
 else
+  echo '{"data-root":"'"$DOCKER_DATA_ROOT"'"}' > /etc/docker/daemon.json.tmp
+fi
+mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
+echo "Configured data-root=$DOCKER_DATA_ROOT"
+
+# Stop any running daemon so data-root + runtime config take effect on first start.
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active docker >/dev/null 2>&1; then
+  systemctl stop docker
+elif pgrep -x dockerd >/dev/null 2>&1; then
   pkill -x dockerd && sleep 2
+fi
+
+echo ""
+echo "=== Starting dockerd ==="
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+  systemctl start docker
+else
   nohup dockerd > /var/log/dockerd.log 2>&1 &
   sleep 5
-  if ! docker info >/dev/null 2>&1; then
-    echo "ERROR: dockerd failed to restart after nvidia-ctk configure. Check /var/log/dockerd.log"
-    exit 1
-  fi
-  echo "dockerd restarted (PID $(pgrep -x dockerd))"
 fi
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: dockerd failed to start. Check /var/log/dockerd.log"
+  exit 1
+fi
+echo "dockerd running (PID $(pgrep -x dockerd || echo systemctl))"
+docker info 2>/dev/null | grep -i "Docker Root Dir" || true
 
 # -- clone or update repo --
 echo ""
@@ -174,7 +188,8 @@ fi
 
 # -- disk space (before large downloads) --
 echo ""
-echo "=== Disk space (/workspace) ==="
+echo "=== Disk space ==="
+df -h / /workspace "$DOCKER_DATA_ROOT" 2>/dev/null || df -h / /workspace 2>/dev/null || true
 avail_kb="$(df -Pk /workspace 2>/dev/null | awk 'NR==2 {print $4}')"
 if [[ -z "$avail_kb" ]] || ! [[ "$avail_kb" =~ ^[0-9]+$ ]]; then
   echo "WARNING: could not read free space on /workspace (df). Continuing."
