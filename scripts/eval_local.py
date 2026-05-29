@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local eval test harness for two-pass validator evaluation.
 
-Runs stress baseline + per-miner Pass 1/Pass 2 + inline audit scoring against
+Runs Pass 1 speed baseline + per-miner Pass 1/Pass 2 + inline correctness scoring against
 manually-specified Docker images on a GPU pod. No bittensor, no S3, no
 chain access -- just Docker and GPUs.
 
@@ -172,7 +172,7 @@ def main() -> int:
         state_dir=state_dir,
     )
     logger.info(
-        "Stress baseline ready: %d scored prompts", len(stress_baseline.results)
+        "Pass 1 speed baseline ready: %d scored prompts", len(stress_baseline.results)
     )
 
     records: list[tuple[str, EvaluationRecord]] = []
@@ -269,6 +269,7 @@ def main() -> int:
                 state_dir=state_dir,
                 collected_audit_output_texts=audit_output_texts,
                 collected_audit_miner_tokens=audit_miner_tokens,
+                max_model_len=mml,
             )
             record = _run_pass2(record, audit_output_texts, audit_miner_tokens)
             records.append((image, record))

@@ -562,14 +562,19 @@ def run_tick(
             from .gpu_orchestrator import run_gpu_eval
 
             success = run_gpu_eval(state_dir, eval_job)
-            if success:
-                try:
-                    from .sync import download
+            try:
+                from .sync import download
 
+                if success:
                     download(state_dir)
-                except Exception as exc:
-                    logger.error("Post-eval S3 download failed: %s", exc)
-                _reload_state(state, state_dir)
+                    _reload_state(state, state_dir)
+                else:
+                    logger.info(
+                        "GPU eval failed; downloading logs from S3 (container_logs/, logs/)"
+                    )
+                    download(state_dir, only=["container_logs/", "logs/"])
+            except Exception as exc:
+                logger.error("Post-eval S3 download failed: %s", exc)
 
             from .eval_progress import clear_progress
 

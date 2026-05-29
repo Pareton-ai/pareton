@@ -4,9 +4,9 @@ Prompts are deterministic: same block hash always produces the same set.
 Passages are sampled from PG19 (Project Gutenberg books), paired with
 instruction templates, and wrapped as OpenAI chat messages.
 
-Two regimes:
-  - Stress (Pass 1): long context, 512 output tokens, 10 scored prompts.
-  - Audit (Pass 2): ~4k context, 256 output tokens, 8 prompts.
+Two passes:
+  - Pass 1 (Speed): long context, 512 output tokens, 10 scored prompts.
+  - Pass 2 (Correctness): ~4k context, 256 output tokens, 8 prompts.
 
 PG19 must be pre-downloaded to the local HuggingFace cache. The validator
 fails fast at startup if the dataset is missing rather than attempting an
@@ -24,7 +24,7 @@ from .eval_schema import ChatMessage, Prompt
 
 logger = logging.getLogger(__name__)
 
-PROMPT_ENGINE_VERSION: int = 2
+PROMPT_ENGINE_VERSION: int = 3
 
 DATASET_NAME: str = "emozilla/pg19"
 DATASET_SPLIT: str = "train"
@@ -40,15 +40,15 @@ AUDIT_PROMPT_COUNT: int = 8
 
 STRESS_MAX_OUTPUT_TOKENS: int = 512
 
-CHARS_PER_TOKEN: float = 3.2
+CHARS_PER_TOKEN: float = 2.9
 """Conservative chars/token for English prose with the Qwen2.5 tokenizer.
-Real average is ~3.5-4.0; using 3.2 so we slightly underestimate chars per
-token and stay safely within the context budget."""
+Real average is ~3.5-4.0; using 2.9 keeps the char budget below the token cap."""
 
-OVERHEAD_TOKENS: int = 300
-"""Tokens consumed by the chat template, instruction text, and special tokens.
-The instruction templates are short (~30-50 tokens) but the chat template
-wraps the message with role markers, BOS/EOS, etc."""
+OVERHEAD_TOKENS: int = 512
+"""Tokens reserved for the chat template, instruction text, and special tokens."""
+
+PASSAGE_TOKEN_SAFETY_MARGIN: int = 256
+"""Extra input-token headroom subtracted before converting the passage budget to chars."""
 
 SCORING_MAX_MODEL_LEN: int = (
     AUDIT_CONTEXT_TOKENS + OVERHEAD_TOKENS + AUDIT_MAX_OUTPUT_TOKENS
@@ -56,7 +56,7 @@ SCORING_MAX_MODEL_LEN: int = (
 """vLLM ``--max-model-len`` for Pass 2 teacher-forcing only (~4.5k, not 128k)."""
 
 MAX_OUTPUT_TOKENS: int = STRESS_MAX_OUTPUT_TOKENS
-"""Default output tokens for stress prompts (backward compat)."""
+"""Default output tokens for Pass 1 speed prompts (backward compat)."""
 
 MIN_ALPHA_RATIO: float = 0.5
 MAX_WHITESPACE_RATIO: float = 0.35
@@ -158,7 +158,12 @@ def max_passage_chars(
     """
     if max_context_tokens is None:
         return MAX_CONTEXT_CHARS
-    passage_tokens = max_context_tokens - output_tokens - OVERHEAD_TOKENS
+    passage_tokens = (
+        max_context_tokens
+        - output_tokens
+        - OVERHEAD_TOKENS
+        - PASSAGE_TOKEN_SAFETY_MARGIN
+    )
     return max(min_context_chars, int(passage_tokens * CHARS_PER_TOKEN))
 
 
@@ -250,7 +255,7 @@ def sample_stress_prompts(
     max_context_tokens: int | None = None,
     _rows: list[str] | None = None,
 ) -> list[Prompt]:
-    """Sample long-context stress prompts (Pass 1): 512 output tokens."""
+    """Sample long-context speed prompts (Pass 1): 512 output tokens."""
     return _build_prompts(
         block_hash,
         n,
@@ -268,7 +273,7 @@ def sample_audit_prompts(
     max_context_tokens: int = AUDIT_CONTEXT_TOKENS,
     _rows: list[str] | None = None,
 ) -> list[Prompt]:
-    """Sample short-context audit prompts (Pass 2): ~4k input, 256 output."""
+    """Sample short-context correctness prompts (Pass 2): ~4k input, 256 output."""
     return _build_prompts(
         block_hash,
         n,

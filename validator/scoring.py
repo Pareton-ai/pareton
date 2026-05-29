@@ -65,7 +65,7 @@ def compute_pass1_aggregate_match(
     baseline_tokens_list: list[list[str]],
     miner_tokens_list: list[list[str]],
 ) -> float:
-    """Mean token match rate across Pass 1 stress prompt pairs."""
+    """Mean token match rate across Pass 1 speed prompt pairs."""
     if not baseline_tokens_list or not miner_tokens_list:
         return 0.0
     n = min(len(baseline_tokens_list), len(miner_tokens_list))
@@ -81,37 +81,60 @@ def pass1_match_passes(aggregate_match: float, threshold: float) -> bool:
     return aggregate_match >= threshold
 
 
+# Pass 2: minimum fraction of scoring_canonical_token_count that must be
+# covered by extracted prompt_logprobs. Gaps from EOS/special-token suffixes
+# (e.g. 256/261) are OK; near-empty extraction (e.g. 10/50) is infra fail.
+SCORING_LOGPROB_MIN_COVERAGE_RATIO: float = 0.5
+
+
 def compute_teacher_forcing_verdict(
-    miner_tokens: list[str],
     scoring_logprobs: list[float],
     *,
+    scoring_canonical_token_count: int,
     mean_logprob_threshold: float = -4.0,
     min_logprob_threshold: float = -12.0,
+    min_coverage_ratio: float = SCORING_LOGPROB_MIN_COVERAGE_RATIO,
 ) -> CorrectnessVerdict:
-    """Pass 2 audit gate: teacher-forcing logprobs only (no baseline token match).
+    """Pass 2 correctness gate: teacher-forcing logprobs on scoring canonical tokens.
 
-    Empty logprobs indicate scoring infra failure (OOM, HTTP 500), not
-    miner correctness failure.
+    Nomenclature (see docs/evaluation/scoring):
+      - challenger_output_text: miner SSE text (scored as-is)
+      - challenger_stream_token_count: miner SSE logprob token count (telemetry)
+      - scoring_canonical_token_count: scoring vLLM /tokenize assistant positions (N)
+      - scoring_logprob_count: len(scoring_logprobs) from prompt_logprobs extraction (M)
+
+    Correctness runs on min(N, M) extracted logprobs (both from scoring vLLM).
+    Never compare M to challenger_stream_token_count for DQ.
     """
-    if not scoring_logprobs:
+    scoring_logprob_count = len(scoring_logprobs)
+    if scoring_logprob_count == 0:
         return CorrectnessVerdict(
             passed=False,
             token_match_rate=0.0,
-            reason="scoring_infra_fail: no baseline scoring logprobs available",
+            reason="scoring_infra_fail: no scoring logprobs available",
         )
 
-    if len(scoring_logprobs) < len(miner_tokens):
-        return CorrectnessVerdict(
-            passed=False,
-            token_match_rate=0.0,
-            reason=(
-                "correctness_fail: teacher-forcing covered "
-                f"{len(scoring_logprobs)}/{len(miner_tokens)} streamed tokens"
-            ),
-        )
+    if scoring_canonical_token_count > 0:
+        coverage = scoring_logprob_count / scoring_canonical_token_count
+        if coverage < min_coverage_ratio:
+            return CorrectnessVerdict(
+                passed=False,
+                token_match_rate=0.0,
+                reason=(
+                    "scoring_infra_fail: extracted "
+                    f"{scoring_logprob_count}/{scoring_canonical_token_count} "
+                    f"scoring canonical tokens (below {min_coverage_ratio:.0%} coverage floor)"
+                ),
+            )
 
-    mean_lp = statistics.mean(scoring_logprobs)
-    min_lp = min(scoring_logprobs)
+    scored_logprobs = scoring_logprobs[
+        : min(scoring_canonical_token_count, scoring_logprob_count)
+        if scoring_canonical_token_count > 0
+        else scoring_logprob_count
+    ]
+
+    mean_lp = statistics.mean(scored_logprobs)
+    min_lp = min(scored_logprobs)
 
     if mean_lp < mean_logprob_threshold:
         return CorrectnessVerdict(

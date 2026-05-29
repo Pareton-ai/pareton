@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -684,7 +685,15 @@ class TestPurgeOldLogs:
         (logs / "gpu_eval_20260102_090000.log").write_text("old gpu")
         (logs / "random_file.txt").write_text("ignore me")
 
-        with patch("validator.config.LOG_RETENTION_DAYS", 10):
+        class FixedNow(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 5, 20, 12, 0, 0)
+
+        with (
+            patch("validator.config.LOG_RETENTION_DAYS", 10),
+            patch("validator.eval_progress.datetime", FixedNow),
+        ):
             removed = purge_old_logs(str(tmp_path))
 
         assert removed == 2

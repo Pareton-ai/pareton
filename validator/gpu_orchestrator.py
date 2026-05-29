@@ -189,11 +189,11 @@ def _calculate_eval_timeout_minutes(num_challengers: int) -> int:
     """
     Calculate the GPU eval timeout in minutes.
     """
-    BASE_TIMEOUT_MINUTES = 20
-    TIMEOUT_PER_CHALLENGER_MINUTES = 12
+    BASE_TIMEOUT_MINUTES = 30
+    TIMEOUT_PER_CHALLENGER_MINUTES = 30
 
     timeout = BASE_TIMEOUT_MINUTES + num_challengers * TIMEOUT_PER_CHALLENGER_MINUTES
-    return max(timeout, 30)
+    return max(timeout, 45)
 
 
 def _remote_run_eval(

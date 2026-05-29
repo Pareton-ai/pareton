@@ -57,8 +57,8 @@ BASELINE_IMAGE: str = os.environ.get(
 BASELINE_DIGEST: str = os.environ.get("CACHEON_BASELINE_DIGEST", "")
 
 SCORING_IMAGE: str = os.environ.get("CACHEON_SCORING_IMAGE", "vllm/vllm-openai:v0.9.2")
-"""vLLM image used only for Pass 2 audit teacher-forcing (prompt_logprobs).
-Pinned to v0.9.2 for B200 (sm_100) support; audit prompts are ~4k context."""
+"""vLLM image used only for Pass 2 correctness teacher-forcing (prompt_logprobs).
+Pinned to v0.9.2 for B200 (sm_100) support; correctness prompts are ~4k context."""
 
 GPU_COUNT: int = int(os.environ.get("CACHEON_GPU_COUNT", "8"))
 """Number of GPUs on the host. Set to 8 for 8x H200/B200/B300 (the standard eval tier)."""
@@ -103,7 +103,7 @@ WINNER_EPSILON_INITIAL: float = float(
 
 1% is small enough to not protect truly weak winners, large enough to swallow
 float noise and discourage copycat submissions that match the winner
-byte-for-byte (a byte-identical copy also trips the `duplicate_of_winner` DQ
+byte-for-byte (a byte-identical copy also trips the `duplicate_of_leader` DQ
 path in `state.record_evaluation`; the epsilon covers near-duplicates /
 scoring noise). Leader and runner-up are re-evaluated each round, so the moat
 is always applied against a fresh score."""
@@ -154,10 +154,10 @@ MIN_LOGPROB_THRESHOLD: float = float(
 """Floor logprob for any single token. Catches isolated garbage tokens."""
 
 PASS1_MATCH_DQ_THRESHOLD: float = float(
-    os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.25")
+    os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.10")
 )
-"""Pass 1 hard DQ: aggregate token match vs stress baseline must be at or
-above this fraction (default 25%). Below threshold, miner is DQ'd before
+"""Pass 1 hard DQ: aggregate token match vs speed baseline must be at or
+above this fraction. Below threshold, miner is DQ'd before
 Pass 2 teacher-forcing."""
 
 VLLM_COMPILE_CACHE_DIR: str = os.environ.get(
@@ -170,7 +170,7 @@ Persists torch.compile artifacts across container restarts."""
 # Housekeeping
 # --------------------------------------------------------------------------- #
 
-LOG_RETENTION_DAYS: int = int(os.environ.get("CACHEON_LOG_RETENTION_DAYS", "10"))
+LOG_RETENTION_DAYS: int = int(os.environ.get("CACHEON_LOG_RETENTION_DAYS", "7"))
 """Delete log files in ``state/logs/`` older than this many days (by filename
 timestamp). 0 disables pruning."""
 

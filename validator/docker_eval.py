@@ -44,7 +44,7 @@ EVAL_N_WARMUP: int = 2
 """Warmup prompts discarded before scored eval (baseline + challengers)."""
 
 EVAL_N_STRESS_SCORED: int = 10
-"""Scored stress prompts per miner after warmup discards."""
+"""Scored Pass 1 (speed) prompts per miner after warmup discards."""
 
 
 # --------------------------------------------------------------------------- #
@@ -65,6 +65,14 @@ class RawPromptResult:
     output_tokens: int
     decode_elapsed_secs: list[float] | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class TeacherForcingScore:
+    """Pass 2 teacher-forcing result from the scoring vLLM."""
+
+    logprobs: list[float]
+    scoring_canonical_token_count: int
 
 
 # --------------------------------------------------------------------------- #
@@ -447,8 +455,12 @@ def _parse_sse_response(
 
     Token source: when logprobs are present in the SSE chunks, tokens
     are taken from ``logprobs.content[].token`` so each token and its
-    logprobs stay paired by construction.  ``delta.content`` is used
-    for timing and display text only.
+    logprobs stay paired by construction.
+
+    ``challenger_output_text`` reconstruction (Pass 2 source of truth):
+    primary = concatenate ``delta.content``; if logprobs were streamed
+    but content deltas are empty, fall back to ``"".join(tokens)``.
+    See docs/evaluation/scoring.
     """
     tokens: list[str] = []
     output_parts: list[str] = []
@@ -514,9 +526,12 @@ def _parse_sse_response(
             if capped:
                 break
     except Exception as exc:
+        output_text = "".join(output_parts)
+        if saw_logprobs and not output_text:
+            output_text = "".join(tokens)
         return RawPromptResult(
             prompt_index=prompt_index,
-            output_text="".join(output_parts),
+            output_text=output_text,
             tokens=tokens,
             top_logprobs=all_top_logprobs if saw_logprobs else None,
             ttft_s=(t_first - t_start) if t_first else 0.0,
@@ -545,10 +560,14 @@ def _parse_sse_response(
 
     logprobs_out = all_top_logprobs if saw_logprobs else None
 
+    output_text = "".join(output_parts)
+    if saw_logprobs and not output_text:
+        output_text = "".join(tokens)
+
     if logprobs_out is not None and len(logprobs_out) != n_tokens:
         return RawPromptResult(
             prompt_index=prompt_index,
-            output_text="".join(output_parts),
+            output_text=output_text,
             tokens=tokens,
             top_logprobs=logprobs_out,
             ttft_s=ttft,
@@ -563,7 +582,7 @@ def _parse_sse_response(
 
     return RawPromptResult(
         prompt_index=prompt_index,
-        output_text="".join(output_parts),
+        output_text=output_text,
         tokens=tokens,
         top_logprobs=logprobs_out,
         ttft_s=ttft,
@@ -660,46 +679,132 @@ def _tokenize(
     return json.loads(resp.read().decode("utf-8", errors="replace")).get("tokens", [])
 
 
+def _trim_messages_to_fit(
+    base_url: str,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int,
+    max_model_len: int,
+    timeout_s: float,
+    prompt_index: int = 0,
+) -> list[dict[str, str]]:
+    """Trim user content so tokenized input plus max_tokens fits max_model_len."""
+    max_input = max_model_len - max_tokens
+    if max_input <= 0:
+        return messages
+
+    try:
+        input_tokens = len(_tokenize(base_url, messages, timeout_s))
+    except Exception as exc:
+        logger.warning("Prompt %d: /tokenize preflight failed: %s", prompt_index, exc)
+        return messages
+
+    if input_tokens <= max_input:
+        return messages
+
+    user_idx = max(
+        (i for i, m in enumerate(messages) if m.get("role") == "user"),
+        default=-1,
+    )
+    if user_idx < 0:
+        return messages
+
+    trimmed = [{**m} for m in messages]
+    content = trimmed[user_idx]["content"]
+    orig_len = len(content)
+    lo, hi = 0, len(content)
+    best = ""
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        trial = content[:mid]
+        if mid < len(content):
+            sp = trial.rfind(" ")
+            if sp > mid // 2:
+                trial = trial[:sp]
+        trimmed[user_idx]["content"] = trial
+        try:
+            trial_tokens = len(_tokenize(base_url, trimmed, timeout_s))
+        except Exception:
+            hi = mid - 1
+            continue
+        if trial_tokens <= max_input:
+            best = trial
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    trimmed[user_idx]["content"] = best
+    try:
+        final_tokens = len(_tokenize(base_url, trimmed, timeout_s))
+    except Exception:
+        final_tokens = -1
+    logger.warning(
+        "Prompt %d: trimmed for max_model_len=%d (content %d->%d chars, "
+        "input tokens %d->%d, max_output=%d)",
+        prompt_index,
+        max_model_len,
+        orig_len,
+        len(best),
+        input_tokens,
+        final_tokens,
+        max_tokens,
+    )
+    return trimmed
+
+
+_EOS_TOKENS = {"<|im_end|>", "</s>", "<|eot_id|>", "<|endoftext|>", "<eos>"}
+
+
 def score_miner_output(
     base_url: str,
     messages: list[dict[str, str]],
     miner_output_text: str,
     timeout_s: float = 60,
-) -> list[float]:
-    """Score miner's output tokens using the baseline model (teacher-forcing).
+) -> TeacherForcingScore:
+    """Score challenger_output_text via scoring vLLM teacher-forcing.
 
-    Uses vLLM's prompt_logprobs extension on /v1/chat/completions. The
-    baseline processes the full prompt + assistant reply in one forward pass
-    and returns per-token logprobs for every position. We slice to just the
-    assistant output tokens by first tokenizing the prompt-only prefix to
-    find where the assistant content starts.
-
-    For each position in the assistant output, the actual token's logprob is
-    identified by rank: with prompt_logprobs=1, each position contains the
-    actual token plus the top-1 alternative (when different). The actual token
-    is the one with rank != 1 when two entries exist, or the sole entry when
-    it matches top-1. We stop at the first end-of-turn marker.
-
-    Returns one logprob per assistant output token. Empty list on any error.
+    Uses exact ``miner_output_text`` bytes (no strip). Returns
+    ``scoring_logprobs`` and ``scoring_canonical_token_count`` from the
+    scoring vLLM /tokenize path only.
     """
-    _EOS_TOKENS = {"<|im_end|>", "</s>", "<|eot_id|>", "<|endoftext|>", "<eos>"}
+    empty = TeacherForcingScore(logprobs=[], scoring_canonical_token_count=0)
 
     if not miner_output_text or not miner_output_text.strip():
-        return []
+        return empty
 
-    stripped = miner_output_text.strip()
-    scoring_messages = list(messages) + [{"role": "assistant", "content": stripped}]
+    scoring_messages = list(messages) + [
+        {"role": "assistant", "content": miner_output_text}
+    ]
 
     try:
         prefix_token_ids = _tokenize(base_url, messages, timeout_s)
     except Exception as exc:
         logger.warning("Scoring pass: /tokenize failed: %s", exc)
-        return []
+        return empty
 
     prefix_len = len(prefix_token_ids)
     if prefix_len == 0:
         logger.warning("Scoring pass: /tokenize returned empty prefix")
-        return []
+        return empty
+
+    try:
+        full_token_ids = _tokenize(base_url, scoring_messages, timeout_s)
+    except Exception as exc:
+        logger.warning("Scoring pass: /tokenize full messages failed: %s", exc)
+        return empty
+
+    scoring_canonical_token_count = len(full_token_ids) - prefix_len
+    if scoring_canonical_token_count <= 0:
+        logger.warning("Scoring pass: no assistant tokens in canonical tokenization")
+        return empty
+
+    logger.info(
+        "Scoring pass: prefix_len=%d scoring_canonical_token_count=%d total_len=%d",
+        prefix_len,
+        scoring_canonical_token_count,
+        len(full_token_ids),
+    )
 
     url = f"{base_url}/v1/chat/completions"
     body: dict[str, Any] = {
@@ -727,25 +832,17 @@ def score_miner_output(
         except Exception:
             pass
         logger.warning("Scoring pass HTTP %d: %s", exc.code, err_body)
-        return []
+        return TeacherForcingScore([], scoring_canonical_token_count)
     except Exception as exc:
         logger.warning("Scoring pass failed: %s", exc)
-        return []
+        return TeacherForcingScore([], scoring_canonical_token_count)
 
     prompt_logprobs = result.get("prompt_logprobs") or []
 
     if not prompt_logprobs or not isinstance(prompt_logprobs, list):
         logger.warning("Scoring pass: prompt_logprobs missing from response")
-        return []
+        return TeacherForcingScore([], scoring_canonical_token_count)
 
-    # Extract the logprob of the actual token at each assistant output position.
-    # prompt_logprobs[i] is None | dict{token_id_str: {logprob, rank, decoded_token}}.
-    # With prompt_logprobs=1, each non-None entry contains:
-    #   - always: the actual token at that position
-    #   - additionally: the top-1 predicted token if it differs from actual
-    # The actual token is identified by rank > 1 when 2 entries exist (the
-    # top-1 alternative always has rank=1). When only 1 entry, actual == top-1.
-    # We stop at the first end-of-turn marker to exclude chat template suffixes.
     assistant_logprobs: list[float] = []
     for i in range(prefix_len, len(prompt_logprobs)):
         lp_entry = prompt_logprobs[i]
@@ -766,7 +863,10 @@ def score_miner_output(
     if not assistant_logprobs:
         logger.warning("Scoring pass: no assistant token logprobs extracted")
 
-    return assistant_logprobs
+    return TeacherForcingScore(
+        logprobs=assistant_logprobs,
+        scoring_canonical_token_count=scoring_canonical_token_count,
+    )
 
 
 def score_challenger_teacher_forcing(
@@ -777,7 +877,7 @@ def score_challenger_teacher_forcing(
     *,
     log_prefix: str = "",
 ) -> tuple[bool, list[str], list[float]]:
-    """Teacher-forcing correctness for Pass 2 audit prompts.
+    """Teacher-forcing correctness for Pass 2 prompts.
 
     Returns ``(passed, fail_reasons, per_prompt_mean_logprobs)``.
     Stops at the first failed prompt (same as prod gpu_eval).
@@ -794,22 +894,65 @@ def score_challenger_teacher_forcing(
         msgs = [
             {"role": m.role, "content": m.content} for m in scored_prompts[i].messages
         ]
-        scoring_logprobs = score_miner_output(scoring_url, msgs, output_texts[i])
+        challenger_stream_token_count = len(miner_tokens_list[i])
+        label = f"{log_prefix} " if log_prefix else ""
+        logger.info(
+            "%sprompt %d: Pass 2 scoring start (challenger_stream_token_count=%d)",
+            label,
+            i,
+            challenger_stream_token_count,
+        )
+        tf_score = score_miner_output(scoring_url, msgs, output_texts[i])
+        scoring_canonical_token_count = tf_score.scoring_canonical_token_count
+        scoring_logprob_count = len(tf_score.logprobs)
+        scoring_scored_token_count = (
+            min(scoring_canonical_token_count, scoring_logprob_count)
+            if scoring_canonical_token_count > 0
+            else scoring_logprob_count
+        )
+
+        if (
+            scoring_canonical_token_count > 0
+            and challenger_stream_token_count > 1.5 * scoring_canonical_token_count
+        ):
+            logger.warning(
+                "%sprompt %d: stream_canonical_drift: "
+                "challenger_stream_token_count=%d scoring_canonical_token_count=%d",
+                log_prefix + " " if log_prefix else "",
+                i,
+                challenger_stream_token_count,
+                scoring_canonical_token_count,
+            )
+        elif challenger_stream_token_count > scoring_canonical_token_count + 10:
+            logger.warning(
+                "%sprompt %d: possible_stream_spam: "
+                "challenger_stream_token_count=%d scoring_canonical_token_count=%d",
+                log_prefix + " " if log_prefix else "",
+                i,
+                challenger_stream_token_count,
+                scoring_canonical_token_count,
+            )
+
         verdict = compute_teacher_forcing_verdict(
-            miner_tokens_list[i],
-            scoring_logprobs,
+            tf_score.logprobs,
+            scoring_canonical_token_count=scoring_canonical_token_count,
             mean_logprob_threshold=validator_config.MEAN_LOGPROB_THRESHOLD,
             min_logprob_threshold=validator_config.MIN_LOGPROB_THRESHOLD,
         )
         mean_logprobs.append(verdict.mean_logprob)
-        label = f"{log_prefix} " if log_prefix else ""
         logger.info(
-            "%sprompt %d: correctness=%s mean_lp=%.3f min_lp=%.3f",
+            "%sprompt %d: correctness=%s mean_lp=%.3f min_lp=%.3f "
+            "challenger_stream_token_count=%d scoring_canonical_token_count=%d "
+            "scoring_logprob_count=%d scoring_scored_token_count=%d",
             label,
             i,
             "PASS" if verdict.passed else "FAIL",
             verdict.mean_logprob,
             verdict.min_logprob,
+            challenger_stream_token_count,
+            scoring_canonical_token_count,
+            scoring_logprob_count,
+            scoring_scored_token_count,
         )
         if not verdict.passed:
             reason = verdict.reason or "unknown"
@@ -835,11 +978,21 @@ def _run_prompts_on_server(
     logprobs: bool,
     per_prompt_timeout_s: int,
     n_warmup: int = 0,
+    max_model_len: int | None = None,
 ) -> list[RawPromptResult]:
     """Send prompts to a running server, optionally discarding warmup results."""
     results: list[RawPromptResult] = []
     for i, prompt in enumerate(prompts):
         msgs = [{"role": m.role, "content": m.content} for m in prompt.messages]
+        if max_model_len is not None:
+            msgs = _trim_messages_to_fit(
+                base_url,
+                msgs,
+                max_tokens=prompt.max_tokens,
+                max_model_len=max_model_len,
+                timeout_s=per_prompt_timeout_s,
+                prompt_index=i,
+            )
         r = send_prompt(
             base_url,
             msgs,
@@ -941,13 +1094,19 @@ def _max_model_len(gpu_count: int, model_path: str = "") -> int:
             )
 
             return model_max
+        if model_max is None:
+            logger.warning(
+                "Could not read max_position_embeddings from %s; falling back to 32768",
+                model_path,
+            )
+            return 32_768
 
     return heuristic
 
 
-def _baseline_cmd_args(gpu_count: int, model_volume: str = "") -> list[str]:
+def _baseline_cmd_args(gpu_count: int) -> list[str]:
     """Build the vLLM server command args for the baseline container."""
-    mml = _max_model_len(gpu_count, model_path=model_volume)
+    mml = _max_model_len(gpu_count, model_path=validator_config.MODEL_PATH)
     args = [
         "--model",
         "/models",
@@ -963,7 +1122,7 @@ def _baseline_cmd_args(gpu_count: int, model_volume: str = "") -> list[str]:
     return args
 
 
-def _scoring_baseline_cmd_args(gpu_count: int, model_volume: str = "") -> list[str]:
+def _scoring_baseline_cmd_args(gpu_count: int) -> list[str]:
     """vLLM args for the teacher-forcing scoring baseline."""
     from .prompts import SCORING_MAX_MODEL_LEN
 
@@ -977,6 +1136,9 @@ def _scoring_baseline_cmd_args(gpu_count: int, model_volume: str = "") -> list[s
         "vllm",
         "--max-model-len",
         str(mml),
+        "--gpu-memory-utilization",
+        "0.8",
+        "--enforce-eager",
         "--disable-custom-all-reduce",
     ]
     if gpu_count > 1:
@@ -1009,7 +1171,7 @@ def run_baseline_if_needed(
 
     logger.info("Baseline cache miss for key=%s -- running baseline", cache_key)
 
-    baseline_args = _baseline_cmd_args(gpu_count, model_volume=model_volume)
+    baseline_args = _baseline_cmd_args(gpu_count)
     logger.info("Baseline cmd args: %s", baseline_args)
 
     container_name = "cacheon-baseline"
@@ -1022,11 +1184,11 @@ def run_baseline_if_needed(
             model_volume=model_volume,
             cmd_args=baseline_args,
             container_name=container_name,
-            extra_env={"VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"},
             compile_cache_volume=validator_config.VLLM_COMPILE_CACHE_DIR,
         )
         wait_for_health(base_url, timeout_s=startup_timeout_s, container_id=cid)
 
+        mml = _max_model_len(gpu_count, model_path=validator_config.MODEL_PATH)
         results = _run_prompts_on_server(
             base_url,
             prompts,
@@ -1034,6 +1196,7 @@ def run_baseline_if_needed(
             logprobs=True,
             per_prompt_timeout_s=per_prompt_timeout_s,
             n_warmup=n_warmup,
+            max_model_len=mml,
         )
     finally:
         if state_dir:
@@ -1078,13 +1241,13 @@ def start_baseline_for_scoring(
     """Start the baseline container for the teacher-forcing scoring pass.
 
     Uses the dedicated SCORING_IMAGE (default v0.9.2) for prompt_logprobs
-    on Pass 2 audit prompts (~4k context).
+    on Pass 2 correctness prompts (~4k context).
 
     Returns ``(container_id, base_url)``. Caller is responsible for
     calling ``stop_and_remove`` when done.
     """
     scoring_image = validator_config.SCORING_IMAGE
-    scoring_args = _scoring_baseline_cmd_args(gpu_count, model_volume=model_volume)
+    scoring_args = _scoring_baseline_cmd_args(gpu_count)
     logger.info("Scoring baseline cmd args: %s", scoring_args)
     container_name = "cacheon-baseline-scoring"
     pull_image(scoring_image, "")
@@ -1094,7 +1257,6 @@ def start_baseline_for_scoring(
         model_volume=model_volume,
         cmd_args=scoring_args,
         container_name=container_name,
-        extra_env={"VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1"},
         compile_cache_volume=validator_config.VLLM_COMPILE_CACHE_DIR,
     )
     try:
@@ -1172,16 +1334,17 @@ def evaluate_challenger(
     log_label: str = "",
     collected_audit_output_texts: list | None = None,
     collected_audit_miner_tokens: list | None = None,
+    max_model_len: int | None = None,
 ) -> EvaluationRecord:
     """Full lifecycle for one challenger. Returns an EvaluationRecord.
 
-    Runs Pass 1 (stress) and Pass 2 (audit) in one miner container session.
-    Speed score uses stress prompts only. Pass 1 aggregate token match vs
-    stress baseline is a hard DQ gate. Pass 2 teacher-forcing is done by
+    Runs Pass 1 (speed) and Pass 2 (correctness) in one miner container session.
+    Speed score uses Pass 1 prompts only. Pass 1 aggregate token match vs
+    speed baseline is a hard DQ gate. Pass 2 teacher-forcing is done by
     the caller after GPU handoff to the scoring container.
 
     If ``collected_audit_output_texts`` / ``collected_audit_miner_tokens``
-    are provided, audit outputs are appended for deferred Pass 2 scoring.
+    are provided, Pass 2 outputs are appended for deferred correctness scoring.
     """
     container_name = f"cacheon-uid{com.uid}-{com.hotkey[:8]}"
     cid: str | None = None
@@ -1206,6 +1369,7 @@ def evaluate_challenger(
             logprobs=True,
             per_prompt_timeout_s=per_prompt_timeout_s,
             n_warmup=n_warmup,
+            max_model_len=max_model_len,
         )
         audit_results = _run_prompts_on_server(
             base_url,
@@ -1258,6 +1422,32 @@ def evaluate_challenger(
             f"below threshold {validator_config.PASS1_MATCH_DQ_THRESHOLD}"
         )
         logger.warning("Challenger UID %d Pass 1 match DQ: %s", com.uid, reason)
+
+        n_scored = min(len(stress_results), len(stress_baseline.results))
+        per_prompt: list[PerPromptResult] = []
+        for i in range(n_scored):
+            bl = stress_baseline.results[i]
+            r = stress_results[i]
+            match_rate = compute_token_match_rate(bl.tokens, r.tokens)
+            miner_decode = r.decode_elapsed_secs or []
+            miner_tps = compute_aligned_throughput_tps(bl.output_tokens, miner_decode)
+            per_prompt.append(
+                PerPromptResult(
+                    ttft_s=r.ttft_s,
+                    throughput_tps=miner_tps,
+                    output_tokens=r.output_tokens,
+                    token_match_rate=match_rate,
+                )
+            )
+            logger.info(
+                "  prompt %d: match=%.4f ttft=%.4fs tokens=%d",
+                i,
+                match_rate,
+                r.ttft_s,
+                r.output_tokens,
+            )
+
+        per_prompt_dicts = [pp.to_dict() for pp in per_prompt] if per_prompt else None
         return EvaluationRecord(
             uid=com.uid,
             hotkey=com.hotkey,
@@ -1272,9 +1462,10 @@ def evaluate_challenger(
             disqualify_reason=reason,
             evaluated_at=time.time(),
             evaluation_block=current_block,
+            per_prompt=per_prompt_dicts,
         )
 
-    per_prompt: list[PerPromptResult] = []
+    per_prompt = []
     miner_ttfts: list[float] = []
     miner_tps_list: list[float] = []
     baseline_ttfts: list[float] = []
@@ -1325,7 +1516,7 @@ def evaluate_challenger(
 
     logger.info(
         "Challenger UID %d scored: score=%.4f ttft_imp=%.4f tps_imp=%.4f "
-        "match_rate=%.4f (%d stress prompts)",
+        "match_rate=%.4f (%d speed prompts)",
         com.uid,
         score,
         ttft_imp,
@@ -1430,7 +1621,7 @@ def make_eval_fn(
 
         from .prompts import sample_audit_prompts, sample_stress_prompts
 
-        mml = _max_model_len(resolved_gpu_count, model_path=model_volume)
+        mml = _max_model_len(resolved_gpu_count, model_path=validator_config.MODEL_PATH)
         stress_prompts = sample_stress_prompts(
             block_hash,
             n=EVAL_N_STRESS_SCORED + n_warmup,
@@ -1471,6 +1662,7 @@ def make_eval_fn(
                 n_warmup=n_warmup,
                 current_block=current_block,
                 state_dir=state_dir,
+                max_model_len=mml,
             )
             results.append(record)
 

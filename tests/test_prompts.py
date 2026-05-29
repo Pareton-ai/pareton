@@ -18,6 +18,7 @@ from validator.prompts import (
     MIN_ALPHA_RATIO,
     MIN_CONTEXT_CHARS,
     OVERHEAD_TOKENS,
+    PASSAGE_TOKEN_SAFETY_MARGIN,
     PROMPT_ENGINE_VERSION,
     STRESS_MAX_OUTPUT_TOKENS,
     TEMPLATES,
@@ -230,7 +231,13 @@ class TestMaxPassageChars:
     def test_32k_context(self):
         result = max_passage_chars(32_768, output_tokens=STRESS_MAX_OUTPUT_TOKENS)
         expected = int(
-            (32_768 - STRESS_MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN
+            (
+                32_768
+                - STRESS_MAX_OUTPUT_TOKENS
+                - OVERHEAD_TOKENS
+                - PASSAGE_TOKEN_SAFETY_MARGIN
+            )
+            * CHARS_PER_TOKEN
         )
         assert result == expected
         assert result < MAX_CONTEXT_CHARS
@@ -238,7 +245,13 @@ class TestMaxPassageChars:
     def test_65k_context(self):
         result = max_passage_chars(65_536, output_tokens=STRESS_MAX_OUTPUT_TOKENS)
         expected = int(
-            (65_536 - STRESS_MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS) * CHARS_PER_TOKEN
+            (
+                65_536
+                - STRESS_MAX_OUTPUT_TOKENS
+                - OVERHEAD_TOKENS
+                - PASSAGE_TOKEN_SAFETY_MARGIN
+            )
+            * CHARS_PER_TOKEN
         )
         assert result == expected
 
@@ -249,7 +262,12 @@ class TestMaxPassageChars:
             min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
         )
         expected = int(
-            (AUDIT_CONTEXT_TOKENS - AUDIT_MAX_OUTPUT_TOKENS - OVERHEAD_TOKENS)
+            (
+                AUDIT_CONTEXT_TOKENS
+                - AUDIT_MAX_OUTPUT_TOKENS
+                - OVERHEAD_TOKENS
+                - PASSAGE_TOKEN_SAFETY_MARGIN
+            )
             * CHARS_PER_TOKEN
         )
         assert result == expected
@@ -262,7 +280,7 @@ class TestMaxPassageChars:
 
 class TestConstants:
     def test_prompt_engine_version_positive(self):
-        assert PROMPT_ENGINE_VERSION >= 2
+        assert PROMPT_ENGINE_VERSION >= 3
 
     def test_min_context_chars(self):
         assert MIN_CONTEXT_CHARS == 16_000

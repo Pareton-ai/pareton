@@ -81,6 +81,45 @@ class TargonProvider:
         resp = requests.delete(f"{API_BASE}{path}", headers=self._headers, timeout=30)
         resp.raise_for_status()
 
+    def _deploy_workload(self, workload_uid: str) -> None:
+        """Deploy with retries; Targon sometimes returns 502 while deploy proceeds."""
+        url = f"{API_BASE}/workloads/{workload_uid}/deploy"
+        last_resp: requests.Response | None = None
+        for attempt in range(1, 4):
+            last_resp = requests.post(url, headers=self._headers, timeout=60)
+            if last_resp.ok:
+                return
+            if last_resp.status_code in (502, 503, 504) and attempt < 3:
+                logger.warning(
+                    "Targon deploy %s returned %s (attempt %d/3), retrying in 5s",
+                    workload_uid,
+                    last_resp.status_code,
+                    attempt,
+                )
+                time.sleep(5)
+                continue
+            break
+
+        state = self._get(f"/workloads/{workload_uid}/state")
+        status = state.get("status", "").upper()
+        if status in ("DEPLOYING", "PROVISIONING", "RUNNING"):
+            logger.warning(
+                "Targon deploy HTTP failed for %s but state is %s; continuing",
+                workload_uid,
+                status,
+            )
+            return
+
+        try:
+            self._delete(f"/workloads/{workload_uid}")
+        except Exception:
+            logger.exception(
+                "Failed to delete Targon workload %s after deploy failure",
+                workload_uid,
+            )
+        assert last_resp is not None
+        last_resp.raise_for_status()
+
     # -- SSH key management ------------------------------------------------
 
     @staticmethod
@@ -199,7 +238,7 @@ class TargonProvider:
         workload = self._post("/workloads", json=body)
         workload_uid = workload["uid"]
 
-        self._post(f"/workloads/{workload_uid}/deploy")
+        self._deploy_workload(workload_uid)
         logger.info(
             "Targon workload %s created (resource=%s, volume=%s)",
             workload_uid,

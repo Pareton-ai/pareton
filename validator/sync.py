@@ -155,19 +155,33 @@ def download(
     state_dir: str | Path,
     bucket: str = "",
     prefix: str = "",
+    only: list[str] | None = None,
 ) -> int:
-    """Download all files from S3 prefix into ``state_dir``. Returns file count."""
+    """Download files from S3 prefix into ``state_dir``. Returns file count.
+
+    When *only* is provided, only relative paths matching those prefixes are
+    downloaded. E.g. ``only=["logs/", "container_logs/"]``.
+    """
     bucket = bucket or BUCKET
     prefix = prefix or S3_PREFIX
     state_path = Path(state_dir)
     state_path.mkdir(parents=True, exist_ok=True)
 
-    logger.info(
-        "⏳ S3 download starting: s3://%s/%s -> %s",
-        bucket,
-        prefix,
-        state_path.resolve(),
-    )
+    if only:
+        logger.info(
+            "⏳ S3 download starting: s3://%s/%s -> %s (filter: %s)",
+            bucket,
+            prefix,
+            state_path.resolve(),
+            ", ".join(only),
+        )
+    else:
+        logger.info(
+            "⏳ S3 download starting: s3://%s/%s -> %s",
+            bucket,
+            prefix,
+            state_path.resolve(),
+        )
 
     s3 = _client()
     paginator = s3.get_paginator("list_objects_v2")
@@ -180,6 +194,8 @@ def download(
             key = obj["Key"]
             rel = key[len(prefix_dir) :] if prefix_dir else key
             if not rel or _should_skip(rel):
+                continue
+            if only and not any(rel == o or rel.startswith(o) for o in only):
                 continue
             local_file = state_path / rel
             local_file.parent.mkdir(parents=True, exist_ok=True)
