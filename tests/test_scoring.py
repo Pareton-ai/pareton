@@ -102,44 +102,60 @@ class TestPass1MatchGate:
 
 
 # --------------------------------------------------------------------------- #
-# compute_teacher_forcing_verdict (Pass 2 audit)
+# compute_teacher_forcing_verdict (Pass 2 correctness)
 # --------------------------------------------------------------------------- #
 
 
 class TestComputeTeacherForcingVerdict:
     def test_high_logprobs_pass(self):
-        v = compute_teacher_forcing_verdict(["a", "b"], [-0.3, -0.5])
+        v = compute_teacher_forcing_verdict(
+            [-0.3, -0.5], scoring_canonical_token_count=2
+        )
         assert v.passed is True
         assert v.token_match_rate == 0.0
 
     def test_empty_logprobs_infra_fail(self):
-        v = compute_teacher_forcing_verdict(["a", "b"], [])
+        v = compute_teacher_forcing_verdict([], scoring_canonical_token_count=2)
         assert v.passed is False
         assert (v.reason or "").startswith("scoring_infra_fail:")
 
     def test_garbage_fails_mean(self):
-        v = compute_teacher_forcing_verdict(["a", "b"], [-15.0, -20.0])
+        v = compute_teacher_forcing_verdict(
+            [-15.0, -20.0], scoring_canonical_token_count=2
+        )
         assert v.passed is False
         assert "mean_logprob" in (v.reason or "")
 
-    def test_incomplete_coverage_fails_even_with_high_logprobs(self):
-        """Early EOS / truncated scoring: short logprob list vs long stream."""
-        miner = [f"t{i}" for i in range(50)]
+    def test_catastrophic_scoring_coverage_infra_fail(self):
+        """Near-empty extraction vs /tokenize count is infra fail."""
         logprobs = [-0.5] * 10
-        v = compute_teacher_forcing_verdict(miner, logprobs)
+        v = compute_teacher_forcing_verdict(logprobs, scoring_canonical_token_count=50)
         assert v.passed is False
-        assert (v.reason or "").startswith("correctness_fail:")
-        assert "10/50" in (v.reason or "")
+        assert (v.reason or "").startswith("scoring_infra_fail:")
+        assert "10/50 scoring canonical tokens" in (v.reason or "")
 
-    def test_equal_length_passes(self):
-        tokens = ["a", "b", "c"]
-        logprobs = [-0.3, -0.5, -0.4]
-        v = compute_teacher_forcing_verdict(tokens, logprobs)
+    def test_partial_coverage_scores_extracted_logprobs(self):
+        """EOS/suffix gap: score min(N, M) logprobs, do not infra-fail."""
+        logprobs = [-0.3] * 256
+        v = compute_teacher_forcing_verdict(logprobs, scoring_canonical_token_count=261)
         assert v.passed is True
 
-    def test_scoring_longer_than_stream_passes(self):
-        """Under-score only: extra scored positions do not auto-fail."""
-        v = compute_teacher_forcing_verdict(["a", "b"], [-0.3, -0.5, -0.4])
+    def test_cross_engine_stream_drift_not_compared(self):
+        """Stream token count is never compared for DQ."""
+        logprobs = [-0.3] * 161
+        v = compute_teacher_forcing_verdict(logprobs, scoring_canonical_token_count=161)
+        assert v.passed is True
+
+    def test_equal_length_passes(self):
+        logprobs = [-0.3, -0.5, -0.4]
+        v = compute_teacher_forcing_verdict(logprobs, scoring_canonical_token_count=3)
+        assert v.passed is True
+
+    def test_extra_logprobs_still_passes(self):
+        """More extracted logprobs than canonical count does not auto-fail."""
+        v = compute_teacher_forcing_verdict(
+            [-0.3, -0.5, -0.4], scoring_canonical_token_count=2
+        )
         assert v.passed is True
 
 

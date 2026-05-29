@@ -90,7 +90,7 @@ def derive_cache_key(
     Including the baseline digest ensures a cache miss when the pinned
     vLLM image changes. Including the prompt engine version invalidates
     the cache when templates or sampling logic change. The regime suffix
-    keeps stress and audit baseline caches separate.
+    keeps Pass 1 (speed) and Pass 2 (correctness) baseline caches separate.
     """
     from .prompts import PROMPT_ENGINE_VERSION
 

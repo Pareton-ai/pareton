@@ -190,7 +190,7 @@ class WinnerRecord:
 # --------------------------------------------------------------------------- #
 
 
-DUPLICATE_OF_WINNER_REASON: str = "duplicate_of_winner"
+DUPLICATE_OF_LEADER_REASON: str = "duplicate_of_leader"
 
 
 @dataclass(frozen=True)
@@ -198,7 +198,7 @@ class RecordResult:
     """Outcome of `ValidatorState.record_evaluation`.
 
     * ``stored`` is the record actually written to state -- it can differ
-      from the input when the duplicate-of-winner DQ rule fires.
+      from the input when the duplicate-of-leader DQ rule fires.
     * ``overtook`` is True iff this call made ``stored`` the new winner.
     * ``overtake_threshold`` is the score the challenger needed to beat
       (``winner.score * (1 + OVERTAKE_EPSILON)``).
@@ -299,7 +299,7 @@ class ValidatorState:
         *,
         current_block: int,
     ) -> RecordResult:
-        """Store an eval and apply duplicate-of-winner DQ.
+        """Store an eval and apply duplicate-of-leader DQ.
 
         Ranking and throne changes are handled separately by
         ``rerank_round()`` after all participants have been evaluated.
@@ -317,13 +317,13 @@ class ValidatorState:
                 ev,
                 score=0.0,
                 disqualified=True,
-                disqualify_reason=DUPLICATE_OF_WINNER_REASON,
+                disqualify_reason=DUPLICATE_OF_LEADER_REASON,
             )
             logger.info(
                 "UID %d (%s) DQ'd: %s (matches winner digest=%s)",
                 ev.uid,
                 ev.hotkey[:16],
-                DUPLICATE_OF_WINNER_REASON,
+                DUPLICATE_OF_LEADER_REASON,
                 (ev.digest or "")[:24],
             )
 

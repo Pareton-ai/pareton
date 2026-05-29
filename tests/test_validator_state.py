@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from validator.state import (
-    DUPLICATE_OF_WINNER_REASON,
+    DUPLICATE_OF_LEADER_REASON,
     OVERTAKE_EPSILON,
     EvaluationRecord,
     WinnerRecord,
@@ -271,7 +271,7 @@ class TestValidatorStateRecording:
         assert state.has_evaluation("hk1", 100)
 
 
-class TestDuplicateOfWinnerDQ:
+class TestDuplicateOfLeaderDQ:
     """Byte-identical Docker image (same digest) cannot tie or overtake the
     earlier-committed winner -- whoever committed first holds position."""
 
@@ -300,7 +300,7 @@ class TestDuplicateOfWinnerDQ:
         out = _record(state, ev_copy)
         assert out.overtook is False
         assert out.stored.disqualified is True
-        assert out.stored.disqualify_reason == DUPLICATE_OF_WINNER_REASON
+        assert out.stored.disqualify_reason == DUPLICATE_OF_LEADER_REASON
         assert out.stored.score == 0.0
         persisted = state.evaluations[ev_copy.eval_key]
         assert persisted.disqualified is True

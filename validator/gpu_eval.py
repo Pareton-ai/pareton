@@ -172,7 +172,7 @@ def main() -> int:
             return 3
         logger.info("Auto-detected %d GPU(s)", gpu_count)
 
-    # Generate prompts (Pass 1 stress + Pass 2 audit)
+    # Generate prompts (Pass 1 speed + Pass 2 correctness)
     from .prompts import sample_audit_prompts, sample_stress_prompts
 
     mml = _max_model_len(gpu_count, model_path=model_path)
@@ -181,7 +181,7 @@ def main() -> int:
     )
     audit_prompts = sample_audit_prompts(block_hash)
     logger.info(
-        "Generated %d stress + %d audit prompts (max_model_len=%d)",
+        "Generated %d Pass 1 (speed) + %d Pass 2 (correctness) prompts (max_model_len=%d)",
         len(stress_prompts),
         len(audit_prompts),
         mml,
@@ -194,7 +194,7 @@ def main() -> int:
     )
     _upload_progress(state_dir)
 
-    # Run stress baseline once
+    # Run Pass 1 speed baseline once
     cache_dir = Path(state_dir) / "baseline_cache"
     update_progress(state_dir, phase="baseline_running", image=baseline_image)
     _upload_progress(state_dir)
@@ -366,6 +366,7 @@ def main() -> int:
             log_label=label,
             collected_audit_output_texts=audit_output_texts,
             collected_audit_miner_tokens=audit_miner_tokens,
+            max_model_len=mml,
         )
         record = _run_pass2_scoring(
             record,
@@ -442,6 +443,7 @@ def main() -> int:
                     state_dir=state_dir,
                     collected_audit_output_texts=audit_output_texts,
                     collected_audit_miner_tokens=audit_miner_tokens,
+                    max_model_len=mml,
                 )
                 record = _run_pass2_scoring(
                     record,

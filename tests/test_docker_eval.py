@@ -14,6 +14,7 @@ from validator.chain import CommitmentRecord
 from validator.docker_eval import (
     INTERNAL_NETWORK,
     RawPromptResult,
+    TeacherForcingScore,
     capture_container_logs,
     ensure_eval_network,
     evaluate_challenger,
@@ -28,6 +29,8 @@ from validator.docker_eval import (
     start_container,
     stop_and_remove,
     wait_for_health,
+    _scoring_baseline_cmd_args,
+    _trim_messages_to_fit,
 )
 from validator.baseline import BaselineCache, BaselinePromptResult
 from validator.eval_schema import ChatMessage, Prompt
@@ -414,6 +417,49 @@ class TestSendPromptStreaming:
         assert result.error is None
         assert result.tokens == ["A", "B"]
         assert result.output_text == "AB"
+
+    @patch("validator.docker_eval.time.monotonic")
+    @patch("validator.docker_eval.urlopen")
+    def test_logprobs_only_stream_falls_back_output_text(self, mock_urlopen, mock_mono):
+        """When delta.content is absent, challenger_output_text joins stream tokens."""
+        chunks = [
+            {
+                "choices": [
+                    {
+                        "delta": {},
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": "Hello",
+                                    "top_logprobs": [
+                                        {"token": "Hello", "logprob": -0.1}
+                                    ],
+                                },
+                                {
+                                    "token": " world",
+                                    "top_logprobs": [
+                                        {"token": " world", "logprob": -0.2}
+                                    ],
+                                },
+                            ]
+                        },
+                    }
+                ],
+            },
+        ]
+        mock_urlopen.return_value = _make_sse_response(chunks)
+        mock_mono.side_effect = [0.0, 0.1, 0.2]
+
+        result = send_prompt(
+            "http://172.18.0.2:8000",
+            [{"role": "user", "content": "hi"}],
+            stream=True,
+            logprobs=True,
+        )
+
+        assert result.error is None
+        assert result.tokens == ["Hello", " world"]
+        assert result.output_text == "Hello world"
 
     @patch("validator.docker_eval.time.monotonic")
     @patch("validator.docker_eval.urlopen")
@@ -1061,7 +1107,10 @@ class TestEvaluateChallenger:
 
         assert record.disqualified is True
         assert (record.disqualify_reason or "").startswith("pass1_match_fail:")
-        assert record.token_match_rate < 0.25
+        assert record.token_match_rate < 0.10
+        assert record.per_prompt is not None
+        assert len(record.per_prompt) == 2
+        assert record.per_prompt[0]["token_match_rate"] == pytest.approx(0.0)
 
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
@@ -1156,7 +1205,9 @@ class TestEvaluateChallenger:
         mock_reset,
         mock_capture_logs,
     ):
-        mock_score.return_value = []
+        mock_score.return_value = TeacherForcingScore(
+            logprobs=[], scoring_canonical_token_count=0
+        )
         passed, fail_reasons, _ = score_challenger_teacher_forcing(
             "http://scoring:8000",
             _make_audit_prompts(n=1),
@@ -1167,12 +1218,14 @@ class TestEvaluateChallenger:
         assert any("scoring_infra_fail:" in r for r in fail_reasons)
 
     @patch("validator.docker_eval.score_miner_output")
-    def test_score_challenger_teacher_forcing_incomplete_coverage(
+    def test_score_challenger_teacher_forcing_catastrophic_coverage(
         self,
         mock_score,
     ):
-        """Simulates early EOS: few logprobs scored vs full streamed token list."""
-        mock_score.return_value = [-0.3, -0.5]
+        """Near-empty logprob extraction is infra fail."""
+        mock_score.return_value = TeacherForcingScore(
+            logprobs=[-0.3, -0.5], scoring_canonical_token_count=20
+        )
         miner_tokens = [f"t{i}" for i in range(20)]
         passed, fail_reasons, _ = score_challenger_teacher_forcing(
             "http://scoring:8000",
@@ -1181,8 +1234,27 @@ class TestEvaluateChallenger:
             [miner_tokens],
         )
         assert passed is False
-        assert any("correctness_fail:" in r for r in fail_reasons)
-        assert any("2/20" in r for r in fail_reasons)
+        assert any("scoring_infra_fail:" in r for r in fail_reasons)
+        assert any("2/20 scoring canonical tokens" in r for r in fail_reasons)
+
+    @patch("validator.docker_eval.score_miner_output")
+    def test_score_challenger_teacher_forcing_partial_coverage_passes(
+        self,
+        mock_score,
+    ):
+        """Small EOS/suffix gap scores extracted logprobs."""
+        mock_score.return_value = TeacherForcingScore(
+            logprobs=[-0.3] * 256, scoring_canonical_token_count=261
+        )
+        passed, fail_reasons, mean_lps = score_challenger_teacher_forcing(
+            "http://scoring:8000",
+            _make_audit_prompts(n=1),
+            ["answer text"],
+            [["t"] * 256],
+        )
+        assert passed is True
+        assert fail_reasons == []
+        assert mean_lps == [pytest.approx(-0.3)]
 
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
@@ -1246,6 +1318,14 @@ class TestEvaluateChallenger:
 
         assert record.disqualified is True
         assert "prompt_errors" in (record.disqualify_reason or "")
+
+
+class TestScoringBaselineCmdArgs:
+    def test_reserves_vram_headroom_for_prompt_logprobs(self):
+        args = _scoring_baseline_cmd_args(gpu_count=8)
+        assert "--gpu-memory-utilization" in args
+        assert args[args.index("--gpu-memory-utilization") + 1] == "0.8"
+        assert "--enforce-eager" in args
 
 
 class TestPauseResumeScoring:
@@ -1349,3 +1429,87 @@ class TestRunBaselineErrorCheck:
             )
 
         assert list(tmp_path.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
+# _trim_messages_to_fit
+# --------------------------------------------------------------------------- #
+
+
+class TestTrimMessagesToFit:
+    @patch("validator.docker_eval._tokenize")
+    def test_no_trim_when_within_budget(self, mock_tokenize):
+        mock_tokenize.return_value = [1] * 100
+        msgs = [{"role": "user", "content": "hello"}]
+        out = _trim_messages_to_fit(
+            "http://localhost:8000",
+            msgs,
+            max_tokens=512,
+            max_model_len=32_768,
+            timeout_s=10,
+        )
+        assert out == msgs
+        mock_tokenize.assert_called_once()
+
+    @patch("validator.docker_eval._tokenize")
+    def test_trims_when_over_budget(self, mock_tokenize):
+        long_content = "word " * 20_000
+
+        def tokenize_side_effect(_url, messages, _timeout):
+            n = max(1, len(messages[0]["content"]) // 3)
+            return list(range(n))
+
+        mock_tokenize.side_effect = tokenize_side_effect
+        msgs = [{"role": "user", "content": long_content}]
+        out = _trim_messages_to_fit(
+            "http://localhost:8000",
+            msgs,
+            max_tokens=512,
+            max_model_len=32_768,
+            timeout_s=10,
+        )
+        assert len(out[0]["content"]) < len(long_content)
+        final_n = max(1, len(out[0]["content"]) // 3)
+        assert final_n + 512 <= 32_768
+
+
+# --------------------------------------------------------------------------- #
+# score_miner_output
+# --------------------------------------------------------------------------- #
+
+
+class TestScoreMinerOutput:
+    @patch("validator.docker_eval.urlopen")
+    @patch("validator.docker_eval._tokenize")
+    def test_preserves_exact_output_text_bytes(self, mock_tokenize, mock_urlopen):
+        """Leading/trailing whitespace in challenger_output_text is not stripped."""
+        mock_tokenize.side_effect = [
+            [1, 2, 3],
+            [1, 2, 3, 4, 5],
+        ]
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(
+            {
+                "prompt_logprobs": [
+                    None,
+                    None,
+                    None,
+                    {"99": {"logprob": -0.3, "rank": 1, "decoded_token": "x"}},
+                    {"100": {"logprob": -0.4, "rank": 1, "decoded_token": "y"}},
+                ]
+            }
+        ).encode()
+        mock_urlopen.return_value = mock_resp
+
+        from validator.docker_eval import score_miner_output
+
+        padded = "  hello  "
+        score_miner_output(
+            "http://scoring:8000",
+            [{"role": "user", "content": "hi"}],
+            padded,
+        )
+
+        scoring_call = mock_tokenize.call_args_list[1]
+        assistant_msg = scoring_call[0][1][1]
+        assert assistant_msg["content"] == padded
