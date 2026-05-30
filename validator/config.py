@@ -52,9 +52,13 @@ MODEL_PATH: str = os.environ.get("CACHEON_MODEL_PATH", "/models")
 """Path to read model config.json inside the gpu-eval container (mounted model dir)."""
 
 BASELINE_IMAGE: str = os.environ.get(
-    "CACHEON_BASELINE_IMAGE", "vllm/vllm-openai:latest"
+    "CACHEON_BASELINE_IMAGE", "vllm/vllm-openai:v0.22.0"
 )
-BASELINE_DIGEST: str = os.environ.get("CACHEON_BASELINE_DIGEST", "")
+"""Pass 1"""
+BASELINE_DIGEST: str = os.environ.get(
+    "CACHEON_BASELINE_DIGEST",
+    "sha256:0fec7ec5f3e6bc168e54899935fb0557da908a4832a1dbc88e2debcf2f889416",
+)
 
 SCORING_IMAGE: str = os.environ.get("CACHEON_SCORING_IMAGE", "vllm/vllm-openai:v0.9.2")
 """vLLM image used only for Pass 2 correctness teacher-forcing (prompt_logprobs).
@@ -160,11 +164,17 @@ PASS1_MATCH_DQ_THRESHOLD: float = float(
 above this fraction. Below threshold, miner is DQ'd before
 Pass 2 teacher-forcing."""
 
-VLLM_COMPILE_CACHE_DIR: str = os.environ.get(
-    "CACHEON_VLLM_CACHE_DIR", "/workspace/vllm-cache"
-)
-"""Host directory mounted into baseline container at /root/.cache/vllm.
-Persists torch.compile artifacts across container restarts."""
+VLLM_COMPILE_CACHE_DIR: str = os.environ.get("CACHEON_VLLM_CACHE_DIR", "")
+"""Host directory mounted into Pass 1 baseline container at /root/.cache/vllm.
+Empty disables the mount. Auto-rent on Targon sets /workspace/vllm-cache;
+set manually on persistent-volume Targon pods."""
+
+
+def baseline_compile_cache_dir() -> str | None:
+    """Return the compile-cache host path, or None when disabled."""
+    path = VLLM_COMPILE_CACHE_DIR.strip()
+    return path or None
+
 
 # --------------------------------------------------------------------------- #
 # Housekeeping

@@ -206,6 +206,11 @@ else
   fi
 fi
 
+VLLM_COMPILE_CACHE="${CACHEON_VLLM_CACHE_DIR:-/workspace/vllm-cache}"
+if [[ -n "$VLLM_COMPILE_CACHE" ]]; then
+  mkdir -p "$VLLM_COMPILE_CACHE"
+fi
+
 # -- model weights --
 echo ""
 echo "=== Model weights ($MODEL_NAME) ==="
@@ -239,13 +244,33 @@ else
   "$VENV_DIR/bin/python" -c "from datasets import load_dataset; load_dataset('emozilla/pg19', split='train'); print('PG19 cached')"
 fi
 
+_restart_dockerd() {
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+    systemctl restart docker
+  else
+    pkill -x dockerd 2>/dev/null || true
+    sleep 2
+    nohup dockerd > /var/log/dockerd.log 2>&1 &
+    sleep 5
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "ERROR: dockerd failed to restart after layer cache cleanup"
+    exit 1
+  fi
+}
+
 # -- vLLM baseline image --
 echo ""
 echo "=== vLLM baseline Docker image ==="
 if docker image inspect vllm/vllm-openai:latest >/dev/null 2>&1; then
   echo "vLLM baseline image already present, skipping pull."
 else
-  docker pull vllm/vllm-openai:latest
+  if ! docker pull vllm/vllm-openai:latest; then
+    echo "WARNING: docker pull failed; clearing partial layer state on $DOCKER_DATA_ROOT and retrying..."
+    rm -rf "$DOCKER_DATA_ROOT/image" "$DOCKER_DATA_ROOT/overlay2"
+    _restart_dockerd
+    docker pull vllm/vllm-openai:latest
+  fi
 fi
 REPO_DIGEST="$(docker image inspect vllm/vllm-openai:latest --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
 DIGEST=""

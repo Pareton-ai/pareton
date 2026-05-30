@@ -23,7 +23,7 @@ from validator.docker_eval import (
     remove_image,
     reset_gpu_state,
     resume_scoring_baseline,
-    run_baseline_if_needed,
+    run_baseline,
     score_challenger_teacher_forcing,
     send_prompt,
     start_container,
@@ -189,6 +189,39 @@ class TestStartContainer:
         assert cmd[cmd.index("--gpus") + 1] == "all"
         assert "--device" in cmd
         assert cmd[cmd.index("--device") + 1] == "nvidia.com/gpu=all"
+
+    @patch("validator.docker_eval._get_container_ip", return_value="172.18.0.2")
+    @patch("validator.docker_eval.ensure_eval_network")
+    @patch("validator.docker_eval.subprocess.run")
+    def test_compile_cache_mount_present(self, mock_run, _mock_net, _mock_ip):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="container_id\n", stderr=""
+        )
+        start_container(
+            _IMAGE,
+            _DIGEST,
+            model_volume="/mnt/models",
+            compile_cache_volume="/workspace/vllm-cache",
+        )
+        cmd = mock_run.call_args[0][0]
+        assert "-v" in cmd
+        assert "/workspace/vllm-cache:/root/.cache/vllm" in cmd
+
+    @patch("validator.docker_eval._get_container_ip", return_value="172.18.0.2")
+    @patch("validator.docker_eval.ensure_eval_network")
+    @patch("validator.docker_eval.subprocess.run")
+    def test_compile_cache_mount_absent(self, mock_run, _mock_net, _mock_ip):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="container_id\n", stderr=""
+        )
+        start_container(
+            _IMAGE,
+            _DIGEST,
+            model_volume="/mnt/models",
+        )
+        cmd = mock_run.call_args[0][0]
+        cmd_str = " ".join(cmd)
+        assert "/root/.cache/vllm" not in cmd_str
 
     @patch("validator.docker_eval.ensure_eval_network")
     @patch("validator.docker_eval.subprocess.run")
@@ -1351,7 +1384,7 @@ class TestPauseResumeScoring:
 
 
 # --------------------------------------------------------------------------- #
-# run_baseline_if_needed -- error checking
+# run_baseline -- error checking
 # --------------------------------------------------------------------------- #
 
 
@@ -1364,14 +1397,13 @@ class TestRunBaselineErrorCheck:
         return_value=("cid_bl", "http://172.18.0.3:8000"),
     )
     @patch("validator.docker_eval.pull_image")
-    def test_baseline_prompt_error_raises_and_does_not_cache(
+    def test_baseline_prompt_error_raises(
         self,
         mock_pull,
         mock_start,
         mock_health,
         mock_send,
         mock_stop,
-        tmp_path,
     ):
         warmup_r = RawPromptResult(
             prompt_index=0,
@@ -1415,20 +1447,17 @@ class TestRunBaselineErrorCheck:
         prompts = _make_prompts(n=2, n_warmup=2)
 
         with pytest.raises(RuntimeError, match="Baseline had prompt errors"):
-            run_baseline_if_needed(
+            run_baseline(
                 prompts,
                 baseline_image="vllm:latest",
                 baseline_digest="sha256:" + "b" * 64,
                 model_volume="/models",
                 gpu_count=4,
-                cache_dir=tmp_path,
                 block_hash="0xabc",
                 startup_timeout_s=600,
                 per_prompt_timeout_s=120,
                 n_warmup=2,
             )
-
-        assert list(tmp_path.iterdir()) == []
 
 
 # --------------------------------------------------------------------------- #

@@ -18,13 +18,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .baseline import (
-    BaselineCache,
-    BaselinePromptResult,
-    derive_cache_key,
-    load_cached_baseline,
-    save_baseline_cache,
-)
+from .baseline import BaselineCache, BaselinePromptResult, derive_cache_key
 from .chain import CommitmentRecord
 from .eval_schema import PerPromptResult, Prompt
 from .scoring import (
@@ -1146,30 +1140,22 @@ def _scoring_baseline_cmd_args(gpu_count: int) -> list[str]:
     return args
 
 
-def run_baseline_if_needed(
+def run_baseline(
     prompts: list[Prompt],
     *,
     baseline_image: str,
     baseline_digest: str,
     model_volume: str,
     gpu_count: int,
-    cache_dir: Path,
     block_hash: str,
     state_dir: str | Path = "",
-    startup_timeout_s: int = 600,
+    startup_timeout_s: int = 1200,
     per_prompt_timeout_s: int = 120,
     n_warmup: int = 2,
 ) -> BaselineCache:
-    """Load cached baseline or run the vLLM baseline container, measure, and cache."""
+    """Run the vLLM baseline container once and return measurements."""
     cache_key = derive_cache_key(block_hash, baseline_digest, regime="stress")
-    cached = load_cached_baseline(cache_dir, cache_key)
-    if cached is not None:
-        logger.info(
-            "Baseline cache hit for key=%s (%d prompts)", cache_key, len(cached.results)
-        )
-        return cached
-
-    logger.info("Baseline cache miss for key=%s -- running baseline", cache_key)
+    logger.info("Running Pass 1 baseline (key=%s)", cache_key)
 
     baseline_args = _baseline_cmd_args(gpu_count)
     logger.info("Baseline cmd args: %s", baseline_args)
@@ -1184,7 +1170,7 @@ def run_baseline_if_needed(
             model_volume=model_volume,
             cmd_args=baseline_args,
             container_name=container_name,
-            compile_cache_volume=validator_config.VLLM_COMPILE_CACHE_DIR,
+            compile_cache_volume=validator_config.baseline_compile_cache_dir(),
         )
         wait_for_health(base_url, timeout_s=startup_timeout_s, container_id=cid)
 
@@ -1208,7 +1194,7 @@ def run_baseline_if_needed(
     errors = [r for r in results if r.error]
     if errors:
         err_msg = "; ".join(f"prompt {r.prompt_index}: {r.error}" for r in errors)
-        raise RuntimeError(f"Baseline had prompt errors (not caching): {err_msg}")
+        raise RuntimeError(f"Baseline had prompt errors: {err_msg}")
 
     baseline_results: list[BaselinePromptResult] = []
     for r in results:
@@ -1223,12 +1209,10 @@ def run_baseline_if_needed(
             )
         )
 
-    cache = BaselineCache(cache_key=cache_key, results=baseline_results)
-    save_baseline_cache(cache_dir, cache_key, cache)
     logger.info(
-        "✅ Baseline cached: key=%s, %d prompts", cache_key, len(baseline_results)
+        "✅ Baseline complete: key=%s, %d prompts", cache_key, len(baseline_results)
     )
-    return cache
+    return BaselineCache(cache_key=cache_key, results=baseline_results)
 
 
 def start_baseline_for_scoring(
@@ -1257,7 +1241,6 @@ def start_baseline_for_scoring(
         model_volume=model_volume,
         cmd_args=scoring_args,
         container_name=container_name,
-        compile_cache_volume=validator_config.VLLM_COMPILE_CACHE_DIR,
     )
     try:
         wait_for_health(base_url, timeout_s=startup_timeout_s, container_id=cid)
@@ -1284,9 +1267,13 @@ def pause_scoring_baseline(container_id: str) -> None:
 def resume_scoring_baseline(
     container_id: str,
     *,
-    startup_timeout_s: int = 120,
+    startup_timeout_s: int = 600,
 ) -> str:
-    """Start a stopped scoring container and return its base URL."""
+    """Start a stopped scoring container and return its base URL.
+
+    Deprecated: gpu_eval batches Pass 2 at the end with a fresh container
+    instead of pause/resume. Kept for eval_local and tests.
+    """
     result = subprocess.run(
         ["docker", "start", container_id],
         capture_output=True,
@@ -1579,7 +1566,6 @@ def _dq_record(
 def make_eval_fn(
     *,
     model_volume: str,
-    baseline_cache_dir: str,
     baseline_image: str,
     baseline_digest: str,
     gpu_count: int = 0,
@@ -1591,12 +1577,11 @@ def make_eval_fn(
     """Return an ``EvalFn`` that runs Docker eval per challenger.
 
     For each challenger, runs the full Docker lifecycle sequentially.
-    Baseline is run once (or loaded from cache) per block hash.
+    Baseline is run once per eval invocation and reused in memory.
 
     If ``gpu_count`` is positive it is used directly; otherwise
     ``nvidia-smi`` auto-detection is attempted on first eval.
     """
-    cache_dir = Path(baseline_cache_dir)
     resolved_gpu_count = gpu_count
 
     def eval_fn(
@@ -1629,13 +1614,12 @@ def make_eval_fn(
         )
         audit_prompts = sample_audit_prompts(block_hash)
 
-        baseline = run_baseline_if_needed(
+        baseline = run_baseline(
             stress_prompts,
             baseline_image=baseline_image,
             baseline_digest=baseline_digest,
             model_volume=model_volume,
             gpu_count=resolved_gpu_count,
-            cache_dir=cache_dir,
             block_hash=block_hash,
             state_dir=state_dir,
             startup_timeout_s=startup_timeout_s,

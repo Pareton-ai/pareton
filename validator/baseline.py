@@ -1,25 +1,16 @@
-"""Baseline result cache for containerized evaluation.
+"""Baseline measurement types for containerized evaluation.
 
-The vLLM baseline is run once per prompt set and cached on disk so that
-every challenger in the same round is compared against identical baseline
-numbers. Cache is keyed by block hash (prompt sets are deterministic
-given the block hash).
+The vLLM baseline is run once per GPU eval round; results are held in memory
+so every challenger is compared against identical baseline numbers.
 
-No Docker, no HTTP -- this module only handles serialization and disk I/O.
+No Docker, no HTTP -- datatypes and cache-key derivation for log labels only.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
-from .state import _atomic_write_json
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -61,7 +52,7 @@ class BaselinePromptResult:
 
 @dataclass
 class BaselineCache:
-    """Full baseline run for a prompt set."""
+    """Pass 1 baseline run for a prompt set (in-memory only)."""
 
     cache_key: str
     results: list[BaselinePromptResult]
@@ -85,40 +76,12 @@ def derive_cache_key(
     baseline_digest: str = "",
     regime: str = "stress",
 ) -> str:
-    """SHA-256 of block_hash + baseline_digest + prompt engine version + regime.
+    """Short id for a baseline run (container log filenames).
 
-    Including the baseline digest ensures a cache miss when the pinned
-    vLLM image changes. Including the prompt engine version invalidates
-    the cache when templates or sampling logic change. The regime suffix
-    keeps Pass 1 (speed) and Pass 2 (correctness) baseline caches separate.
+    Derived from block_hash, baseline image digest, prompt engine version, and
+    regime so logs from different configs do not collide.
     """
     from .prompts import PROMPT_ENGINE_VERSION
 
     raw = f"{block_hash}:{baseline_digest}:v{PROMPT_ENGINE_VERSION}:{regime}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-
-def _cache_file_path(cache_dir: Path, cache_key: str) -> Path:
-    return cache_dir / f"baseline_{cache_key}.json"
-
-
-def load_cached_baseline(cache_dir: Path, cache_key: str) -> BaselineCache | None:
-    """Load cached baseline from disk. Returns None on miss or corrupt file."""
-    path = _cache_file_path(cache_dir, cache_key)
-    if not path.exists():
-        return None
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return BaselineCache.from_dict(data)
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as exc:
-        logger.warning(
-            "Corrupt baseline cache at %s (%s) -- treating as miss.", path, exc
-        )
-        return None
-
-
-def save_baseline_cache(cache_dir: Path, cache_key: str, cache: BaselineCache) -> None:
-    """Atomically write baseline cache to disk."""
-    path = _cache_file_path(cache_dir, cache_key)
-    _atomic_write_json(path, cache.to_dict())

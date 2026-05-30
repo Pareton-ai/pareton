@@ -23,6 +23,8 @@ import argparse
 import logging
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -36,9 +38,7 @@ from validator.docker_eval import (
     _max_model_len,
     ensure_eval_network,
     evaluate_challenger,
-    pause_scoring_baseline,
-    resume_scoring_baseline,
-    run_baseline_if_needed,
+    run_baseline,
     score_challenger_teacher_forcing,
     start_baseline_for_scoring,
     stop_scoring_baseline,
@@ -47,6 +47,16 @@ from validator.prompts import sample_audit_prompts, sample_stress_prompts
 from validator.state import EvaluationRecord
 
 logger = logging.getLogger(__name__)
+
+SCORING_BASELINE_STARTUP_TIMEOUT_S = 600
+
+
+@dataclass
+class _PendingPass2:
+    record: EvaluationRecord
+    audit_output_texts: list[str]
+    audit_miner_tokens: list[list[str]]
+
 
 BLOCK_HASH = "0" * 64
 
@@ -144,7 +154,6 @@ def main() -> int:
 
     state_dir = args.state_dir
     Path(state_dir).mkdir(parents=True, exist_ok=True)
-    (Path(state_dir) / "baseline_cache").mkdir(exist_ok=True)
     (Path(state_dir) / "container_logs").mkdir(exist_ok=True)
 
     gpu_count = _detect_gpu_count()
@@ -161,13 +170,12 @@ def main() -> int:
     )
     audit_prompts = sample_audit_prompts(BLOCK_HASH)
 
-    stress_baseline = run_baseline_if_needed(
+    stress_baseline = run_baseline(
         stress_prompts,
         baseline_image=args.baseline_image,
         baseline_digest=baseline_digest,
         model_volume=args.model_volume,
         gpu_count=gpu_count,
-        cache_dir=Path(state_dir) / "baseline_cache",
         block_hash=BLOCK_HASH,
         state_dir=state_dir,
     )
@@ -176,106 +184,109 @@ def main() -> int:
     )
 
     records: list[tuple[str, EvaluationRecord]] = []
-    scoring_cid: str | None = None
-    scoring_url: str = ""
+    pending_pass2: list[_PendingPass2] = []
+    eval_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    scoring_log_label = f"baseline_scoring_0_{eval_ts}"
 
-    def _pause_scoring_if_running() -> None:
-        nonlocal scoring_cid
-        if scoring_cid:
-            pause_scoring_baseline(scoring_cid)
+    for idx, image in enumerate(args.image):
+        digest = _resolve_digest(image)
+        com = CommitmentRecord(
+            uid=idx,
+            hotkey=f"local-test-{idx}",
+            coldkey=f"local-coldkey-{idx}",
+            commit_block=0,
+            image=image,
+            digest=digest,
+            raw="",
+        )
+        logger.info("=== Evaluating [%d/%d]: %s ===", idx + 1, len(args.image), image)
 
-    def _ensure_scoring_url() -> str:
-        nonlocal scoring_cid, scoring_url
-        if scoring_cid is None:
+        audit_output_texts: list[str] = []
+        audit_miner_tokens: list[list[str]] = []
+        record = evaluate_challenger(
+            com,
+            stress_prompts,
+            audit_prompts,
+            stress_baseline,
+            model_volume=args.model_volume,
+            startup_timeout_s=600,
+            per_prompt_timeout_s=120,
+            n_warmup=EVAL_N_WARMUP,
+            current_block=0,
+            state_dir=state_dir,
+            collected_audit_output_texts=audit_output_texts,
+            collected_audit_miner_tokens=audit_miner_tokens,
+            max_model_len=mml,
+        )
+        if not record.disqualified and audit_output_texts:
+            pending_pass2.append(
+                _PendingPass2(record, audit_output_texts, audit_miner_tokens)
+            )
+        records.append((image, record))
+
+    if pending_pass2:
+        scoring_cid: str | None = None
+        try:
             scoring_cid, scoring_url = start_baseline_for_scoring(
                 model_volume=args.model_volume,
                 gpu_count=gpu_count,
                 state_dir=state_dir,
+                startup_timeout_s=SCORING_BASELINE_STARTUP_TIMEOUT_S,
             )
-            return scoring_url
-        import urllib.request
-
-        try:
-            urllib.request.urlopen(f"{scoring_url}/health", timeout=5)
-            return scoring_url
-        except Exception:
-            logger.warning("Scoring baseline unreachable, resuming container")
-            scoring_url = resume_scoring_baseline(scoring_cid)
-            return scoring_url
-
-    def _run_pass2(record: EvaluationRecord, texts: list[str], tokens: list[list[str]]):
-        if record.disqualified or not texts:
-            return record
-        try:
-            url = _ensure_scoring_url()
-            passed, fail_reasons, _ = score_challenger_teacher_forcing(
-                url,
-                audit_prompts,
-                texts,
-                tokens,
-                log_prefix=record.eval_key,
-            )
+            for pending in pending_pass2:
+                try:
+                    passed, fail_reasons, _ = score_challenger_teacher_forcing(
+                        scoring_url,
+                        audit_prompts,
+                        pending.audit_output_texts,
+                        pending.audit_miner_tokens,
+                        log_prefix=pending.record.eval_key,
+                    )
+                except Exception as exc:
+                    logger.error("Pass 2 scoring unavailable: %s", exc, exc_info=True)
+                    pending.record = EvaluationRecord(
+                        uid=pending.record.uid,
+                        hotkey=pending.record.hotkey,
+                        commit_block=pending.record.commit_block,
+                        image=pending.record.image,
+                        digest=pending.record.digest,
+                        score=0.0,
+                        ttft_improvement=0.0,
+                        throughput_improvement=0.0,
+                        token_match_rate=pending.record.token_match_rate,
+                        disqualified=True,
+                        disqualify_reason=f"baseline_scoring_unavailable: {exc}",
+                        evaluated_at=pending.record.evaluated_at,
+                        evaluation_block=pending.record.evaluation_block,
+                        per_prompt=pending.record.per_prompt,
+                    )
+                    continue
+                if not passed:
+                    pending.record = _dq_from_scoring_fail(pending.record, fail_reasons)
         except Exception as exc:
-            logger.error("Pass 2 scoring unavailable: %s", exc, exc_info=True)
-            return EvaluationRecord(
-                uid=record.uid,
-                hotkey=record.hotkey,
-                commit_block=record.commit_block,
-                image=record.image,
-                digest=record.digest,
-                score=0.0,
-                ttft_improvement=0.0,
-                throughput_improvement=0.0,
-                token_match_rate=record.token_match_rate,
-                disqualified=True,
-                disqualify_reason=f"baseline_scoring_unavailable: {exc}",
-                evaluated_at=record.evaluated_at,
-                evaluation_block=record.evaluation_block,
-                per_prompt=record.per_prompt,
-            )
-        if passed:
-            return record
-        return _dq_from_scoring_fail(record, fail_reasons)
-
-    try:
-        for idx, image in enumerate(args.image):
-            digest = _resolve_digest(image)
-            com = CommitmentRecord(
-                uid=idx,
-                hotkey=f"local-test-{idx}",
-                coldkey=f"local-coldkey-{idx}",
-                commit_block=0,
-                image=image,
-                digest=digest,
-                raw="",
-            )
-            logger.info(
-                "=== Evaluating [%d/%d]: %s ===", idx + 1, len(args.image), image
-            )
-
-            _pause_scoring_if_running()
-            audit_output_texts: list[str] = []
-            audit_miner_tokens: list[list[str]] = []
-            record = evaluate_challenger(
-                com,
-                stress_prompts,
-                audit_prompts,
-                stress_baseline,
-                model_volume=args.model_volume,
-                startup_timeout_s=600,
-                per_prompt_timeout_s=120,
-                n_warmup=EVAL_N_WARMUP,
-                current_block=0,
-                state_dir=state_dir,
-                collected_audit_output_texts=audit_output_texts,
-                collected_audit_miner_tokens=audit_miner_tokens,
-                max_model_len=mml,
-            )
-            record = _run_pass2(record, audit_output_texts, audit_miner_tokens)
-            records.append((image, record))
-    finally:
-        if scoring_cid:
-            stop_scoring_baseline(scoring_cid, state_dir)
+            logger.exception("Pass 2 scoring baseline failed: %s", exc)
+            for pending in pending_pass2:
+                pending.record = EvaluationRecord(
+                    uid=pending.record.uid,
+                    hotkey=pending.record.hotkey,
+                    commit_block=pending.record.commit_block,
+                    image=pending.record.image,
+                    digest=pending.record.digest,
+                    score=0.0,
+                    ttft_improvement=0.0,
+                    throughput_improvement=0.0,
+                    token_match_rate=pending.record.token_match_rate,
+                    disqualified=True,
+                    disqualify_reason=f"baseline_scoring_unavailable: {exc}",
+                    evaluated_at=pending.record.evaluated_at,
+                    evaluation_block=pending.record.evaluation_block,
+                    per_prompt=pending.record.per_prompt,
+                )
+        finally:
+            if scoring_cid:
+                stop_scoring_baseline(
+                    scoring_cid, state_dir, log_label=scoring_log_label
+                )
 
     _print_summary(records)
     return 0

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -144,11 +145,61 @@ def delete_remote_keys(
     bucket = bucket or BUCKET
     prefix = prefix or S3_PREFIX
     s3 = _client()
+    full_keys: list[str] = []
     for rel in relative_keys:
         rel = rel.lstrip("/")
-        key = f"{prefix}/{rel}" if prefix else rel
-        logger.info("Deleting s3://%s/%s", bucket, key)
-        s3.delete_object(Bucket=bucket, Key=key)
+        full_keys.append(f"{prefix}/{rel}" if prefix else rel)
+
+    for i in range(0, len(full_keys), 1000):
+        chunk = full_keys[i : i + 1000]
+        s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": key} for key in chunk]},
+        )
+
+    logger.info(
+        "Deleted %d key(s) from s3://%s/%s",
+        len(full_keys),
+        bucket,
+        prefix or "",
+    )
+
+
+def purge_remote_logs(
+    cutoff: datetime,
+    *,
+    bucket: str = "",
+    prefix: str = "",
+) -> int:
+    """Delete stale objects under ``logs/`` in S3. Returns keys removed."""
+    from .eval_progress import log_is_stale
+
+    bucket = bucket or BUCKET
+    prefix = prefix or S3_PREFIX
+    prefix_dir = (prefix.rstrip("/") + "/") if prefix else ""
+    logs_prefix = f"{prefix_dir}logs/"
+
+    s3 = _client()
+    paginator = s3.get_paginator("list_objects_v2")
+    stale_rels: list[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=logs_prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            filename = key.rsplit("/", 1)[-1]
+            if not filename or not log_is_stale(filename, cutoff):
+                continue
+            rel = key[len(prefix_dir) :] if prefix_dir else key
+            stale_rels.append(rel)
+
+    if stale_rels:
+        delete_remote_keys(stale_rels, bucket=bucket, prefix=prefix)
+        logger.info(
+            "🧹 Purged %d old log file(s) from s3://%s/%s/logs/",
+            len(stale_rels),
+            bucket,
+            prefix or "",
+        )
+    return len(stale_rels)
 
 
 def download(
