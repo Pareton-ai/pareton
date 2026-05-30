@@ -1,8 +1,6 @@
-"""Unit tests for validator.baseline -- cache I/O, no Docker."""
+"""Unit tests for validator.baseline -- datatypes and cache keys, no Docker."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
@@ -10,8 +8,6 @@ from validator.baseline import (
     BaselineCache,
     BaselinePromptResult,
     derive_cache_key,
-    load_cached_baseline,
-    save_baseline_cache,
 )
 
 pytestmark = pytest.mark.unit
@@ -113,53 +109,3 @@ class TestDeriveCacheKey:
     def test_hex_chars_only(self):
         key = derive_cache_key("test")
         assert all(c in "0123456789abcdef" for c in key)
-
-
-# --------------------------------------------------------------------------- #
-# Disk cache
-# --------------------------------------------------------------------------- #
-
-
-class TestDiskCache:
-    def test_save_and_load(self, tmp_path):
-        cache = BaselineCache(
-            cache_key="key1",
-            results=[_sample_result(), _sample_result(throughput_tps=200.0)],
-        )
-        save_baseline_cache(tmp_path, "key1", cache)
-        loaded = load_cached_baseline(tmp_path, "key1")
-        assert loaded is not None
-        assert loaded.cache_key == "key1"
-        assert len(loaded.results) == 2
-        assert loaded.results[1].throughput_tps == 200.0
-
-    def test_missing_cache_returns_none(self, tmp_path):
-        assert load_cached_baseline(tmp_path, "nonexistent") is None
-
-    def test_corrupt_json_returns_none(self, tmp_path):
-        path = tmp_path / "baseline_bad.json"
-        path.write_text("{not valid json!!")
-        assert load_cached_baseline(tmp_path, "bad") is None
-
-    def test_empty_file_returns_none(self, tmp_path):
-        path = tmp_path / "baseline_empty.json"
-        path.write_text("")
-        assert load_cached_baseline(tmp_path, "empty") is None
-
-    def test_wrong_schema_returns_none(self, tmp_path):
-        path = tmp_path / "baseline_wrong.json"
-        path.write_text(json.dumps({"foo": "bar"}))
-        assert load_cached_baseline(tmp_path, "wrong") is None
-
-    def test_no_temp_files_left(self, tmp_path):
-        cache = BaselineCache(cache_key="k", results=[_sample_result()])
-        save_baseline_cache(tmp_path, "k", cache)
-        files = list(tmp_path.iterdir())
-        assert len(files) == 1
-        assert files[0].name == "baseline_k.json"
-
-    def test_creates_cache_dir(self, tmp_path):
-        nested = tmp_path / "sub" / "dir"
-        cache = BaselineCache(cache_key="k", results=[_sample_result()])
-        save_baseline_cache(nested, "k", cache)
-        assert (nested / "baseline_k.json").exists()

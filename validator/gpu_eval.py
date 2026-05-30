@@ -14,6 +14,7 @@ Env vars:
     CACHEON_BASELINE_IMAGE     (default: vllm/vllm-openai:latest)
     CACHEON_BASELINE_DIGEST    (required)
     CACHEON_GPU_COUNT          (default: 8, auto-detect via nvidia-smi)
+    CACHEON_VLLM_CACHE_DIR     (optional; host path for vLLM torch.compile cache)
     HIPPIUS_ACCESS_KEY         (required for S3)
     HIPPIUS_SECRET_KEY         (required for S3)
     CACHEON_S3_BUCKET          (default: cacheon-validator)
@@ -22,6 +23,7 @@ Env vars:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -32,14 +34,15 @@ from .docker_eval import (
     EVAL_N_WARMUP,
     _max_model_len,
     evaluate_challenger,
-    pause_scoring_baseline,
-    resume_scoring_baseline,
-    run_baseline_if_needed,
+    run_baseline,
     score_challenger_teacher_forcing,
     start_baseline_for_scoring,
     stop_scoring_baseline,
     _dq_record,
 )
+from .state import EvaluationRecord, ValidatorState, append_winner_history
+
+SCORING_BASELINE_STARTUP_TIMEOUT_S = 600
 from .eval_progress import (
     clear_progress,
     purge_old_logs,
@@ -47,12 +50,20 @@ from .eval_progress import (
     update_progress,
 )
 from .eval_schema import EVAL_JOB_FILE, EvalJob
-from .state import ValidatorState, append_winner_history
 
 logger = logging.getLogger(__name__)
 
 
-def _configure_logging(state_dir: str) -> None:
+@dataclass
+class _PendingPass2:
+    record: EvaluationRecord
+    audit_output_texts: list[str]
+    audit_miner_tokens: list[list[str]]
+    log_prefix: str
+
+
+def _configure_logging(state_dir: str) -> str:
+    """Configure logging and return the run timestamp (for paired artifact names)."""
     logs_dir = Path(state_dir) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -69,6 +80,7 @@ def _configure_logging(state_dir: str) -> None:
     fh.setFormatter(fmt)
     logging.getLogger().addHandler(fh)
     logger.info("Logging to %s", log_path)
+    return ts
 
 
 def _delete_eval_job(state_dir: str) -> None:
@@ -84,7 +96,7 @@ def _delete_eval_job(state_dir: str) -> None:
 
 def main() -> int:
     state_dir = str(validator_config.STATE_DIR)
-    _configure_logging(state_dir)
+    eval_ts = _configure_logging(state_dir)
     purge_old_logs(state_dir)
 
     model_volume = validator_config.MODEL_VOLUME
@@ -194,18 +206,16 @@ def main() -> int:
     )
     _upload_progress(state_dir)
 
-    # Run Pass 1 speed baseline once
-    cache_dir = Path(state_dir) / "baseline_cache"
+    # Run Pass 1 speed baseline once (in-memory for all challengers)
     update_progress(state_dir, phase="baseline_running", image=baseline_image)
     _upload_progress(state_dir)
     try:
-        stress_baseline = run_baseline_if_needed(
+        stress_baseline = run_baseline(
             stress_prompts,
             baseline_image=baseline_image,
             baseline_digest=baseline_digest,
             model_volume=model_volume,
             gpu_count=gpu_count,
-            cache_dir=cache_dir,
             block_hash=block_hash,
             state_dir=state_dir,
         )
@@ -224,48 +234,18 @@ def main() -> int:
     update_progress(state_dir, phase="baseline_complete")
     _upload_state(state_dir)
 
-    scoring_cid: str | None = None
-    scoring_url: str = ""
-
-    def _pause_scoring_if_running() -> None:
-        nonlocal scoring_cid
-        if scoring_cid:
-            try:
-                pause_scoring_baseline(scoring_cid)
-            except RuntimeError as exc:
-                raise RuntimeError(f"baseline_scoring_unavailable: {exc}") from exc
-
-    def _ensure_scoring_url() -> str:
-        nonlocal scoring_cid, scoring_url
-        if scoring_cid is None:
-            scoring_cid, scoring_url = start_baseline_for_scoring(
-                model_volume=model_volume,
-                gpu_count=gpu_count,
-                state_dir=state_dir,
-            )
-            logger.info("Scoring baseline started at %s", scoring_url)
-            return scoring_url
-        try:
-            from urllib.request import urlopen as _urlopen
-
-            _urlopen(f"{scoring_url}/health", timeout=5)
-            return scoring_url
-        except Exception:
-            logger.warning("Scoring baseline unreachable, resuming container")
-            scoring_url = resume_scoring_baseline(scoring_cid)
-            return scoring_url
+    scoring_log_label = f"baseline_scoring_{block}_{eval_ts}"
+    pending_pass2: list[_PendingPass2] = []
 
     def _dq_from_scoring_fail(
-        record,
+        record: EvaluationRecord,
         fail_reasons: list[str],
-    ):
-        from .state import EvaluationRecord as ER
-
+    ) -> EvaluationRecord:
         if any("scoring_infra_fail:" in r for r in fail_reasons):
             prefix = "scoring_infra_fail"
         else:
             prefix = "correctness_fail"
-        return ER(
+        return EvaluationRecord(
             uid=record.uid,
             hotkey=record.hotkey,
             commit_block=record.commit_block,
@@ -282,43 +262,95 @@ def main() -> int:
             per_prompt=record.per_prompt,
         )
 
-    def _run_pass2_scoring(record, audit_output_texts, audit_miner_tokens, log_prefix):
+    def _dq_baseline_scoring_unavailable(
+        record: EvaluationRecord, exc: Exception
+    ) -> EvaluationRecord:
+        logger.error("Pass 2 scoring unavailable for %s: %s", record.eval_key, exc)
+        return EvaluationRecord(
+            uid=record.uid,
+            hotkey=record.hotkey,
+            commit_block=record.commit_block,
+            image=record.image,
+            digest=record.digest,
+            score=0.0,
+            ttft_improvement=0.0,
+            throughput_improvement=0.0,
+            token_match_rate=record.token_match_rate,
+            disqualified=True,
+            disqualify_reason=f"baseline_scoring_unavailable: {exc}",
+            evaluated_at=record.evaluated_at,
+            evaluation_block=record.evaluation_block,
+            per_prompt=record.per_prompt,
+        )
+
+    def _queue_pass2(
+        record: EvaluationRecord,
+        audit_output_texts: list[str],
+        audit_miner_tokens: list[list[str]],
+        log_prefix: str,
+    ) -> None:
         if record.disqualified or not audit_output_texts:
-            return record
-        try:
-            url = _ensure_scoring_url()
-            passed, fail_reasons, _ = score_challenger_teacher_forcing(
-                url,
-                audit_prompts,
-                audit_output_texts,
-                audit_miner_tokens,
+            return
+        pending_pass2.append(
+            _PendingPass2(
+                record=record,
+                audit_output_texts=audit_output_texts,
+                audit_miner_tokens=audit_miner_tokens,
                 log_prefix=log_prefix,
             )
-        except Exception as exc:
-            from .state import EvaluationRecord as ER
+        )
 
-            logger.error("Pass 2 scoring unavailable for %s: %s", log_prefix, exc)
-            return ER(
-                uid=record.uid,
-                hotkey=record.hotkey,
-                commit_block=record.commit_block,
-                image=record.image,
-                digest=record.digest,
-                score=0.0,
-                ttft_improvement=0.0,
-                throughput_improvement=0.0,
-                token_match_rate=record.token_match_rate,
-                disqualified=True,
-                disqualify_reason=f"baseline_scoring_unavailable: {exc}",
-                evaluated_at=record.evaluated_at,
-                evaluation_block=record.evaluation_block,
-                per_prompt=record.per_prompt,
-            )
+    def _apply_pass2_scoring(
+        scoring_url: str, pending: _PendingPass2
+    ) -> EvaluationRecord:
+        record = pending.record
+        passed, fail_reasons, _ = score_challenger_teacher_forcing(
+            scoring_url,
+            audit_prompts,
+            pending.audit_output_texts,
+            pending.audit_miner_tokens,
+            log_prefix=pending.log_prefix,
+        )
         if passed:
             return record
         dq = _dq_from_scoring_fail(record, fail_reasons)
-        logger.warning("DQ %s via Pass 2 scoring: %s", log_prefix, dq.disqualify_reason)
+        logger.warning(
+            "DQ %s via Pass 2 scoring: %s", pending.log_prefix, dq.disqualify_reason
+        )
         return dq
+
+    def _batch_run_pass2_scoring() -> None:
+        if not pending_pass2:
+            return
+        logger.info(
+            "Pass 2 scoring batch: %d challenger(s), log_label=%s",
+            len(pending_pass2),
+            scoring_log_label,
+        )
+        update_progress(state_dir, phase="pass2_scoring_running")
+        _upload_progress(state_dir)
+        scoring_cid: str | None = None
+        try:
+            scoring_cid, scoring_url = start_baseline_for_scoring(
+                model_volume=model_volume,
+                gpu_count=gpu_count,
+                state_dir=state_dir,
+                startup_timeout_s=SCORING_BASELINE_STARTUP_TIMEOUT_S,
+            )
+            logger.info("Scoring baseline started at %s", scoring_url)
+            for pending in pending_pass2:
+                pending.record = _apply_pass2_scoring(scoring_url, pending)
+        except Exception as exc:
+            logger.exception("Pass 2 scoring baseline failed: %s", exc)
+            for pending in pending_pass2:
+                pending.record = _dq_baseline_scoring_unavailable(pending.record, exc)
+        finally:
+            if scoring_cid:
+                stop_scoring_baseline(
+                    scoring_cid, state_dir, log_label=scoring_log_label
+                )
+        update_progress(state_dir, phase="pass2_scoring_complete")
+        _upload_progress(state_dir)
 
     # ------------------------------------------------------------------ #
     # Evaluate leader and runner-up (fresh scores on same hardware)
@@ -346,10 +378,6 @@ def main() -> int:
         )
         update_progress(state_dir, phase=f"{label}_running")
         _upload_progress(state_dir)
-        try:
-            _pause_scoring_if_running()
-        except RuntimeError as exc:
-            return _dq_record(com, block, str(exc))
         audit_output_texts: list[str] = []
         audit_miner_tokens: list[list[str]] = []
         record = evaluate_challenger(
@@ -368,16 +396,14 @@ def main() -> int:
             collected_audit_miner_tokens=audit_miner_tokens,
             max_model_len=mml,
         )
-        record = _run_pass2_scoring(
+        _queue_pass2(
             record,
             audit_output_texts,
             audit_miner_tokens,
             log_prefix=f"{label}:{com.hotkey[:16]}",
         )
-        icon = "❌" if record.disqualified else "📊"
         logger.info(
-            "%s %s UID %d score=%.4f (dq=%s)",
-            icon,
+            "%s UID %d Pass 1 complete (score=%.4f, dq=%s)",
             label,
             record.uid,
             record.score,
@@ -389,103 +415,112 @@ def main() -> int:
     ru_record = _eval_incumbent(eval_job.runner_up, "runner_up")
 
     # ------------------------------------------------------------------ #
-    # Evaluate challengers (Phase 1: timing collection)
+    # Evaluate challengers (Pass 1 + collect Pass 2 outputs)
     # ------------------------------------------------------------------ #
 
     challenger_records: list = []
+    challenger_persist: list[tuple[int, EvaluationRecord]] = []
 
-    try:
-        for challenger_idx, ci in enumerate(eval_job.challengers):
-            if state.is_known(ci.hotkey, ci.commit_block):
-                logger.info("Skipping UID %d (already evaluated)", ci.uid)
-                update_challenger_status(
-                    state_dir, challenger_idx, status="skipped", detail="already_known"
-                )
-                continue
-
-            com = CommitmentRecord(
-                uid=ci.uid,
-                hotkey=ci.hotkey,
-                coldkey="",
-                commit_block=ci.commit_block,
-                image=ci.image,
-                digest=ci.digest,
-                raw="",
-            )
-            logger.info(
-                "Evaluating challenger UID %d (%s) image=%s",
-                com.uid,
-                com.hotkey[:16],
-                com.image,
-            )
+    for challenger_idx, ci in enumerate(eval_job.challengers):
+        if state.is_known(ci.hotkey, ci.commit_block):
+            logger.info("Skipping UID %d (already evaluated)", ci.uid)
             update_challenger_status(
-                state_dir, challenger_idx, status="pulling", detail="pulling_image"
+                state_dir, challenger_idx, status="skipped", detail="already_known"
             )
-            _upload_progress(state_dir)
+            continue
 
-            try:
-                _pause_scoring_if_running()
-            except RuntimeError as exc:
-                record = _dq_record(com, block, str(exc))
-            else:
-                audit_output_texts: list[str] = []
-                audit_miner_tokens: list[list[str]] = []
-                record = evaluate_challenger(
-                    com,
-                    stress_prompts,
-                    audit_prompts,
-                    stress_baseline,
-                    model_volume=model_volume,
-                    startup_timeout_s=600,
-                    per_prompt_timeout_s=120,
-                    n_warmup=EVAL_N_WARMUP,
-                    current_block=block,
-                    state_dir=state_dir,
-                    collected_audit_output_texts=audit_output_texts,
-                    collected_audit_miner_tokens=audit_miner_tokens,
-                    max_model_len=mml,
-                )
-                record = _run_pass2_scoring(
-                    record,
-                    audit_output_texts,
-                    audit_miner_tokens,
-                    log_prefix=f"{com.hotkey}:{com.commit_block}",
-                )
+        com = CommitmentRecord(
+            uid=ci.uid,
+            hotkey=ci.hotkey,
+            coldkey="",
+            commit_block=ci.commit_block,
+            image=ci.image,
+            digest=ci.digest,
+            raw="",
+        )
+        logger.info(
+            "Evaluating challenger UID %d (%s) image=%s",
+            com.uid,
+            com.hotkey[:16],
+            com.image,
+        )
+        update_challenger_status(
+            state_dir, challenger_idx, status="pulling", detail="pulling_image"
+        )
+        _upload_progress(state_dir)
 
-            outcome = state.record_evaluation(record, current_block=block)
-            icon = "❌" if outcome.stored.disqualify_reason else "📊"
+        audit_output_texts: list[str] = []
+        audit_miner_tokens: list[list[str]] = []
+        record = evaluate_challenger(
+            com,
+            stress_prompts,
+            audit_prompts,
+            stress_baseline,
+            model_volume=model_volume,
+            startup_timeout_s=600,
+            per_prompt_timeout_s=120,
+            n_warmup=EVAL_N_WARMUP,
+            current_block=block,
+            state_dir=state_dir,
+            collected_audit_output_texts=audit_output_texts,
+            collected_audit_miner_tokens=audit_miner_tokens,
+            max_model_len=mml,
+        )
+        _queue_pass2(
+            record,
+            audit_output_texts,
+            audit_miner_tokens,
+            log_prefix=f"{com.hotkey}:{com.commit_block}",
+        )
+        challenger_persist.append((challenger_idx, record))
+
+    _batch_run_pass2_scoring()
+
+    for challenger_idx, record in challenger_persist:
+        outcome = state.record_evaluation(record, current_block=block)
+        icon = "❌" if outcome.stored.disqualify_reason else "📊"
+        logger.info(
+            "%s UID %d score=%.4f (dq=%s)",
+            icon,
+            outcome.stored.uid,
+            outcome.stored.score,
+            outcome.stored.disqualify_reason or "no",
+        )
+        if outcome.stored.disqualified:
+            update_challenger_status(
+                state_dir,
+                challenger_idx,
+                status="dq",
+                score=outcome.stored.score,
+                dq_reason=outcome.stored.disqualify_reason,
+                detail="disqualified",
+            )
+        else:
+            update_challenger_status(
+                state_dir,
+                challenger_idx,
+                status="scored",
+                score=outcome.stored.score,
+                detail="scored",
+            )
+        challenger_records.append(outcome.stored)
+
+        if not state.save(state_dir):
+            logger.error("Could not persist state.json; continuing eval round")
+        _upload_state(state_dir)
+
+    # Re-log leader/RU after Pass 2 (records updated in place via pending_pass2)
+    for label, rec in (("leader", leader_record), ("runner_up", ru_record)):
+        if rec is not None:
+            icon = "❌" if rec.disqualified else "📊"
             logger.info(
-                "%s UID %d score=%.4f (dq=%s)",
+                "%s %s UID %d score=%.4f (dq=%s) [after Pass 2]",
                 icon,
-                outcome.stored.uid,
-                outcome.stored.score,
-                outcome.stored.disqualify_reason or "no",
+                label,
+                rec.uid,
+                rec.score,
+                rec.disqualify_reason or "no",
             )
-            if outcome.stored.disqualified:
-                update_challenger_status(
-                    state_dir,
-                    challenger_idx,
-                    status="dq",
-                    score=outcome.stored.score,
-                    dq_reason=outcome.stored.disqualify_reason,
-                    detail="disqualified",
-                )
-            else:
-                update_challenger_status(
-                    state_dir,
-                    challenger_idx,
-                    status="scored",
-                    score=outcome.stored.score,
-                    detail="scored",
-                )
-            challenger_records.append(outcome.stored)
-
-            if not state.save(state_dir):
-                logger.error("Could not persist state.json; continuing eval round")
-            _upload_state(state_dir)
-    finally:
-        if scoring_cid:
-            stop_scoring_baseline(scoring_cid, state_dir)
 
     # ------------------------------------------------------------------ #
     # Upsert leader/RU fresh scores and rerank

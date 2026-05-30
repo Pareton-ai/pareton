@@ -24,35 +24,70 @@ logger = logging.getLogger(__name__)
 _LOG_TS_RE = re.compile(r"_(\d{8})_\d{6}\.log$")
 
 
-def purge_old_logs(state_dir: str | os.PathLike) -> int:
-    """Delete log files in ``state/logs/`` whose filename date is older than
-    ``LOG_RETENTION_DAYS``. Returns the number of files removed."""
+def log_cutoff() -> datetime | None:
+    """Retention cutoff for timestamped log filenames, or ``None`` if disabled."""
     from . import config as validator_config
 
     retention = validator_config.LOG_RETENTION_DAYS
     if retention <= 0:
+        return None
+    return datetime.now() - timedelta(days=retention)
+
+
+def log_is_stale(filename: str, cutoff: datetime) -> bool:
+    """True when *filename* matches the log timestamp pattern and is before *cutoff*."""
+    m = _LOG_TS_RE.search(filename)
+    if not m:
+        return False
+    try:
+        file_date = datetime.strptime(m.group(1), "%Y%m%d")
+    except ValueError:
+        return False
+    return file_date < cutoff
+
+
+def purge_old_logs(
+    state_dir: str | os.PathLike,
+    *,
+    remote: bool = True,
+    local: bool = True,
+) -> int:
+    """Delete stale files in ``state/logs/`` locally and on S3.
+
+    Returns the number of files removed (local + remote).
+    """
+    cutoff = log_cutoff()
+    if cutoff is None:
         return 0
-    logs_dir = Path(state_dir) / "logs"
-    if not logs_dir.is_dir():
-        return 0
-    cutoff = datetime.now() - timedelta(days=retention)
+
     removed = 0
-    for p in logs_dir.iterdir():
-        m = _LOG_TS_RE.search(p.name)
-        if not m:
-            continue
+
+    if remote:
         try:
-            file_date = datetime.strptime(m.group(1), "%Y%m%d")
-        except ValueError:
-            continue
-        if file_date < cutoff:
-            try:
-                p.unlink()
-                removed += 1
-            except OSError:
-                pass
-    if removed:
-        logger.info("🧹 Purged %d old log file(s) from %s", removed, logs_dir)
+            from .sync import purge_remote_logs
+
+            removed += purge_remote_logs(cutoff)
+        except Exception:
+            logger.warning("S3 log purge failed", exc_info=True)
+
+    if local:
+        logs_dir = Path(state_dir) / "logs"
+        if logs_dir.is_dir():
+            local_removed = 0
+            for p in logs_dir.iterdir():
+                if not log_is_stale(p.name, cutoff):
+                    continue
+                try:
+                    p.unlink()
+                    local_removed += 1
+                except OSError:
+                    pass
+            if local_removed:
+                logger.info(
+                    "🧹 Purged %d old log file(s) from %s", local_removed, logs_dir
+                )
+            removed += local_removed
+
     return removed
 
 

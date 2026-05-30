@@ -13,6 +13,7 @@ after teardown.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -97,6 +98,12 @@ def _build_env_exports(handle: PodHandle) -> str:
     hf_token = validator_config.HF_TOKEN
     if hf_token:
         env["HF_TOKEN"] = hf_token
+
+    if handle.provider == "targon":
+        if "CACHEON_VLLM_CACHE_DIR" in os.environ:
+            env["CACHEON_VLLM_CACHE_DIR"] = os.environ["CACHEON_VLLM_CACHE_DIR"]
+        else:
+            env["CACHEON_VLLM_CACHE_DIR"] = "/workspace/vllm-cache"
 
     return " && ".join(f'export {k}="{_dq_escape(v)}"' for k, v in env.items())
 

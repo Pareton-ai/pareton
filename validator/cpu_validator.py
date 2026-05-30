@@ -304,6 +304,10 @@ def run_tick(
 ) -> dict:
     """One iteration of the CPU validator loop. Returns a summary dict."""
 
+    from .eval_progress import purge_old_logs
+
+    purge_old_logs(state_dir)
+
     # S3 download
     try:
         from .sync import download
@@ -312,11 +316,10 @@ def run_tick(
     except Exception as exc:
         logger.error("S3 download failed: %s -- using local state", exc)
 
+    purge_old_logs(state_dir, remote=False)
+
     _reload_state(state, state_dir)
     _clean_stale_eval_job(state, state_dir)
-    from .eval_progress import purge_old_logs
-
-    purge_old_logs(state_dir)
 
     winner_desc = (
         f"UID {state.winner.uid} score={state.winner.score:.4f}"

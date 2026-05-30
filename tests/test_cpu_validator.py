@@ -694,7 +694,7 @@ class TestPurgeOldLogs:
             patch("validator.config.LOG_RETENTION_DAYS", 10),
             patch("validator.eval_progress.datetime", FixedNow),
         ):
-            removed = purge_old_logs(str(tmp_path))
+            removed = purge_old_logs(str(tmp_path), remote=False)
 
         assert removed == 2
         assert not (logs / "cpu_validator_20260101_120000.log").exists()
@@ -708,11 +708,21 @@ class TestPurgeOldLogs:
         (logs / "cpu_validator_20200101_120000.log").write_text("old")
 
         with patch("validator.config.LOG_RETENTION_DAYS", 0):
-            removed = purge_old_logs(str(tmp_path))
+            removed = purge_old_logs(str(tmp_path), remote=False)
 
         assert removed == 0
         assert (logs / "cpu_validator_20200101_120000.log").exists()
 
     def test_noop_when_no_logs_dir(self, tmp_path):
-        removed = purge_old_logs(str(tmp_path))
+        removed = purge_old_logs(str(tmp_path), remote=False)
         assert removed == 0
+
+
+class TestLogIsStale:
+    def test_stale_and_recent(self):
+        from validator.eval_progress import log_is_stale
+
+        cutoff = datetime(2026, 5, 10, 12, 0, 0)
+        assert log_is_stale("cpu_validator_20260101_120000.log", cutoff)
+        assert not log_is_stale("cpu_validator_20260516_120000.log", cutoff)
+        assert not log_is_stale("random_file.txt", cutoff)
