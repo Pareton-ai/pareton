@@ -22,9 +22,10 @@ from .baseline import BaselineCache, BaselinePromptResult, derive_cache_key
 from .chain import CommitmentRecord
 from .eval_schema import PerPromptResult, Prompt
 from .scoring import (
-    compute_aligned_throughput_tps,
-    compute_improvements,
+    aligned_e2e_improvement,
+    aligned_e2e_seconds,
     compute_pass1_aggregate_match,
+    compute_speed_improvement,
     compute_teacher_forcing_verdict,
     compute_token_match_rate,
     pass1_match_passes,
@@ -37,8 +38,65 @@ logger = logging.getLogger(__name__)
 EVAL_N_WARMUP: int = 2
 """Warmup prompts discarded before scored eval (baseline + challengers)."""
 
-EVAL_N_STRESS_SCORED: int = 10
-"""Scored Pass 1 (speed) prompts per miner after warmup discards."""
+EVAL_N_SCORED: int = 10
+"""Scored eval prompts per miner after warmup discards."""
+
+
+def _stream_decode_tps(
+    target_token_count: int, decode_elapsed_secs: list[float]
+) -> float:
+    """Decode-window TPS from SSE timing (telemetry only; not used for scoring)."""
+    if target_token_count < 2:
+        return 0.0
+    if len(decode_elapsed_secs) < target_token_count:
+        return 0.0
+    elapsed = decode_elapsed_secs[target_token_count - 1] - decode_elapsed_secs[0]
+    if elapsed <= 0:
+        return 0.0
+    return target_token_count / elapsed
+
+
+_BUFFERED_STREAM_TTFT_RATIO = 2.0
+"""Log when miner TTFT exceeds baseline by this factor and decode window ~0."""
+
+
+def _miner_e2e_s(
+    baseline_n: int,
+    ttft_s: float,
+    decode_elapsed_secs: list[float],
+    output_tokens: int,
+) -> float:
+    k = min(baseline_n, output_tokens)
+    e2e = aligned_e2e_seconds(ttft_s, decode_elapsed_secs, k)
+    return e2e if e2e is not None else 0.0
+
+
+def _log_buffered_stream_if_suspected(
+    uid: int,
+    prompt_index: int,
+    *,
+    bl_ttft: float,
+    mn_ttft: float,
+    mn_decode: list[float],
+    aligned_k: int,
+) -> None:
+    if aligned_k < 2 or len(mn_decode) < aligned_k:
+        return
+    if bl_ttft <= 0 or mn_ttft <= bl_ttft * _BUFFERED_STREAM_TTFT_RATIO:
+        return
+    decode_window = mn_decode[aligned_k - 1] - mn_decode[0]
+    if decode_window > 0.001:
+        return
+    logger.info(
+        "UID %d prompt %d: buffered stream suspected "
+        "(ttft=%.3fs vs baseline %.3fs, decode_window=%.6fs, k=%d)",
+        uid,
+        prompt_index,
+        mn_ttft,
+        bl_ttft,
+        decode_window,
+        aligned_k,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -550,7 +608,7 @@ def _parse_sse_response(
 
     ttft = t_first - t_start
     n_tokens = len(tokens)
-    tps = compute_aligned_throughput_tps(n_tokens, decode_elapsed_secs)
+    tps = _stream_decode_tps(n_tokens, decode_elapsed_secs)
 
     logprobs_out = all_top_logprobs if saw_logprobs else None
 
@@ -1154,8 +1212,8 @@ def run_baseline(
     n_warmup: int = 2,
 ) -> BaselineCache:
     """Run the vLLM baseline container once and return measurements."""
-    cache_key = derive_cache_key(block_hash, baseline_digest, regime="stress")
-    logger.info("Running Pass 1 baseline (key=%s)", cache_key)
+    cache_key = derive_cache_key(block_hash, baseline_digest)
+    logger.info("Running eval baseline (key=%s)", cache_key)
 
     baseline_args = _baseline_cmd_args(gpu_count)
     logger.info("Baseline cmd args: %s", baseline_args)
@@ -1271,8 +1329,8 @@ def resume_scoring_baseline(
 ) -> str:
     """Start a stopped scoring container and return its base URL.
 
-    Deprecated: gpu_eval batches Pass 2 at the end with a fresh container
-    instead of pause/resume. Kept for eval_local and tests.
+    Deprecated: gpu_eval batches teacher-forcing at the end with a fresh container
+    instead of pause/resume. Kept for tests.
     """
     result = subprocess.run(
         ["docker", "start", container_id],
@@ -1308,9 +1366,8 @@ def stop_scoring_baseline(
 
 def evaluate_challenger(
     com: CommitmentRecord,
-    stress_prompts: list[Prompt],
-    audit_prompts: list[Prompt],
-    stress_baseline: BaselineCache,
+    eval_prompts: list[Prompt],
+    baseline: BaselineCache,
     *,
     model_volume: str,
     startup_timeout_s: int,
@@ -1319,24 +1376,23 @@ def evaluate_challenger(
     current_block: int,
     state_dir: str | Path = "",
     log_label: str = "",
-    collected_audit_output_texts: list | None = None,
-    collected_audit_miner_tokens: list | None = None,
+    collected_tf_output_texts: list | None = None,
+    collected_tf_miner_tokens: list | None = None,
     max_model_len: int | None = None,
 ) -> EvaluationRecord:
     """Full lifecycle for one challenger. Returns an EvaluationRecord.
 
-    Runs Pass 1 (speed) and Pass 2 (correctness) in one miner container session.
-    Speed score uses Pass 1 prompts only. Pass 1 aggregate token match vs
-    speed baseline is a hard DQ gate. Pass 2 teacher-forcing is done by
-    the caller after GPU handoff to the scoring container.
+    Runs eval prompts in one miner container session. Speed score
+    uses the same outputs that are teacher-forced for correctness. Aggregate
+    token match vs baseline is a cheap pre-filter only; teacher-forcing is
+    the authoritative correctness gate (deferred to the scoring container).
 
-    If ``collected_audit_output_texts`` / ``collected_audit_miner_tokens``
-    are provided, Pass 2 outputs are appended for deferred correctness scoring.
+    If ``collected_tf_output_texts`` / ``collected_tf_miner_tokens`` are
+    provided, scored (post-warmup) outputs are appended for deferred scoring.
     """
     container_name = f"cacheon-uid{com.uid}-{com.hotkey[:8]}"
     cid: str | None = None
-    stress_results: list[RawPromptResult] = []
-    audit_results: list[RawPromptResult] = []
+    eval_results: list[RawPromptResult] = []
     eval_error: Exception | None = None
 
     try:
@@ -1349,22 +1405,14 @@ def evaluate_challenger(
         )
         wait_for_health(base_url, timeout_s=startup_timeout_s, container_id=cid)
 
-        stress_results = _run_prompts_on_server(
+        eval_results = _run_prompts_on_server(
             base_url,
-            stress_prompts,
+            eval_prompts,
             stream=True,
             logprobs=True,
             per_prompt_timeout_s=per_prompt_timeout_s,
             n_warmup=n_warmup,
             max_model_len=max_model_len,
-        )
-        audit_results = _run_prompts_on_server(
-            base_url,
-            audit_prompts,
-            stream=True,
-            logprobs=True,
-            per_prompt_timeout_s=per_prompt_timeout_s,
-            n_warmup=0,
         )
     except Exception as exc:
         logger.error("❌ Challenger UID %d failed: %s", com.uid, exc)
@@ -1380,22 +1428,21 @@ def evaluate_challenger(
     if eval_error is not None:
         return _dq_record(com, current_block, str(eval_error))
 
-    all_results = stress_results + audit_results
-    errors = [r for r in all_results if r.error]
+    errors = [r for r in eval_results if r.error]
     if errors:
         err_msg = "; ".join(f"prompt {r.prompt_index}: {r.error}" for r in errors)
         logger.warning("Challenger UID %d had prompt errors: %s", com.uid, err_msg)
         return _dq_record(com, current_block, f"prompt_errors: {err_msg}")
 
-    if collected_audit_output_texts is not None:
-        for r in audit_results:
-            collected_audit_output_texts.append(r.output_text)
-    if collected_audit_miner_tokens is not None:
-        for r in audit_results:
-            collected_audit_miner_tokens.append(r.tokens)
+    if collected_tf_output_texts is not None:
+        for r in eval_results:
+            collected_tf_output_texts.append(r.output_text)
+    if collected_tf_miner_tokens is not None:
+        for r in eval_results:
+            collected_tf_miner_tokens.append(r.tokens)
 
-    baseline_tokens = [bl.tokens for bl in stress_baseline.results]
-    miner_stress_tokens = [r.tokens for r in stress_results]
+    baseline_tokens = [bl.tokens for bl in baseline.results]
+    miner_stress_tokens = [r.tokens for r in eval_results]
     agg_match_rate = compute_pass1_aggregate_match(
         baseline_tokens,
         miner_stress_tokens,
@@ -1410,27 +1457,30 @@ def evaluate_challenger(
         )
         logger.warning("Challenger UID %d Pass 1 match DQ: %s", com.uid, reason)
 
-        n_scored = min(len(stress_results), len(stress_baseline.results))
+        n_scored = min(len(eval_results), len(baseline.results))
         per_prompt: list[PerPromptResult] = []
         for i in range(n_scored):
-            bl = stress_baseline.results[i]
-            r = stress_results[i]
+            bl = baseline.results[i]
+            r = eval_results[i]
             match_rate = compute_token_match_rate(bl.tokens, r.tokens)
             miner_decode = r.decode_elapsed_secs or []
-            miner_tps = compute_aligned_throughput_tps(bl.output_tokens, miner_decode)
+            mn_e2e = _miner_e2e_s(
+                bl.output_tokens, r.ttft_s, miner_decode, r.output_tokens
+            )
             per_prompt.append(
                 PerPromptResult(
                     ttft_s=r.ttft_s,
-                    throughput_tps=miner_tps,
+                    e2e_s=mn_e2e,
                     output_tokens=r.output_tokens,
                     token_match_rate=match_rate,
                 )
             )
             logger.info(
-                "  prompt %d: match=%.4f ttft=%.4fs tokens=%d",
+                "  prompt %d: match=%.4f ttft=%.4fs e2e=%.4fs tokens=%d",
                 i,
                 match_rate,
                 r.ttft_s,
+                mn_e2e,
                 r.output_tokens,
             )
 
@@ -1442,8 +1492,7 @@ def evaluate_challenger(
             image=com.image,
             digest=com.digest,
             score=0.0,
-            ttft_improvement=0.0,
-            throughput_improvement=0.0,
+            speed_improvement=0.0,
             token_match_rate=agg_match_rate,
             disqualified=True,
             disqualify_reason=reason,
@@ -1453,24 +1502,36 @@ def evaluate_challenger(
         )
 
     per_prompt = []
-    miner_ttfts: list[float] = []
-    miner_tps_list: list[float] = []
-    baseline_ttfts: list[float] = []
-    baseline_tps_list: list[float] = []
+    per_prompt_improvements: list[float] = []
 
-    n_scored = min(len(stress_results), len(stress_baseline.results))
+    n_scored = min(len(eval_results), len(baseline.results))
     for i in range(n_scored):
-        bl = stress_baseline.results[i]
-        r = stress_results[i]
+        bl = baseline.results[i]
+        r = eval_results[i]
         match_rate = compute_token_match_rate(bl.tokens, r.tokens)
 
         miner_decode = r.decode_elapsed_secs or []
         bl_decode = bl.decode_elapsed_secs or []
-        miner_tps = compute_aligned_throughput_tps(bl.output_tokens, miner_decode)
-        baseline_tps = compute_aligned_throughput_tps(bl.output_tokens, bl_decode)
+        improvement, _, mn_e2e_opt = aligned_e2e_improvement(
+            bl.ttft_s,
+            bl_decode,
+            bl.output_tokens,
+            r.ttft_s,
+            miner_decode,
+            r.output_tokens,
+        )
+        aligned_k = min(bl.output_tokens, r.output_tokens)
+        _log_buffered_stream_if_suspected(
+            com.uid,
+            i,
+            bl_ttft=bl.ttft_s,
+            mn_ttft=r.ttft_s,
+            mn_decode=miner_decode,
+            aligned_k=aligned_k,
+        )
         if len(miner_decode) < bl.output_tokens:
             logger.debug(
-                "Challenger UID %d prompt %d: no throughput credit "
+                "Challenger UID %d prompt %d: no speed credit "
                 "(miner emitted %d tokens, baseline %d)",
                 com.uid,
                 i,
@@ -1478,15 +1539,17 @@ def evaluate_challenger(
                 bl.output_tokens,
             )
 
-        miner_ttfts.append(r.ttft_s)
-        miner_tps_list.append(miner_tps)
-        baseline_ttfts.append(bl.ttft_s)
-        baseline_tps_list.append(baseline_tps)
+        per_prompt_improvements.append(improvement)
+        mn_e2e = (
+            mn_e2e_opt
+            if mn_e2e_opt is not None
+            else _miner_e2e_s(bl.output_tokens, r.ttft_s, miner_decode, r.output_tokens)
+        )
 
         per_prompt.append(
             PerPromptResult(
                 ttft_s=r.ttft_s,
-                throughput_tps=miner_tps,
+                e2e_s=mn_e2e,
                 output_tokens=r.output_tokens,
                 token_match_rate=match_rate,
             )
@@ -1494,28 +1557,23 @@ def evaluate_challenger(
 
     per_prompt_dicts = [pp.to_dict() for pp in per_prompt] if per_prompt else None
 
-    score, ttft_imp, tps_imp = compute_improvements(
-        baseline_ttfts,
-        miner_ttfts,
-        baseline_tps_list,
-        miner_tps_list,
-    )
+    speed_improvement = compute_speed_improvement(per_prompt_improvements)
+    score = speed_improvement
 
     logger.info(
-        "Challenger UID %d scored: score=%.4f ttft_imp=%.4f tps_imp=%.4f "
-        "match_rate=%.4f (%d speed prompts)",
+        "Challenger UID %d scored: score=%.4f speed_imp=%.4f "
+        "match_rate=%.4f (%d eval prompts)",
         com.uid,
         score,
-        ttft_imp,
-        tps_imp,
+        speed_improvement,
         agg_match_rate,
         len(per_prompt),
     )
     for pp in per_prompt:
         logger.debug(
-            "  prompt: ttft=%.4fs tps=%.1f tokens=%d match=%.4f",
+            "  prompt: ttft=%.4fs e2e=%.4fs tokens=%d match=%.4f",
             pp.ttft_s,
-            pp.throughput_tps,
+            pp.e2e_s,
             pp.output_tokens,
             pp.token_match_rate,
         )
@@ -1527,8 +1585,7 @@ def evaluate_challenger(
         image=com.image,
         digest=com.digest,
         score=score,
-        ttft_improvement=ttft_imp,
-        throughput_improvement=tps_imp,
+        speed_improvement=speed_improvement,
         token_match_rate=agg_match_rate,
         disqualified=False,
         disqualify_reason=None,
@@ -1548,8 +1605,7 @@ def _dq_record(
         image=com.image,
         digest=com.digest,
         score=0.0,
-        ttft_improvement=0.0,
-        throughput_improvement=0.0,
+        speed_improvement=0.0,
         token_match_rate=0.0,
         disqualified=True,
         disqualify_reason=reason,
@@ -1604,18 +1660,16 @@ def make_eval_fn(
                 ]
             logger.info("Auto-detected %d GPU(s)", resolved_gpu_count)
 
-        from .prompts import sample_audit_prompts, sample_stress_prompts
+        from .prompts import EVAL_CONTEXT_TOKENS, sample_eval_prompts
 
-        mml = _max_model_len(resolved_gpu_count, model_path=validator_config.MODEL_PATH)
-        stress_prompts = sample_stress_prompts(
+        eval_prompts = sample_eval_prompts(
             block_hash,
-            n=EVAL_N_STRESS_SCORED + n_warmup,
-            max_context_tokens=mml,
+            n=EVAL_N_SCORED + n_warmup,
+            max_context_tokens=EVAL_CONTEXT_TOKENS,
         )
-        audit_prompts = sample_audit_prompts(block_hash)
 
         baseline = run_baseline(
-            stress_prompts,
+            eval_prompts,
             baseline_image=baseline_image,
             baseline_digest=baseline_digest,
             model_volume=model_volume,
@@ -1637,8 +1691,7 @@ def make_eval_fn(
             )
             record = evaluate_challenger(
                 com,
-                stress_prompts,
-                audit_prompts,
+                eval_prompts,
                 baseline,
                 model_volume=model_volume,
                 startup_timeout_s=startup_timeout_s,
@@ -1646,7 +1699,6 @@ def make_eval_fn(
                 n_warmup=n_warmup,
                 current_block=current_block,
                 state_dir=state_dir,
-                max_model_len=mml,
             )
             results.append(record)
 

@@ -858,26 +858,15 @@ def _make_baseline(n_prompts: int = 2) -> BaselineCache:
     )
 
 
-def _make_stress_prompts(n: int = 2, n_warmup: int = 2) -> list[Prompt]:
+def _make_eval_prompts(n: int = 2, n_warmup: int = 2) -> list[Prompt]:
     return [
-        Prompt(
-            messages=[ChatMessage(role="user", content=f"stress-{i}")], max_tokens=512
-        )
+        Prompt(messages=[ChatMessage(role="user", content=f"eval-{i}")], max_tokens=512)
         for i in range(n + n_warmup)
     ]
 
 
-def _make_audit_prompts(n: int = 8) -> list[Prompt]:
-    return [
-        Prompt(
-            messages=[ChatMessage(role="user", content=f"audit-{i}")], max_tokens=256
-        )
-        for i in range(n)
-    ]
-
-
 def _make_prompts(n: int = 2, n_warmup: int = 2) -> list[Prompt]:
-    return _make_stress_prompts(n=n, n_warmup=n_warmup)
+    return _make_eval_prompts(n=n, n_warmup=n_warmup)
 
 
 class TestCaptureContainerLogs:
@@ -955,12 +944,11 @@ class TestEvaluateChallenger:
             warmup_r,
             scored_r,
             scored_r,
-        ] + [scored_r] * 8
+        ]
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_stress_prompts(n=2, n_warmup=2),
-            _make_audit_prompts(n=8),
+            _make_eval_prompts(n=2, n_warmup=2),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -973,12 +961,11 @@ class TestEvaluateChallenger:
         assert record.disqualified is False
         assert record.score > 0
         assert record.token_match_rate == 1.0
-        assert record.ttft_improvement > 0
-        assert record.throughput_improvement > 0
+        assert record.speed_improvement > 0
         assert record.per_prompt is not None
         assert len(record.per_prompt) == 2
         assert record.per_prompt[0]["ttft_s"] == 0.5
-        assert record.per_prompt[0]["throughput_tps"] == pytest.approx(4.0)
+        assert record.per_prompt[0]["e2e_s"] == pytest.approx(1.0)
         mock_pull.assert_called_once()
         mock_stop.assert_called_once_with("cid123")
         mock_reset.assert_called_once()
@@ -994,7 +981,7 @@ class TestEvaluateChallenger:
         return_value=("cid123", "http://172.18.0.2:8000"),
     )
     @patch("validator.docker_eval.pull_image")
-    def test_incomplete_stream_zero_throughput_not_dq(
+    def test_incomplete_stream_zero_e2e_credit_not_dq(
         self,
         mock_pull,
         mock_start,
@@ -1004,7 +991,7 @@ class TestEvaluateChallenger:
         mock_reset,
         mock_capture_logs,
     ):
-        """Miner stops before baseline length: 0 TPS credit, no auto-DQ."""
+        """Miner stops before tolerance band: 0 speed credit, no auto-DQ."""
         short_r = RawPromptResult(
             prompt_index=0,
             output_text="Hello world",
@@ -1028,12 +1015,11 @@ class TestEvaluateChallenger:
             output_tokens=1,
             decode_elapsed_secs=[0.0],
         )
-        mock_send.side_effect = [warmup_r, warmup_r, short_r, short_r] + [short_r] * 8
+        mock_send.side_effect = [warmup_r, warmup_r, short_r, short_r]
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_stress_prompts(n=2, n_warmup=2),
-            _make_audit_prompts(n=8),
+            _make_eval_prompts(n=2, n_warmup=2),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -1044,8 +1030,8 @@ class TestEvaluateChallenger:
 
         assert record.disqualified is False
         assert record.per_prompt is not None
-        assert record.per_prompt[0]["throughput_tps"] == 0.0
-        assert record.throughput_improvement == 0.0
+        assert record.per_prompt[0]["e2e_s"] == 0.0
+        assert record.speed_improvement == 0.0
 
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
@@ -1069,8 +1055,7 @@ class TestEvaluateChallenger:
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_stress_prompts(),
-            _make_audit_prompts(),
+            _make_eval_prompts(),
             _make_baseline(),
             model_volume="/models",
             startup_timeout_s=600,
@@ -1124,12 +1109,11 @@ class TestEvaluateChallenger:
             throughput_tps=50.0,
             output_tokens=1,
         )
-        mock_send.side_effect = [warmup_r, warmup_r, wrong_r, wrong_r] + [wrong_r] * 8
+        mock_send.side_effect = [warmup_r, warmup_r, wrong_r, wrong_r]
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_stress_prompts(n=2, n_warmup=2),
-            _make_audit_prompts(n=8),
+            _make_eval_prompts(n=2, n_warmup=2),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -1197,14 +1181,11 @@ class TestEvaluateChallenger:
             throughput_tps=50.0,
             output_tokens=1,
         )
-        mock_send.side_effect = [warmup_r, warmup_r, partial_r, wrong_r] + [
-            partial_r
-        ] * 8
+        mock_send.side_effect = [warmup_r, warmup_r, partial_r, wrong_r]
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_stress_prompts(n=2, n_warmup=2),
-            _make_audit_prompts(n=8),
+            _make_eval_prompts(n=2, n_warmup=2),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,
@@ -1243,7 +1224,7 @@ class TestEvaluateChallenger:
         )
         passed, fail_reasons, _ = score_challenger_teacher_forcing(
             "http://scoring:8000",
-            _make_audit_prompts(n=1),
+            _make_eval_prompts(n=1),
             ["out"],
             [["a", "b"]],
         )
@@ -1262,7 +1243,7 @@ class TestEvaluateChallenger:
         miner_tokens = [f"t{i}" for i in range(20)]
         passed, fail_reasons, _ = score_challenger_teacher_forcing(
             "http://scoring:8000",
-            _make_audit_prompts(n=1),
+            _make_eval_prompts(n=1),
             ["prefix only"],
             [miner_tokens],
         )
@@ -1281,7 +1262,7 @@ class TestEvaluateChallenger:
         )
         passed, fail_reasons, mean_lps = score_challenger_teacher_forcing(
             "http://scoring:8000",
-            _make_audit_prompts(n=1),
+            _make_eval_prompts(n=1),
             ["answer text"],
             [["t"] * 256],
         )
@@ -1335,12 +1316,11 @@ class TestEvaluateChallenger:
             warmup_r,
             error_r,
             error_r,
-        ] + [error_r] * 8
+        ]
 
         record = evaluate_challenger(
             _make_commitment(),
-            _make_stress_prompts(n=2, n_warmup=2),
-            _make_audit_prompts(n=8),
+            _make_eval_prompts(n=2, n_warmup=2),
             _make_baseline(n_prompts=2),
             model_volume="/models",
             startup_timeout_s=600,

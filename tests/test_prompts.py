@@ -7,11 +7,11 @@ import random
 import pytest
 
 from validator.prompts import (
-    AUDIT_CONTEXT_TOKENS,
-    AUDIT_MAX_OUTPUT_TOKENS,
-    AUDIT_MIN_CONTEXT_CHARS,
-    AUDIT_PROMPT_COUNT,
     CHARS_PER_TOKEN,
+    EVAL_CONTEXT_TOKENS,
+    EVAL_MAX_OUTPUT_TOKENS,
+    EVAL_MIN_CONTEXT_CHARS,
+    EVAL_PROMPT_COUNT,
     MAX_CONTEXT_CHARS,
     MAX_OUTPUT_TOKENS,
     MAX_SAMPLE_ATTEMPTS,
@@ -20,15 +20,14 @@ from validator.prompts import (
     OVERHEAD_TOKENS,
     PASSAGE_TOKEN_SAFETY_MARGIN,
     PROMPT_ENGINE_VERSION,
-    STRESS_MAX_OUTPUT_TOKENS,
+    SCORING_MAX_MODEL_LEN,
     TEMPLATES,
     _is_valid_passage,
     _sample_passage,
     derive_seed,
     max_passage_chars,
-    sample_audit_prompts,
+    sample_eval_prompts,
     sample_prompts,
-    sample_stress_prompts,
 )
 
 pytestmark = pytest.mark.unit
@@ -95,14 +94,14 @@ class TestDeriveSeed:
 
 class TestIsValidPassage:
     def test_valid_english(self):
-        text = "a" * MIN_CONTEXT_CHARS
+        text = "a" * EVAL_MIN_CONTEXT_CHARS
         assert _is_valid_passage(text) is True
 
     def test_too_short(self):
         assert _is_valid_passage("hello") is False
 
     def test_too_much_whitespace(self):
-        text = " " * (MIN_CONTEXT_CHARS + 1)
+        text = " " * (EVAL_MIN_CONTEXT_CHARS + 1)
         assert _is_valid_passage(text) is False
 
     def test_low_alpha_ratio(self):
@@ -122,7 +121,7 @@ class TestSamplePassage:
     def test_returns_valid_passage(self):
         rng = random.Random(123)
         passage = _sample_passage(rng, FAKE_ROWS)
-        assert len(passage) >= MIN_CONTEXT_CHARS
+        assert len(passage) >= EVAL_MIN_CONTEXT_CHARS
         assert len(passage) <= MAX_CONTEXT_CHARS
         assert _is_valid_passage(passage)
 
@@ -174,8 +173,8 @@ class TestSamplePrompts:
         assert len(prompts[0].messages[0].content) > 0
 
     def test_max_tokens_default(self):
-        prompts = sample_stress_prompts("0xtest", n=1, _rows=FAKE_ROWS)
-        assert prompts[0].max_tokens == STRESS_MAX_OUTPUT_TOKENS
+        prompts = sample_eval_prompts("0xtest", n=1, _rows=FAKE_ROWS)
+        assert prompts[0].max_tokens == EVAL_MAX_OUTPUT_TOKENS
 
     def test_template_applied(self):
         prompts = sample_prompts("0xtest", n=10, _rows=FAKE_ROWS)
@@ -187,35 +186,29 @@ class TestSamplePrompts:
             assert has_template, f"No template prefix found in: {content[:80]}..."
 
 
-class TestSampleAuditPrompts:
-    def test_returns_eight_by_default(self):
-        prompts = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
-        assert len(prompts) == AUDIT_PROMPT_COUNT
+class TestSampleEvalPrompts:
+    def test_returns_ten_by_default(self):
+        prompts = sample_eval_prompts("0xblock1", _rows=FAKE_ROWS)
+        assert len(prompts) == EVAL_PROMPT_COUNT
 
     def test_deterministic(self):
-        p1 = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
-        p2 = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
+        p1 = sample_eval_prompts("0xblock1", _rows=FAKE_ROWS)
+        p2 = sample_eval_prompts("0xblock1", _rows=FAKE_ROWS)
         assert p1[0].messages[0].content == p2[0].messages[0].content
 
-    def test_different_from_stress_seed(self):
-        stress = sample_stress_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
-        audit = sample_audit_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
-        assert stress[0].messages[0].content != audit[0].messages[0].content
+    def test_eval_max_tokens(self):
+        prompts = sample_eval_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
+        assert prompts[0].max_tokens == EVAL_MAX_OUTPUT_TOKENS
 
-    def test_audit_max_tokens(self):
-        prompts = sample_audit_prompts("0xblock1", n=1, _rows=FAKE_ROWS)
-        assert prompts[0].max_tokens == AUDIT_MAX_OUTPUT_TOKENS
-
-    def test_audit_passage_fits_budget(self):
-        prompts = sample_audit_prompts("0xblock1", _rows=FAKE_ROWS)
+    def test_eval_passage_fits_budget(self):
+        prompts = sample_eval_prompts("0xblock1", _rows=FAKE_ROWS)
         max_passage = max_passage_chars(
-            AUDIT_CONTEXT_TOKENS,
-            output_tokens=AUDIT_MAX_OUTPUT_TOKENS,
-            min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
+            EVAL_CONTEXT_TOKENS,
+            output_tokens=EVAL_MAX_OUTPUT_TOKENS,
+            min_context_chars=EVAL_MIN_CONTEXT_CHARS,
         )
         for p in prompts:
             content = p.messages[0].content
-            # Passage is embedded in template; upper bound check on content length
             assert len(content) <= max_passage + 500
 
 
@@ -229,11 +222,11 @@ class TestMaxPassageChars:
         assert max_passage_chars(None) == MAX_CONTEXT_CHARS
 
     def test_32k_context(self):
-        result = max_passage_chars(32_768, output_tokens=STRESS_MAX_OUTPUT_TOKENS)
+        result = max_passage_chars(32_768, output_tokens=EVAL_MAX_OUTPUT_TOKENS)
         expected = int(
             (
                 32_768
-                - STRESS_MAX_OUTPUT_TOKENS
+                - EVAL_MAX_OUTPUT_TOKENS
                 - OVERHEAD_TOKENS
                 - PASSAGE_TOKEN_SAFETY_MARGIN
             )
@@ -243,11 +236,11 @@ class TestMaxPassageChars:
         assert result < MAX_CONTEXT_CHARS
 
     def test_65k_context(self):
-        result = max_passage_chars(65_536, output_tokens=STRESS_MAX_OUTPUT_TOKENS)
+        result = max_passage_chars(65_536, output_tokens=EVAL_MAX_OUTPUT_TOKENS)
         expected = int(
             (
                 65_536
-                - STRESS_MAX_OUTPUT_TOKENS
+                - EVAL_MAX_OUTPUT_TOKENS
                 - OVERHEAD_TOKENS
                 - PASSAGE_TOKEN_SAFETY_MARGIN
             )
@@ -255,38 +248,41 @@ class TestMaxPassageChars:
         )
         assert result == expected
 
-    def test_audit_4k_budget(self):
+    def test_eval_6k_budget(self):
         result = max_passage_chars(
-            AUDIT_CONTEXT_TOKENS,
-            output_tokens=AUDIT_MAX_OUTPUT_TOKENS,
-            min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
+            EVAL_CONTEXT_TOKENS,
+            output_tokens=EVAL_MAX_OUTPUT_TOKENS,
+            min_context_chars=EVAL_MIN_CONTEXT_CHARS,
         )
         expected = int(
             (
-                AUDIT_CONTEXT_TOKENS
-                - AUDIT_MAX_OUTPUT_TOKENS
+                EVAL_CONTEXT_TOKENS
+                - EVAL_MAX_OUTPUT_TOKENS
                 - OVERHEAD_TOKENS
                 - PASSAGE_TOKEN_SAFETY_MARGIN
             )
             * CHARS_PER_TOKEN
         )
         assert result == expected
-        assert result >= AUDIT_MIN_CONTEXT_CHARS
+        assert result >= EVAL_MIN_CONTEXT_CHARS
 
     def test_never_below_min(self):
         result = max_passage_chars(600)
-        assert result >= MIN_CONTEXT_CHARS
+        assert result >= EVAL_MIN_CONTEXT_CHARS
 
 
 class TestConstants:
-    def test_prompt_engine_version_positive(self):
-        assert PROMPT_ENGINE_VERSION >= 3
+    def test_prompt_engine_version(self):
+        assert PROMPT_ENGINE_VERSION == 4
 
-    def test_min_context_chars(self):
-        assert MIN_CONTEXT_CHARS == 16_000
+    def test_eval_context_tokens(self):
+        assert EVAL_CONTEXT_TOKENS == 6144
 
-    def test_audit_prompt_count(self):
-        assert AUDIT_PROMPT_COUNT == 8
+    def test_scoring_max_model_len(self):
+        assert SCORING_MAX_MODEL_LEN == 7168
+
+    def test_eval_prompt_count(self):
+        assert EVAL_PROMPT_COUNT == 10
 
     def test_max_context_chars(self):
         assert MAX_CONTEXT_CHARS == 131_072
@@ -296,6 +292,12 @@ class TestConstants:
 
     def test_min_alpha_ratio(self):
         assert MIN_ALPHA_RATIO == 0.5
+
+    def test_min_context_chars_alias(self):
+        assert MIN_CONTEXT_CHARS == EVAL_MIN_CONTEXT_CHARS
+
+    def test_max_output_tokens_alias(self):
+        assert MAX_OUTPUT_TOKENS == EVAL_MAX_OUTPUT_TOKENS
 
     def test_template_count(self):
         assert len(TEMPLATES) >= 15

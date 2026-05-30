@@ -144,7 +144,7 @@ class TestPerPromptResult:
     def test_round_trip(self):
         r = PerPromptResult(
             ttft_s=0.045,
-            throughput_tps=120.5,
+            e2e_s=12.5,
             output_tokens=256,
             token_match_rate=0.998,
         )
@@ -159,21 +159,19 @@ class TestPerPromptResult:
 def _make_result(**overrides) -> EvaluationResult:
     defaults = dict(
         success=True,
-        ttft_improvement=0.15,
-        throughput_improvement=0.22,
+        speed_improvement=0.22,
         token_match_rate=0.997,
-        median_ttft_s=0.042,
-        median_throughput_tps=130.0,
+        median_e2e_s=12.5,
         per_prompt=[
             PerPromptResult(
                 ttft_s=0.04,
-                throughput_tps=125.0,
+                e2e_s=12.0,
                 output_tokens=256,
                 token_match_rate=0.998,
             ),
             PerPromptResult(
                 ttft_s=0.044,
-                throughput_tps=135.0,
+                e2e_s=13.0,
                 output_tokens=200,
                 token_match_rate=0.995,
             ),
@@ -197,8 +195,7 @@ class TestEvaluationResult:
             error="Container failed /health within 600s",
         )
         assert result.success is False
-        assert result.ttft_improvement == 0.0
-        assert result.throughput_improvement == 0.0
+        assert result.speed_improvement == 0.0
         assert result.token_match_rate == 0.0
         assert result.per_prompt == []
         assert result.aggregation == "median"
@@ -206,8 +203,7 @@ class TestEvaluationResult:
     def test_from_dict_defaults(self):
         data = {"success": True}
         result = EvaluationResult.from_dict(data)
-        assert result.ttft_improvement == 0.0
-        assert result.throughput_improvement == 0.0
+        assert result.speed_improvement == 0.0
         assert result.token_match_rate == 0.0
         assert result.per_prompt == []
         assert result.aggregation == "median"
@@ -217,7 +213,7 @@ class TestEvaluationResult:
         per_prompt = [
             PerPromptResult(
                 ttft_s=0.05 * i,
-                throughput_tps=100.0 + i,
+                e2e_s=10.0 + i,
                 output_tokens=256,
                 token_match_rate=1.0,
             )
@@ -227,7 +223,7 @@ class TestEvaluationResult:
         restored = EvaluationResult.from_dict(result.to_dict())
         assert len(restored.per_prompt) == 10
         assert restored.per_prompt[0].ttft_s == pytest.approx(0.05)
-        assert restored.per_prompt[9].throughput_tps == pytest.approx(110.0)
+        assert restored.per_prompt[9].e2e_s == pytest.approx(20.0)
 
     def test_error_field_none_when_success(self):
         result = _make_result(success=True, error=None)

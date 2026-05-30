@@ -13,6 +13,7 @@ from validator.eval_progress import (
     PROGRESS_FILE,
     clear_progress,
     update_challenger_status,
+    update_incumbent_status,
     update_progress,
 )
 
@@ -172,6 +173,60 @@ def test_update_challenger_status_bad_idx(tmp_path):
     update_challenger_status(tmp_path, 99, status="pulling")
     data = _read(tmp_path)
     assert all(c["status"] == "pending" for c in data["challengers"])
+
+
+# --------------------------------------------------------------------------- #
+# update_incumbent_status
+# --------------------------------------------------------------------------- #
+
+
+def test_update_incumbent_status(tmp_path):
+    update_progress(
+        tmp_path,
+        phase="challengers_found",
+        round_block=1,
+        challengers=SAMPLE_CHALLENGERS,
+        leader={"uid": 1, "hotkey": "5Lead", "image": "docker.io/l:v1"},
+        runner_up={"uid": 2, "hotkey": "5Run", "image": "docker.io/r:v1"},
+    )
+    data = _read(tmp_path)
+    assert data["leader"]["status"] == "pending"
+    assert data["runner_up"]["status"] == "pending"
+
+    update_incumbent_status(tmp_path, "leader", status="evaluating")
+    data = _read(tmp_path)
+    assert data["leader"]["status"] == "evaluating"
+    assert data["runner_up"]["status"] == "pending"
+
+    update_incumbent_status(tmp_path, "leader", status="scored", score=0.0188)
+    data = _read(tmp_path)
+    assert data["leader"]["status"] == "scored"
+    assert data["leader"]["score"] == 0.0188
+
+    update_incumbent_status(
+        tmp_path, "runner_up", status="dq", score=0.0, dq_reason="pull_timeout"
+    )
+    data = _read(tmp_path)
+    assert data["runner_up"]["status"] == "dq"
+    assert data["runner_up"]["dq_reason"] == "pull_timeout"
+
+
+def test_update_incumbent_status_no_file(tmp_path):
+    update_incumbent_status(tmp_path, "leader", status="evaluating")
+    assert not (tmp_path / PROGRESS_FILE).exists()
+
+
+def test_update_incumbent_status_bad_role(tmp_path):
+    update_progress(
+        tmp_path,
+        phase="challengers_found",
+        round_block=1,
+        challengers=SAMPLE_CHALLENGERS,
+        leader={"uid": 1, "hotkey": "5Lead", "image": "docker.io/l:v1"},
+    )
+    update_incumbent_status(tmp_path, "winner", status="scored", score=1.0)
+    data = _read(tmp_path)
+    assert "score" not in data["leader"]
 
 
 # --------------------------------------------------------------------------- #

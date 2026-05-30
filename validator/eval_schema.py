@@ -104,7 +104,7 @@ class PerPromptResult:
     """Metrics for a single (non-warmup) prompt."""
 
     ttft_s: float
-    throughput_tps: float
+    e2e_s: float
     output_tokens: int
     token_match_rate: float
 
@@ -115,7 +115,7 @@ class PerPromptResult:
     def from_dict(cls, data: dict[str, Any]) -> PerPromptResult:
         return cls(
             ttft_s=float(data["ttft_s"]),
-            throughput_tps=float(data["throughput_tps"]),
+            e2e_s=float(data.get("e2e_s", 0.0)),
             output_tokens=int(data["output_tokens"]),
             token_match_rate=float(data["token_match_rate"]),
         )
@@ -126,17 +126,13 @@ class EvaluationResult:
     """What the GPU eval function returns after running one challenger.
 
     Aggregated metrics use median across scored prompts (warmup excluded).
-    Improvement values are relative to the pre-computed baseline:
-      ttft_improvement    = max(0, (baseline_ttft - miner_ttft) / baseline_ttft)
-      throughput_improvement = max(0, (miner_tps - baseline_tps) / baseline_tps)
+    ``speed_improvement`` is median end-to-end speedup vs baseline.
     """
 
     success: bool
-    ttft_improvement: float = 0.0
-    throughput_improvement: float = 0.0
+    speed_improvement: float = 0.0
     token_match_rate: float = 0.0
-    median_ttft_s: float = 0.0
-    median_throughput_tps: float = 0.0
+    median_e2e_s: float = 0.0
     per_prompt: list[PerPromptResult] = field(default_factory=list)
     aggregation: str = "median"
     error: str | None = None
@@ -144,11 +140,9 @@ class EvaluationResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "success": self.success,
-            "ttft_improvement": self.ttft_improvement,
-            "throughput_improvement": self.throughput_improvement,
+            "speed_improvement": self.speed_improvement,
             "token_match_rate": self.token_match_rate,
-            "median_ttft_s": self.median_ttft_s,
-            "median_throughput_tps": self.median_throughput_tps,
+            "median_e2e_s": self.median_e2e_s,
             "per_prompt": [p.to_dict() for p in self.per_prompt],
             "aggregation": self.aggregation,
             "error": self.error,
@@ -157,13 +151,17 @@ class EvaluationResult:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvaluationResult:
         per_prompt = [PerPromptResult.from_dict(p) for p in data.get("per_prompt", [])]
+        legacy_speed = float(
+            data.get(
+                "speed_improvement",
+                data.get("throughput_improvement", data.get("ttft_improvement", 0.0)),
+            )
+        )
         return cls(
             success=bool(data["success"]),
-            ttft_improvement=float(data.get("ttft_improvement", 0.0)),
-            throughput_improvement=float(data.get("throughput_improvement", 0.0)),
+            speed_improvement=legacy_speed,
             token_match_rate=float(data.get("token_match_rate", 0.0)),
-            median_ttft_s=float(data.get("median_ttft_s", 0.0)),
-            median_throughput_tps=float(data.get("median_throughput_tps", 0.0)),
+            median_e2e_s=float(data.get("median_e2e_s", 0.0)),
             per_prompt=per_prompt,
             aggregation=str(data.get("aggregation", "median")),
             error=data.get("error"),

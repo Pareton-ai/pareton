@@ -6,6 +6,7 @@ floats or strings produced by the HTTP client in ``docker_eval``.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 from typing import Any
@@ -27,23 +28,70 @@ class CorrectnessVerdict:
     reason: str | None = None
 
 
-def compute_aligned_throughput_tps(
-    target_token_count: int,
-    decode_elapsed_secs: list[float],
-) -> float:
-    """Throughput using a fixed token budget (baseline output length).
+SPEED_TOLERANCE_RATIO: float = 0.9
+"""Minimum fraction of baseline output tokens a miner must emit before
+end-to-end speed credit applies (``ceil(ratio * baseline_N)``)."""
 
-    TPS = target_token_count / time from first to target_token_count-th token.
-    Returns 0.0 if the stream ended early, target < 2, or elapsed <= 0.
+
+def _min_aligned_token_count(baseline_n: int, tolerance: float) -> int:
+    if baseline_n < 2:
+        return baseline_n
+    return max(2, math.ceil(tolerance * baseline_n))
+
+
+def aligned_e2e_seconds(
+    ttft_s: float,
+    decode_elapsed_secs: list[float],
+    aligned_k: int,
+) -> float | None:
+    """Wall time from request start to the aligned_k-th token.
+
+    Returns None when timing data is insufficient.
     """
-    if target_token_count < 2:
+    if aligned_k < 1:
+        return None
+    if len(decode_elapsed_secs) < aligned_k:
+        return None
+    return ttft_s + decode_elapsed_secs[aligned_k - 1]
+
+
+def aligned_e2e_improvement(
+    bl_ttft: float,
+    bl_decode: list[float],
+    bl_n: int,
+    mn_ttft: float,
+    mn_decode: list[float],
+    mn_n: int,
+    *,
+    tolerance: float = SPEED_TOLERANCE_RATIO,
+) -> tuple[float, float | None, float | None]:
+    """Per-prompt end-to-end speed improvement vs baseline.
+
+    Returns ``(improvement, baseline_e2e_s, miner_e2e_s)``. Improvement is
+    0.0 when the tolerance gate fails or timing is insufficient.
+    """
+    if bl_n < 1:
+        return (0.0, None, None)
+
+    k = min(bl_n, mn_n)
+    min_k = _min_aligned_token_count(bl_n, tolerance)
+    if k < min_k:
+        return (0.0, None, None)
+
+    bl_e2e = aligned_e2e_seconds(bl_ttft, bl_decode, k)
+    mn_e2e = aligned_e2e_seconds(mn_ttft, mn_decode, k)
+    if bl_e2e is None or mn_e2e is None or bl_e2e <= 0:
+        return (0.0, bl_e2e, mn_e2e)
+
+    improvement = max(0.0, (bl_e2e - mn_e2e) / bl_e2e)
+    return (improvement, bl_e2e, mn_e2e)
+
+
+def compute_speed_improvement(improvements: list[float]) -> float:
+    """Median per-prompt e2e improvement; empty list -> 0.0."""
+    if not improvements:
         return 0.0
-    if len(decode_elapsed_secs) < target_token_count:
-        return 0.0
-    elapsed = decode_elapsed_secs[target_token_count - 1] - decode_elapsed_secs[0]
-    if elapsed <= 0:
-        return 0.0
-    return target_token_count / elapsed
+    return statistics.median(improvements)
 
 
 def compute_token_match_rate(
@@ -234,41 +282,3 @@ def compute_correctness(
         mean_logprob=mean_lp,
         min_logprob=min_lp,
     )
-
-
-def compute_improvements(
-    baseline_ttfts: list[float],
-    miner_ttfts: list[float],
-    baseline_tps_list: list[float],
-    miner_tps_list: list[float],
-) -> tuple[float, float, float]:
-    """Compute the final score from per-prompt timing measurements.
-
-    Returns ``(score, ttft_improvement, throughput_improvement)``.
-
-    1. Take median TTFT and median throughput across prompts.
-    2. Compute relative improvement vs. baseline, floored at 0.
-    3. Score = 0.5 * ttft_improvement + 0.5 * throughput_improvement.
-    """
-    if not baseline_ttfts or not miner_ttfts:
-        return (0.0, 0.0, 0.0)
-    if not baseline_tps_list or not miner_tps_list:
-        return (0.0, 0.0, 0.0)
-
-    med_bl_ttft = statistics.median(baseline_ttfts)
-    med_mn_ttft = statistics.median(miner_ttfts)
-    med_bl_tps = statistics.median(baseline_tps_list)
-    med_mn_tps = statistics.median(miner_tps_list)
-
-    if med_bl_ttft > 0:
-        ttft_imp = max(0.0, (med_bl_ttft - med_mn_ttft) / med_bl_ttft)
-    else:
-        ttft_imp = 0.0
-
-    if med_bl_tps > 0:
-        tps_imp = max(0.0, (med_mn_tps - med_bl_tps) / med_bl_tps)
-    else:
-        tps_imp = 0.0
-
-    score = 0.5 * ttft_imp + 0.5 * tps_imp
-    return (score, ttft_imp, tps_imp)

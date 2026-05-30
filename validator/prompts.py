@@ -4,9 +4,9 @@ Prompts are deterministic: same block hash always produces the same set.
 Passages are sampled from PG19 (Project Gutenberg books), paired with
 instruction templates, and wrapped as OpenAI chat messages.
 
-Two passes:
-  - Pass 1 (Speed): long context, 512 output tokens, 10 scored prompts.
-  - Pass 2 (Correctness): ~4k context, 256 output tokens, 8 prompts.
+One prompt category (~6k input, 512 output, 10 scored + 2 warmup):
+speed (vs baseline) and correctness (teacher-forcing) use the
+same prompts and miner outputs.
 
 PG19 must be pre-downloaded to the local HuggingFace cache. The validator
 fails fast at startup if the dataset is missing rather than attempting an
@@ -24,21 +24,25 @@ from .eval_schema import ChatMessage, Prompt
 
 logger = logging.getLogger(__name__)
 
-PROMPT_ENGINE_VERSION: int = 3
+PROMPT_ENGINE_VERSION: int = 4
 
 DATASET_NAME: str = "emozilla/pg19"
 DATASET_SPLIT: str = "train"
 
-MIN_CONTEXT_CHARS: int = 16_000
 MAX_CONTEXT_CHARS: int = 131_072
 MAX_SAMPLE_ATTEMPTS: int = 1_000
 
-AUDIT_MIN_CONTEXT_CHARS: int = 4_000
-AUDIT_CONTEXT_TOKENS: int = 4096
-AUDIT_MAX_OUTPUT_TOKENS: int = 256
-AUDIT_PROMPT_COUNT: int = 8
+EVAL_CONTEXT_TOKENS: int = 6144
+"""Input context budget for eval prompts (teacher-forceable on v0.9.2)."""
 
-STRESS_MAX_OUTPUT_TOKENS: int = 512
+EVAL_MAX_OUTPUT_TOKENS: int = 512
+"""Max output tokens per eval prompt."""
+
+EVAL_PROMPT_COUNT: int = 10
+"""Scored eval prompts per miner (after warmup discards)."""
+
+EVAL_MIN_CONTEXT_CHARS: int = 4_000
+"""Minimum passage length for ~6k-context eval prompts."""
 
 CHARS_PER_TOKEN: float = 2.9
 """Conservative chars/token for English prose with the Qwen2.5 tokenizer.
@@ -51,12 +55,15 @@ PASSAGE_TOKEN_SAFETY_MARGIN: int = 256
 """Extra input-token headroom subtracted before converting the passage budget to chars."""
 
 SCORING_MAX_MODEL_LEN: int = (
-    AUDIT_CONTEXT_TOKENS + OVERHEAD_TOKENS + AUDIT_MAX_OUTPUT_TOKENS
+    EVAL_CONTEXT_TOKENS + OVERHEAD_TOKENS + EVAL_MAX_OUTPUT_TOKENS
 )
-"""vLLM ``--max-model-len`` for Pass 2 teacher-forcing only (~4.5k, not 128k)."""
+"""vLLM ``--max-model-len`` for teacher-forcing scoring container (~7k)."""
 
-MAX_OUTPUT_TOKENS: int = STRESS_MAX_OUTPUT_TOKENS
-"""Default output tokens for Pass 1 speed prompts (backward compat)."""
+MAX_OUTPUT_TOKENS: int = EVAL_MAX_OUTPUT_TOKENS
+"""Default output tokens for eval prompts (backward compat)."""
+
+MIN_CONTEXT_CHARS: int = EVAL_MIN_CONTEXT_CHARS
+"""Backward-compat alias for passage quality filter default."""
 
 MIN_ALPHA_RATIO: float = 0.5
 MAX_WHITESPACE_RATIO: float = 0.35
@@ -126,7 +133,7 @@ def _load_pg19() -> list[str]:
     return rows
 
 
-def _is_valid_passage(text: str, *, min_chars: int = MIN_CONTEXT_CHARS) -> bool:
+def _is_valid_passage(text: str, *, min_chars: int = EVAL_MIN_CONTEXT_CHARS) -> bool:
     """Cheap quality filter for PG19 passages."""
     if len(text) < min_chars:
         return False
@@ -146,7 +153,7 @@ def max_passage_chars(
     max_context_tokens: int | None = None,
     *,
     output_tokens: int = MAX_OUTPUT_TOKENS,
-    min_context_chars: int = MIN_CONTEXT_CHARS,
+    min_context_chars: int = EVAL_MIN_CONTEXT_CHARS,
 ) -> int:
     """Compute the safe passage character limit for a given context window.
 
@@ -172,7 +179,7 @@ def _sample_passage(
     rows: Sequence[str],
     max_chars: int = MAX_CONTEXT_CHARS,
     *,
-    min_chars: int = MIN_CONTEXT_CHARS,
+    min_chars: int = EVAL_MIN_CONTEXT_CHARS,
 ) -> str:
     """Sample a single long passage from PG19 with quality filtering.
 
@@ -217,15 +224,13 @@ def _build_prompts(
     block_hash: str,
     n: int,
     *,
-    seed_suffix: str = "",
     max_context_tokens: int | None,
     output_tokens: int,
     min_context_chars: int,
     _rows: list[str] | None = None,
 ) -> list[Prompt]:
     rows = _rows if _rows is not None else _load_pg19()
-    seed_input = f"{block_hash}{seed_suffix}"
-    seed = derive_seed(seed_input)
+    seed = derive_seed(block_hash)
     rng = random.Random(seed)
 
     mc = max_passage_chars(
@@ -248,52 +253,33 @@ def _build_prompts(
     return prompts
 
 
-def sample_stress_prompts(
+def sample_eval_prompts(
     block_hash: str,
-    n: int = 10,
+    n: int = EVAL_PROMPT_COUNT,
     *,
-    max_context_tokens: int | None = None,
+    max_context_tokens: int = EVAL_CONTEXT_TOKENS,
     _rows: list[str] | None = None,
 ) -> list[Prompt]:
-    """Sample long-context speed prompts (Pass 1): 512 output tokens."""
+    """Sample eval prompts: ~6k input, 512 output."""
     return _build_prompts(
         block_hash,
         n,
         max_context_tokens=max_context_tokens,
-        output_tokens=STRESS_MAX_OUTPUT_TOKENS,
-        min_context_chars=MIN_CONTEXT_CHARS,
-        _rows=_rows,
-    )
-
-
-def sample_audit_prompts(
-    block_hash: str,
-    n: int = AUDIT_PROMPT_COUNT,
-    *,
-    max_context_tokens: int = AUDIT_CONTEXT_TOKENS,
-    _rows: list[str] | None = None,
-) -> list[Prompt]:
-    """Sample short-context correctness prompts (Pass 2): ~4k input, 256 output."""
-    return _build_prompts(
-        block_hash,
-        n,
-        seed_suffix=":audit",
-        max_context_tokens=max_context_tokens,
-        output_tokens=AUDIT_MAX_OUTPUT_TOKENS,
-        min_context_chars=AUDIT_MIN_CONTEXT_CHARS,
+        output_tokens=EVAL_MAX_OUTPUT_TOKENS,
+        min_context_chars=EVAL_MIN_CONTEXT_CHARS,
         _rows=_rows,
     )
 
 
 def sample_prompts(
     block_hash: str,
-    n: int = 10,
+    n: int = EVAL_PROMPT_COUNT,
     *,
-    max_context_tokens: int | None = None,
+    max_context_tokens: int = EVAL_CONTEXT_TOKENS,
     _rows: list[str] | None = None,
 ) -> list[Prompt]:
-    """Backward-compatible alias for ``sample_stress_prompts``."""
-    return sample_stress_prompts(
+    """Backward-compatible alias for ``sample_eval_prompts``."""
+    return sample_eval_prompts(
         block_hash,
         n=n,
         max_context_tokens=max_context_tokens,

@@ -9,7 +9,7 @@ Writes use a temp file + rename so a crash never leaves a torn JSON
 file. `SCHEMA_VERSION` applies to this file only.
 
 Scoring convention: **higher = better**. A miner's score is
-`0.5 * max(0, ttft_improvement) + 0.5 * max(0, throughput_improvement)`,
+``score`` is ``speed_improvement``: median end-to-end speedup vs baseline,
 where improvements are relative to the vLLM baseline (median across
 prompts). The winner is the miner with the highest score. Disqualified
 runs store score `0.0` and cannot win.
@@ -104,8 +104,7 @@ class EvaluationRecord:
     image: str
     digest: str
     score: float  # higher = better; 0.0 if disqualified
-    ttft_improvement: float
-    throughput_improvement: float
+    speed_improvement: float
     token_match_rate: float
     disqualified: bool
     disqualify_reason: str | None
@@ -125,7 +124,14 @@ class EvaluationRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvaluationRecord:
-        known = {f: data[f] for f in cls.__dataclass_fields__ if f in data}
+        mapped = dict(data)
+        if "speed_improvement" not in mapped:
+            mapped["speed_improvement"] = float(
+                mapped.get(
+                    "throughput_improvement", mapped.get("ttft_improvement", 0.0)
+                )
+            )
+        known = {f: mapped[f] for f in cls.__dataclass_fields__ if f in mapped}
         return cls(**known)
 
 
@@ -144,8 +150,7 @@ class WinnerRecord:
     image: str
     digest: str
     score: float
-    ttft_improvement: float
-    throughput_improvement: float
+    speed_improvement: float
     token_match_rate: float
     evaluated_at: float
     evaluation_block: int
@@ -159,6 +164,12 @@ class WinnerRecord:
         mapped = dict(data)
         if "crowned_at_block" in mapped and "won_at_block" not in mapped:
             mapped["won_at_block"] = mapped.pop("crowned_at_block")
+        if "speed_improvement" not in mapped:
+            mapped["speed_improvement"] = float(
+                mapped.get(
+                    "throughput_improvement", mapped.get("ttft_improvement", 0.0)
+                )
+            )
         known = {f: mapped[f] for f in cls.__dataclass_fields__ if f in mapped}
         return cls(**known)
 
@@ -176,8 +187,7 @@ class WinnerRecord:
             image=ev.image,
             digest=ev.digest,
             score=ev.score,
-            ttft_improvement=ev.ttft_improvement,
-            throughput_improvement=ev.throughput_improvement,
+            speed_improvement=ev.speed_improvement,
             token_match_rate=ev.token_match_rate,
             evaluated_at=ev.evaluated_at,
             evaluation_block=ev.evaluation_block,

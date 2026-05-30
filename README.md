@@ -18,13 +18,13 @@
 
 Cacheon is a Bittensor subnet (SN14) that runs an open competition for **production-grade LLM inference optimization**. Miners submit containerized inference servers. Validators evaluate them against a vLLM baseline on the same hardware. The fastest correct server earns the majority of emission; a runner-up receives a share, and the remaining emission scales with the winner's improvement.
 
-**V1 arena:** `Qwen2.5-72B-Instruct` on 8-GPU TP=8 pods (8x H200, 8x B200, or 8x B300). Beat the pinned vLLM baseline on TTFT and throughput while passing a greedy-decoding correctness gate.
+**V1 arena:** `Qwen2.5-72B-Instruct` on 8-GPU TP=8 pods (8x H200, 8x B200, or 8x B300). Beat the pinned vLLM baseline on end-to-end response time while passing a greedy-decoding correctness gate.
 
 ## How It Works
 
 1. **Miners** build an inference server, package it as a Docker image, pay the submission fee, and commit the image reference, digest, and payment proof on-chain.
 2. **Validators** scan the chain for new commitments, pull the image, and run it with model weights mounted at `/models`.
-3. **Scoring** measures TTFT and throughput improvement over the vLLM baseline. Correctness is checked first; fail it and the score is zero.
+3. **Scoring** measures end-to-end response time improvement over the vLLM baseline. Correctness is checked first; fail it and the score is zero.
 4. **The fastest correct server** becomes the winner and earns 80% of the competition pool. The runner-up earns 20%. Total pool scales with the winner's score relative to a target improvement.
 5. **Challengers** must exceed the winner's fresh score by a fixed 1% margin to prevent noise-driven churn.
 
@@ -34,10 +34,11 @@ Score formula:
 if not correctness_pass:
     score = 0.0
 else:
-    ttft_imp = max(0, (baseline_ttft - miner_ttft) / baseline_ttft)
-    tps_imp  = max(0, (miner_tps  - baseline_tps)  / baseline_tps)
-    score = 0.5 * ttft_imp + 0.5 * tps_imp
+    speed_improvement = median(max(0, (baseline_e2e - miner_e2e) / baseline_e2e))
+    score = speed_improvement
 ```
+
+Full detail: [cacheon.ai/docs/evaluation/scoring](https://cacheon.ai/docs/evaluation/scoring)
 
 ## For Miners
 
