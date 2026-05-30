@@ -6,10 +6,12 @@ import pytest
 
 from validator.scoring import (
     CorrectnessVerdict,
-    compute_aligned_throughput_tps,
+    SPEED_TOLERANCE_RATIO,
+    aligned_e2e_improvement,
+    aligned_e2e_seconds,
     compute_correctness,
-    compute_improvements,
     compute_pass1_aggregate_match,
+    compute_speed_improvement,
     compute_teacher_forcing_verdict,
     compute_token_match_rate,
     pass1_match_passes,
@@ -19,27 +21,74 @@ pytestmark = pytest.mark.unit
 
 
 # --------------------------------------------------------------------------- #
-# compute_aligned_throughput_tps
+# End-to-end speed (aligned_e2e_improvement)
 # --------------------------------------------------------------------------- #
 
 
-class TestComputeAlignedThroughputTps:
-    def test_complete_stream(self):
-        elapsed = [0.0, 0.05, 0.1, 0.2]
-        assert compute_aligned_throughput_tps(4, elapsed) == pytest.approx(4 / 0.2)
+class TestAlignedE2eSeconds:
+    def test_complete_timing(self):
+        decode = [0.0, 0.05, 0.1, 0.2]
+        assert aligned_e2e_seconds(0.5, decode, 4) == pytest.approx(0.7)
 
-    def test_early_stop_returns_zero(self):
-        elapsed = [0.0, 0.05]
-        assert compute_aligned_throughput_tps(4, elapsed) == 0.0
+    def test_insufficient_decode_returns_none(self):
+        assert aligned_e2e_seconds(0.5, [0.0], 4) is None
 
-    def test_target_less_than_two_returns_zero(self):
-        assert compute_aligned_throughput_tps(1, [0.0, 0.1]) == 0.0
 
-    def test_zero_elapsed_returns_zero(self):
-        assert compute_aligned_throughput_tps(3, [0.0, 0.0, 0.0]) == 0.0
+class TestAlignedE2eImprovement:
+    def test_faster_miner(self):
+        bl_decode = [0.0, 0.5, 1.0]
+        mn_decode = [0.0, 0.4, 0.8]
+        imp, bl_e2e, mn_e2e = aligned_e2e_improvement(
+            1.0, bl_decode, 3, 0.8, mn_decode, 3
+        )
+        assert bl_e2e == pytest.approx(2.0)
+        assert mn_e2e == pytest.approx(1.6)
+        assert imp == pytest.approx(0.2)
 
-    def test_empty_elapsed_returns_zero(self):
-        assert compute_aligned_throughput_tps(3, []) == 0.0
+    def test_slower_miner_floors_at_zero(self):
+        imp, _, _ = aligned_e2e_improvement(1.0, [0.0, 1.0], 2, 2.0, [0.0, 2.0], 2)
+        assert imp == 0.0
+
+    def test_tolerance_band_rejects_short_output(self):
+        bl_n = 512
+        mn_n = 400
+        bl_decode = [float(i) * 0.02 for i in range(bl_n)]
+        mn_decode = [float(i) * 0.02 for i in range(mn_n)]
+        imp, _, _ = aligned_e2e_improvement(
+            0.6, bl_decode, bl_n, 0.5, mn_decode, mn_n, tolerance=SPEED_TOLERANCE_RATIO
+        )
+        assert imp == 0.0
+
+    def test_tolerance_band_allows_ninety_percent(self):
+        bl_n = 512
+        mn_n = 461
+        bl_decode = [float(i) * 0.02 for i in range(bl_n)]
+        mn_decode = [float(i) * 0.01 for i in range(mn_n)]
+        imp, _, _ = aligned_e2e_improvement(
+            0.6, bl_decode, bl_n, 0.5, mn_decode, mn_n, tolerance=SPEED_TOLERANCE_RATIO
+        )
+        assert imp > 0.0
+
+    def test_buffering_exploit_not_inflated(self):
+        """Burst after long TTFT: modest e2e gain, not hundreds of x."""
+        bl_n = 512
+        bl_decode = [float(i) * (12.0 / (bl_n - 1)) for i in range(bl_n)]
+        mn_decode = [0.0] * bl_n
+        imp, bl_e2e, mn_e2e = aligned_e2e_improvement(
+            0.6, bl_decode, bl_n, 12.0, mn_decode, bl_n
+        )
+        assert bl_e2e == pytest.approx(12.6)
+        assert mn_e2e == pytest.approx(12.0)
+        assert imp == pytest.approx((12.6 - 12.0) / 12.6, rel=1e-3)
+        assert imp < 0.2
+
+
+class TestComputeSpeedImprovement:
+    def test_median_across_prompts(self):
+        assert compute_speed_improvement([0.1, 0.2, 0.3]) == pytest.approx(0.2)
+
+    def test_empty_returns_zero(self):
+        assert compute_speed_improvement([]) == 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -247,91 +296,3 @@ class TestComputeCorrectness:
         v = compute_correctness(base, miner, logprobs)
         assert v.passed is False
         assert v.mean_logprob < -20.0
-
-
-# --------------------------------------------------------------------------- #
-# compute_improvements
-# --------------------------------------------------------------------------- #
-
-
-class TestComputeImprovements:
-    def test_miner_faster_on_both_axes(self):
-        bl_ttft = [1.0, 1.0, 1.0]
-        mn_ttft = [0.5, 0.5, 0.5]
-        bl_tps = [100.0, 100.0, 100.0]
-        mn_tps = [150.0, 150.0, 150.0]
-        score, ttft_imp, tps_imp = compute_improvements(
-            bl_ttft, mn_ttft, bl_tps, mn_tps
-        )
-        assert ttft_imp == pytest.approx(0.5)
-        assert tps_imp == pytest.approx(0.5)
-        assert score == pytest.approx(0.5)
-
-    def test_miner_slower_floors_at_zero(self):
-        bl_ttft = [0.5]
-        mn_ttft = [1.0]
-        bl_tps = [100.0]
-        mn_tps = [50.0]
-        score, ttft_imp, tps_imp = compute_improvements(
-            bl_ttft, mn_ttft, bl_tps, mn_tps
-        )
-        assert ttft_imp == 0.0
-        assert tps_imp == 0.0
-        assert score == 0.0
-
-    def test_mixed_axes(self):
-        bl_ttft = [1.0]
-        mn_ttft = [0.8]
-        bl_tps = [100.0]
-        mn_tps = [80.0]
-        score, ttft_imp, tps_imp = compute_improvements(
-            bl_ttft, mn_ttft, bl_tps, mn_tps
-        )
-        assert ttft_imp == pytest.approx(0.2)
-        assert tps_imp == 0.0
-        assert score == pytest.approx(0.1)
-
-    def test_median_with_outlier(self):
-        bl_ttft = [1.0, 1.0, 1.0, 1.0, 100.0]
-        mn_ttft = [0.5, 0.5, 0.5, 0.5, 0.5]
-        bl_tps = [100.0, 100.0, 100.0, 100.0, 100.0]
-        mn_tps = [120.0, 120.0, 120.0, 120.0, 120.0]
-        score, ttft_imp, tps_imp = compute_improvements(
-            bl_ttft, mn_ttft, bl_tps, mn_tps
-        )
-        assert ttft_imp == pytest.approx(0.5)
-        assert tps_imp == pytest.approx(0.2)
-
-    def test_single_prompt(self):
-        score, ttft_imp, tps_imp = compute_improvements([2.0], [1.0], [50.0], [75.0])
-        assert ttft_imp == pytest.approx(0.5)
-        assert tps_imp == pytest.approx(0.5)
-        assert score == pytest.approx(0.5)
-
-    def test_even_number_of_prompts(self):
-        score, _, _ = compute_improvements(
-            [1.0, 2.0], [0.5, 1.0], [100.0, 100.0], [150.0, 150.0]
-        )
-        assert score == pytest.approx(0.5)
-
-    def test_empty_lists_return_zero(self):
-        assert compute_improvements([], [], [], []) == (0.0, 0.0, 0.0)
-
-    def test_empty_baseline_ttft(self):
-        assert compute_improvements([], [1.0], [100.0], [150.0]) == (0.0, 0.0, 0.0)
-
-    def test_zero_baseline_ttft(self):
-        score, ttft_imp, tps_imp = compute_improvements([0.0], [0.5], [100.0], [150.0])
-        assert ttft_imp == 0.0
-        assert tps_imp == pytest.approx(0.5)
-
-    def test_zero_baseline_tps(self):
-        score, ttft_imp, tps_imp = compute_improvements([1.0], [0.5], [0.0], [150.0])
-        assert ttft_imp == pytest.approx(0.5)
-        assert tps_imp == 0.0
-
-    def test_identical_performance(self):
-        score, ttft_imp, tps_imp = compute_improvements([1.0], [1.0], [100.0], [100.0])
-        assert ttft_imp == 0.0
-        assert tps_imp == 0.0
-        assert score == 0.0

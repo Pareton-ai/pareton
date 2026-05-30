@@ -36,7 +36,7 @@ DRY_RUN: bool = os.environ.get("CACHEON_DRY_RUN", "0") == "1"
 """When True, skip `subtensor.set_weights()` and do not run Docker eval.
 Useful for testing the loop without touching the chain."""
 
-VERSION_KEY: int = int(os.environ.get("CACHEON_VERSION_KEY", "28"))
+VERSION_KEY: int = int(os.environ.get("CACHEON_VERSION_KEY", "29"))
 """Version tag passed as `version_key` to `subtensor.set_weights(...)`. Bump
 whenever the scoring mechanism or evaluation rules change in a way that would
 produce different winner selections on identical commits.
@@ -61,8 +61,7 @@ BASELINE_DIGEST: str = os.environ.get(
 )
 
 SCORING_IMAGE: str = os.environ.get("CACHEON_SCORING_IMAGE", "vllm/vllm-openai:v0.9.2")
-"""vLLM image used only for Pass 2 correctness teacher-forcing (prompt_logprobs).
-Pinned to v0.9.2 for B200 (sm_100) support; correctness prompts are ~4k context."""
+"""vLLM image used for teacher-forcing correctness (prompt_logprobs). Pinned to v0.9.2 for B200 (sm_100) support"""
 
 GPU_COUNT: int = int(os.environ.get("CACHEON_GPU_COUNT", "8"))
 """Number of GPUs on the host. Set to 8 for 8x H200/B200/B300 (the standard eval tier)."""
@@ -94,6 +93,9 @@ HIPPIUS_ACCESS_KEY: str = os.environ.get("HIPPIUS_ACCESS_KEY", "")
 HIPPIUS_SECRET_KEY: str = os.environ.get("HIPPIUS_SECRET_KEY", "")
 S3_BUCKET: str = os.environ.get("CACHEON_S3_BUCKET", "cacheon-validator")
 S3_PREFIX: str = os.environ.get("CACHEON_S3_PREFIX", "state-mainnet")
+
+SKIP_S3: bool = os.environ.get("CACHEON_SKIP_S3", "0") == "1"
+"""When True, ``gpu_eval`` skips Hippius S3 download and upload (local pod testing)."""
 
 # --------------------------------------------------------------------------- #
 # Winner defender-advantage window
@@ -160,9 +162,9 @@ MIN_LOGPROB_THRESHOLD: float = float(
 PASS1_MATCH_DQ_THRESHOLD: float = float(
     os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.10")
 )
-"""Pass 1 hard DQ: aggregate token match vs speed baseline must be at or
-above this fraction. Below threshold, miner is DQ'd before
-Pass 2 teacher-forcing."""
+"""Cheap pre-filter: aggregate token match vs baseline must be at or above
+this fraction before teacher-forcing. Below threshold, miner is DQ'd without
+scoring. Not the authoritative correctness gate (teacher-forcing is)."""
 
 VLLM_COMPILE_CACHE_DIR: str = os.environ.get("CACHEON_VLLM_CACHE_DIR", "")
 """Host directory mounted into Pass 1 baseline container at /root/.cache/vllm.

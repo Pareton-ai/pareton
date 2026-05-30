@@ -31,8 +31,7 @@ def _make_eval(
     hotkey: str = "hk_alice",
     commit_block: int = 100,
     score: float = 0.25,
-    ttft_improvement: float = 0.15,
-    throughput_improvement: float = 0.35,
+    speed_improvement: float = 0.25,
     token_match_rate: float = 0.995,
     disqualified: bool = False,
     reason: str | None = None,
@@ -48,8 +47,7 @@ def _make_eval(
         image=image,
         digest=digest,
         score=score,
-        ttft_improvement=ttft_improvement,
-        throughput_improvement=throughput_improvement,
+        speed_improvement=speed_improvement,
         token_match_rate=token_match_rate,
         disqualified=disqualified,
         disqualify_reason=reason,
@@ -98,12 +96,10 @@ class TestEvaluationRecord:
 
     def test_new_metric_fields(self):
         ev = _make_eval(
-            ttft_improvement=0.22,
-            throughput_improvement=0.44,
+            speed_improvement=0.44,
             token_match_rate=0.998,
         )
-        assert ev.ttft_improvement == 0.22
-        assert ev.throughput_improvement == 0.44
+        assert ev.speed_improvement == 0.44
         assert ev.token_match_rate == 0.998
 
     def test_per_prompt_defaults_to_none(self):
@@ -114,13 +110,13 @@ class TestEvaluationRecord:
         pp = [
             {
                 "ttft_s": 0.5,
-                "throughput_tps": 100.0,
+                "e2e_s": 12.0,
                 "output_tokens": 256,
                 "token_match_rate": 1.0,
             },
             {
                 "ttft_s": 0.6,
-                "throughput_tps": 90.0,
+                "e2e_s": 11.0,
                 "output_tokens": 200,
                 "token_match_rate": 0.99,
             },
@@ -132,8 +128,7 @@ class TestEvaluationRecord:
             image="i:v1",
             digest="sha256:" + "a" * 64,
             score=0.5,
-            ttft_improvement=0.1,
-            throughput_improvement=0.2,
+            speed_improvement=0.2,
             token_match_rate=0.99,
             disqualified=False,
             disqualify_reason=None,
@@ -167,8 +162,7 @@ class TestWinnerRecord:
         assert winner.score == ev.score
         assert winner.hotkey == ev.hotkey
         assert winner.won_at_block == 500
-        assert winner.ttft_improvement == ev.ttft_improvement
-        assert winner.throughput_improvement == ev.throughput_improvement
+        assert winner.speed_improvement == ev.speed_improvement
         assert winner.token_match_rate == ev.token_match_rate
 
     def test_round_trip(self):
@@ -192,8 +186,7 @@ class TestWinnerRecord:
             "image": "img:v1",
             "digest": "sha256:" + "a" * 64,
             "score": 0.5,
-            "ttft_improvement": 0.1,
-            "throughput_improvement": 0.2,
+            "speed_improvement": 0.2,
             "token_match_rate": 0.99,
             "evaluated_at": 1.0,
             "evaluation_block": 110,
@@ -758,6 +751,7 @@ class TestPersistence:
         assert loaded.winner is not None
         assert loaded.winner.uid == 7
         assert loaded.winner.won_at_block == 105
+        assert loaded.winner.speed_improvement == pytest.approx(0.2)
 
     def test_load_stale_field_names_does_not_crash(self, tmp_path):
         """A state file with old KV-cache field names must fall back to
@@ -882,8 +876,7 @@ class TestAppendWinnerHistory:
             image="user/server:latest",
             digest="sha256:" + "a" * 64,
             score=score,
-            ttft_improvement=0.15,
-            throughput_improvement=0.35,
+            speed_improvement=0.35,
             token_match_rate=0.995,
             evaluated_at=1700000000.0,
             evaluation_block=1000,

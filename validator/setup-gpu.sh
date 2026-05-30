@@ -128,20 +128,31 @@ fi
 mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
 echo "Configured data-root=$DOCKER_DATA_ROOT"
 
-# Stop any running daemon so data-root + runtime config take effect on first start.
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active docker >/dev/null 2>&1; then
-  systemctl stop docker
-elif pgrep -x dockerd >/dev/null 2>&1; then
-  pkill -x dockerd && sleep 2
-fi
+_need_docker_restart() {
+  if ! docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  local root
+  root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  [[ "$root" != "$DOCKER_DATA_ROOT" ]]
+}
 
-echo ""
-echo "=== Starting dockerd ==="
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
-  systemctl start docker
+if _need_docker_restart; then
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active docker >/dev/null 2>&1; then
+    systemctl stop docker
+  elif pgrep -x dockerd >/dev/null 2>&1; then
+    pkill -x dockerd && sleep 2
+  fi
+  echo ""
+  echo "=== Starting dockerd ==="
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+    systemctl start docker
+  else
+    nohup dockerd > /var/log/dockerd.log 2>&1 &
+    sleep 5
+  fi
 else
-  nohup dockerd > /var/log/dockerd.log 2>&1 &
-  sleep 5
+  echo "dockerd already using $DOCKER_DATA_ROOT, skipping restart"
 fi
 if ! docker info >/dev/null 2>&1; then
   echo "ERROR: dockerd failed to start. Check /var/log/dockerd.log"
@@ -244,45 +255,47 @@ else
   "$VENV_DIR/bin/python" -c "from datasets import load_dataset; load_dataset('emozilla/pg19', split='train'); print('PG19 cached')"
 fi
 
-_restart_dockerd() {
-  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
-    systemctl restart docker
-  else
-    pkill -x dockerd 2>/dev/null || true
-    sleep 2
-    nohup dockerd > /var/log/dockerd.log 2>&1 &
-    sleep 5
+BASELINE_IMAGE="${CACHEON_BASELINE_IMAGE:-vllm/vllm-openai:v0.22.0}"
+SCORING_IMAGE="${CACHEON_SCORING_IMAGE:-vllm/vllm-openai:v0.9.2}"
+
+ensure_docker_image() {
+  local ref="$1"
+  if docker image inspect "$ref" >/dev/null 2>&1; then
+    echo "$ref already present, skipping pull."
+    return 0
   fi
-  if ! docker info >/dev/null 2>&1; then
-    echo "ERROR: dockerd failed to restart after layer cache cleanup"
-    exit 1
-  fi
+  local attempt
+  for attempt in 1 2 3; do
+    echo "Pulling $ref (attempt $attempt/3)..."
+    if docker pull "$ref"; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 3 ]]; then
+      echo "Pull failed, retrying in 10s..."
+      sleep 10
+    fi
+  done
+  echo "ERROR: failed to pull $ref after 3 attempts"
+  return 1
 }
 
-# -- vLLM baseline image --
+# -- vLLM eval images (generation baseline + teacher-forcing) --
 echo ""
-echo "=== vLLM baseline Docker image ==="
-if docker image inspect vllm/vllm-openai:latest >/dev/null 2>&1; then
-  echo "vLLM baseline image already present, skipping pull."
-else
-  if ! docker pull vllm/vllm-openai:latest; then
-    echo "WARNING: docker pull failed; clearing partial layer state on $DOCKER_DATA_ROOT and retrying..."
-    rm -rf "$DOCKER_DATA_ROOT/image" "$DOCKER_DATA_ROOT/overlay2"
-    _restart_dockerd
-    docker pull vllm/vllm-openai:latest
-  fi
-fi
-REPO_DIGEST="$(docker image inspect vllm/vllm-openai:latest --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
+echo "=== vLLM Docker images ==="
+ensure_docker_image "$BASELINE_IMAGE"
+ensure_docker_image "$SCORING_IMAGE"
+REPO_DIGEST="$(docker image inspect "$BASELINE_IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
 DIGEST=""
 if [[ -n "$REPO_DIGEST" ]] && [[ "$REPO_DIGEST" == *"@"* ]]; then
   DIGEST="${REPO_DIGEST##*@}"
 else
-  echo "WARNING: could not read RepoDigests for vllm/vllm-openai:latest; set CACHEON_BASELINE_DIGEST manually."
+  echo "WARNING: could not read RepoDigests for $BASELINE_IMAGE; set CACHEON_BASELINE_DIGEST manually."
 fi
 echo ""
-echo "# Baseline pinning (add to .env alongside CACHEON_MODEL_VOLUME and CACHEON_GPUS)"
-echo "CACHEON_BASELINE_IMAGE=vllm/vllm-openai:latest"
+echo "# Add to .env (with CACHEON_MODEL_VOLUME, CACHEON_GPU_COUNT=8)"
+echo "CACHEON_BASELINE_IMAGE=$BASELINE_IMAGE"
 echo "CACHEON_BASELINE_DIGEST=${DIGEST:-sha256:REPLACE_WITH_ACTUAL_DIGEST}"
+echo "CACHEON_SCORING_IMAGE=$SCORING_IMAGE"
 
 # -- verification --
 echo ""

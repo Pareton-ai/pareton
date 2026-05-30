@@ -74,14 +74,13 @@ class BaselineCache:
 def derive_cache_key(
     block_hash: str,
     baseline_digest: str = "",
-    regime: str = "stress",
 ) -> str:
     """Short id for a baseline run (container log filenames).
 
-    Derived from block_hash, baseline image digest, prompt engine version, and
-    regime so logs from different configs do not collide.
+    Derived from block_hash, baseline image digest, and prompt engine version
+    so logs from different configs do not collide.
     """
     from .prompts import PROMPT_ENGINE_VERSION
 
-    raw = f"{block_hash}:{baseline_digest}:v{PROMPT_ENGINE_VERSION}:{regime}"
+    raw = f"{block_hash}:{baseline_digest}:v{PROMPT_ENGINE_VERSION}:eval"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]

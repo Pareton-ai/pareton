@@ -144,6 +144,12 @@ def update_progress(
                 }
                 for i, c in enumerate(challengers or [])
             ]
+
+            def _incumbent_entry(data: dict[str, Any] | None) -> dict[str, Any] | None:
+                if data is None:
+                    return None
+                return {**data, "status": data.get("status", "pending")}
+
             payload: dict[str, Any] = {
                 "round_block": round_block,
                 "status": "running",
@@ -151,8 +157,8 @@ def update_progress(
                 "detail": detail,
                 "current_idx": None,
                 "challengers": entries,
-                "leader": leader,
-                "runner_up": runner_up,
+                "leader": _incumbent_entry(leader),
+                "runner_up": _incumbent_entry(runner_up),
                 "gpu": None,
                 "steps": [step],
                 "started_at": now,
@@ -225,6 +231,49 @@ def update_challenger_status(
         _write_progress(state_dir, payload)
     except Exception:
         logger.debug("Failed to update challenger status", exc_info=True)
+
+
+def update_incumbent_status(
+    state_dir: str | os.PathLike,
+    role: str,
+    *,
+    status: str,
+    score: float | None = None,
+    dq_reason: str | None = None,
+) -> None:
+    """Advance leader or runner-up status in the progress file."""
+    if role not in ("leader", "runner_up"):
+        return
+    try:
+        payload = _read_progress(state_dir)
+        if not payload:
+            return
+
+        incumbent = payload.get(role)
+        if not incumbent:
+            return
+
+        incumbent["status"] = status
+        if score is not None:
+            incumbent["score"] = score
+        if dq_reason is not None:
+            incumbent["dq_reason"] = dq_reason
+
+        payload[role] = incumbent
+
+        step: dict[str, Any] = {
+            "ts": time.time(),
+            "phase": f"{role}_eval",
+            "uid": incumbent.get("uid"),
+            "status": status,
+        }
+        if score is not None:
+            step["score"] = score
+        payload.setdefault("steps", []).append(step)
+
+        _write_progress(state_dir, payload)
+    except Exception:
+        logger.debug("Failed to update incumbent status", exc_info=True)
 
 
 def clear_progress(state_dir: str | os.PathLike) -> None:

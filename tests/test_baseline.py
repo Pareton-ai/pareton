@@ -101,11 +101,6 @@ class TestDeriveCacheKey:
     def test_length_is_16(self):
         assert len(derive_cache_key("anything")) == 16
 
-    def test_different_regimes_differ(self):
-        k_stress = derive_cache_key("0xabc123", regime="stress")
-        k_audit = derive_cache_key("0xabc123", regime="audit")
-        assert k_stress != k_audit
-
     def test_hex_chars_only(self):
         key = derive_cache_key("test")
         assert all(c in "0123456789abcdef" for c in key)

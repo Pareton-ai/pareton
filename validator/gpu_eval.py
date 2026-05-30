@@ -15,8 +15,9 @@ Env vars:
     CACHEON_BASELINE_DIGEST    (required)
     CACHEON_GPU_COUNT          (default: 8, auto-detect via nvidia-smi)
     CACHEON_VLLM_CACHE_DIR     (optional; host path for vLLM torch.compile cache)
-    HIPPIUS_ACCESS_KEY         (required for S3)
-    HIPPIUS_SECRET_KEY         (required for S3)
+    HIPPIUS_ACCESS_KEY         (required for S3 unless CACHEON_SKIP_S3=1)
+    HIPPIUS_SECRET_KEY         (required for S3 unless CACHEON_SKIP_S3=1)
+    CACHEON_SKIP_S3            (default: 0; set 1 for local pod testing without S3)
     CACHEON_S3_BUCKET          (default: cacheon-validator)
 """
 
@@ -30,7 +31,7 @@ from pathlib import Path
 from . import config as validator_config
 from .chain import CommitmentRecord
 from .docker_eval import (
-    EVAL_N_STRESS_SCORED,
+    EVAL_N_SCORED,
     EVAL_N_WARMUP,
     _max_model_len,
     evaluate_challenger,
@@ -47,6 +48,7 @@ from .eval_progress import (
     clear_progress,
     purge_old_logs,
     update_challenger_status,
+    update_incumbent_status,
     update_progress,
 )
 from .eval_schema import EVAL_JOB_FILE, EvalJob
@@ -55,10 +57,10 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class _PendingPass2:
+class _PendingTeacherForcing:
     record: EvaluationRecord
-    audit_output_texts: list[str]
-    audit_miner_tokens: list[list[str]]
+    tf_output_texts: list[str]
+    tf_miner_tokens: list[list[str]]
     log_prefix: str
 
 
@@ -146,13 +148,16 @@ def main() -> int:
             return 1
 
     # S3 download
-    try:
-        from .sync import download
+    if not validator_config.SKIP_S3:
+        try:
+            from .sync import download
 
-        download(state_dir)
-    except Exception as exc:
-        logger.error("S3 download failed: %s", exc)
-        return 2
+            download(state_dir)
+        except Exception as exc:
+            logger.error("S3 download failed: %s", exc)
+            return 2
+    else:
+        logger.info("CACHEON_SKIP_S3=1: skipping S3 download")
 
     # Load state and eval job
     state = ValidatorState.load(state_dir)
@@ -184,34 +189,33 @@ def main() -> int:
             return 3
         logger.info("Auto-detected %d GPU(s)", gpu_count)
 
-    # Generate prompts (Pass 1 speed + Pass 2 correctness)
-    from .prompts import sample_audit_prompts, sample_stress_prompts
+    from .prompts import EVAL_CONTEXT_TOKENS, sample_eval_prompts
 
     mml = _max_model_len(gpu_count, model_path=model_path)
-    stress_prompts = sample_stress_prompts(
-        block_hash, n=EVAL_N_STRESS_SCORED + EVAL_N_WARMUP, max_context_tokens=mml
+    eval_prompts = sample_eval_prompts(
+        block_hash,
+        n=EVAL_N_SCORED + EVAL_N_WARMUP,
+        max_context_tokens=EVAL_CONTEXT_TOKENS,
     )
-    audit_prompts = sample_audit_prompts(block_hash)
+    scored_eval_prompts = eval_prompts[EVAL_N_WARMUP:]
     logger.info(
-        "Generated %d Pass 1 (speed) + %d Pass 2 (correctness) prompts (max_model_len=%d)",
-        len(stress_prompts),
-        len(audit_prompts),
+        "Generated %d eval prompts (10 scored + 2 warmup, ctx=%d, max_model_len=%d)",
+        len(eval_prompts),
+        EVAL_CONTEXT_TOKENS,
         mml,
     )
     update_progress(
         state_dir,
         phase="prompts_generated",
-        n_stress=len(stress_prompts),
-        n_audit=len(audit_prompts),
+        n_eval=len(eval_prompts),
     )
     _upload_progress(state_dir)
 
-    # Run Pass 1 speed baseline once (in-memory for all challengers)
     update_progress(state_dir, phase="baseline_running", image=baseline_image)
     _upload_progress(state_dir)
     try:
-        stress_baseline = run_baseline(
-            stress_prompts,
+        eval_baseline = run_baseline(
+            eval_prompts,
             baseline_image=baseline_image,
             baseline_digest=baseline_digest,
             model_volume=model_volume,
@@ -235,7 +239,7 @@ def main() -> int:
     _upload_state(state_dir)
 
     scoring_log_label = f"baseline_scoring_{block}_{eval_ts}"
-    pending_pass2: list[_PendingPass2] = []
+    pending_tf: list[_PendingTeacherForcing] = []
 
     def _dq_from_scoring_fail(
         record: EvaluationRecord,
@@ -252,8 +256,7 @@ def main() -> int:
             image=record.image,
             digest=record.digest,
             score=0.0,
-            ttft_improvement=0.0,
-            throughput_improvement=0.0,
+            speed_improvement=0.0,
             token_match_rate=record.token_match_rate,
             disqualified=True,
             disqualify_reason=f"{prefix}: " + "; ".join(fail_reasons),
@@ -265,7 +268,9 @@ def main() -> int:
     def _dq_baseline_scoring_unavailable(
         record: EvaluationRecord, exc: Exception
     ) -> EvaluationRecord:
-        logger.error("Pass 2 scoring unavailable for %s: %s", record.eval_key, exc)
+        logger.error(
+            "Teacher-forcing scoring unavailable for %s: %s", record.eval_key, exc
+        )
         return EvaluationRecord(
             uid=record.uid,
             hotkey=record.hotkey,
@@ -273,8 +278,7 @@ def main() -> int:
             image=record.image,
             digest=record.digest,
             score=0.0,
-            ttft_improvement=0.0,
-            throughput_improvement=0.0,
+            speed_improvement=0.0,
             token_match_rate=record.token_match_rate,
             disqualified=True,
             disqualify_reason=f"baseline_scoring_unavailable: {exc}",
@@ -283,51 +287,51 @@ def main() -> int:
             per_prompt=record.per_prompt,
         )
 
-    def _queue_pass2(
+    def _queue_teacher_forcing(
         record: EvaluationRecord,
-        audit_output_texts: list[str],
-        audit_miner_tokens: list[list[str]],
+        tf_output_texts: list[str],
+        tf_miner_tokens: list[list[str]],
         log_prefix: str,
     ) -> None:
-        if record.disqualified or not audit_output_texts:
+        if record.disqualified or not tf_output_texts:
             return
-        pending_pass2.append(
-            _PendingPass2(
+        pending_tf.append(
+            _PendingTeacherForcing(
                 record=record,
-                audit_output_texts=audit_output_texts,
-                audit_miner_tokens=audit_miner_tokens,
+                tf_output_texts=tf_output_texts,
+                tf_miner_tokens=tf_miner_tokens,
                 log_prefix=log_prefix,
             )
         )
 
-    def _apply_pass2_scoring(
-        scoring_url: str, pending: _PendingPass2
+    def _apply_teacher_forcing(
+        scoring_url: str, pending: _PendingTeacherForcing
     ) -> EvaluationRecord:
         record = pending.record
         passed, fail_reasons, _ = score_challenger_teacher_forcing(
             scoring_url,
-            audit_prompts,
-            pending.audit_output_texts,
-            pending.audit_miner_tokens,
+            scored_eval_prompts,
+            pending.tf_output_texts,
+            pending.tf_miner_tokens,
             log_prefix=pending.log_prefix,
         )
         if passed:
             return record
         dq = _dq_from_scoring_fail(record, fail_reasons)
         logger.warning(
-            "DQ %s via Pass 2 scoring: %s", pending.log_prefix, dq.disqualify_reason
+            "DQ %s via teacher-forcing: %s", pending.log_prefix, dq.disqualify_reason
         )
         return dq
 
-    def _batch_run_pass2_scoring() -> None:
-        if not pending_pass2:
+    def _batch_run_teacher_forcing() -> None:
+        if not pending_tf:
             return
         logger.info(
-            "Pass 2 scoring batch: %d challenger(s), log_label=%s",
-            len(pending_pass2),
+            "Teacher-forcing batch: %d challenger(s), log_label=%s",
+            len(pending_tf),
             scoring_log_label,
         )
-        update_progress(state_dir, phase="pass2_scoring_running")
+        update_progress(state_dir, phase="teacher_forcing_running")
         _upload_progress(state_dir)
         scoring_cid: str | None = None
         try:
@@ -338,18 +342,18 @@ def main() -> int:
                 startup_timeout_s=SCORING_BASELINE_STARTUP_TIMEOUT_S,
             )
             logger.info("Scoring baseline started at %s", scoring_url)
-            for pending in pending_pass2:
-                pending.record = _apply_pass2_scoring(scoring_url, pending)
+            for pending in pending_tf:
+                pending.record = _apply_teacher_forcing(scoring_url, pending)
         except Exception as exc:
-            logger.exception("Pass 2 scoring baseline failed: %s", exc)
-            for pending in pending_pass2:
+            logger.exception("Teacher-forcing scoring baseline failed: %s", exc)
+            for pending in pending_tf:
                 pending.record = _dq_baseline_scoring_unavailable(pending.record, exc)
         finally:
             if scoring_cid:
                 stop_scoring_baseline(
                     scoring_cid, state_dir, log_label=scoring_log_label
                 )
-        update_progress(state_dir, phase="pass2_scoring_complete")
+        update_progress(state_dir, phase="teacher_forcing_complete")
         _upload_progress(state_dir)
 
     # ------------------------------------------------------------------ #
@@ -377,14 +381,14 @@ def main() -> int:
             com.image,
         )
         update_progress(state_dir, phase=f"{label}_running")
+        update_incumbent_status(state_dir, label, status="evaluating")
         _upload_progress(state_dir)
-        audit_output_texts: list[str] = []
-        audit_miner_tokens: list[list[str]] = []
+        tf_output_texts: list[str] = []
+        tf_miner_tokens: list[list[str]] = []
         record = evaluate_challenger(
             com,
-            stress_prompts,
-            audit_prompts,
-            stress_baseline,
+            eval_prompts,
+            eval_baseline,
             model_volume=model_volume,
             startup_timeout_s=600,
             per_prompt_timeout_s=120,
@@ -392,18 +396,18 @@ def main() -> int:
             current_block=block,
             state_dir=state_dir,
             log_label=label,
-            collected_audit_output_texts=audit_output_texts,
-            collected_audit_miner_tokens=audit_miner_tokens,
+            collected_tf_output_texts=tf_output_texts,
+            collected_tf_miner_tokens=tf_miner_tokens,
             max_model_len=mml,
         )
-        _queue_pass2(
+        _queue_teacher_forcing(
             record,
-            audit_output_texts,
-            audit_miner_tokens,
+            tf_output_texts,
+            tf_miner_tokens,
             log_prefix=f"{label}:{com.hotkey[:16]}",
         )
         logger.info(
-            "%s UID %d Pass 1 complete (score=%.4f, dq=%s)",
+            "%s UID %d generation complete (score=%.4f, dq=%s)",
             label,
             record.uid,
             record.score,
@@ -415,7 +419,7 @@ def main() -> int:
     ru_record = _eval_incumbent(eval_job.runner_up, "runner_up")
 
     # ------------------------------------------------------------------ #
-    # Evaluate challengers (Pass 1 + collect Pass 2 outputs)
+    # Evaluate challengers (generation + collect outputs for teacher-forcing)
     # ------------------------------------------------------------------ #
 
     challenger_records: list = []
@@ -449,32 +453,40 @@ def main() -> int:
         )
         _upload_progress(state_dir)
 
-        audit_output_texts: list[str] = []
-        audit_miner_tokens: list[list[str]] = []
+        tf_output_texts: list[str] = []
+        tf_miner_tokens: list[list[str]] = []
         record = evaluate_challenger(
             com,
-            stress_prompts,
-            audit_prompts,
-            stress_baseline,
+            eval_prompts,
+            eval_baseline,
             model_volume=model_volume,
             startup_timeout_s=600,
             per_prompt_timeout_s=120,
             n_warmup=EVAL_N_WARMUP,
             current_block=block,
             state_dir=state_dir,
-            collected_audit_output_texts=audit_output_texts,
-            collected_audit_miner_tokens=audit_miner_tokens,
+            collected_tf_output_texts=tf_output_texts,
+            collected_tf_miner_tokens=tf_miner_tokens,
             max_model_len=mml,
         )
-        _queue_pass2(
+        _queue_teacher_forcing(
             record,
-            audit_output_texts,
-            audit_miner_tokens,
+            tf_output_texts,
+            tf_miner_tokens,
             log_prefix=f"{com.hotkey}:{com.commit_block}",
         )
         challenger_persist.append((challenger_idx, record))
 
-    _batch_run_pass2_scoring()
+    _batch_run_teacher_forcing()
+
+    tf_by_key = {p.record.eval_key: p.record for p in pending_tf}
+    challenger_persist = [
+        (idx, tf_by_key.get(rec.eval_key, rec)) for idx, rec in challenger_persist
+    ]
+    if leader_record is not None:
+        leader_record = tf_by_key.get(leader_record.eval_key, leader_record)
+    if ru_record is not None:
+        ru_record = tf_by_key.get(ru_record.eval_key, ru_record)
 
     for challenger_idx, record in challenger_persist:
         outcome = state.record_evaluation(record, current_block=block)
@@ -509,18 +521,25 @@ def main() -> int:
             logger.error("Could not persist state.json; continuing eval round")
         _upload_state(state_dir)
 
-    # Re-log leader/RU after Pass 2 (records updated in place via pending_pass2)
     for label, rec in (("leader", leader_record), ("runner_up", ru_record)):
         if rec is not None:
             icon = "❌" if rec.disqualified else "📊"
             logger.info(
-                "%s %s UID %d score=%.4f (dq=%s) [after Pass 2]",
+                "%s %s UID %d score=%.4f (dq=%s) [after teacher-forcing]",
                 icon,
                 label,
                 rec.uid,
                 rec.score,
                 rec.disqualify_reason or "no",
             )
+            update_incumbent_status(
+                state_dir,
+                label,
+                status="dq" if rec.disqualified else "scored",
+                score=rec.score,
+                dq_reason=rec.disqualify_reason,
+            )
+    _upload_progress(state_dir)
 
     # ------------------------------------------------------------------ #
     # Upsert leader/RU fresh scores and rerank
@@ -585,6 +604,8 @@ def main() -> int:
 
 
 def _upload_state(state_dir: str) -> None:
+    if validator_config.SKIP_S3:
+        return
     try:
         from .sync import upload
 
@@ -595,6 +616,8 @@ def _upload_state(state_dir: str) -> None:
 
 def _upload_progress(state_dir: str) -> None:
     """Push only eval_progress.json to S3 (< 1 KB vs full state)."""
+    if validator_config.SKIP_S3:
+        return
     try:
         from .eval_progress import PROGRESS_FILE
         from .sync import upload
