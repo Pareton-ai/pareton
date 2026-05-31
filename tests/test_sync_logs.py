@@ -18,10 +18,10 @@ class TestPurgeRemoteLogs:
             {
                 "Contents": [
                     {
-                        "Key": "state-mainnet/logs/cpu_validator_20260101_120000.log",
+                        "Key": "state-mainnet/logs/cpu_20260101_120000.log",
                     },
                     {
-                        "Key": "state-mainnet/logs/cpu_validator_20260516_120000.log",
+                        "Key": "state-mainnet/logs/cpu_8303961_20260516_120000.log",
                     },
                     {"Key": "state-mainnet/logs/random_file.txt"},
                 ]
@@ -42,7 +42,7 @@ class TestPurgeRemoteLogs:
 
         assert removed == 1
         mock_delete.assert_called_once_with(
-            ["logs/cpu_validator_20260101_120000.log"],
+            ["logs/cpu_20260101_120000.log"],
             bucket="cacheon-validator",
             prefix="state-mainnet",
         )
@@ -63,3 +63,68 @@ class TestPurgeRemoteLogs:
 
         assert removed == 0
         mock_delete.assert_not_called()
+
+
+class TestDownloadSkipPrefixes:
+    def test_skips_logs_prefix_by_default(self, tmp_path):
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "Contents": [
+                    {"Key": "state-mainnet/state.json"},
+                    {"Key": "state-mainnet/logs/cpu_100_20260101_120000.log"},
+                    {"Key": "state-mainnet/container_logs/uid1_abcd_100.log"},
+                ]
+            }
+        ]
+        mock_s3 = MagicMock()
+        mock_s3.get_paginator.return_value = mock_paginator
+
+        with (
+            patch("validator.sync._client", return_value=mock_s3),
+            patch("validator.sync.S3_PREFIX", "state-mainnet"),
+            patch("validator.sync.BUCKET", "cacheon-validator"),
+        ):
+            from validator.sync import download
+
+            count = download(tmp_path, skip_prefixes=("logs/",))
+
+        assert count == 2
+        assert mock_s3.download_file.call_count == 2
+        downloaded_locals = {
+            call.args[2] for call in mock_s3.download_file.call_args_list
+        }
+        assert str(tmp_path / "state.json") in downloaded_locals
+        assert str(tmp_path / "container_logs/uid1_abcd_100.log") in downloaded_locals
+        assert not (tmp_path / "logs/cpu_100_20260101_120000.log").exists()
+
+    def test_skip_cpu_logs_only_when_pulling_gpu_logs(self, tmp_path):
+        mock_paginator = MagicMock()
+        mock_paginator.paginate.return_value = [
+            {
+                "Contents": [
+                    {"Key": "state-mainnet/logs/cpu_100_20260101_120000.log"},
+                    {"Key": "state-mainnet/logs/gpu_100_20260101_130000.log"},
+                ]
+            }
+        ]
+        mock_s3 = MagicMock()
+        mock_s3.get_paginator.return_value = mock_paginator
+
+        with (
+            patch("validator.sync._client", return_value=mock_s3),
+            patch("validator.sync.S3_PREFIX", "state-mainnet"),
+        ):
+            from validator.sync import download
+
+            count = download(
+                tmp_path,
+                only=["logs/"],
+                skip_prefixes=("logs/cpu_",),
+            )
+
+        assert count == 1
+        mock_s3.download_file.assert_called_once()
+        assert mock_s3.download_file.call_args.args[2].endswith(
+            "logs/gpu_100_20260101_130000.log"
+        )

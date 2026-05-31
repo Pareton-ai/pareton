@@ -24,6 +24,7 @@ import logging
 import os
 import signal
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import config as validator_config
@@ -46,6 +47,8 @@ from .state import ValidatorState, WinnerRecord
 
 logger = logging.getLogger(__name__)
 
+_last_cpu_log_block: int | None = None
+
 WEIGHTS_REFRESH_BLOCKS: int = int(
     os.environ.get("CACHEON_WEIGHTS_REFRESH_BLOCKS", "360")
 )
@@ -58,11 +61,29 @@ validator stays active in consensus even when no new GPU eval results arrive."""
 # --------------------------------------------------------------------------- #
 
 
-def _configure_logging(verbose: bool, state_dir: str) -> None:
-    from datetime import datetime
+def _set_log_file(state_dir: str, block: int, *, level: int) -> None:
+    """Point the root logger at ``logs/cpu_{block}_{ts}.log``."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, logging.FileHandler):
+            root.removeHandler(handler)
+            handler.close()
 
+    logs_dir = Path(state_dir) / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = logs_dir / f"cpu_{block}_{ts}.log"
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(level)
+    fh.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    )
+    root.addHandler(fh)
+    logger.info("Logging to %s", log_path)
+
+
+def _configure_logging(verbose: bool, state_dir: str) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
 
     logging.basicConfig(
         level=level,
@@ -70,14 +91,7 @@ def _configure_logging(verbose: bool, state_dir: str) -> None:
         force=True,
     )
 
-    logs_dir = Path(state_dir) / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = logs_dir / f"cpu_validator_{ts}.log"
-    fh = logging.FileHandler(log_path, encoding="utf-8")
-    fh.setLevel(level)
-    fh.setFormatter(fmt)
-    logging.getLogger().addHandler(fh)
+    _set_log_file(state_dir, 0, level=level)
 
     for name, lg in list(logging.Logger.manager.loggerDict.items()):
         if isinstance(lg, logging.Logger) and name.startswith("validator"):
@@ -98,7 +112,14 @@ def _configure_logging(verbose: bool, state_dir: str) -> None:
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    logger.info("Logging to %s", log_path)
+
+def _rotate_log_for_block(state_dir: str, block: int) -> None:
+    """Start a fresh CPU log file keyed to the eval round block."""
+    global _last_cpu_log_block
+    if _last_cpu_log_block == block:
+        return
+    _last_cpu_log_block = block
+    _set_log_file(state_dir, block, level=logging.getLogger().level)
 
 
 def _needs_weight_set(state: ValidatorState, current_block: int) -> str | None:
@@ -128,18 +149,42 @@ def _reload_state(state: ValidatorState, state_dir: str) -> None:
     state.last_weights_set_block = fresh.last_weights_set_block
 
 
-_CPU_UPLOAD_ONLY = ["eval_job.json", "eval_progress.json", "logs/"]
-"""CPU never uploads state.json -- the GPU is the sole writer of eval
-results and winner. Prevents the CPU from overwriting GPU results on S3."""
+_CPU_UPLOAD_PRE_EVAL = ["eval_job.json", "eval_progress.json"]
+"""Mid-tick upload before GPU eval. Excludes ``logs/`` (uploaded after tick)."""
+
+_CPU_LOGS_UPLOAD = ["logs/"]
+
+# Never download validator logs onto the running CPU process (open FileHandler).
+_DOWNLOAD_SKIP_LOGS: tuple[str, ...] = ("logs/",)
+
+# Remote GPU pod logs only; never overwrite local cpu_* files from S3.
+_DOWNLOAD_SKIP_CPU_LOGS: tuple[str, ...] = ("logs/cpu_",)
+
+
+def _flush_log_handlers() -> None:
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
 
 
 def _try_upload(state_dir: str) -> None:
     try:
         from .sync import upload
 
-        upload(state_dir, only=_CPU_UPLOAD_ONLY)
+        upload(state_dir, only=_CPU_UPLOAD_PRE_EVAL)
     except Exception as exc:
         logger.error("S3 upload failed: %s", exc)
+
+
+def _try_upload_logs(state_dir: str) -> None:
+    """Push complete validator logs to S3 after a tick finishes."""
+    _flush_log_handlers()
+    try:
+        from .sync import upload
+
+        upload(state_dir, only=_CPU_LOGS_UPLOAD)
+    except Exception as exc:
+        logger.error("S3 log upload failed: %s", exc)
 
 
 def _clean_stale_eval_job(state: ValidatorState, state_dir: str) -> bool:
@@ -312,7 +357,7 @@ def run_tick(
     try:
         from .sync import download
 
-        download(state_dir)
+        download(state_dir, skip_prefixes=_DOWNLOAD_SKIP_LOGS)
     except Exception as exc:
         logger.error("S3 download failed: %s -- using local state", exc)
 
@@ -544,6 +589,7 @@ def run_tick(
                     else None
                 ),
             )
+            _rotate_log_for_block(state_dir, current_block)
             eval_job.save(state_dir)
             state.save(state_dir)
             dirty = True
@@ -565,23 +611,31 @@ def run_tick(
             from .gpu_orchestrator import run_gpu_eval
 
             success = run_gpu_eval(state_dir, eval_job)
+            clear_stale_progress = not success
             try:
                 from .sync import download
 
                 if success:
-                    download(state_dir)
+                    download(state_dir, skip_prefixes=_DOWNLOAD_SKIP_CPU_LOGS)
                     _reload_state(state, state_dir)
                 else:
                     logger.info(
-                        "GPU eval failed; downloading logs from S3 (container_logs/, logs/)"
+                        "GPU eval failed; downloading remote artifacts from S3 "
+                        "(container_logs/, gpu logs only)"
                     )
-                    download(state_dir, only=["container_logs/", "logs/"])
+                    download(state_dir, only=["container_logs/"])
+                    download(
+                        state_dir,
+                        only=["logs/"],
+                        skip_prefixes=_DOWNLOAD_SKIP_CPU_LOGS,
+                    )
             except Exception as exc:
                 logger.error("Post-eval S3 download failed: %s", exc)
+                clear_stale_progress = True
+            if clear_stale_progress:
+                from .eval_progress import clear_progress
 
-            from .eval_progress import clear_progress
-
-            clear_progress(state_dir)
+                clear_progress(state_dir)
 
     return {
         "block": current_block,
@@ -706,6 +760,8 @@ def main(argv: list[str] | None = None) -> int:
                 logger.exception(
                     "❌ Tick failed after %.1fs: %s", time.time() - tick_start, exc
                 )
+            finally:
+                _try_upload_logs(args.state_dir)
 
             time.sleep(args.poll_interval)
     except KeyboardInterrupt:

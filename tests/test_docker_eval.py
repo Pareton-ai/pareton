@@ -966,10 +966,51 @@ class TestEvaluateChallenger:
         assert len(record.per_prompt) == 2
         assert record.per_prompt[0]["ttft_s"] == 0.5
         assert record.per_prompt[0]["e2e_s"] == pytest.approx(1.0)
+        assert record.per_prompt[0]["baseline_e2e_s"] == pytest.approx(2.0)
         mock_pull.assert_called_once()
         mock_stop.assert_called_once_with("cid123")
         mock_reset.assert_called_once()
         mock_capture_logs.assert_called_once()
+
+    @patch("validator.docker_eval.capture_container_logs")
+    @patch("validator.docker_eval.reset_gpu_state")
+    @patch("validator.docker_eval.stop_and_remove")
+    @patch("validator.docker_eval.wait_for_health")
+    @patch(
+        "validator.docker_eval.start_container",
+        return_value=("cid123", "http://172.18.0.2:8000"),
+    )
+    @patch("validator.docker_eval.pull_image")
+    def test_on_pulled_after_pull_image(
+        self,
+        mock_pull,
+        mock_start,
+        mock_health,
+        mock_stop,
+        mock_reset,
+        mock_capture_logs,
+    ):
+        calls: list[str] = []
+
+        def on_pulled() -> None:
+            calls.append("pulled")
+
+        with patch("validator.docker_eval.send_prompt") as mock_send:
+            mock_send.side_effect = Exception("stop after pull")
+            evaluate_challenger(
+                _make_commitment(),
+                _make_eval_prompts(n=1, n_warmup=0),
+                _make_baseline(n_prompts=1),
+                model_volume="/models",
+                startup_timeout_s=600,
+                per_prompt_timeout_s=120,
+                n_warmup=0,
+                current_block=500,
+                on_pulled=on_pulled,
+            )
+
+        assert calls == ["pulled"]
+        mock_pull.assert_called_once()
 
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
@@ -1434,6 +1475,7 @@ class TestRunBaselineErrorCheck:
                 model_volume="/models",
                 gpu_count=4,
                 block_hash="0xabc",
+                evaluation_block=100,
                 startup_timeout_s=600,
                 per_prompt_timeout_s=120,
                 n_warmup=2,

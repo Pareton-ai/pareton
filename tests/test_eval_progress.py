@@ -9,9 +9,11 @@ from unittest.mock import patch
 
 import pytest
 
+from api.helpers.eval_progress import progress_expired
 from validator.eval_progress import (
     PROGRESS_FILE,
     clear_progress,
+    complete_progress,
     update_challenger_status,
     update_incumbent_status,
     update_progress,
@@ -114,6 +116,23 @@ def test_update_progress_preserves_gpu(tmp_path):
     update_progress(tmp_path, phase="gpu_setup")
     data = _read(tmp_path)
     assert data["gpu"]["pod_id"] == "wrk-1"
+
+
+def test_update_progress_resets_complete_status(tmp_path):
+    update_progress(
+        tmp_path,
+        phase="challengers_found",
+        round_block=100,
+        challengers=SAMPLE_CHALLENGERS,
+    )
+    complete_progress(tmp_path)
+    assert _read(tmp_path)["status"] == "complete"
+
+    update_progress(tmp_path, phase="gpu_searching")
+    data = _read(tmp_path)
+    assert data["status"] == "running"
+    assert data["phase"] == "gpu_searching"
+    assert "completed_at" not in data
 
 
 # --------------------------------------------------------------------------- #
@@ -230,6 +249,44 @@ def test_update_incumbent_status_bad_role(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# complete_progress
+# --------------------------------------------------------------------------- #
+
+
+def test_complete_progress_sets_status(tmp_path):
+    update_progress(
+        tmp_path,
+        phase="challengers_found",
+        round_block=1,
+        challengers=SAMPLE_CHALLENGERS,
+    )
+    update_challenger_status(tmp_path, 0, status="scored", score=0.05)
+    complete_progress(tmp_path)
+    data = _read(tmp_path)
+    assert data["status"] == "complete"
+    assert data["phase"] == "eval_complete"
+    assert data["completed_at"] > 0
+    assert data["challengers"][0]["score"] == 0.05
+
+
+def test_progress_expired_only_for_complete(tmp_path):
+    update_progress(
+        tmp_path,
+        phase="gpu_searching",
+        round_block=1,
+        challengers=SAMPLE_CHALLENGERS,
+    )
+    assert progress_expired(_read(tmp_path)) is False
+
+    complete_progress(tmp_path)
+    data = _read(tmp_path)
+    assert progress_expired(data) is False
+
+    data["completed_at"] = time.time() - 3600
+    assert progress_expired(data) is True
+
+
+# --------------------------------------------------------------------------- #
 # clear_progress
 # --------------------------------------------------------------------------- #
 
@@ -339,3 +396,32 @@ class TestEvalProgressAPI:
         resp = self.client.get("/api/eval-progress")
         body = resp.json()
         assert body.get("possibly_stale") is True
+
+    def test_complete_status(self):
+        update_progress(
+            self.state_dir,
+            phase="challengers_found",
+            round_block=100,
+            challengers=SAMPLE_CHALLENGERS,
+        )
+        complete_progress(self.state_dir)
+        resp = self.client.get("/api/eval-progress")
+        body = resp.json()
+        assert body["status"] == "complete"
+        assert body["phase"] == "eval_complete"
+
+    def test_idle_when_complete_expired(self):
+        update_progress(
+            self.state_dir,
+            phase="challengers_found",
+            round_block=100,
+            challengers=SAMPLE_CHALLENGERS,
+        )
+        complete_progress(self.state_dir)
+        path = self.state_dir / PROGRESS_FILE
+        data = json.loads(path.read_text())
+        data["completed_at"] = time.time() - 3600
+        path.write_text(json.dumps(data))
+
+        resp = self.client.get("/api/eval-progress")
+        assert resp.json() == {"status": "idle"}

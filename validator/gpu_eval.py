@@ -46,6 +46,7 @@ from .state import EvaluationRecord, ValidatorState, append_winner_history
 SCORING_BASELINE_STARTUP_TIMEOUT_S = 600
 from .eval_progress import (
     clear_progress,
+    complete_progress,
     purge_old_logs,
     update_challenger_status,
     update_incumbent_status,
@@ -64,12 +65,12 @@ class _PendingTeacherForcing:
     log_prefix: str
 
 
-def _configure_logging(state_dir: str) -> str:
+def _configure_logging(state_dir: str, block: int) -> str:
     """Configure logging and return the run timestamp (for paired artifact names)."""
     logs_dir = Path(state_dir) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = logs_dir / f"gpu_eval_{ts}.log"
+    log_path = logs_dir / f"gpu_{block}_{ts}.log"
 
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     logging.basicConfig(
@@ -98,7 +99,11 @@ def _delete_eval_job(state_dir: str) -> None:
 
 def main() -> int:
     state_dir = str(validator_config.STATE_DIR)
-    eval_ts = _configure_logging(state_dir)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        force=True,
+    )
     purge_old_logs(state_dir)
 
     model_volume = validator_config.MODEL_VOLUME
@@ -167,9 +172,11 @@ def main() -> int:
     )
     if not has_work:
         logger.info("No challengers/leader/runner_up in eval job, nothing to do")
+        clear_progress(state_dir)
         return 0
 
     block = eval_job.block
+    eval_ts = _configure_logging(state_dir, block)
     block_hash = eval_job.block_hash
     logger.info(
         "Eval job: block=%d, block_hash=%s, %d challenger(s), leader=%s, runner_up=%s",
@@ -221,6 +228,7 @@ def main() -> int:
             model_volume=model_volume,
             gpu_count=gpu_count,
             block_hash=block_hash,
+            evaluation_block=block,
             state_dir=state_dir,
         )
     except Exception as exc:
@@ -395,7 +403,7 @@ def main() -> int:
             n_warmup=EVAL_N_WARMUP,
             current_block=block,
             state_dir=state_dir,
-            log_label=label,
+            log_label=f"{label}_{block}",
             collected_tf_output_texts=tf_output_texts,
             collected_tf_miner_tokens=tf_miner_tokens,
             max_model_len=mml,
@@ -413,6 +421,13 @@ def main() -> int:
             record.score,
             record.disqualify_reason or "no",
         )
+        if record.disqualified:
+            update_incumbent_status(
+                state_dir, label, status="dq", dq_reason=record.disqualify_reason
+            )
+        else:
+            update_incumbent_status(state_dir, label, status="awaiting_correctness")
+        _upload_progress(state_dir)
         return record
 
     leader_record = _eval_incumbent(eval_job.leader, "leader")
@@ -453,6 +468,12 @@ def main() -> int:
         )
         _upload_progress(state_dir)
 
+        def _on_challenger_pulled() -> None:
+            update_challenger_status(
+                state_dir, challenger_idx, status="evaluating", detail="evaluating"
+            )
+            _upload_progress(state_dir)
+
         tf_output_texts: list[str] = []
         tf_miner_tokens: list[list[str]] = []
         record = evaluate_challenger(
@@ -468,6 +489,7 @@ def main() -> int:
             collected_tf_output_texts=tf_output_texts,
             collected_tf_miner_tokens=tf_miner_tokens,
             max_model_len=mml,
+            on_pulled=_on_challenger_pulled,
         )
         _queue_teacher_forcing(
             record,
@@ -475,6 +497,22 @@ def main() -> int:
             tf_miner_tokens,
             log_prefix=f"{com.hotkey}:{com.commit_block}",
         )
+        if record.disqualified:
+            update_challenger_status(
+                state_dir,
+                challenger_idx,
+                status="dq",
+                dq_reason=record.disqualify_reason,
+                detail="disqualified",
+            )
+        else:
+            update_challenger_status(
+                state_dir,
+                challenger_idx,
+                status="awaiting_correctness",
+                detail="awaiting_correctness",
+            )
+        _upload_progress(state_dir)
         challenger_persist.append((challenger_idx, record))
 
     _batch_run_teacher_forcing()
@@ -598,8 +636,8 @@ def main() -> int:
     logger.info("GPU eval complete")
     _delete_eval_job(state_dir)
     _upload_state(state_dir)
-    update_progress(state_dir, phase="eval_complete")
-    clear_progress(state_dir)
+    complete_progress(state_dir)
+    _upload_progress(state_dir)
     return 0
 
 

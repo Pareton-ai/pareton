@@ -207,11 +207,15 @@ def download(
     bucket: str = "",
     prefix: str = "",
     only: list[str] | None = None,
+    skip_prefixes: tuple[str, ...] = (),
 ) -> int:
     """Download files from S3 prefix into ``state_dir``. Returns file count.
 
     When *only* is provided, only relative paths matching those prefixes are
     downloaded. E.g. ``only=["logs/", "container_logs/"]``.
+
+    *skip_prefixes* drops matching relative paths (e.g. ``("logs/",)`` so the
+    CPU validator never clobbers its open log file from S3).
     """
     bucket = bucket or BUCKET
     prefix = prefix or S3_PREFIX
@@ -245,6 +249,8 @@ def download(
             key = obj["Key"]
             rel = key[len(prefix_dir) :] if prefix_dir else key
             if not rel or _should_skip(rel):
+                continue
+            if skip_prefixes and any(rel.startswith(p) for p in skip_prefixes):
                 continue
             if only and not any(rel == o or rel.startswith(o) for o in only):
                 continue

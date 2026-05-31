@@ -107,6 +107,7 @@ class PerPromptResult:
     e2e_s: float
     output_tokens: int
     token_match_rate: float
+    baseline_e2e_s: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,6 +119,7 @@ class PerPromptResult:
             e2e_s=float(data.get("e2e_s", 0.0)),
             output_tokens=int(data["output_tokens"]),
             token_match_rate=float(data["token_match_rate"]),
+            baseline_e2e_s=float(data.get("baseline_e2e_s", 0.0)),
         )
 
 
