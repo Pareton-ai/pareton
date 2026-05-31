@@ -90,7 +90,7 @@ def get_container_log(label: str):
     tags=["Logs"],
     summary="List validator logs",
     description=(
-        "Available validator process log files (cpu_{block}_{ts} and gpu_{block}_{ts}). "
+        "Available validator process log files (cpu_idle_{ts}, cpu_{block}_{ts}, gpu_{block}_{ts}). "
         "Use a label with /api/validator-log/{label} to fetch the raw text."
     ),
 )
@@ -123,7 +123,7 @@ def list_validator_logs():
     summary="Raw validator log",
     description=(
         "Full stdout/stderr from a validator process run. "
-        "Returns plain text. Label format: cpu_{block}_{YYYYMMDD}_{HHMMSS} or gpu_{block}_{YYYYMMDD}_{HHMMSS}."
+        "Returns plain text. Label format: cpu_idle_{YYYYMMDD}_{HHMMSS}, cpu_{block}_{YYYYMMDD}_{HHMMSS}, or gpu_{block}_{YYYYMMDD}_{HHMMSS}."
     ),
 )
 def get_validator_log(label: str):

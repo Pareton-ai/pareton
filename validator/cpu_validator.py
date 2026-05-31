@@ -35,6 +35,7 @@ from .chain import (
     PaymentVerifyOutcome,
     build_commitments,
     build_competition_weights,
+    compute_emission_pool_frac,
     fetch_metagraph,
     fetch_revealed_commitments,
     preflight_check,
@@ -61,8 +62,8 @@ validator stays active in consensus even when no new GPU eval results arrive."""
 # --------------------------------------------------------------------------- #
 
 
-def _set_log_file(state_dir: str, block: int, *, level: int) -> None:
-    """Point the root logger at ``logs/cpu_{block}_{ts}.log``."""
+def _set_log_file(state_dir: str, block: int | None, *, level: int) -> None:
+    """Point the root logger at ``logs/cpu_idle_{ts}.log`` or ``logs/cpu_{block}_{ts}.log``."""
     root = logging.getLogger()
     for handler in list(root.handlers):
         if isinstance(handler, logging.FileHandler):
@@ -72,7 +73,10 @@ def _set_log_file(state_dir: str, block: int, *, level: int) -> None:
     logs_dir = Path(state_dir) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = logs_dir / f"cpu_{block}_{ts}.log"
+    if block is None:
+        log_path = logs_dir / f"cpu_idle_{ts}.log"
+    else:
+        log_path = logs_dir / f"cpu_{block}_{ts}.log"
     fh = logging.FileHandler(log_path, encoding="utf-8")
     fh.setLevel(level)
     fh.setFormatter(
@@ -91,7 +95,7 @@ def _configure_logging(verbose: bool, state_dir: str) -> None:
         force=True,
     )
 
-    _set_log_file(state_dir, 0, level=level)
+    _set_log_file(state_dir, None, level=level)
 
     for name, lg in list(logging.Logger.manager.loggerDict.items()):
         if isinstance(lg, logging.Logger) and name.startswith("validator"):
@@ -442,13 +446,21 @@ def run_tick(
         w_dense = build_competition_weights(
             n_uids=len(metagraph.hotkeys),
             winner_uid=state.winner.uid,
-            winner_score=state.winner.score,
             runner_up_uid=runner_up_uid,
+            current_block=current_block,
         )
         burn_uid = validator_config.BURN_UID
+        emission_frac = compute_emission_pool_frac(current_block)
+        override_note = (
+            " (CACHEON_EMISSION_FRAC_OVERRIDE)"
+            if validator_config.EMISSION_FRAC_OVERRIDE is not None
+            else ""
+        )
         logger.info(
-            "⚖️  weight vector: winner=%d (%.4f), runner_up=%s (%.4f),"
-            " burn_uid=%d (%.4f), n_uids=%d",
+            "⚖️  weight vector: emission_frac=%.4f%s, winner=%d (%.4f),"
+            " runner_up=%s (%.4f), burn_uid=%d (%.4f), n_uids=%d",
+            emission_frac,
+            override_note,
             state.winner.uid,
             w_dense[state.winner.uid] if state.winner.uid < len(w_dense) else 0.0,
             runner_up_uid,

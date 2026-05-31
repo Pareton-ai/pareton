@@ -24,6 +24,7 @@ from .chain import (
     CommitmentRecord,
     build_commitments,
     build_competition_weights,
+    compute_emission_pool_frac,
     parse_commitment_data,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "WinnerRecord",
     "build_commitments",
     "build_competition_weights",
+    "compute_emission_pool_frac",
     "parse_commitment_data",
     "select_challengers",
 ]

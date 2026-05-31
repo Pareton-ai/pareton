@@ -214,23 +214,47 @@ def build_commitments(
     return out
 
 
+def compute_emission_pool_frac(current_block: int) -> float:
+    """Return the fraction of total emission allocated to the competition pool.
+
+    Pre-ramp (< start block): 2%. Ramp: linear 10% to 100% over the mainnet
+    block window. Post-ramp: 100%. Optional ``EMISSION_FRAC_OVERRIDE`` env
+    replaces the schedule when set by validator operators.
+    """
+    override = validator_config.EMISSION_FRAC_OVERRIDE
+    if override is not None:
+        return max(0.0, min(1.0, override))
+
+    start_block = validator_config.EMISSION_RAMP_START_BLOCK
+    end_block = validator_config.EMISSION_RAMP_END_BLOCK
+    if current_block < start_block:
+        return validator_config.EMISSION_PRE_RAMP_FRAC
+    if current_block >= end_block:
+        return validator_config.EMISSION_RAMP_END_FRAC
+
+    span = end_block - start_block
+    progress = (current_block - start_block) / span
+    start_frac = validator_config.EMISSION_RAMP_START_FRAC
+    end_frac = validator_config.EMISSION_RAMP_END_FRAC
+    return start_frac + (end_frac - start_frac) * progress
+
+
 def build_competition_weights(
     n_uids: int,
     winner_uid: int,
-    winner_score: float,
+    current_block: int,
     runner_up_uid: int | None = None,
     *,
     burn_uid: int = validator_config.BURN_UID,
     winner_share: float = validator_config.WINNER_WEIGHT_SHARE,
     runner_up_share: float = validator_config.RUNNER_UP_WEIGHT_SHARE,
-    score_target: float = validator_config.SCORE_EMISSION_TARGET,
 ) -> list[float]:
-    """Score-scaled weight vector with winner, optional runner-up, and burn UID.
+    """Block-scheduled weight vector with winner, optional runner-up, and burn UID.
 
-    ``comp_frac = min(1.0, winner_score / score_target)`` controls how much
-    of total emission goes to the competition pool. The remainder goes to
-    ``burn_uid``. Within the competition pool, ``winner_share`` and
-    ``runner_up_share`` split the allocation.
+    ``compute_emission_pool_frac(current_block)`` controls how much of total
+    emission goes to the competition pool. The remainder goes to ``burn_uid``.
+    Within the competition pool, ``winner_share`` and ``runner_up_share`` split
+    the allocation.
 
     When there is no valid runner-up, the winner receives 100% of the
     competition pool. If ``burn_uid`` collides with the winner or runner-up,
@@ -239,7 +263,7 @@ def build_competition_weights(
     if winner_uid < 0:
         raise ValueError(f"winner_uid must be non-negative, got {winner_uid}")
 
-    comp = min(1.0, winner_score / score_target) if score_target > 0 else 1.0
+    comp = compute_emission_pool_frac(current_block)
     burn = 1.0 - comp
 
     has_runner_up = runner_up_uid is not None and runner_up_uid != winner_uid

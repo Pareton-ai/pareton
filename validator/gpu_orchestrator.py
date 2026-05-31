@@ -92,7 +92,7 @@ def _build_env_exports(handle: PodHandle) -> str:
         "CACHEON_S3_PREFIX": validator_config.S3_PREFIX,
         "CACHEON_GPU_COUNT": str(handle.gpu_count),
         "CACHEON_MODEL_VOLUME": "/workspace/models/Qwen2.5-72B-Instruct",
-        "CACHEON_BASELINE_IMAGE": "vllm/vllm-openai:latest",
+        "CACHEON_BASELINE_IMAGE": validator_config.BASELINE_IMAGE,
         "CACHEON_NESTED_DIN": "0" if handle.provider == "shadeform" else "1",
     }
     hf_token = validator_config.HF_TOKEN

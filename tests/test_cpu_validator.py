@@ -661,6 +661,16 @@ class TestRotateLogForBlock:
         assert list((tmp_path / "logs").glob("cpu_8305628_*.log"))
         assert list((tmp_path / "logs").glob("cpu_8305700_*.log"))
 
+    def test_idle_log_on_startup(self, tmp_path):
+        import logging
+
+        logging.basicConfig(level=logging.INFO, force=True)
+        from validator.cpu_validator import _set_log_file
+
+        _set_log_file(str(tmp_path), None, level=logging.INFO)
+        assert len(list((tmp_path / "logs").glob("cpu_idle_*.log"))) == 1
+        assert not list((tmp_path / "logs").glob("cpu_0_*.log"))
+
 
 class TestCpuLogRotationOnTick:
     @patch("validator.cpu_validator._try_upload", _noop)

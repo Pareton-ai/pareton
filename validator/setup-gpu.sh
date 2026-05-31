@@ -258,6 +258,16 @@ fi
 BASELINE_IMAGE="${CACHEON_BASELINE_IMAGE:-vllm/vllm-openai:v0.22.0}"
 SCORING_IMAGE="${CACHEON_SCORING_IMAGE:-vllm/vllm-openai:v0.9.2}"
 
+# Failed pulls can leave overlay2 tmp write-sets behind; retries then hit
+# "failed to register layer: rename ... file exists".
+_cleanup_docker_pull_artifacts() {
+  local ref="$1"
+  docker image rm -f "$ref" 2>/dev/null || true
+  if [[ -d "$DOCKER_DATA_ROOT/image/overlay2/layerdb/tmp" ]]; then
+    rm -rf "$DOCKER_DATA_ROOT/image/overlay2/layerdb/tmp/"* 2>/dev/null || true
+  fi
+}
+
 ensure_docker_image() {
   local ref="$1"
   if docker image inspect "$ref" >/dev/null 2>&1; then
@@ -265,17 +275,19 @@ ensure_docker_image() {
     return 0
   fi
   local attempt
-  for attempt in 1 2 3; do
-    echo "Pulling $ref (attempt $attempt/3)..."
-    if docker pull "$ref"; then
+  for attempt in 1 2; do
+    echo "Pulling $ref (attempt $attempt/2)..."
+    if docker pull "$ref" 2>&1; then
       return 0
     fi
-    if [[ "$attempt" -lt 3 ]]; then
-      echo "Pull failed, retrying in 10s..."
-      sleep 10
+    if [[ "$attempt" -lt 2 ]]; then
+      echo "Pull failed, cleaning partial layers and retrying in 30s..."
+      _cleanup_docker_pull_artifacts "$ref"
+      sleep 30
     fi
   done
-  echo "ERROR: failed to pull $ref after 3 attempts"
+  _cleanup_docker_pull_artifacts "$ref"
+  echo "ERROR: failed to pull $ref after 2 attempts"
   return 1
 }
 
