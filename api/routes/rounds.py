@@ -34,7 +34,10 @@ def list_rounds():
                 "uid": e.get("uid"),
                 "hotkey": e.get("hotkey"),
                 "image": e.get("image"),
+                "commit_block": e.get("commit_block"),
                 "score": e.get("score"),
+                "speed_improvement": e.get("speed_improvement"),
+                "token_match_rate": e.get("token_match_rate"),
                 "disqualified": e.get("disqualified"),
                 "disqualify_reason": e.get("disqualify_reason"),
             }

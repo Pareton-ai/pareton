@@ -92,6 +92,8 @@ def purge_old_logs(
 
 
 PROGRESS_FILE = "eval_progress.json"
+"""How long a finished round stays visible in ``eval_progress.json`` before expiring."""
+COMPLETE_LINGER_S = 900  # 15 minutes
 
 
 def _read_progress(state_dir: str | os.PathLike) -> dict[str, Any]:
@@ -179,6 +181,8 @@ def update_progress(
                 }
             payload["phase"] = phase
             payload["detail"] = detail
+            payload["status"] = "running"
+            payload.pop("completed_at", None)
             if round_block is not None:
                 payload["round_block"] = round_block
             payload.setdefault("steps", []).append(step)
@@ -274,6 +278,22 @@ def update_incumbent_status(
         _write_progress(state_dir, payload)
     except Exception:
         logger.debug("Failed to update incumbent status", exc_info=True)
+
+
+def complete_progress(state_dir: str | os.PathLike) -> None:
+    """Mark the current round finished but keep the file for dashboard linger."""
+    try:
+        payload = _read_progress(state_dir)
+        if not payload:
+            return
+        now = time.time()
+        payload["status"] = "complete"
+        payload["phase"] = "eval_complete"
+        payload["completed_at"] = now
+        payload.setdefault("steps", []).append({"ts": now, "phase": "eval_complete"})
+        _write_progress(state_dir, payload)
+    except Exception:
+        logger.debug("Failed to complete eval progress", exc_info=True)
 
 
 def clear_progress(state_dir: str | os.PathLike) -> None:

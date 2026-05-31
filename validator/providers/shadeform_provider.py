@@ -256,7 +256,7 @@ class ShadeformProvider:
                 shade_type,
                 volume_id,
             )
-            logger.info("Dashboard: %s/%s", SHADEFORM_DASHBOARD, instance_id)
+            logger.info("🔗 Dashboard:  %s/%s", SHADEFORM_DASHBOARD, instance_id)
 
             return PodHandle(
                 provider="shadeform",

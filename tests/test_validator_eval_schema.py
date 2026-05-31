@@ -147,8 +147,18 @@ class TestPerPromptResult:
             e2e_s=12.5,
             output_tokens=256,
             token_match_rate=0.998,
+            baseline_e2e_s=13.2,
         )
         assert PerPromptResult.from_dict(r.to_dict()) == r
+
+    def test_from_dict_defaults_baseline_e2e(self):
+        data = {
+            "ttft_s": 0.04,
+            "e2e_s": 12.0,
+            "output_tokens": 256,
+            "token_match_rate": 0.998,
+        }
+        assert PerPromptResult.from_dict(data).baseline_e2e_s == 0.0
 
 
 # --------------------------------------------------------------------------- #

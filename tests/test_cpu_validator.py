@@ -13,10 +13,16 @@ import pytest
 from validator.chain import CommitmentRecord
 from validator.cpu_validator import (
     WEIGHTS_REFRESH_BLOCKS,
+    _CPU_LOGS_UPLOAD,
+    _CPU_UPLOAD_PRE_EVAL,
     _clean_stale_eval_job,
     _needs_weight_set,
+    _rotate_log_for_block,
+    _try_upload,
+    _try_upload_logs,
     run_tick,
 )
+import validator.cpu_validator as cpu_validator_module
 from validator.eval_progress import purge_old_logs
 from validator.eval_schema import EVAL_JOB_FILE, ChallengerInfo, EvalJob
 from validator.state import EvaluationRecord, ValidatorState, WinnerRecord
@@ -577,6 +583,166 @@ class TestRunTickS3Failure:
 
 
 # --------------------------------------------------------------------------- #
+# run_tick -- GPU eval failure clears stale progress
+# --------------------------------------------------------------------------- #
+
+
+class TestGpuEvalFailureClearsProgress:
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", _noop)
+    @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=False)
+    @patch("validator.cpu_validator.validator_config.AUTO_RENT", True)
+    @patch("validator.eval_progress.clear_progress")
+    def test_clears_progress_when_gpu_eval_fails(
+        self, mock_clear, mock_run_gpu, tmp_path
+    ):
+        st = FakeSubtensor(
+            hotkeys=["hk0"],
+            revealed={"hk0": [(100, _commit_json())]},
+        )
+        state = ValidatorState()
+        state.save(tmp_path)
+
+        run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_clear.assert_called_once_with(str(tmp_path))
+
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", side_effect=RuntimeError("S3 down"))
+    @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=True)
+    @patch("validator.cpu_validator.validator_config.AUTO_RENT", True)
+    @patch("validator.eval_progress.clear_progress")
+    def test_clears_progress_when_success_download_fails(
+        self, mock_clear, mock_run_gpu, mock_dl, tmp_path
+    ):
+        st = FakeSubtensor(
+            hotkeys=["hk0"],
+            revealed={"hk0": [(100, _commit_json())]},
+        )
+        state = ValidatorState()
+        state.save(tmp_path)
+
+        run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_clear.assert_called_once_with(str(tmp_path))
+
+
+# --------------------------------------------------------------------------- #
+# CPU log rotation (eval round only)
+# --------------------------------------------------------------------------- #
+
+
+class TestRotateLogForBlock:
+    def setup_method(self) -> None:
+        cpu_validator_module._last_cpu_log_block = None
+
+    def test_skips_same_block(self, tmp_path):
+        _rotate_log_for_block(str(tmp_path), 8305628)
+        _rotate_log_for_block(str(tmp_path), 8305628)
+        assert len(list((tmp_path / "logs").glob("cpu_8305628_*.log"))) == 1
+
+    def test_rotates_on_new_block(self, tmp_path):
+        _rotate_log_for_block(str(tmp_path), 8305628)
+        _rotate_log_for_block(str(tmp_path), 8305700)
+        assert list((tmp_path / "logs").glob("cpu_8305628_*.log"))
+        assert list((tmp_path / "logs").glob("cpu_8305700_*.log"))
+
+
+class TestCpuLogRotationOnTick:
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", _noop)
+    @patch("validator.cpu_validator._rotate_log_for_block")
+    def test_quiet_tick_does_not_rotate(self, mock_rotate, tmp_path):
+        st = FakeSubtensor(hotkeys=["hk0"], revealed={})
+        state = ValidatorState()
+        state.save(tmp_path)
+
+        run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_rotate.assert_not_called()
+
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", _noop)
+    @patch("validator.cpu_validator._rotate_log_for_block")
+    def test_rotates_when_eval_job_written(self, mock_rotate, tmp_path):
+        st = FakeSubtensor(
+            hotkeys=["hk0"],
+            revealed={"hk0": [(100, _commit_json())]},
+        )
+        state = ValidatorState()
+        state.save(tmp_path)
+
+        run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_rotate.assert_called_once_with(str(tmp_path), 1000)
+
+
+# --------------------------------------------------------------------------- #
+# S3 upload / download log sync
+# --------------------------------------------------------------------------- #
+
+
+class TestCpuValidatorLogSync:
+    @patch("validator.sync.upload")
+    def test_pre_eval_upload_excludes_logs(self, mock_upload, tmp_path):
+        _try_upload(str(tmp_path))
+        mock_upload.assert_called_once_with(str(tmp_path), only=_CPU_UPLOAD_PRE_EVAL)
+        assert "logs/" not in _CPU_UPLOAD_PRE_EVAL
+
+    @patch("validator.sync.upload")
+    def test_end_of_tick_uploads_logs_only(self, mock_upload, tmp_path):
+        _try_upload_logs(str(tmp_path))
+        mock_upload.assert_called_once_with(str(tmp_path), only=_CPU_LOGS_UPLOAD)
+
+    @patch("validator.sync.download")
+    @patch("validator.cpu_validator._try_upload", _noop)
+    def test_tick_start_download_skips_logs(self, mock_download, tmp_path):
+        st = FakeSubtensor(hotkeys=["hk0"], revealed={})
+        state = ValidatorState()
+        state.save(tmp_path)
+
+        run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_download.assert_called_once()
+        assert mock_download.call_args.kwargs.get("skip_prefixes") == ("logs/",)
+
+
+# --------------------------------------------------------------------------- #
 # _clean_stale_eval_job
 # --------------------------------------------------------------------------- #
 
@@ -677,9 +843,9 @@ class TestPurgeOldLogs:
     def test_removes_old_logs(self, tmp_path):
         logs = tmp_path / "logs"
         logs.mkdir()
-        (logs / "cpu_validator_20260101_120000.log").write_text("old")
-        (logs / "cpu_validator_20260516_120000.log").write_text("recent")
-        (logs / "gpu_eval_20260102_090000.log").write_text("old gpu")
+        (logs / "cpu_20260101_120000.log").write_text("old")
+        (logs / "cpu_8303961_20260516_120000.log").write_text("recent")
+        (logs / "gpu_100_20260102_090000.log").write_text("old gpu")
         (logs / "random_file.txt").write_text("ignore me")
 
         class FixedNow(datetime):
@@ -694,21 +860,21 @@ class TestPurgeOldLogs:
             removed = purge_old_logs(str(tmp_path), remote=False)
 
         assert removed == 2
-        assert not (logs / "cpu_validator_20260101_120000.log").exists()
-        assert not (logs / "gpu_eval_20260102_090000.log").exists()
-        assert (logs / "cpu_validator_20260516_120000.log").exists()
+        assert not (logs / "cpu_20260101_120000.log").exists()
+        assert not (logs / "gpu_100_20260102_090000.log").exists()
+        assert (logs / "cpu_8303961_20260516_120000.log").exists()
         assert (logs / "random_file.txt").exists()
 
     def test_noop_when_disabled(self, tmp_path):
         logs = tmp_path / "logs"
         logs.mkdir()
-        (logs / "cpu_validator_20200101_120000.log").write_text("old")
+        (logs / "cpu_0_20200101_120000.log").write_text("old")
 
         with patch("validator.config.LOG_RETENTION_DAYS", 0):
             removed = purge_old_logs(str(tmp_path), remote=False)
 
         assert removed == 0
-        assert (logs / "cpu_validator_20200101_120000.log").exists()
+        assert (logs / "cpu_0_20200101_120000.log").exists()
 
     def test_noop_when_no_logs_dir(self, tmp_path):
         removed = purge_old_logs(str(tmp_path), remote=False)
@@ -720,6 +886,6 @@ class TestLogIsStale:
         from validator.eval_progress import log_is_stale
 
         cutoff = datetime(2026, 5, 10, 12, 0, 0)
-        assert log_is_stale("cpu_validator_20260101_120000.log", cutoff)
-        assert not log_is_stale("cpu_validator_20260516_120000.log", cutoff)
+        assert log_is_stale("cpu_20260101_120000.log", cutoff)
+        assert not log_is_stale("cpu_8303961_20260516_120000.log", cutoff)
         assert not log_is_stale("random_file.txt", cutoff)

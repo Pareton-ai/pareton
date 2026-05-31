@@ -1206,6 +1206,7 @@ def run_baseline(
     model_volume: str,
     gpu_count: int,
     block_hash: str,
+    evaluation_block: int,
     state_dir: str | Path = "",
     startup_timeout_s: int = 1200,
     per_prompt_timeout_s: int = 120,
@@ -1244,7 +1245,8 @@ def run_baseline(
         )
     finally:
         if state_dir:
-            log_label = f"baseline_{cache_key}"
+            cid_short = (cid or container_name)[:12]
+            log_label = f"baseline_{evaluation_block}_{cid_short}"
             capture_container_logs(cid or container_name, state_dir, log_label)
         stop_and_remove(cid or container_name)
         reset_gpu_state()
@@ -1379,6 +1381,7 @@ def evaluate_challenger(
     collected_tf_output_texts: list | None = None,
     collected_tf_miner_tokens: list | None = None,
     max_model_len: int | None = None,
+    on_pulled: Callable[[], None] | None = None,
 ) -> EvaluationRecord:
     """Full lifecycle for one challenger. Returns an EvaluationRecord.
 
@@ -1397,6 +1400,8 @@ def evaluate_challenger(
 
     try:
         pull_image(com.image, com.digest)
+        if on_pulled is not None:
+            on_pulled()
         cid, base_url = start_container(
             com.image,
             com.digest,
@@ -1464,8 +1469,21 @@ def evaluate_challenger(
             r = eval_results[i]
             match_rate = compute_token_match_rate(bl.tokens, r.tokens)
             miner_decode = r.decode_elapsed_secs or []
-            mn_e2e = _miner_e2e_s(
-                bl.output_tokens, r.ttft_s, miner_decode, r.output_tokens
+            bl_decode = bl.decode_elapsed_secs or []
+            _, bl_e2e, mn_e2e_opt = aligned_e2e_improvement(
+                bl.ttft_s,
+                bl_decode,
+                bl.output_tokens,
+                r.ttft_s,
+                miner_decode,
+                r.output_tokens,
+            )
+            mn_e2e = (
+                mn_e2e_opt
+                if mn_e2e_opt is not None
+                else _miner_e2e_s(
+                    bl.output_tokens, r.ttft_s, miner_decode, r.output_tokens
+                )
             )
             per_prompt.append(
                 PerPromptResult(
@@ -1473,6 +1491,7 @@ def evaluate_challenger(
                     e2e_s=mn_e2e,
                     output_tokens=r.output_tokens,
                     token_match_rate=match_rate,
+                    baseline_e2e_s=bl_e2e if bl_e2e is not None else 0.0,
                 )
             )
             logger.info(
@@ -1512,7 +1531,7 @@ def evaluate_challenger(
 
         miner_decode = r.decode_elapsed_secs or []
         bl_decode = bl.decode_elapsed_secs or []
-        improvement, _, mn_e2e_opt = aligned_e2e_improvement(
+        improvement, bl_e2e, mn_e2e_opt = aligned_e2e_improvement(
             bl.ttft_s,
             bl_decode,
             bl.output_tokens,
@@ -1552,6 +1571,7 @@ def evaluate_challenger(
                 e2e_s=mn_e2e,
                 output_tokens=r.output_tokens,
                 token_match_rate=match_rate,
+                baseline_e2e_s=bl_e2e if bl_e2e is not None else 0.0,
             )
         )
 
@@ -1675,6 +1695,7 @@ def make_eval_fn(
             model_volume=model_volume,
             gpu_count=resolved_gpu_count,
             block_hash=block_hash,
+            evaluation_block=current_block,
             state_dir=state_dir,
             startup_timeout_s=startup_timeout_s,
             per_prompt_timeout_s=per_prompt_timeout_s,
