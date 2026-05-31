@@ -21,12 +21,18 @@ from validator.chain import (
     _payment_events_valid,
     build_commitments,
     build_competition_weights,
+    compute_emission_pool_frac,
     extract_payment_fields,
     parse_commitment_data,
     preflight_check,
     unique_hotkeys,
     verify_submission_payment,
 )
+from validator import config as validator_config
+
+_RAMP_START = validator_config.EMISSION_RAMP_START_BLOCK
+_RAMP_END = validator_config.EMISSION_RAMP_END_BLOCK
+_RAMP_MID = (_RAMP_START + _RAMP_END) // 2
 
 pytestmark = pytest.mark.unit
 
@@ -621,24 +627,46 @@ class TestBuildCommitments:
         assert rec.as_eval_key() == ("hk1", 100)
 
 
+class TestComputeEmissionPoolFrac:
+    def test_pre_ramp(self):
+        assert compute_emission_pool_frac(_RAMP_START - 1) == pytest.approx(0.02)
+
+    def test_ramp_start(self):
+        assert compute_emission_pool_frac(_RAMP_START) == pytest.approx(0.10)
+
+    def test_ramp_midpoint(self):
+        assert compute_emission_pool_frac(_RAMP_MID) == pytest.approx(0.55)
+
+    def test_ramp_end(self):
+        assert compute_emission_pool_frac(_RAMP_END) == pytest.approx(1.0)
+
+    def test_post_ramp(self):
+        assert compute_emission_pool_frac(_RAMP_END + 1) == pytest.approx(1.0)
+
+    def test_override_replaces_schedule(self, monkeypatch):
+        monkeypatch.setattr(validator_config, "EMISSION_FRAC_OVERRIDE", 0.3)
+        assert compute_emission_pool_frac(_RAMP_START - 1) == pytest.approx(0.3)
+        assert compute_emission_pool_frac(_RAMP_END) == pytest.approx(0.3)
+
+    def test_override_clamped(self, monkeypatch):
+        monkeypatch.setattr(validator_config, "EMISSION_FRAC_OVERRIDE", 1.5)
+        assert compute_emission_pool_frac(_RAMP_START) == pytest.approx(1.0)
+        monkeypatch.setattr(validator_config, "EMISSION_FRAC_OVERRIDE", -0.1)
+        assert compute_emission_pool_frac(_RAMP_START) == pytest.approx(0.0)
+
+
 class TestBuildCompetitionWeights:
-    def test_basic_winner_only(self):
-        w = build_competition_weights(5, 2, 0.10, score_target=0.10)
-        assert w[2] > 0
+    def test_basic_winner_only_at_ramp_end(self):
+        w = build_competition_weights(5, 2, _RAMP_END)
+        assert w[2] == pytest.approx(1.0)
         assert sum(w) == pytest.approx(1.0)
 
-    def test_winner_at_half_target(self):
-        w = build_competition_weights(5, 0, 0.05, score_target=0.10)
-        comp = 0.5
-        assert w[0] == pytest.approx(comp)
-
-    def test_winner_and_runner_up(self):
+    def test_winner_and_runner_up_at_ramp_end(self):
         w = build_competition_weights(
             5,
             0,
-            0.10,
+            _RAMP_END,
             runner_up_uid=1,
-            score_target=0.10,
             winner_share=0.80,
             runner_up_share=0.20,
         )
@@ -646,48 +674,60 @@ class TestBuildCompetitionWeights:
         assert w[1] == pytest.approx(0.20)
         assert sum(w) == pytest.approx(1.0)
 
-    def test_burn_uid_receives_remainder(self):
+    def test_burn_uid_receives_remainder_at_ramp_start(self):
         w = build_competition_weights(
             5,
             0,
-            0.05,
-            score_target=0.10,
+            _RAMP_START,
             burn_uid=4,
         )
-        assert w[4] == pytest.approx(0.5)
-        assert w[0] == pytest.approx(0.5)
+        assert w[4] == pytest.approx(0.90)
+        assert w[0] == pytest.approx(0.10)
 
     def test_burn_uid_collision_folds_into_winner(self):
         w = build_competition_weights(
             5,
             0,
-            0.05,
-            score_target=0.10,
+            _RAMP_MID,
             burn_uid=0,
         )
         assert w[0] == pytest.approx(1.0)
 
     def test_negative_winner_rejected(self):
         with pytest.raises(ValueError):
-            build_competition_weights(5, -1, 0.10)
+            build_competition_weights(5, -1, _RAMP_END)
 
     def test_winner_uid_beyond_n_uids(self):
-        w = build_competition_weights(3, 5, 0.10, score_target=0.10)
+        w = build_competition_weights(3, 5, _RAMP_END)
         assert len(w) > 5
-        assert w[5] > 0
+        assert w[5] == pytest.approx(1.0)
         assert sum(w) == pytest.approx(1.0)
 
     def test_no_runner_up_winner_gets_full_comp_pool(self):
         w = build_competition_weights(
             5,
             0,
-            0.10,
+            _RAMP_END,
             runner_up_uid=None,
-            score_target=0.10,
             winner_share=0.80,
             runner_up_share=0.20,
         )
         assert w[0] == pytest.approx(1.0)
+
+    def test_pre_ramp_small_pool(self):
+        w = build_competition_weights(
+            5,
+            0,
+            _RAMP_START - 1,
+            runner_up_uid=1,
+            burn_uid=4,
+            winner_share=0.80,
+            runner_up_share=0.20,
+        )
+        assert w[0] == pytest.approx(0.016)
+        assert w[1] == pytest.approx(0.004)
+        assert w[4] == pytest.approx(0.98)
+        assert sum(w) == pytest.approx(1.0)
 
 
 class TestUniqueHotkeys:

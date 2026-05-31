@@ -11,7 +11,7 @@ Usage (inside Docker):
 Env vars:
     CACHEON_STATE_DIR          (default: /app/state-mainnet)
     CACHEON_MODEL_VOLUME       (default: /models)
-    CACHEON_BASELINE_IMAGE     (default: vllm/vllm-openai:latest)
+    CACHEON_BASELINE_IMAGE     (default: vllm/vllm-openai:v0.22.0)
     CACHEON_BASELINE_DIGEST    (required)
     CACHEON_GPU_COUNT          (default: 8, auto-detect via nvidia-smi)
     CACHEON_VLLM_CACHE_DIR     (optional; host path for vLLM torch.compile cache)

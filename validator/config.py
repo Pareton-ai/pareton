@@ -129,19 +129,32 @@ RUNNER_UP_WEIGHT_SHARE: float = float(
 """Fraction of the competition pool allocated to the runner-up.
 When no runner-up exists, the winner receives 100% of the pool."""
 
-SCORE_EMISSION_TARGET: float = float(
-    os.environ.get("CACHEON_SCORE_EMISSION_TARGET", "0.10")
+EMISSION_RAMP_START_BLOCK: int = 8_309_900
+"""Mainnet block where the competition emission ramp begins (10% pool)."""
+
+EMISSION_RAMP_END_BLOCK: int = 9_166_700
+"""Mainnet block where the competition pool reaches 100% of emission."""
+
+EMISSION_PRE_RAMP_FRAC: float = 0.02
+"""Competition pool fraction before EMISSION_RAMP_START_BLOCK."""
+
+EMISSION_RAMP_START_FRAC: float = 0.10
+"""Competition pool fraction at EMISSION_RAMP_START_BLOCK."""
+
+EMISSION_RAMP_END_FRAC: float = 1.0
+"""Competition pool fraction at and after EMISSION_RAMP_END_BLOCK."""
+
+_emission_override_raw = os.environ.get("CACHEON_EMISSION_FRAC_OVERRIDE", "").strip()
+EMISSION_FRAC_OVERRIDE: float | None = (
+    float(_emission_override_raw) if _emission_override_raw else None
 )
-"""Improvement score at which the competition pool earns 100% of emission.
-Below this threshold, emission scales linearly; the remainder goes to the
-burn UID. Example: with target 0.10, a winner scoring 0.05 earns 50% of
-emission for the competition pool."""
+"""When set, replaces the block-scheduled competition pool fraction.
+Validator-operator env only; clamped to [0.0, 1.0] at use time."""
 
 BURN_UID: int = int(os.environ.get("CACHEON_BURN_UID", "29"))
-"""UID that receives the unused portion of emission when the winner's score
-is below SCORE_EMISSION_TARGET. Must not collide with the winner or
-runner-up UID; the weight builder folds burn weight into the winner on
-collision."""
+"""UID that receives emission not allocated to the competition pool.
+Must not collide with the winner or runner-up UID; the weight builder
+folds burn weight into the winner on collision."""
 
 # --------------------------------------------------------------------------- #
 # Teacher-forcing correctness gate
