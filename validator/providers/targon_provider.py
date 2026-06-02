@@ -38,7 +38,7 @@ class TargonProvider:
     """GpuProvider backed by the Targon v2 REST API."""
 
     name = "targon"
-    READY_TIMEOUT_S = 210
+    READY_TIMEOUT_S = 360
 
     def __init__(self, api_key: str) -> None:
         self._api_key = api_key
