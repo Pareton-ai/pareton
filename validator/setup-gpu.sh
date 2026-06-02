@@ -119,11 +119,13 @@ if ! mountpoint -q /workspace 2>/dev/null && ! df -Pk /workspace >/dev/null 2>&1
   exit 1
 fi
 mkdir -p "$DOCKER_DATA_ROOT" /etc/docker
+# max-concurrent-downloads=1 serializes layer extraction; concurrent extraction
+# under nested overlay2 (DinD) is the trigger for "failed to register layer: file exists".
 if [[ -f /etc/docker/daemon.json ]]; then
-  jq '. + {"data-root": "'"$DOCKER_DATA_ROOT"'"}' /etc/docker/daemon.json \
+  jq '. + {"data-root": "'"$DOCKER_DATA_ROOT"'", "max-concurrent-downloads": 1}' /etc/docker/daemon.json \
     > /etc/docker/daemon.json.tmp
 else
-  echo '{"data-root":"'"$DOCKER_DATA_ROOT"'"}' > /etc/docker/daemon.json.tmp
+  echo '{"data-root":"'"$DOCKER_DATA_ROOT"'","max-concurrent-downloads":1}' > /etc/docker/daemon.json.tmp
 fi
 mv /etc/docker/daemon.json.tmp /etc/docker/daemon.json
 echo "Configured data-root=$DOCKER_DATA_ROOT"
@@ -258,44 +260,72 @@ fi
 BASELINE_IMAGE="${CACHEON_BASELINE_IMAGE:-vllm/vllm-openai:v0.22.0}"
 SCORING_IMAGE="${CACHEON_SCORING_IMAGE:-vllm/vllm-openai:v0.9.2}"
 
-# Failed pulls can leave overlay2 tmp write-sets behind; retries then hit
-# "failed to register layer: rename ... file exists".
-_cleanup_docker_pull_artifacts() {
-  local ref="$1"
-  docker image rm -f "$ref" 2>/dev/null || true
-  if [[ -d "$DOCKER_DATA_ROOT/image/overlay2/layerdb/tmp" ]]; then
-    rm -rf "$DOCKER_DATA_ROOT/image/overlay2/layerdb/tmp/"* 2>/dev/null || true
+# A failed pull leaves a partially-registered layer (orphaned
+# layerdb/sha256/<hash> dir) behind. Because the Docker data-root lives on the
+# persistent /workspace volume, that broken state survives pod teardown and
+# poisons every later rental with "failed to register layer: ... file exists".
+# Removing only layerdb/tmp does not clear the orphaned destination dir, so the
+# only reliable recovery is to wipe the whole data-root and restart dockerd.
+# models/ and .cache/ live elsewhere on /workspace and are untouched.
+_reset_docker_store() {
+  echo "Resetting Docker layer store at $DOCKER_DATA_ROOT (clearing partial/broken layers)..."
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active docker >/dev/null 2>&1; then
+    systemctl stop docker.socket docker || true
+  elif pgrep -x dockerd >/dev/null 2>&1; then
+    pkill -x dockerd || true
   fi
+  sleep 3
+  rm -rf "${DOCKER_DATA_ROOT:?}/"* 2>/dev/null || true
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+    systemctl start docker
+  else
+    nohup dockerd > /var/log/dockerd.log 2>&1 &
+  fi
+  local i
+  for i in $(seq 1 15); do
+    docker info >/dev/null 2>&1 && break
+    sleep 1
+  done
 }
 
-ensure_docker_image() {
-  local ref="$1"
-  if docker image inspect "$ref" >/dev/null 2>&1; then
-    echo "$ref already present, skipping pull."
+ensure_vllm_images() {
+  local refs=("$BASELINE_IMAGE" "$SCORING_IMAGE")
+  if docker image inspect "$BASELINE_IMAGE" >/dev/null 2>&1 \
+    && docker image inspect "$SCORING_IMAGE" >/dev/null 2>&1; then
+    echo "vLLM images already present, skipping pull."
     return 0
   fi
-  local attempt
+  local attempt ref
   for attempt in 1 2; do
-    echo "Pulling $ref (attempt $attempt/2)..."
-    if docker pull "$ref" 2>&1; then
+    local failed=0
+    for ref in "${refs[@]}"; do
+      if docker image inspect "$ref" >/dev/null 2>&1; then
+        echo "$ref already present, skipping pull."
+        continue
+      fi
+      echo "Pulling $ref (attempt $attempt/2)..."
+      if ! docker pull "$ref" 2>&1; then
+        failed=1
+        break
+      fi
+    done
+    if [[ "$failed" -eq 0 ]]; then
       return 0
     fi
     if [[ "$attempt" -lt 2 ]]; then
-      echo "Pull failed, cleaning partial layers and retrying in 30s..."
-      _cleanup_docker_pull_artifacts "$ref"
-      sleep 30
+      echo "Pull failed; resetting layer store and retrying both images in 15s..."
+      _reset_docker_store
+      sleep 15
     fi
   done
-  _cleanup_docker_pull_artifacts "$ref"
-  echo "ERROR: failed to pull $ref after 2 attempts"
+  echo "ERROR: failed to pull vLLM images after 2 attempts"
   return 1
 }
 
 # -- vLLM eval images (generation baseline + teacher-forcing) --
 echo ""
 echo "=== vLLM Docker images ==="
-ensure_docker_image "$BASELINE_IMAGE"
-ensure_docker_image "$SCORING_IMAGE"
+ensure_vllm_images
 REPO_DIGEST="$(docker image inspect "$BASELINE_IMAGE" --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
 DIGEST=""
 if [[ -n "$REPO_DIGEST" ]] && [[ "$REPO_DIGEST" == *"@"* ]]; then

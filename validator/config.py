@@ -129,10 +129,10 @@ RUNNER_UP_WEIGHT_SHARE: float = float(
 """Fraction of the competition pool allocated to the runner-up.
 When no runner-up exists, the winner receives 100% of the pool."""
 
-EMISSION_RAMP_START_BLOCK: int = 8_309_900
+EMISSION_RAMP_START_BLOCK: int = 8_360_900
 """Mainnet block where the competition emission ramp begins (10% pool)."""
 
-EMISSION_RAMP_END_BLOCK: int = 9_166_700
+EMISSION_RAMP_END_BLOCK: int = 9_678_500
 """Mainnet block where the competition pool reaches 100% of emission."""
 
 EMISSION_PRE_RAMP_FRAC: float = 0.02
