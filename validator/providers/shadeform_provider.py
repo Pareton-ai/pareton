@@ -56,8 +56,9 @@ class ShadeformProvider:
     name = "shadeform"
     READY_TIMEOUT_S = 720
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, *, preferred_gpu: str | None = None) -> None:
         self._api_key = api_key
+        self._preferred_gpu = preferred_gpu
         self._headers = {
             "X-API-KEY": api_key,
             "Content-Type": "application/json",
@@ -162,6 +163,8 @@ class ShadeformProvider:
 
             canon, table_vram = lookup_vram(gpu_type_raw)
             if not table_vram:
+                continue
+            if self._preferred_gpu and canon != self._preferred_gpu:
                 continue
             if gpu_count != 8:
                 continue

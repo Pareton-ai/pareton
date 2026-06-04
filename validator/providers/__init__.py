@@ -157,17 +157,34 @@ def _matches_any_tier(instance: GpuInstance) -> bool:
     return False
 
 
+def _tier_config_for_gpu(gpu: str) -> dict | None:
+    """Return the tier config dict for a canonical GPU type, or None."""
+    for config in TIER_A + TIER_B:
+        if config["gpu_type"] == gpu:
+            return config
+    return None
+
+
 def search_all_providers(
     providers: list[GpuProvider],
     *,
     max_hourly_price_cents: int = 0,
+    preferred_gpu: str = "",
 ) -> GpuInstance | None:
-    """Query all providers and return the cheapest tier-ranked match."""
+    """Query all providers and return the cheapest tier-ranked match.
+
+    When *preferred_gpu* is set (H200, H100, B200, or B300), only instances
+    matching that tier config are considered; tier A/B fallback is disabled.
+    """
+    pin_config = _tier_config_for_gpu(preferred_gpu) if preferred_gpu else None
     all_candidates: list[GpuInstance] = []
     for prov in providers:
         try:
             instances = prov.search()
-            eligible = [i for i in instances if _matches_any_tier(i)]
+            if pin_config is not None:
+                eligible = [i for i in instances if _matches_config(i, pin_config)]
+            else:
+                eligible = [i for i in instances if _matches_any_tier(i)]
             all_candidates.extend(eligible)
             logger.info(
                 "%s: %d instance(s) found, %d eligible",
@@ -191,5 +208,10 @@ def search_all_providers(
         all_candidates = [
             c for c in all_candidates if c.hourly_price_cents <= max_hourly_price_cents
         ]
+
+    if pin_config is not None:
+        if not all_candidates:
+            return None
+        return min(all_candidates, key=lambda m: m.hourly_price_cents)
 
     return rank_tiers(all_candidates)

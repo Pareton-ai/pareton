@@ -7,8 +7,11 @@ different machines, and dry-run mode without editing source.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -77,6 +80,27 @@ are detected, runs eval, and tears it down."""
 PREFERRED_PROVIDER: str = os.environ.get("CACHEON_PREFERRED_PROVIDER", "")
 """If set to 'lium' or 'targon', only that provider is used for GPU rental
 even when both API keys are configured. Empty means cheapest-wins."""
+
+_ALLOWED_PREFERRED_GPUS = frozenset({"H200", "H100", "B200", "B300"})
+
+
+def _parse_preferred_gpu() -> str:
+    raw = os.environ.get("CACHEON_PREFERRED_GPU", "").strip()
+    if not raw:
+        return ""
+    normalized = raw.upper()
+    if normalized in _ALLOWED_PREFERRED_GPUS:
+        return normalized
+    logger.warning(
+        "CACHEON_PREFERRED_GPU=%r is invalid (use H200, H100, B200, or B300); ignoring",
+        raw,
+    )
+    return ""
+
+
+PREFERRED_GPU: str = _parse_preferred_gpu()
+"""If set to H200, H100, B200, or B300, auto-rent only matches that GPU type.
+Empty uses tier A (H200/B200/B300) then tier B (H100). Invalid values are ignored."""
 
 LIUM_API_KEY: str = os.environ.get("LIUM_API_KEY", "")
 TARGON_API_KEY: str = os.environ.get("TARGON_API_KEY", "")

@@ -34,25 +34,32 @@ def _build_providers() -> list[GpuProvider]:
 
     When ``CACHEON_PREFERRED_PROVIDER`` is set (e.g. 'targon', 'lium', or
     'shadeform'), only that provider is instantiated even if multiple keys
-    exist.
+    exist. ``CACHEON_PREFERRED_GPU`` pins GPU type independently of provider.
     """
     pref = validator_config.PREFERRED_PROVIDER.lower().strip()
+    gpu_pin = validator_config.PREFERRED_GPU or None
     providers: list[GpuProvider] = []
 
     if validator_config.LIUM_API_KEY and pref in ("", "lium"):
         from .providers.lium_provider import LiumProvider
 
-        providers.append(LiumProvider(validator_config.LIUM_API_KEY))
+        providers.append(
+            LiumProvider(validator_config.LIUM_API_KEY, preferred_gpu=gpu_pin)
+        )
 
     if validator_config.TARGON_API_KEY and pref in ("", "targon"):
         from .providers.targon_provider import TargonProvider
 
-        providers.append(TargonProvider(validator_config.TARGON_API_KEY))
+        providers.append(
+            TargonProvider(validator_config.TARGON_API_KEY, preferred_gpu=gpu_pin)
+        )
 
     if validator_config.SHADEFORM_API_KEY and pref in ("", "shadeform"):
         from .providers.shadeform_provider import ShadeformProvider
 
-        providers.append(ShadeformProvider(validator_config.SHADEFORM_API_KEY))
+        providers.append(
+            ShadeformProvider(validator_config.SHADEFORM_API_KEY, preferred_gpu=gpu_pin)
+        )
 
     if pref and not providers:
         logger.warning(
@@ -292,7 +299,11 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
 
     # Search
     update_progress(state_dir, phase="gpu_searching")
-    best = search_all_providers(providers, max_hourly_price_cents=max_price)
+    best = search_all_providers(
+        providers,
+        max_hourly_price_cents=max_price,
+        preferred_gpu=validator_config.PREFERRED_GPU,
+    )
     if best is None:
         logger.warning(
             "⚠️ No GPU instances available matching tier requirements (max $%.2f/hr)",
