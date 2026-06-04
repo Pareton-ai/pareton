@@ -40,8 +40,9 @@ class TargonProvider:
     name = "targon"
     READY_TIMEOUT_S = 360
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, *, preferred_gpu: str | None = None) -> None:
         self._api_key = api_key
+        self._preferred_gpu = preferred_gpu
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -183,6 +184,8 @@ class TargonProvider:
 
             canon, vram = lookup_vram(gpu_type_raw)
             if not vram:
+                continue
+            if self._preferred_gpu and canon != self._preferred_gpu:
                 continue
 
             storage_mb = spec.get("storage", 0)
