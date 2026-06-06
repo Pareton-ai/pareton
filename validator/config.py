@@ -216,6 +216,17 @@ def baseline_compile_cache_dir() -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# Eval harness timeouts
+# --------------------------------------------------------------------------- #
+
+CHALLENGER_STARTUP_TIMEOUT_S: int = 750
+"""Seconds to wait for miner ``/health`` after ``docker run``."""
+
+SCORING_BASELINE_STARTUP_TIMEOUT_S: int = 600
+"""Seconds to wait for the teacher-forcing scoring vLLM container."""
+
+
+# --------------------------------------------------------------------------- #
 # Housekeeping
 # --------------------------------------------------------------------------- #
 

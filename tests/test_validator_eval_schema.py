@@ -98,7 +98,9 @@ class TestEvaluationJob:
         assert job.model_volume == "/models"
         assert job.per_prompt_timeout_s == 120
         assert job.n_warmup == 2
-        assert job.startup_timeout_s == 600
+        from validator.config import CHALLENGER_STARTUP_TIMEOUT_S
+
+        assert job.startup_timeout_s == CHALLENGER_STARTUP_TIMEOUT_S
 
     def test_custom_values(self):
         job = _make_job(

@@ -43,7 +43,6 @@ from .docker_eval import (
 )
 from .state import EvaluationRecord, ValidatorState, append_winner_history
 
-SCORING_BASELINE_STARTUP_TIMEOUT_S = 600
 from .eval_progress import (
     clear_progress,
     complete_progress,
@@ -347,7 +346,7 @@ def main() -> int:
                 model_volume=model_volume,
                 gpu_count=gpu_count,
                 state_dir=state_dir,
-                startup_timeout_s=SCORING_BASELINE_STARTUP_TIMEOUT_S,
+                startup_timeout_s=validator_config.SCORING_BASELINE_STARTUP_TIMEOUT_S,
             )
             logger.info("Scoring baseline started at %s", scoring_url)
             for pending in pending_tf:
@@ -398,7 +397,7 @@ def main() -> int:
             eval_prompts,
             eval_baseline,
             model_volume=model_volume,
-            startup_timeout_s=600,
+            startup_timeout_s=validator_config.CHALLENGER_STARTUP_TIMEOUT_S,
             per_prompt_timeout_s=120,
             n_warmup=EVAL_N_WARMUP,
             current_block=block,
@@ -481,7 +480,7 @@ def main() -> int:
             eval_prompts,
             eval_baseline,
             model_volume=model_volume,
-            startup_timeout_s=600,
+            startup_timeout_s=validator_config.CHALLENGER_STARTUP_TIMEOUT_S,
             per_prompt_timeout_s=120,
             n_warmup=EVAL_N_WARMUP,
             current_block=block,
