@@ -583,9 +583,9 @@ def main() -> int:
     # ------------------------------------------------------------------ #
 
     if leader_record is not None:
-        state.evaluations[leader_record.eval_key] = leader_record
+        state.evaluations[f"{leader_record.eval_key}:{block}"] = leader_record
     if ru_record is not None:
-        state.evaluations[ru_record.eval_key] = ru_record
+        state.evaluations[f"{ru_record.eval_key}:{block}"] = ru_record
 
     prev_winner = state.winner
     from .state import OVERTAKE_EPSILON
@@ -610,9 +610,10 @@ def main() -> int:
     if winner_changed:
         winner_ev = None
         if new_winner is not None:
+            base_key = f"{new_winner.hotkey}:{new_winner.commit_block}"
             winner_ev = state.evaluations.get(
-                f"{new_winner.hotkey}:{new_winner.commit_block}"
-            )
+                f"{base_key}:{block}"
+            ) or state.evaluations.get(base_key)
         if winner_ev is not None:
             threshold = (
                 new_winner.score * (1.0 + OVERTAKE_EPSILON) if prev_winner else 0.0

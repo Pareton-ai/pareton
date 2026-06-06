@@ -1,5 +1,6 @@
 """GET /api/evaluations -- all eval records.
-GET /api/evaluations/{uid} -- eval history for a specific UID."""
+GET /api/evaluations/hotkey/{hotkey} -- eval history for a specific hotkey (stable identity).
+GET /api/evaluations/{uid} -- eval history for a specific UID (slot, not stable across recycling)."""
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
@@ -44,10 +45,38 @@ def list_evaluations(
 
 
 @router.get(
+    "/api/evaluations/hotkey/{hotkey}",
+    tags=["Evaluations"],
+    summary="Evaluations for a specific hotkey",
+    description=(
+        "All evaluation records for a given hotkey, newest first. "
+        "Hotkey is the stable miner identity; UIDs can be recycled when a slot changes owner."
+    ),
+)
+def get_evaluations_by_hotkey(hotkey: str):
+    evals = [e for e in _load_evals() if e.get("hotkey") == hotkey]
+    if not evals:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"No evaluations found for hotkey {hotkey}"},
+        )
+    return JSONResponse(
+        content=sanitize_floats(
+            {"hotkey": hotkey, "evaluations": evals, "total": len(evals)}
+        ),
+        headers={"Cache-Control": "public, max-age=30"},
+    )
+
+
+@router.get(
     "/api/evaluations/{uid}",
     tags=["Evaluations"],
-    summary="Evaluations for a specific UID",
-    description="All evaluation records for a given UID, newest first.",
+    summary="Evaluations for a specific UID (slot)",
+    description=(
+        "All evaluation records for a given UID, newest first. "
+        "Note: UIDs are Bittensor slot numbers (0-255) and can be recycled when a slot changes owner. "
+        "Prefer GET /api/evaluations/hotkey/{hotkey} for stable lookups."
+    ),
 )
 def get_evaluations_by_uid(uid: int):
     evals = [e for e in _load_evals() if e.get("uid") == uid]
