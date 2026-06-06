@@ -24,6 +24,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import config as validator_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +75,7 @@ class EvaluationJob:
     model_volume: str = "/models"
     per_prompt_timeout_s: int = 120
     n_warmup: int = 2
-    startup_timeout_s: int = 600
+    startup_timeout_s: int = validator_config.CHALLENGER_STARTUP_TIMEOUT_S
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,7 +97,12 @@ class EvaluationJob:
             model_volume=str(data.get("model_volume", "/models")),
             per_prompt_timeout_s=int(data.get("per_prompt_timeout_s", 120)),
             n_warmup=int(data.get("n_warmup", 2)),
-            startup_timeout_s=int(data.get("startup_timeout_s", 600)),
+            startup_timeout_s=int(
+                data.get(
+                    "startup_timeout_s",
+                    validator_config.CHALLENGER_STARTUP_TIMEOUT_S,
+                )
+            ),
         )
 
 

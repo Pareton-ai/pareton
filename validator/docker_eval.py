@@ -161,7 +161,7 @@ def ensure_eval_network() -> None:
     _ensure_network(INTERNAL_NETWORK, internal=True)
 
 
-def pull_image(image: str, digest: str, timeout_s: float = 300) -> None:
+def pull_image(image: str, digest: str, timeout_s: float = 600) -> None:
     """Pull a Docker image by digest. Raises on failure."""
     ref = f"{image}@{digest}" if digest else image
     logger.info("Pulling image %s", ref)
@@ -1646,7 +1646,7 @@ def make_eval_fn(
     baseline_digest: str,
     gpu_count: int = 0,
     state_dir: str = "",
-    startup_timeout_s: int = 600,
+    startup_timeout_s: int = validator_config.CHALLENGER_STARTUP_TIMEOUT_S,
     per_prompt_timeout_s: int = 120,
     n_warmup: int = 2,
 ) -> Callable:
