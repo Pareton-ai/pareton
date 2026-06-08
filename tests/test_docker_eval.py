@@ -1015,6 +1015,52 @@ class TestEvaluateChallenger:
     @patch("validator.docker_eval.capture_container_logs")
     @patch("validator.docker_eval.reset_gpu_state")
     @patch("validator.docker_eval.stop_and_remove")
+    @patch("validator.content_fingerprint.check_and_register_fingerprint")
+    @patch("validator.docker_eval.wait_for_health")
+    @patch(
+        "validator.docker_eval.start_container",
+        return_value=("cid123", "http://172.18.0.2:8000"),
+    )
+    @patch("validator.docker_eval.pull_image")
+    def test_duplicate_submission_dq_before_prompts(
+        self,
+        mock_pull,
+        mock_start,
+        mock_health,
+        mock_fingerprint,
+        mock_stop,
+        mock_reset,
+        mock_capture_logs,
+    ):
+        from validator.content_fingerprint import FingerprintCheckResult
+        from validator.state import DUPLICATE_SUBMISSION_REASON
+
+        mock_fingerprint.return_value = FingerprintCheckResult(
+            dq_reason=(
+                f"{DUPLICATE_SUBMISSION_REASON}: matches hotkey hk_owner (commit_block 100)"
+            )
+        )
+
+        record = evaluate_challenger(
+            _make_commitment(hotkey="hk_copy", commit_block=200),
+            _make_eval_prompts(n=2, n_warmup=2),
+            _make_baseline(n_prompts=2),
+            model_volume="/models",
+            startup_timeout_s=600,
+            per_prompt_timeout_s=120,
+            n_warmup=2,
+            current_block=500,
+            fingerprint_registry={"entries": {}},
+        )
+
+        assert record.disqualified is True
+        assert record.disqualify_reason.startswith(DUPLICATE_SUBMISSION_REASON)
+        mock_fingerprint.assert_called_once()
+        mock_stop.assert_called_once_with("cid123")
+
+    @patch("validator.docker_eval.capture_container_logs")
+    @patch("validator.docker_eval.reset_gpu_state")
+    @patch("validator.docker_eval.stop_and_remove")
     @patch("validator.docker_eval.send_prompt")
     @patch("validator.docker_eval.wait_for_health")
     @patch(

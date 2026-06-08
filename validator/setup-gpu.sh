@@ -46,6 +46,19 @@ if [[ "$PULL_ONLY" == true ]]; then
   exit 0
 fi
 
+# -- DNS (some DinD pods have flaky resolvers for huggingface.co) --
+if ! getent hosts huggingface.co >/dev/null 2>&1; then
+  echo ""
+  echo "=== DNS workaround ==="
+  echo "huggingface.co lookup failed; prepending public nameservers"
+  if [[ -f /etc/resolv.conf ]] && ! grep -q '^nameserver 1\.1\.1\.1' /etc/resolv.conf; then
+    cp /etc/resolv.conf /etc/resolv.conf.cacheon.bak
+    { echo "nameserver 1.1.1.1"; echo "nameserver 8.8.8.8"; cat /etc/resolv.conf.cacheon.bak; } > /etc/resolv.conf
+  elif [[ ! -f /etc/resolv.conf ]]; then
+    printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf
+  fi
+fi
+
 # -- system deps --
 echo ""
 echo "=== System dependencies ==="

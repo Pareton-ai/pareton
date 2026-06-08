@@ -41,6 +41,11 @@ from .docker_eval import (
     stop_scoring_baseline,
     _dq_record,
 )
+from .content_fingerprint import (
+    FingerprintCheckResult,
+    apply_fingerprint_supersede_records,
+    load_fingerprint_registry,
+)
 from .state import EvaluationRecord, ValidatorState, append_winner_history
 
 from .eval_progress import (
@@ -165,6 +170,7 @@ def main() -> int:
 
     # Load state and eval job
     state = ValidatorState.load(state_dir)
+    fingerprint_registry = load_fingerprint_registry(state_dir)
     eval_job = EvalJob.load(state_dir)
     has_work = eval_job is not None and (
         eval_job.challengers or eval_job.leader or eval_job.runner_up
@@ -368,9 +374,9 @@ def main() -> int:
     # ------------------------------------------------------------------ #
 
     def _eval_incumbent(ci, label: str):
-        """Run a leader or runner-up container; return EvaluationRecord or None."""
+        """Run a leader or runner-up container; return record, fp events, and com."""
         if ci is None:
-            return None
+            return None, [], None
         com = CommitmentRecord(
             uid=ci.uid,
             hotkey=ci.hotkey,
@@ -392,6 +398,7 @@ def main() -> int:
         _upload_progress(state_dir)
         tf_output_texts: list[str] = []
         tf_miner_tokens: list[list[str]] = []
+        fp_events: list[FingerprintCheckResult] = []
         record = evaluate_challenger(
             com,
             eval_prompts,
@@ -406,6 +413,8 @@ def main() -> int:
             collected_tf_output_texts=tf_output_texts,
             collected_tf_miner_tokens=tf_miner_tokens,
             max_model_len=mml,
+            fingerprint_registry=fingerprint_registry,
+            fingerprint_result=fp_events,
         )
         _queue_teacher_forcing(
             record,
@@ -427,17 +436,60 @@ def main() -> int:
         else:
             update_incumbent_status(state_dir, label, status="awaiting_correctness")
         _upload_progress(state_dir)
-        return record
+        return record, fp_events, com
 
-    leader_record = _eval_incumbent(eval_job.leader, "leader")
-    ru_record = _eval_incumbent(eval_job.runner_up, "runner_up")
+    leader_record: EvaluationRecord | None = None
+    ru_record: EvaluationRecord | None = None
+    challenger_persist: list[tuple[int, EvaluationRecord]] = []
+
+    def _apply_fp_supersede(
+        fp_events: list[FingerprintCheckResult],
+        com: CommitmentRecord,
+    ) -> None:
+        nonlocal leader_record, ru_record, challenger_persist
+        for fp_result in fp_events:
+            leader_record, ru_record, challenger_persist, removed_keys = (
+                apply_fingerprint_supersede_records(
+                    fp_result,
+                    com,
+                    leader_record=leader_record,
+                    ru_record=ru_record,
+                    challenger_records=challenger_persist,
+                )
+            )
+            if removed_keys:
+                pending_tf[:] = [
+                    p for p in pending_tf if p.record.eval_key not in removed_keys
+                ]
+            if fp_result.superseded_owner is not None:
+                if leader_record is not None and leader_record.disqualified:
+                    update_incumbent_status(
+                        state_dir,
+                        "leader",
+                        status="dq",
+                        dq_reason=leader_record.disqualify_reason,
+                    )
+                if ru_record is not None and ru_record.disqualified:
+                    update_incumbent_status(
+                        state_dir,
+                        "runner_up",
+                        status="dq",
+                        dq_reason=ru_record.disqualify_reason,
+                    )
+
+    leader_record, leader_fp, leader_com = _eval_incumbent(eval_job.leader, "leader")
+    if leader_com is not None:
+        _apply_fp_supersede(leader_fp, leader_com)
+
+    ru_record, ru_fp, ru_com = _eval_incumbent(eval_job.runner_up, "runner_up")
+    if ru_com is not None:
+        _apply_fp_supersede(ru_fp, ru_com)
 
     # ------------------------------------------------------------------ #
     # Evaluate challengers (generation + collect outputs for teacher-forcing)
     # ------------------------------------------------------------------ #
 
     challenger_records: list = []
-    challenger_persist: list[tuple[int, EvaluationRecord]] = []
 
     for challenger_idx, ci in enumerate(eval_job.challengers):
         if state.is_known(ci.hotkey, ci.commit_block):
@@ -475,6 +527,7 @@ def main() -> int:
 
         tf_output_texts: list[str] = []
         tf_miner_tokens: list[list[str]] = []
+        fp_events: list[FingerprintCheckResult] = []
         record = evaluate_challenger(
             com,
             eval_prompts,
@@ -489,7 +542,10 @@ def main() -> int:
             collected_tf_miner_tokens=tf_miner_tokens,
             max_model_len=mml,
             on_pulled=_on_challenger_pulled,
+            fingerprint_registry=fingerprint_registry,
+            fingerprint_result=fp_events,
         )
+        _apply_fp_supersede(fp_events, com)
         _queue_teacher_forcing(
             record,
             tf_output_texts,

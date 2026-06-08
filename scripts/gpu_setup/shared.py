@@ -18,7 +18,7 @@ GPU_PREFERENCE = [
 SSH_KEYS = {
     "xavier-latent": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ80HSdgwG98gpXqe/bwR+1NLIlmZJMNmHro7H7X04UC xllgms@gmail.com",
     "clement-latent": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMkpQe0zLHSW+heTGX5UV00HbuCA7CUXC9lowjE/aTwR",
-    "cacheon-cpu-validator": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHle3erHaBhA/yRREWFyYk7m0cTHuCdcnsHEsOWzOrWe cacheon-cpu-validator",
+    "cacheon-cpu-validator": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDYFDZxbZb9jGCgzaWxEaCtWRC0h8iE+ppqk+bzj6mqb cacheon-cpu-validator",
     "cacheon-cpu-validator-mbp": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE/+Pcs6FH7EWLS0Zrs0T1UQrz3sWMXkmg7342yAT1s8 cacheon-cpu-validator-mbp",
 }
 

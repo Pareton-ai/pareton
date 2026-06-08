@@ -200,7 +200,9 @@ class WinnerRecord:
 # --------------------------------------------------------------------------- #
 
 
-DUPLICATE_OF_LEADER_REASON: str = "duplicate_of_leader"
+DUPLICATE_SUBMISSION_REASON: str = "duplicate_submission"
+DUPLICATE_OF_LEADER_REASON: str = DUPLICATE_SUBMISSION_REASON
+"""Backward-compatible alias for pre-rename eval records and imports."""
 
 
 @dataclass(frozen=True)
@@ -309,11 +311,12 @@ class ValidatorState:
         *,
         current_block: int,
     ) -> RecordResult:
-        """Store an eval and apply duplicate-of-leader DQ.
+        """Store an eval and apply legacy manifest-digest duplicate DQ.
 
         Ranking and throne changes are handled separately by
         ``rerank_round()`` after all participants have been evaluated.
         This method only stores the record (with optional DQ annotation).
+        Primary duplicate detection runs pre-eval via content fingerprinting.
         """
         stored = ev
         if (
@@ -327,13 +330,13 @@ class ValidatorState:
                 ev,
                 score=0.0,
                 disqualified=True,
-                disqualify_reason=DUPLICATE_OF_LEADER_REASON,
+                disqualify_reason=DUPLICATE_SUBMISSION_REASON,
             )
             logger.info(
                 "UID %d (%s) DQ'd: %s (matches winner digest=%s)",
                 ev.uid,
                 ev.hotkey[:16],
-                DUPLICATE_OF_LEADER_REASON,
+                DUPLICATE_SUBMISSION_REASON,
                 (ev.digest or "")[:24],
             )
 

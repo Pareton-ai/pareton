@@ -133,8 +133,8 @@ WINNER_EPSILON_INITIAL: float = float(
 
 1% is small enough to not protect truly weak winners, large enough to swallow
 float noise and discourage copycat submissions that match the winner
-byte-for-byte (a byte-identical copy also trips the `duplicate_of_leader` DQ
-path in `state.record_evaluation`; the epsilon covers near-duplicates /
+byte-for-byte (a byte-identical copy also trips the `duplicate_submission` DQ
+path; the epsilon covers near-duplicates /
 scoring noise). Leader and runner-up are re-evaluated each round, so the moat
 is always applied against a fresh score."""
 
@@ -213,6 +213,24 @@ def baseline_compile_cache_dir() -> str | None:
     """Return the compile-cache host path, or None when disabled."""
     path = VLLM_COMPILE_CACHE_DIR.strip()
     return path or None
+
+
+# --------------------------------------------------------------------------- #
+# Content fingerprint dedup (in-container file hashes)
+# --------------------------------------------------------------------------- #
+
+FINGERPRINT_PATHS: tuple[str, ...] = (
+    "/cacheon",
+    "/start.sh",
+    "/draft",
+    "/weights",
+    "/app",
+)
+"""Directories/files inside the miner image hashed for duplicate detection.
+``/models`` is excluded (shared read-only mount)."""
+
+FINGERPRINT_MAX_FILE_BYTES: int = 5 * 1024 * 1024 * 1024
+"""Skip individual files larger than this when computing content fingerprints."""
 
 
 # --------------------------------------------------------------------------- #
