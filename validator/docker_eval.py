@@ -1382,6 +1382,8 @@ def evaluate_challenger(
     collected_tf_miner_tokens: list | None = None,
     max_model_len: int | None = None,
     on_pulled: Callable[[], None] | None = None,
+    fingerprint_registry: dict | None = None,
+    fingerprint_result: list | None = None,
 ) -> EvaluationRecord:
     """Full lifecycle for one challenger. Returns an EvaluationRecord.
 
@@ -1409,6 +1411,19 @@ def evaluate_challenger(
             container_name=container_name,
         )
         wait_for_health(base_url, timeout_s=startup_timeout_s, container_id=cid)
+
+        from .content_fingerprint import check_and_register_fingerprint
+
+        fp_result = check_and_register_fingerprint(
+            fingerprint_registry,
+            container_id=cid,
+            com=com,
+            state_dir=state_dir,
+        )
+        if fingerprint_result is not None:
+            fingerprint_result.append(fp_result)
+        if fp_result.dq_reason is not None:
+            return _dq_record(com, current_block, fp_result.dq_reason)
 
         eval_results = _run_prompts_on_server(
             base_url,
