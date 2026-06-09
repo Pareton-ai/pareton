@@ -1211,7 +1211,7 @@ class TestEvaluateChallenger:
 
         assert record.disqualified is True
         assert (record.disqualify_reason or "").startswith("pass1_match_fail:")
-        assert record.token_match_rate < 0.10
+        assert record.token_match_rate < 0.05
         assert record.per_prompt is not None
         assert len(record.per_prompt) == 2
         assert record.per_prompt[0]["token_match_rate"] == pytest.approx(0.0)
