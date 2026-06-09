@@ -145,7 +145,7 @@ class TargonProvider:
 
         existing = self._get("/ssh-keys")
         for key in existing.get("items", []):
-            remote_fp = self._key_fingerprint(key.get("ssh_key", ""))
+            remote_fp = self._key_fingerprint(key.get("public_key_raw", ""))
             if remote_fp == local_fp:
                 self._ssh_key_uid = key["uid"]
                 logger.info(
