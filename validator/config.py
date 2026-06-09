@@ -197,7 +197,7 @@ MIN_LOGPROB_THRESHOLD: float = float(
 """Floor logprob for any single token. Catches isolated garbage tokens."""
 
 PASS1_MATCH_DQ_THRESHOLD: float = float(
-    os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.10")
+    os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.05")
 )
 """Cheap pre-filter: aggregate token match vs baseline must be at or above
 this fraction before teacher-forcing. Below threshold, miner is DQ'd without
