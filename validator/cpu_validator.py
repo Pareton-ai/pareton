@@ -619,7 +619,7 @@ def run_tick(
             n_challengers,
         )
 
-        if validator_config.AUTO_RENT:
+        if validator_config.GPU_SSH_ENABLED or validator_config.AUTO_RENT:
             from .gpu_orchestrator import run_gpu_eval
 
             success = run_gpu_eval(state_dir, eval_job)

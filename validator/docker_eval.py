@@ -255,8 +255,6 @@ def start_container(
         str(cpus),
         "--gpus",
         "all",
-        "--device",
-        "nvidia.com/gpu=all",
     ]
     if compile_cache_volume:
         cmd.extend(["-v", f"{compile_cache_volume}:/root/.cache/vllm"])

@@ -1,13 +1,17 @@
 """Automated GPU pod lifecycle: search, rent, setup, eval, teardown.
 
-Called by ``cpu_validator.run_tick()`` when ``CACHEON_AUTO_RENT=1`` and
-there are new challengers. The GPU pod is ephemeral: rent it, run one
-eval cycle, and tear it down.
+Called by ``cpu_validator.run_tick()`` when challengers are detected and
+either ``CACHEON_GPU_SSH`` or ``CACHEON_AUTO_RENT=1`` is set.
+
+With ``CACHEON_GPU_SSH``, the orchestrator SSHs into a pre-provisioned pod
+(``setup-gpu.sh`` already run), runs eval, and leaves the pod up.
+
+With ``CACHEON_AUTO_RENT``, the pod is ephemeral: rent, setup, eval, teardown.
 
 The eval itself still runs on the remote pod via ``gpu_eval.py`` inside
 Docker Compose. S3 remains the handoff mechanism: the remote pod
 uploads ``state.json`` after eval, and the CPU process downloads it
-after teardown.
+after the run finishes.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from .providers import GpuInstance, GpuProvider, PodHandle, search_all_providers
 
 logger = logging.getLogger(__name__)
 
-SETUP_BRANCH = "feat/defer-scoring-baseline-unavailable"
+SETUP_BRANCH = "main"
 SETUP_SCRIPT_URL = f"https://raw.githubusercontent.com/latent-to/cacheon/{SETUP_BRANCH}/validator/setup-gpu.sh"
 
 
@@ -257,6 +261,44 @@ def _remote_run_eval(
     return False
 
 
+def _start_eval_with_mirror(
+    state_dir: str,
+    provider: GpuProvider,
+    handle: PodHandle,
+    eval_job: EvalJob,
+) -> bool:
+    """Run remote docker compose eval while mirroring progress from S3."""
+    timeout_min = _calculate_eval_timeout_minutes(len(eval_job.challengers))
+    logger.info(
+        "\t Dynamic timeout: %d min (%d challengers)",
+        timeout_min,
+        len(eval_job.challengers),
+    )
+    update_progress(state_dir, phase="gpu_eval_started", timeout_min=timeout_min)
+
+    try:
+        from .sync import upload as s3_upload
+
+        s3_upload(state_dir, only=[PROGRESS_FILE])
+    except Exception:
+        logger.debug(
+            "Failed to upload eval_progress before mirror start", exc_info=True
+        )
+
+    stop_event = threading.Event()
+    mirror = threading.Thread(
+        target=_mirror_progress_loop,
+        args=(state_dir, stop_event),
+        daemon=True,
+    )
+    mirror.start()
+    try:
+        return _remote_run_eval(provider, handle, timeout_min)
+    finally:
+        stop_event.set()
+        mirror.join(timeout=5)
+
+
 def _mirror_progress_loop(
     state_dir: str, stop_event: threading.Event, interval: float = 15
 ) -> None:
@@ -276,11 +318,53 @@ def _mirror_progress_loop(
             pass
 
 
+def _run_ssh_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
+    """SSH to a pre-provisioned pod and run eval (no search, setup, or teardown)."""
+    from .providers.static_ssh_provider import StaticSshProvider
+
+    target = validator_config.GPU_SSH
+    if target is None:
+        logger.error("CACHEON_GPU_SSH is not configured")
+        return False
+
+    provider = StaticSshProvider()
+    logger.info(
+        "Using pre-provisioned GPU pod %s@%s:%d (profile=%s)",
+        target.user,
+        target.host,
+        target.port,
+        validator_config.GPU_POD_PROFILE,
+    )
+    update_progress(
+        state_dir, phase="gpu_ssh_connecting", pod_id=f"{target.user}@{target.host}"
+    )
+
+    try:
+        handle = provider.connect()
+        handle = provider.wait_ready(handle, timeout_s=provider.READY_TIMEOUT_S)
+        logger.info("Pod %s is ready", handle.pod_id)
+        update_progress(state_dir, phase="gpu_ready", pod_id=handle.pod_id)
+        return _start_eval_with_mirror(state_dir, provider, handle, eval_job)
+    except TimeoutError as exc:
+        logger.error("GPU SSH connection timed out: %s", exc)
+        return False
+    except Exception as exc:
+        logger.exception("GPU SSH orchestration failed: %s", exc)
+        return False
+
+
 def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
-    """Search for a GPU pod, rent it, run eval, tear it down.
+    """Run GPU eval on a remote pod.
+
+    When ``CACHEON_GPU_SSH`` is set, connects to that pod and skips search,
+    setup, and teardown. Otherwise searches cloud providers, rents a pod,
+    runs setup, eval, and tears down.
 
     Returns True if the eval completed successfully and results are on S3.
     """
+    if validator_config.GPU_SSH_ENABLED:
+        return _run_ssh_gpu_eval(state_dir, eval_job)
+
     providers = _build_providers()
     if not providers:
         logger.error(
@@ -362,32 +446,7 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
         if not _remote_setup(provider, handle, state_dir):
             return False
 
-        # Step 2: cd ~/cacheon/validator && docker compose -f gpu-compose.yml up --build
-        update_progress(state_dir, phase="gpu_eval_started", timeout_min=timeout_min)
-
-        # Push progress to S3 so the GPU's read-modify-write preserves CPU steps
-        try:
-            from .sync import upload as s3_upload
-
-            s3_upload(state_dir, only=[PROGRESS_FILE])
-        except Exception:
-            logger.debug(
-                "Failed to upload eval_progress before mirror start", exc_info=True
-            )
-
-        stop_event = threading.Event()
-        mirror = threading.Thread(
-            target=_mirror_progress_loop,
-            args=(state_dir, stop_event),
-            daemon=True,
-        )
-        mirror.start()
-        try:
-            success = _remote_run_eval(provider, handle, timeout_min)
-        finally:
-            stop_event.set()
-            mirror.join(timeout=5)
-        return success
+        return _start_eval_with_mirror(state_dir, provider, handle, eval_job)
 
     except TimeoutError as exc:
         logger.error("GPU orchestration timed out: %s", exc)

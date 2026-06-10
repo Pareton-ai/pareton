@@ -229,6 +229,16 @@ def test_update_incumbent_status(tmp_path):
     assert data["runner_up"]["status"] == "dq"
     assert data["runner_up"]["dq_reason"] == "pull_timeout"
 
+    update_incumbent_status(
+        tmp_path,
+        "leader",
+        status="skipped",
+        detail="scoring_baseline_unavailable",
+    )
+    data = _read(tmp_path)
+    assert data["leader"]["status"] == "skipped"
+    assert data["detail"] == "scoring_baseline_unavailable"
+
 
 def test_update_incumbent_status_no_file(tmp_path):
     update_incumbent_status(tmp_path, "leader", status="evaluating")
