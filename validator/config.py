@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,73 @@ GPU_COUNT: int = int(os.environ.get("CACHEON_GPU_COUNT", "8"))
 
 AUTO_RENT: bool = os.environ.get("CACHEON_AUTO_RENT", "0") == "1"
 """When True, the validator automatically rents a GPU pod when challengers
-are detected, runs eval, and tears it down."""
+are detected, runs eval, and tears it down. Ignored when ``CACHEON_GPU_SSH``
+is set."""
+
+_ALLOWED_GPU_POD_PROFILES = frozenset({"targon", "lium", "shadeform"})
+
+
+@dataclass(frozen=True)
+class GpuSshTarget:
+    user: str
+    host: str
+    port: int
+
+
+def parse_gpu_ssh_target(raw: str) -> GpuSshTarget | None:
+    """Parse ``user@host[:port]``. Returns None when empty or invalid."""
+    text = raw.strip()
+    if not text:
+        return None
+
+    if "@" in text:
+        user, rest = text.rsplit("@", 1)
+        user = user.strip()
+    else:
+        user, rest = "root", text
+
+    if not user:
+        logger.warning("CACHEON_GPU_SSH=%r is invalid (missing user); ignoring", raw)
+        return None
+
+    host = rest.strip()
+    port = 22
+    if ":" in rest:
+        host_part, port_part = rest.rsplit(":", 1)
+        if port_part.isdigit():
+            host = host_part.strip()
+            port = int(port_part)
+
+    if not host:
+        logger.warning("CACHEON_GPU_SSH=%r is invalid (missing host); ignoring", raw)
+        return None
+
+    return GpuSshTarget(user=user, host=host, port=port)
+
+
+GPU_SSH: GpuSshTarget | None = parse_gpu_ssh_target(
+    os.environ.get("CACHEON_GPU_SSH", "")
+)
+"""Pre-provisioned GPU pod SSH target. When set, skips search/rent/setup."""
+
+GPU_SSH_ENABLED: bool = GPU_SSH is not None
+
+
+def _parse_gpu_pod_profile() -> str:
+    raw = os.environ.get("CACHEON_GPU_POD_PROFILE", "targon").strip().lower()
+    if raw in _ALLOWED_GPU_POD_PROFILES:
+        return raw
+    if raw:
+        logger.warning(
+            "CACHEON_GPU_POD_PROFILE=%r is invalid (use targon, lium, or shadeform); "
+            "using targon",
+            raw,
+        )
+    return "targon"
+
+
+GPU_POD_PROFILE: str = _parse_gpu_pod_profile()
+"""Remote pod profile for DinD/docker env exports when ``CACHEON_GPU_SSH`` is set."""
 
 PREFERRED_PROVIDER: str = os.environ.get("CACHEON_PREFERRED_PROVIDER", "")
 """If set to 'lium' or 'targon', only that provider is used for GPU rental

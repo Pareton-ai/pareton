@@ -244,6 +244,7 @@ def update_incumbent_status(
     status: str,
     score: float | None = None,
     dq_reason: str | None = None,
+    detail: str | None = None,
 ) -> None:
     """Advance leader or runner-up status in the progress file."""
     if role not in ("leader", "runner_up"):
@@ -264,6 +265,8 @@ def update_incumbent_status(
             incumbent["dq_reason"] = dq_reason
 
         payload[role] = incumbent
+        if detail is not None:
+            payload["detail"] = detail
 
         step: dict[str, Any] = {
             "ts": time.time(),

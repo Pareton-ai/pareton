@@ -175,7 +175,7 @@ class TestStartContainer:
     @patch("validator.docker_eval.ensure_eval_network")
     @patch("validator.docker_eval.subprocess.run")
     def test_gpu_passthrough(self, mock_run, _mock_net, _mock_ip):
-        """Uses both --gpus all and CDI --device for broad compatibility."""
+        """Uses --gpus all for GPU passthrough (CDI --device omitted; breaks nested DinD)."""
         mock_run.return_value = MagicMock(
             returncode=0, stdout="container_id\n", stderr=""
         )
@@ -187,8 +187,7 @@ class TestStartContainer:
         cmd = mock_run.call_args[0][0]
         assert "--gpus" in cmd
         assert cmd[cmd.index("--gpus") + 1] == "all"
-        assert "--device" in cmd
-        assert cmd[cmd.index("--device") + 1] == "nvidia.com/gpu=all"
+        assert "--device" not in cmd
 
     @patch("validator.docker_eval._get_container_ip", return_value="172.18.0.2")
     @patch("validator.docker_eval.ensure_eval_network")
