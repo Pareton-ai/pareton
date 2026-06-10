@@ -278,27 +278,7 @@ def main() -> int:
             per_prompt=record.per_prompt,
         )
 
-    def _dq_baseline_scoring_unavailable(
-        record: EvaluationRecord, exc: Exception
-    ) -> EvaluationRecord:
-        logger.error(
-            "Teacher-forcing scoring unavailable for %s: %s", record.eval_key, exc
-        )
-        return EvaluationRecord(
-            uid=record.uid,
-            hotkey=record.hotkey,
-            commit_block=record.commit_block,
-            image=record.image,
-            digest=record.digest,
-            score=0.0,
-            speed_improvement=0.0,
-            token_match_rate=record.token_match_rate,
-            disqualified=True,
-            disqualify_reason=f"baseline_scoring_unavailable: {exc}",
-            evaluated_at=record.evaluated_at,
-            evaluation_block=record.evaluation_block,
-            per_prompt=record.per_prompt,
-        )
+    TF_DEFER_DETAIL = "scoring_baseline_unavailable"
 
     def _queue_teacher_forcing(
         record: EvaluationRecord,
@@ -336,9 +316,9 @@ def main() -> int:
         )
         return dq
 
-    def _batch_run_teacher_forcing() -> None:
+    def _batch_run_teacher_forcing() -> bool:
         if not pending_tf:
-            return
+            return True
         logger.info(
             "Teacher-forcing batch: %d challenger(s), log_label=%s",
             len(pending_tf),
@@ -359,8 +339,7 @@ def main() -> int:
                 pending.record = _apply_teacher_forcing(scoring_url, pending)
         except Exception as exc:
             logger.exception("Teacher-forcing scoring baseline failed: %s", exc)
-            for pending in pending_tf:
-                pending.record = _dq_baseline_scoring_unavailable(pending.record, exc)
+            return False
         finally:
             if scoring_cid:
                 stop_scoring_baseline(
@@ -368,6 +347,7 @@ def main() -> int:
                 )
         update_progress(state_dir, phase="teacher_forcing_complete")
         _upload_progress(state_dir)
+        return True
 
     # ------------------------------------------------------------------ #
     # Evaluate leader and runner-up (fresh scores on same hardware)
@@ -570,18 +550,35 @@ def main() -> int:
         _upload_progress(state_dir)
         challenger_persist.append((challenger_idx, record))
 
-    _batch_run_teacher_forcing()
+    scoring_available = _batch_run_teacher_forcing()
+    deferred_keys = (
+        {p.record.eval_key for p in pending_tf} if not scoring_available else set()
+    )
+    if not scoring_available:
+        logger.warning(
+            "Teacher-forcing scoring unavailable; deferring %d participant(s)",
+            len(deferred_keys),
+        )
 
-    tf_by_key = {p.record.eval_key: p.record for p in pending_tf}
-    challenger_persist = [
-        (idx, tf_by_key.get(rec.eval_key, rec)) for idx, rec in challenger_persist
-    ]
-    if leader_record is not None:
-        leader_record = tf_by_key.get(leader_record.eval_key, leader_record)
-    if ru_record is not None:
-        ru_record = tf_by_key.get(ru_record.eval_key, ru_record)
+    if scoring_available:
+        tf_by_key = {p.record.eval_key: p.record for p in pending_tf}
+        challenger_persist = [
+            (idx, tf_by_key.get(rec.eval_key, rec)) for idx, rec in challenger_persist
+        ]
+        if leader_record is not None:
+            leader_record = tf_by_key.get(leader_record.eval_key, leader_record)
+        if ru_record is not None:
+            ru_record = tf_by_key.get(ru_record.eval_key, ru_record)
 
     for challenger_idx, record in challenger_persist:
+        if record.eval_key in deferred_keys:
+            update_challenger_status(
+                state_dir,
+                challenger_idx,
+                status="skipped",
+                detail=TF_DEFER_DETAIL,
+            )
+            continue
         outcome = state.record_evaluation(record, current_block=block)
         icon = "❌" if outcome.stored.disqualify_reason else "📊"
         logger.info(
@@ -615,72 +612,83 @@ def main() -> int:
         _upload_state(state_dir)
 
     for label, rec in (("leader", leader_record), ("runner_up", ru_record)):
-        if rec is not None:
-            icon = "❌" if rec.disqualified else "📊"
-            logger.info(
-                "%s %s UID %d score=%.4f (dq=%s) [after teacher-forcing]",
-                icon,
-                label,
-                rec.uid,
-                rec.score,
-                rec.disqualify_reason or "no",
-            )
+        if rec is None:
+            continue
+        if rec.eval_key in deferred_keys:
             update_incumbent_status(
-                state_dir,
-                label,
-                status="dq" if rec.disqualified else "scored",
-                score=rec.score,
-                dq_reason=rec.disqualify_reason,
+                state_dir, label, status="skipped", detail=TF_DEFER_DETAIL
             )
+            continue
+        icon = "❌" if rec.disqualified else "📊"
+        logger.info(
+            "%s %s UID %d score=%.4f (dq=%s) [after teacher-forcing]",
+            icon,
+            label,
+            rec.uid,
+            rec.score,
+            rec.disqualify_reason or "no",
+        )
+        update_incumbent_status(
+            state_dir,
+            label,
+            status="dq" if rec.disqualified else "scored",
+            score=rec.score,
+            dq_reason=rec.disqualify_reason,
+        )
     _upload_progress(state_dir)
 
     # ------------------------------------------------------------------ #
     # Upsert leader/RU fresh scores and rerank
     # ------------------------------------------------------------------ #
 
-    if leader_record is not None:
-        state.evaluations[f"{leader_record.eval_key}:{block}"] = leader_record
-    if ru_record is not None:
-        state.evaluations[f"{ru_record.eval_key}:{block}"] = ru_record
+    if scoring_available:
+        if leader_record is not None:
+            state.evaluations[f"{leader_record.eval_key}:{block}"] = leader_record
+        if ru_record is not None:
+            state.evaluations[f"{ru_record.eval_key}:{block}"] = ru_record
 
-    prev_winner = state.winner
-    from .state import OVERTAKE_EPSILON
+        prev_winner = state.winner
+        from .state import OVERTAKE_EPSILON
 
-    new_winner, new_ru = state.rerank_round(
-        leader_record=leader_record,
-        ru_record=ru_record,
-        challenger_records=challenger_records,
-        current_block=block,
-    )
-    state.winner = new_winner
-    state.runner_up_record = new_ru
-
-    winner_changed = (new_winner is None) != (prev_winner is None) or (
-        new_winner is not None
-        and prev_winner is not None
-        and (
-            new_winner.hotkey != prev_winner.hotkey
-            or new_winner.score != prev_winner.score
+        new_winner, new_ru = state.rerank_round(
+            leader_record=leader_record,
+            ru_record=ru_record,
+            challenger_records=challenger_records,
+            current_block=block,
         )
-    )
-    if winner_changed:
-        winner_ev = None
-        if new_winner is not None:
-            base_key = f"{new_winner.hotkey}:{new_winner.commit_block}"
-            winner_ev = state.evaluations.get(
-                f"{base_key}:{block}"
-            ) or state.evaluations.get(base_key)
-        if winner_ev is not None:
-            threshold = (
-                new_winner.score * (1.0 + OVERTAKE_EPSILON) if prev_winner else 0.0
+        state.winner = new_winner
+        state.runner_up_record = new_ru
+
+        winner_changed = (new_winner is None) != (prev_winner is None) or (
+            new_winner is not None
+            and prev_winner is not None
+            and (
+                new_winner.hotkey != prev_winner.hotkey
+                or new_winner.score != prev_winner.score
             )
-            append_winner_history(state_dir, winner_ev, prev_winner, block, threshold)
-        if new_winner is not None:
-            logger.info(
-                "New winner: UID %d (score=%.4f)", new_winner.uid, new_winner.score
-            )
-        else:
-            logger.info("No eligible winner this round")
+        )
+        if winner_changed:
+            winner_ev = None
+            if new_winner is not None:
+                base_key = f"{new_winner.hotkey}:{new_winner.commit_block}"
+                winner_ev = state.evaluations.get(
+                    f"{base_key}:{block}"
+                ) or state.evaluations.get(base_key)
+            if winner_ev is not None:
+                threshold = (
+                    new_winner.score * (1.0 + OVERTAKE_EPSILON) if prev_winner else 0.0
+                )
+                append_winner_history(
+                    state_dir, winner_ev, prev_winner, block, threshold
+                )
+            if new_winner is not None:
+                logger.info(
+                    "New winner: UID %d (score=%.4f)", new_winner.uid, new_winner.score
+                )
+            else:
+                logger.info("No eligible winner this round")
+    else:
+        logger.warning("Scoring round void; preserving winner/runner-up")
 
     if not state.save(state_dir):
         logger.error("Could not persist state.json; continuing eval round")
