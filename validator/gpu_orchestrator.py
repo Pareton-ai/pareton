@@ -110,11 +110,8 @@ def _build_env_exports(handle: PodHandle) -> str:
     if hf_token:
         env["HF_TOKEN"] = hf_token
 
-    if handle.provider == "targon":
-        if "CACHEON_VLLM_CACHE_DIR" in os.environ:
-            env["CACHEON_VLLM_CACHE_DIR"] = os.environ["CACHEON_VLLM_CACHE_DIR"]
-        else:
-            env["CACHEON_VLLM_CACHE_DIR"] = "/workspace/vllm-cache"
+    if "CACHEON_VLLM_CACHE_DIR" in os.environ:
+        env["CACHEON_VLLM_CACHE_DIR"] = os.environ["CACHEON_VLLM_CACHE_DIR"]
 
     return " && ".join(f'export {k}="{_dq_escape(v)}"' for k, v in env.items())
 
