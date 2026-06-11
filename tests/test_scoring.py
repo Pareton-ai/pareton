@@ -11,10 +11,12 @@ from validator.scoring import (
     aligned_e2e_seconds,
     compute_correctness,
     compute_pass1_aggregate_match,
+    compute_pass1_text_similarity,
     compute_speed_improvement,
     compute_teacher_forcing_verdict,
+    compute_text_similarity,
     compute_token_match_rate,
-    pass1_match_passes,
+    pass1_text_sim_passes,
 )
 
 pytestmark = pytest.mark.unit
@@ -143,11 +145,52 @@ class TestPass1MatchGate:
         miner = [["a", "b"], ["x", "z"]]
         assert compute_pass1_aggregate_match(base, miner) == pytest.approx(0.75)
 
-    def test_pass_at_threshold(self):
-        assert pass1_match_passes(0.25, 0.25) is True
 
-    def test_fail_below_threshold(self):
-        assert pass1_match_passes(0.24, 0.25) is False
+# --------------------------------------------------------------------------- #
+# Pass 1 text similarity gate (tokenizer agnostic)
+# --------------------------------------------------------------------------- #
+
+
+class TestTextSimilarity:
+    def test_identical_text(self):
+        assert compute_text_similarity("Hello world", "Hello world") == 1.0
+
+    def test_leading_trailing_whitespace_ignored(self):
+        assert compute_text_similarity("  Hello world\n", "Hello world") == 1.0
+
+    def test_internal_formatting_is_significant(self):
+        # Newlines and tabs are preserved, so stripping formatting no longer
+        # scores as identical against a properly formatted baseline.
+        assert compute_text_similarity("a\nb\nc", "abc") < 1.0
+
+    def test_both_empty(self):
+        assert compute_text_similarity("", "") == 1.0
+
+    def test_completely_different(self):
+        assert compute_text_similarity("Hello world", "WRONG") < 0.3
+
+    def test_retokenized_same_text_scores_one(self):
+        # The decoded text is what matters, not how it was chunked into tokens.
+        baseline = "".join(["Hello", " world"])
+        miner = "".join(["Hel", "lo", " wor", "ld"])
+        assert compute_text_similarity(baseline, miner) == 1.0
+
+    def test_aggregate_mean_across_prompts(self):
+        base = ["Hello world", "foo bar"]
+        miner = ["Hello world", "foo baz"]
+        agg = compute_pass1_text_similarity(base, miner)
+        assert agg == pytest.approx(
+            (1.0 + compute_text_similarity("foo bar", "foo baz")) / 2
+        )
+
+    def test_aggregate_empty_returns_zero(self):
+        assert compute_pass1_text_similarity([], ["x"]) == 0.0
+
+    def test_gate_pass_at_threshold(self):
+        assert pass1_text_sim_passes(0.90, 0.90) is True
+
+    def test_gate_fail_below_threshold(self):
+        assert pass1_text_sim_passes(0.89, 0.90) is False
 
 
 # --------------------------------------------------------------------------- #

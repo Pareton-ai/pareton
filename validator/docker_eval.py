@@ -25,10 +25,11 @@ from .scoring import (
     aligned_e2e_improvement,
     aligned_e2e_seconds,
     compute_pass1_aggregate_match,
+    compute_pass1_text_similarity,
     compute_speed_improvement,
     compute_teacher_forcing_verdict,
     compute_token_match_rate,
-    pass1_match_passes,
+    pass1_text_sim_passes,
 )
 from . import config as validator_config
 from .state import EvaluationRecord
@@ -1459,6 +1460,12 @@ def evaluate_challenger(
         for r in eval_results:
             collected_tf_miner_tokens.append(r.tokens)
 
+    # Pass 1 gate runs on decoded text (tokenizer agnostic). The reported
+    # token_match_rate stays the token-based aggregate for telemetry continuity.
+    baseline_texts = ["".join(bl.tokens) for bl in baseline.results]
+    miner_texts = [r.output_text for r in eval_results]
+    text_sim = compute_pass1_text_similarity(baseline_texts, miner_texts)
+
     baseline_tokens = [bl.tokens for bl in baseline.results]
     miner_stress_tokens = [r.tokens for r in eval_results]
     agg_match_rate = compute_pass1_aggregate_match(
@@ -1466,14 +1473,16 @@ def evaluate_challenger(
         miner_stress_tokens,
     )
 
-    if not pass1_match_passes(
-        agg_match_rate, validator_config.PASS1_MATCH_DQ_THRESHOLD
+    if not pass1_text_sim_passes(
+        text_sim, validator_config.PASS1_TEXT_SIM_DQ_THRESHOLD
     ):
         reason = (
-            f"pass1_match_fail: aggregate match {agg_match_rate:.4f} "
-            f"below threshold {validator_config.PASS1_MATCH_DQ_THRESHOLD}"
+            f"pass1_match_fail: text similarity {text_sim:.4f} "
+            f"below threshold {validator_config.PASS1_TEXT_SIM_DQ_THRESHOLD}"
         )
-        logger.warning("Challenger UID %d Pass 1 match DQ: %s", com.uid, reason)
+        logger.warning(
+            "Challenger UID %d Pass 1 text similarity DQ: %s", com.uid, reason
+        )
 
         n_scored = min(len(eval_results), len(baseline.results))
         per_prompt: list[PerPromptResult] = []
