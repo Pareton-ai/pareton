@@ -619,9 +619,9 @@ def run_tick(
             n_challengers,
         )
 
-        if validator_config.GPU_SSH_ENABLED or validator_config.AUTO_RENT:
-            from .gpu_orchestrator import run_gpu_eval
+        from .gpu_orchestrator import gpu_eval_configured, run_gpu_eval
 
+        if gpu_eval_configured():
             success = run_gpu_eval(state_dir, eval_job)
             clear_stale_progress = not success
             try:
@@ -779,7 +779,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         logger.info("Interrupted, shutting down.")
         from .eval_progress import clear_progress
+        from .gpu_orchestrator import teardown_rented_gpu_session
 
+        teardown_rented_gpu_session()
         clear_progress(args.state_dir)
         return 0
 

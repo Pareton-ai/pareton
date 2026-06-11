@@ -131,12 +131,17 @@ class LiumProvider:
         pod_data = self._client.up(**up_kwargs)
         pod_id = pod_data.get("id") if isinstance(pod_data, dict) else str(pod_data)
         logger.info("🔗 Dashboard: %s/%s", LIUM_DASHBOARD, pod_id)
+        raw: dict[str, Any] = (
+            dict(pod_data) if isinstance(pod_data, dict) else {"pod": pod_data}
+        )
+        if volume_id:
+            raw["volume_id"] = volume_id
         return PodHandle(
             provider="lium",
             pod_id=pod_id,
             gpu_count=instance.num_gpus,
             hourly_price_cents=instance.hourly_price_cents,
-            raw=pod_data,
+            raw=raw,
         )
 
     def wait_ready(
@@ -170,6 +175,16 @@ class LiumProvider:
             logger.info("Lium pod %s terminated", handle.pod_id)
         except Exception as exc:
             logger.error("Lium teardown failed for %s: %s", handle.pod_id, exc)
+
+        raw = handle.raw if isinstance(handle.raw, dict) else {}
+        volume_id = raw.get("volume_id") or self._volume_id
+        if volume_id:
+            try:
+                self._client.volume_delete(volume_id)
+                logger.info("Lium volume %s deleted", volume_id)
+            except Exception as exc:
+                logger.error("Lium volume teardown failed for %s: %s", volume_id, exc)
+        self._volume_id = None
 
     def balance(self) -> float:
         return self._client.balance()

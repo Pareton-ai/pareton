@@ -591,7 +591,7 @@ class TestGpuEvalFailureClearsProgress:
     @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=False)
-    @patch("validator.cpu_validator.validator_config.AUTO_RENT", True)
+    @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.eval_progress.clear_progress")
     def test_clears_progress_when_gpu_eval_fails(
         self, mock_clear, mock_run_gpu, tmp_path
@@ -617,7 +617,7 @@ class TestGpuEvalFailureClearsProgress:
     @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", side_effect=RuntimeError("S3 down"))
     @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=True)
-    @patch("validator.cpu_validator.validator_config.AUTO_RENT", True)
+    @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.eval_progress.clear_progress")
     def test_clears_progress_when_success_download_fails(
         self, mock_clear, mock_run_gpu, mock_dl, tmp_path
