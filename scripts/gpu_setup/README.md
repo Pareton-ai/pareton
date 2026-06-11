@@ -9,7 +9,6 @@ Both scripts mark provider-specific values with `# TODO` comments at the top of 
 **`create_targon_pod.py`**
 
 - `# TODO: replace this with your workload name` (`WORKLOAD_NAME`)
-- `# TODO: replace this with your volume UID` (`VOLUME_UID`)
 - `# TODO: replace with one of "H100", "H200", "B200"` (`TARGON_GPU`; Targon does not expose automatic fallback, so you choose one tier)
 
 **`create_lium_pod.py`**
@@ -41,7 +40,7 @@ export LIUM_API_KEY=...
 python scripts/gpu_setup/create_lium_pod.py
 ```
 
-Both scripts register SSH keys with the provider, attach a persistent volume at `/workspace`, inject environment variables from the repo-root `.env`, and poll until the pod is running. GPU picking differs by provider (see **GPU selection** above).
+Both scripts register SSH keys with the provider, create a block volume at `/workspace`, inject environment variables from the repo-root `.env`, and poll until the pod is running. GPU picking differs by provider (see **GPU selection** above). The Targon script leaves the volume in your account until you delete it manually; auto-rent on the validator deletes workload and volume after each eval.
 
 ## Files
 

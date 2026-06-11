@@ -274,9 +274,9 @@ BASELINE_IMAGE="${CACHEON_BASELINE_IMAGE:-vllm/vllm-openai:v0.22.0}"
 SCORING_IMAGE="${CACHEON_SCORING_IMAGE:-vllm/vllm-openai:v0.9.2}"
 
 # A failed pull leaves a partially-registered layer (orphaned
-# layerdb/sha256/<hash> dir) behind. Because the Docker data-root lives on the
-# persistent /workspace volume, that broken state survives pod teardown and
-# poisons every later rental with "failed to register layer: ... file exists".
+# layerdb/sha256/<hash> dir) behind. On ephemeral auto-rent volumes the whole
+# volume is deleted after eval; on long-lived pods, broken layer state on
+# /workspace can poison later Docker pulls until the data-root is reset.
 # Removing only layerdb/tmp does not clear the orphaned destination dir, so the
 # only reliable recovery is to wipe the whole data-root and restart dockerd.
 # models/ and .cache/ live elsewhere on /workspace and are untouched.

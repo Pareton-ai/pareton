@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Create and deploy a Targon GPU rental workload with volume + SSH keys."""
+"""Create and deploy a Targon GPU rental workload with a fresh volume + SSH keys."""
 
 import os
 import sys
 import time
+import uuid
 
 import requests
 
@@ -11,8 +12,9 @@ from shared import SSH_KEYS, load_env_dict
 
 WORKLOAD_NAME = "test-cacheon"  # TODO: replace this with your workload name
 IMAGE = "ghcr.io/manifold-inc/ubuntu-systemd-docker:v3"
-VOLUME_UID = "vol-0lhmsprbolfa"  # TODO: replace this with your volume UID
 VOLUME_MOUNT = "/workspace"
+VOLUME_SIZE_MB = 1_048_576  # 1 TiB
+VOLUME_RESOURCE_NAME = "storage-rentals"
 
 # Targon has no inventory fallback API; pick exactly one tier below.
 TARGON_GPU = "H200"  # TODO: replace with one of "H100", "H200", "B200"
@@ -61,7 +63,41 @@ def ensure_ssh_keys() -> list[str]:
     return uids
 
 
-def create_workload(ssh_key_uids: list[str], pod_envs: list[dict]) -> str:
+def create_volume() -> str:
+    name = f"cacheon-manual-{uuid.uuid4().hex[:8]}"
+    print(f"\nCreating volume '{name}' (1 TiB)...")
+    resp = _req(
+        "POST",
+        "/volumes",
+        json={
+            "name": name,
+            "size_in_mb": VOLUME_SIZE_MB,
+            "resource_name": VOLUME_RESOURCE_NAME,
+        },
+    )
+    volume_uid = resp.json()["uid"]
+    print(f"  Volume registered -> {volume_uid}")
+    return volume_uid
+
+
+def wait_for_volume(volume_uid: str, interval: int = 10) -> None:
+    print(f"\nWaiting for volume {volume_uid} to reach READY...")
+    while True:
+        resp = _req("GET", f"/volumes/{volume_uid}/state")
+        status = resp.json().get("status", "UNKNOWN").upper()
+        print(f"  status={status}")
+        if status == "READY":
+            print(f"  Volume {volume_uid} is ready.")
+            return
+        if status in ("FAILED", "ERROR", "DELETING"):
+            print(f"\n  Volume entered terminal state: {status}", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(interval)
+
+
+def create_workload(
+    ssh_key_uids: list[str], volume_uid: str, pod_envs: list[dict]
+) -> str:
     """Create a rental workload for the configured GPU tier."""
     resource = TARGON_RESOURCE_BY_GPU.get(TARGON_GPU)
     if not resource:
@@ -76,7 +112,7 @@ def create_workload(ssh_key_uids: list[str], pod_envs: list[dict]) -> str:
         "image": IMAGE,
         "resource_name": resource,
         "type": "RENTAL",
-        "volumes": [{"uid": VOLUME_UID, "mount_path": VOLUME_MOUNT}],
+        "volumes": [{"uid": volume_uid, "mount_path": VOLUME_MOUNT}],
         "ssh_keys": ssh_key_uids,
         "envs": pod_envs,
     }
@@ -97,7 +133,7 @@ def deploy_workload(workload_uid: str) -> None:
     print(f"  Status: {state.get('status', 'UNKNOWN')}")
 
 
-def wait_for_running(workload_uid: str, interval: int = 15) -> None:
+def wait_for_running(workload_uid: str, volume_uid: str, interval: int = 15) -> None:
     print("\nWaiting for workload to reach RUNNING...")
     while True:
         resp = _req("GET", f"/workloads/{workload_uid}/state")
@@ -105,8 +141,12 @@ def wait_for_running(workload_uid: str, interval: int = 15) -> None:
         status = data.get("status", "UNKNOWN").upper()
         print(f"  status={status}")
         if status == "RUNNING":
-            print(f"\n  Workload is RUNNING.")
+            print("\n  Workload is RUNNING.")
             print(f"  ssh {workload_uid}@ssh.deployments.targon.com")
+            print(
+                f"\n  Volume {volume_uid} persists until you delete it in the Targon dashboard "
+                "or via POST /tha/v2/volumes/{uid}/delete."
+            )
             return
         if status in ("FAILED", "TERMINATED", "ERROR"):
             print(f"\n  Workload entered terminal state: {status}", file=sys.stderr)
@@ -129,14 +169,18 @@ def main() -> None:
     pod_envs = [{"name": k, "value": v} for k, v in env_dict.items()]
     print(f"  {len(pod_envs)} env vars loaded (values hidden)")
 
-    print("\n3) Creating rental workload...")
-    wid = create_workload(ssh_uids, pod_envs)
+    print("\n3) Creating block volume...")
+    volume_uid = create_volume()
+    wait_for_volume(volume_uid)
 
-    print("\n4) Deploying...")
+    print("\n4) Creating rental workload...")
+    wid = create_workload(ssh_uids, volume_uid, pod_envs)
+
+    print("\n5) Deploying...")
     deploy_workload(wid)
 
-    print("\n5) Polling status...")
-    wait_for_running(wid)
+    print("\n6) Polling status...")
+    wait_for_running(wid, volume_uid)
 
     print("\nDone.")
 

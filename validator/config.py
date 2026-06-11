@@ -172,7 +172,6 @@ Empty uses tier A (H200/B200/B300) then tier B (H100). Invalid values are ignore
 LIUM_API_KEY: str = os.environ.get("LIUM_API_KEY", "")
 TARGON_API_KEY: str = os.environ.get("TARGON_API_KEY", "")
 SHADEFORM_API_KEY: str = os.environ.get("SHADEFORM_API_KEY", "")
-TARGON_VOLUME_UID: str = os.environ.get("TARGON_VOLUME_UID", "")
 
 MAX_HOURLY_PRICE: int = int(os.environ.get("CACHEON_MAX_HOURLY_PRICE", "2000"))
 """Maximum hourly price in US cents. Refuse to rent above this."""
@@ -272,8 +271,8 @@ scoring. Not the authoritative correctness gate (teacher-forcing is)."""
 
 VLLM_COMPILE_CACHE_DIR: str = os.environ.get("CACHEON_VLLM_CACHE_DIR", "")
 """Host directory mounted into Pass 1 baseline container at /root/.cache/vllm.
-Empty disables the mount. Auto-rent on Targon sets /workspace/vllm-cache;
-set manually on persistent-volume Targon pods."""
+Empty disables the mount. Set on persistent GPU pods (for example
+``CACHEON_GPU_SSH`` with ``CACHEON_VLLM_CACHE_DIR=/workspace/vllm-cache``)."""
 
 
 def baseline_compile_cache_dir() -> str | None:

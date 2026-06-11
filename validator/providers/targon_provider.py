@@ -1,18 +1,17 @@
 """Targon GPU cloud provider using the v2 REST API.
 
-Registers the host's existing SSH key with Targon and uses it for
-paramiko exec. Requires TARGON_VOLUME_UID (e.g. vol-xxx) to attach
-a persistent volume for model weights.
+Registers the host's existing SSH key with Targon, creates a fresh block
+volume per rental (mounted at ``/workspace``), and tears down workload +
+volume when done.
 """
 
 from __future__ import annotations
 
-
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Generator
-
 
 import paramiko
 import requests
@@ -25,6 +24,10 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.targon.com/tha/v2"
 TARGON_SSH_HOST = "ssh.deployments.targon.com"
 TARGON_DASHBOARD = "https://targon.com/rentals"
+VOLUME_SIZE_MB = 1_048_576  # 1 TiB
+VOLUME_RESOURCE_NAME = "storage-rentals"
+VOLUME_MOUNT_PATH = "/workspace"
+VOLUME_READY_TIMEOUT_S = 300
 
 
 def _normalize_gpu_type(raw: str) -> str:
@@ -121,6 +124,100 @@ class TargonProvider:
         assert last_resp is not None
         last_resp.raise_for_status()
 
+    # -- Volume lifecycle --------------------------------------------------
+
+    def _create_volume(self) -> str:
+        name = f"cacheon-eval-{uuid.uuid4().hex[:8]}"
+        resp = self._post(
+            "/volumes",
+            json={
+                "name": name,
+                "size_in_mb": VOLUME_SIZE_MB,
+                "resource_name": VOLUME_RESOURCE_NAME,
+            },
+        )
+        volume_uid = resp["uid"]
+        logger.info(
+            "Created Targon volume %s (1 TiB, resource=%s)",
+            volume_uid,
+            VOLUME_RESOURCE_NAME,
+        )
+        return volume_uid
+
+    def _wait_volume_ready(
+        self, volume_uid: str, timeout_s: int = VOLUME_READY_TIMEOUT_S
+    ) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            state = self._get(f"/volumes/{volume_uid}/state")
+            status = state.get("status", "").upper()
+            if status == "READY":
+                logger.info("Targon volume %s is ready", volume_uid)
+                return
+            if status in ("FAILED", "ERROR", "DELETING"):
+                raise RuntimeError(
+                    f"Targon volume {volume_uid} entered {status}: "
+                    f"{state.get('message', '')}"
+                )
+            time.sleep(10)
+
+        raise TimeoutError(f"Targon volume {volume_uid} not ready after {timeout_s}s")
+
+    def _abort_rent(self, workload_uid: str | None, volume_uid: str) -> None:
+        """Best-effort cleanup when rent fails after volume and/or workload creation."""
+        if workload_uid:
+            self._teardown_workload(workload_uid)
+        self._teardown_volume(volume_uid)
+
+    def _teardown_workload(self, workload_uid: str) -> None:
+        try:
+            self._delete(f"/workloads/{workload_uid}")
+            logger.info("Targon workload %s deleted", workload_uid)
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status == 404:
+                logger.info("Targon workload %s already deleted", workload_uid)
+                return
+            logger.error(
+                "Targon workload teardown failed for %s: %s", workload_uid, exc
+            )
+        except Exception as exc:
+            logger.error(
+                "Targon workload teardown failed for %s: %s", workload_uid, exc
+            )
+
+    def _teardown_volume(self, volume_uid: str) -> None:
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            try:
+                self._post(f"/volumes/{volume_uid}/delete")
+                logger.info("Targon volume %s deleted", volume_uid)
+                return
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status == 404:
+                    logger.info("Targon volume %s already deleted", volume_uid)
+                    return
+                if status in (409, 423, 503):
+                    logger.info(
+                        "Volume %s not ready to delete (HTTP %s), retrying...",
+                        volume_uid,
+                        status,
+                    )
+                    time.sleep(15)
+                    continue
+                logger.error(
+                    "Targon volume teardown failed for %s: %s", volume_uid, exc
+                )
+                return
+            except Exception as exc:
+                logger.warning("Targon volume delete retry for %s: %s", volume_uid, exc)
+                time.sleep(15)
+
+        logger.error(
+            "Timed out deleting Targon volume %s after workload delete", volume_uid
+        )
+
     # -- SSH key management ------------------------------------------------
 
     @staticmethod
@@ -214,17 +311,15 @@ class TargonProvider:
         return out
 
     def rent(self, instance: GpuInstance) -> PodHandle:
-        from .. import config as validator_config
-
         resource_name = instance.instance_id
         ssh_key_uid = self._ensure_ssh_key()
+        volume_uid = self._create_volume()
 
-        volume_uid = validator_config.TARGON_VOLUME_UID
-        if not volume_uid or not volume_uid.startswith("vol-"):
-            raise RuntimeError(
-                "TARGON_VOLUME_UID is required and must start with 'vol-' "
-                "(create one at https://targon.com/volumes)"
-            )
+        try:
+            self._wait_volume_ready(volume_uid)
+        except Exception:
+            self._abort_rent(None, volume_uid)
+            raise
 
         body: dict[str, Any] = {
             "name": "cacheon-eval",
@@ -235,13 +330,18 @@ class TargonProvider:
                 {"port": 22, "protocol": "TCP", "routing": "DIRECT"},
             ],
             "ssh_keys": [ssh_key_uid],
-            "volumes": [{"uid": volume_uid, "mount_path": "/workspace"}],
+            "volumes": [{"uid": volume_uid, "mount_path": VOLUME_MOUNT_PATH}],
         }
 
-        workload = self._post("/workloads", json=body)
-        workload_uid = workload["uid"]
+        workload_uid: str | None = None
+        try:
+            workload = self._post("/workloads", json=body)
+            workload_uid = workload["uid"]
+            self._deploy_workload(workload_uid)
+        except Exception:
+            self._abort_rent(workload_uid, volume_uid)
+            raise
 
-        self._deploy_workload(workload_uid)
         logger.info(
             "Targon workload %s created (resource=%s, volume=%s)",
             workload_uid,
@@ -255,7 +355,7 @@ class TargonProvider:
             pod_id=workload_uid,
             gpu_count=instance.num_gpus,
             hourly_price_cents=instance.hourly_price_cents,
-            raw={"resource_name": resource_name},
+            raw={"resource_name": resource_name, "volume_uid": volume_uid},
         )
 
     def wait_ready(
@@ -365,8 +465,9 @@ class TargonProvider:
             client.close()
 
     def teardown(self, handle: PodHandle) -> None:
-        try:
-            self._delete(f"/workloads/{handle.pod_id}")
-            logger.info("Targon workload %s deleted", handle.pod_id)
-        except Exception as exc:
-            logger.error("Targon teardown failed for %s: %s", handle.pod_id, exc)
+        raw = handle.raw or {}
+        volume_uid = raw.get("volume_uid")
+
+        self._teardown_workload(handle.pod_id)
+        if volume_uid:
+            self._teardown_volume(volume_uid)
