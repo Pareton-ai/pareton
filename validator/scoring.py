@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Any
 
 
@@ -124,9 +125,43 @@ def compute_pass1_aggregate_match(
     return statistics.mean(rates)
 
 
-def pass1_match_passes(aggregate_match: float, threshold: float) -> bool:
-    """Return True when aggregate match meets or exceeds the Pass 1 gate."""
-    return aggregate_match >= threshold
+def compute_text_similarity(baseline_text: str, miner_text: str) -> float:
+    """Character-level similarity of two outputs as plain text (0.0 -- 1.0).
+
+    Compares decoded text rather than tokens, so it is tokenizer agnostic:
+    two correct greedy outputs of the same model are near identical as text
+    no matter which framework (vLLM, SGLang) produced them, while a divergent
+    output is clearly different.
+
+    Only leading and trailing whitespace is trimmed; internal newlines and
+    tabs are kept so a miner that strips formatting (e.g. from code or
+    markdown) does not match a properly formatted baseline. ``autojunk`` is
+    disabled so the ratio is deterministic regardless of output length.
+    """
+    base = baseline_text.strip()
+    miner = miner_text.strip()
+    if not base and not miner:
+        return 1.0
+    return SequenceMatcher(None, base, miner, autojunk=False).ratio()
+
+
+def compute_pass1_text_similarity(
+    baseline_texts: list[str],
+    miner_texts: list[str],
+) -> float:
+    """Mean text similarity across Pass 1 speed prompt pairs."""
+    if not baseline_texts or not miner_texts:
+        return 0.0
+    n = min(len(baseline_texts), len(miner_texts))
+    rates = [
+        compute_text_similarity(baseline_texts[i], miner_texts[i]) for i in range(n)
+    ]
+    return statistics.mean(rates)
+
+
+def pass1_text_sim_passes(similarity: float, threshold: float) -> bool:
+    """Return True when text similarity meets or exceeds the Pass 1 gate."""
+    return similarity >= threshold
 
 
 # Pass 2: minimum fraction of scoring_canonical_token_count that must be

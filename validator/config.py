@@ -263,12 +263,15 @@ MIN_LOGPROB_THRESHOLD: float = float(
 )
 """Floor logprob for any single token. Catches isolated garbage tokens."""
 
-PASS1_MATCH_DQ_THRESHOLD: float = float(
-    os.environ.get("CACHEON_PASS1_MATCH_DQ_THRESHOLD", "0.05")
+PASS1_TEXT_SIM_DQ_THRESHOLD: float = float(
+    os.environ.get("CACHEON_PASS1_TEXT_SIM_DQ_THRESHOLD", "0.90")
 )
-"""Cheap pre-filter: aggregate token match vs baseline must be at or above
-this fraction before teacher-forcing. Below threshold, miner is DQ'd without
-scoring. Not the authoritative correctness gate (teacher-forcing is)."""
+"""Pass 1 fidelity gate on decoded text rather than tokens. Baseline and miner
+outputs are compared as plain text (tokenizer agnostic), so framework
+tokenization differences (e.g. SGLang vs vLLM) no longer lower the score and
+the gate can stay strict: correct greedy output of the same model is near
+identical as text, while a divergent (but plausible) output is caught before
+it reaches teacher-forcing."""
 
 VLLM_COMPILE_CACHE_DIR: str = os.environ.get("CACHEON_VLLM_CACHE_DIR", "")
 """Host directory mounted into Pass 1 baseline container at /root/.cache/vllm.

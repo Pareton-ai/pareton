@@ -1210,6 +1210,7 @@ class TestEvaluateChallenger:
 
         assert record.disqualified is True
         assert (record.disqualify_reason or "").startswith("pass1_match_fail:")
+        assert "text similarity" in (record.disqualify_reason or "")
         assert record.token_match_rate < 0.05
         assert record.per_prompt is not None
         assert len(record.per_prompt) == 2
@@ -1225,7 +1226,7 @@ class TestEvaluateChallenger:
         return_value=("cid123", "http://172.18.0.2:8000"),
     )
     @patch("validator.docker_eval.pull_image")
-    def test_pass1_match_passes_at_threshold(
+    def test_pass1_retokenized_output_passes(
         self,
         mock_pull,
         mock_start,
@@ -1235,7 +1236,14 @@ class TestEvaluateChallenger:
         mock_reset,
         mock_capture_logs,
     ):
-        partial_r = RawPromptResult(
+        """Same text, different token boundaries (the SGLang case) passes.
+
+        Baseline text is "Hello world". One prompt reproduces it with the
+        same tokens, the other with different token boundaries but identical
+        text. The text-similarity gate sees both as correct, so the miner is
+        not DQ'd, while the per-prompt token match still reports 0.5.
+        """
+        same_tokens_r = RawPromptResult(
             prompt_index=0,
             output_text="Hello world",
             tokens=["Hello", " world"],
@@ -1248,15 +1256,20 @@ class TestEvaluateChallenger:
             output_tokens=2,
             decode_elapsed_secs=[0.0, 0.5],
         )
-        wrong_r = RawPromptResult(
+        retokenized_r = RawPromptResult(
             prompt_index=0,
-            output_text="x",
-            tokens=["x"],
-            top_logprobs=[[{"token": "x", "logprob": -0.01}]],
+            output_text="Hello world",
+            tokens=["Hel", "lo", " wor", "ld"],
+            top_logprobs=[
+                [{"token": "Hel", "logprob": -0.01}],
+                [{"token": "lo", "logprob": -0.01}],
+                [{"token": " wor", "logprob": -0.01}],
+                [{"token": "ld", "logprob": -0.01}],
+            ],
             ttft_s=0.5,
             throughput_tps=150.0,
-            output_tokens=1,
-            decode_elapsed_secs=[0.0],
+            output_tokens=4,
+            decode_elapsed_secs=[0.0, 0.1, 0.2, 0.5],
         )
         warmup_r = RawPromptResult(
             prompt_index=0,
@@ -1267,7 +1280,7 @@ class TestEvaluateChallenger:
             throughput_tps=50.0,
             output_tokens=1,
         )
-        mock_send.side_effect = [warmup_r, warmup_r, partial_r, wrong_r]
+        mock_send.side_effect = [warmup_r, warmup_r, same_tokens_r, retokenized_r]
 
         record = evaluate_challenger(
             _make_commitment(),
