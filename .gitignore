@@ -51,6 +51,10 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# pytest MagicMock artifacts (accidental dirs when mock paths used as state_dir)
+MagicMock/
+*MagicMock*/
+
 # Translations
 *.mo
 *.pot

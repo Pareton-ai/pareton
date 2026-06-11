@@ -7,9 +7,10 @@ Loop (every CACHEON_POLL_INTERVAL_S, default 600s):
     1. Download latest state from Hippius S3
     2. Chain scan: fetch metagraph + commitments
     3. If winner's hotkey deregistered, promote runner-up or clear
-    4. If new GPU eval results or weights stale: set_weights
-    5. Select new challengers not yet evaluated
-    6. If challengers found: write eval_job.json, upload to S3
+    4. Select new challengers not yet evaluated
+    5. If challengers found: write eval_job.json, upload to S3, run GPU eval
+    6. Re-scan metagraph; re-run deregistration guard on post-GPU state
+    7. If new GPU eval results or weights stale: set_weights (end of tick)
     7. Sleep
 
 Usage:
@@ -156,6 +157,9 @@ def _reload_state(state: ValidatorState, state_dir: str) -> None:
 _CPU_UPLOAD_PRE_EVAL = ["eval_job.json", "eval_progress.json"]
 """Mid-tick upload before GPU eval. Excludes ``logs/`` (uploaded after tick)."""
 
+_CPU_UPLOAD_STATE = ["state.json"]
+"""Post-weight-set upload so ``last_weights_set_block`` persists to S3."""
+
 _CPU_LOGS_UPLOAD = ["logs/"]
 
 # Never download validator logs onto the running CPU process (open FileHandler).
@@ -172,6 +176,8 @@ def _flush_log_handlers() -> None:
 
 
 def _try_upload(state_dir: str) -> None:
+    if validator_config.SKIP_S3:
+        return
     try:
         from .sync import upload
 
@@ -180,8 +186,21 @@ def _try_upload(state_dir: str) -> None:
         logger.error("S3 upload failed: %s", exc)
 
 
+def _try_upload_state(state_dir: str) -> None:
+    if validator_config.SKIP_S3:
+        return
+    try:
+        from .sync import upload
+
+        upload(state_dir, only=_CPU_UPLOAD_STATE)
+    except Exception as exc:
+        logger.error("S3 state upload failed: %s", exc)
+
+
 def _try_upload_logs(state_dir: str) -> None:
     """Push complete validator logs to S3 after a tick finishes."""
+    if validator_config.SKIP_S3:
+        return
     _flush_log_handlers()
     try:
         from .sync import upload
@@ -336,6 +355,125 @@ def _resolve_runner_up_uid(state: ValidatorState, metagraph) -> int | None:
     return None
 
 
+def _apply_deregistration_guard(
+    state: ValidatorState,
+    metagraph,
+    current_block: int,
+) -> bool:
+    """Promote runner-up or clear winner if the leader UID no longer matches chain.
+
+    Returns True when ``state.winner`` or ``runner_up_record`` changed."""
+    if state.winner is None:
+        return False
+    if _hotkey_is_registered(metagraph, state.winner.uid, state.winner.hotkey):
+        return False
+
+    ru = state.runner_up
+    if ru is not None and _hotkey_is_registered(metagraph, ru.uid, ru.hotkey):
+        logger.warning(
+            "Winner UID %d deregistered (%s). Promoting runner-up UID %d.",
+            state.winner.uid,
+            state.winner.hotkey[:16],
+            ru.uid,
+        )
+        state.winner = WinnerRecord.from_evaluation(ru, won_at_block=current_block)
+        state.runner_up_record = None  # promoted; no runner-up until next eval
+        state.last_weights_set_block = 0  # force immediate weight update
+        return True
+
+    reason = "runner-up also gone" if ru is not None else "no runner-up"
+    logger.warning(
+        "Winner UID %d deregistered (%s). Clearing winner (%s).",
+        state.winner.uid,
+        state.winner.hotkey[:16],
+        reason,
+    )
+    state.winner = None
+    state.runner_up_record = None
+    return True
+
+
+def _try_set_weights(
+    *,
+    state: ValidatorState,
+    metagraph,
+    current_block: int,
+    subtensor,
+    wallet,
+    netuid: int,
+    state_dir: str,
+    dry_run: bool,
+    version_key: int,
+) -> bool:
+    """Set on-chain weights when state is current. Returns True if weights were set."""
+    reason = _needs_weight_set(state, current_block)
+    if not reason or state.winner is None:
+        return False
+
+    runner_up_uid = _resolve_runner_up_uid(state, metagraph)
+    logger.info(
+        "⚖️  Setting weights: winner=UID %d (score=%.4f), runner_up=%s, reason=%s",
+        state.winner.uid,
+        state.winner.score,
+        runner_up_uid,
+        reason,
+    )
+
+    w_dense = build_competition_weights(
+        n_uids=len(metagraph.hotkeys),
+        winner_uid=state.winner.uid,
+        runner_up_uid=runner_up_uid,
+        current_block=current_block,
+    )
+    burn_uid = validator_config.BURN_UID
+    emission_frac = compute_emission_pool_frac(current_block)
+    override_note = (
+        " (CACHEON_EMISSION_FRAC_OVERRIDE)"
+        if validator_config.EMISSION_FRAC_OVERRIDE is not None
+        else ""
+    )
+    logger.info(
+        "⚖️  weight vector: emission_frac=%.4f%s, winner=%d (%.4f),"
+        " runner_up=%s (%.4f), burn_uid=%d (%.4f), n_uids=%d",
+        emission_frac,
+        override_note,
+        state.winner.uid,
+        w_dense[state.winner.uid] if state.winner.uid < len(w_dense) else 0.0,
+        runner_up_uid,
+        w_dense[runner_up_uid]
+        if runner_up_uid is not None and runner_up_uid < len(w_dense)
+        else 0.0,
+        burn_uid,
+        w_dense[burn_uid] if burn_uid < len(w_dense) else 0.0,
+        len(w_dense),
+    )
+
+    uid_list = [u for u, wt in enumerate(w_dense) if wt > 0]
+    w = [wt for wt in w_dense if wt > 0]
+
+    if dry_run:
+        logger.info("🧪 [DRY-RUN] would set_weights (see weight vector above)")
+        state.last_weights_set_block = current_block
+        state.save(state_dir)
+        return True
+
+    try:
+        set_weights(
+            subtensor,
+            wallet,
+            netuid,
+            uids=uid_list,
+            weights=w,
+            version_key=version_key,
+        )
+        state.last_weights_set_block = current_block
+        state.save(state_dir)
+        return True
+    except ChainError as exc:
+        logger.error("set_weights failed: %s", exc)
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # Tick
 # --------------------------------------------------------------------------- #
@@ -402,100 +540,10 @@ def run_tick(
     for com, rej_reason in payment_rejected:
         state.record_precheck_failure(com.hotkey, com.commit_block, rej_reason)
 
-    # Winner UID recycling / deregistration guard
-    if state.winner is not None:
-        if not _hotkey_is_registered(metagraph, state.winner.uid, state.winner.hotkey):
-            ru = state.runner_up
-            if ru is not None and _hotkey_is_registered(metagraph, ru.uid, ru.hotkey):
-                logger.warning(
-                    "Winner UID %d deregistered (%s). Promoting runner-up UID %d.",
-                    state.winner.uid,
-                    state.winner.hotkey[:16],
-                    ru.uid,
-                )
-                state.winner = WinnerRecord.from_evaluation(
-                    ru, won_at_block=current_block
-                )
-                state.runner_up_record = None  # promoted; no runner-up until next eval
-                state.last_weights_set_block = 0  # force immediate weight update
-            else:
-                reason = "runner-up also gone" if ru is not None else "no runner-up"
-                logger.warning(
-                    "Winner UID %d deregistered (%s). Clearing winner (%s).",
-                    state.winner.uid,
-                    state.winner.hotkey[:16],
-                    reason,
-                )
-                state.winner = None
-                state.runner_up_record = None
+    if _apply_deregistration_guard(state, metagraph, current_block):
+        state.save(state_dir)
 
-    # Weight setting
-    weights_set = False
     dirty = False
-    reason = _needs_weight_set(state, current_block)
-    if reason:
-        runner_up_uid = _resolve_runner_up_uid(state, metagraph)
-        logger.info(
-            "⚖️  Setting weights: winner=UID %d (score=%.4f), runner_up=%s, reason=%s",
-            state.winner.uid,
-            state.winner.score,
-            runner_up_uid,
-            reason,
-        )
-
-        w_dense = build_competition_weights(
-            n_uids=len(metagraph.hotkeys),
-            winner_uid=state.winner.uid,
-            runner_up_uid=runner_up_uid,
-            current_block=current_block,
-        )
-        burn_uid = validator_config.BURN_UID
-        emission_frac = compute_emission_pool_frac(current_block)
-        override_note = (
-            " (CACHEON_EMISSION_FRAC_OVERRIDE)"
-            if validator_config.EMISSION_FRAC_OVERRIDE is not None
-            else ""
-        )
-        logger.info(
-            "⚖️  weight vector: emission_frac=%.4f%s, winner=%d (%.4f),"
-            " runner_up=%s (%.4f), burn_uid=%d (%.4f), n_uids=%d",
-            emission_frac,
-            override_note,
-            state.winner.uid,
-            w_dense[state.winner.uid] if state.winner.uid < len(w_dense) else 0.0,
-            runner_up_uid,
-            w_dense[runner_up_uid]
-            if runner_up_uid is not None and runner_up_uid < len(w_dense)
-            else 0.0,
-            burn_uid,
-            w_dense[burn_uid] if burn_uid < len(w_dense) else 0.0,
-            len(w_dense),
-        )
-
-        uid_list = [u for u, wt in enumerate(w_dense) if wt > 0]
-        w = [wt for wt in w_dense if wt > 0]
-
-        if dry_run:
-            logger.info("🧪 [DRY-RUN] would set_weights (see weight vector above)")
-            state.last_weights_set_block = current_block
-            weights_set = True
-        else:
-            try:
-                set_weights(
-                    subtensor,
-                    wallet,
-                    netuid,
-                    uids=uid_list,
-                    weights=w,
-                    version_key=version_key,
-                )
-                state.last_weights_set_block = current_block
-                weights_set = True
-            except ChainError as exc:
-                logger.error("set_weights failed: %s", exc)
-        if weights_set:
-            state.save(state_dir)
-            dirty = True
 
     # Challenger selection
     challenger_set = select_challengers(state, commitments.values())
@@ -609,7 +657,6 @@ def run_tick(
     if not challenger_set.challengers:
         state.save(state_dir)
 
-    # Single S3 upload per tick (covers weight-set + eval_job if both changed)
     if dirty:
         _try_upload(state_dir)
 
@@ -648,6 +695,24 @@ def run_tick(
                 from .eval_progress import clear_progress
 
                 clear_progress(state_dir)
+
+    metagraph, weights_block, _ = fetch_metagraph(subtensor, netuid)
+    if _apply_deregistration_guard(state, metagraph, weights_block):
+        state.save(state_dir)
+
+    weights_set = _try_set_weights(
+        state=state,
+        metagraph=metagraph,
+        current_block=weights_block,
+        subtensor=subtensor,
+        wallet=wallet,
+        netuid=netuid,
+        state_dir=state_dir,
+        dry_run=dry_run,
+        version_key=version_key,
+    )
+    if weights_set:
+        _try_upload_state(state_dir)
 
     return {
         "block": current_block,
