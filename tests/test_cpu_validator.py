@@ -15,6 +15,7 @@ from validator.cpu_validator import (
     WEIGHTS_REFRESH_BLOCKS,
     _CPU_LOGS_UPLOAD,
     _CPU_UPLOAD_PRE_EVAL,
+    _apply_deregistration_guard,
     _clean_stale_eval_job,
     _needs_weight_set,
     _rotate_log_for_block,
@@ -28,6 +29,17 @@ from validator.eval_schema import EVAL_JOB_FILE, ChallengerInfo, EvalJob
 from validator.state import EvaluationRecord, ValidatorState, WinnerRecord
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cpu_validator_tests(monkeypatch):
+    """Keep unit tests off chain payment gate and Hippius S3."""
+    monkeypatch.setattr(
+        "validator.cpu_validator.validator_config.SUBMISSION_FEE_RAO", 0
+    )
+    monkeypatch.setattr("validator.cpu_validator.validator_config.SKIP_S3", True)
+    monkeypatch.setattr("validator.sync.purge_remote_logs", lambda *a, **k: 0)
+    monkeypatch.setattr("validator.gpu_orchestrator.gpu_eval_configured", lambda: False)
 
 
 # --------------------------------------------------------------------------- #
@@ -246,6 +258,90 @@ class TestRunTickNoChallengers:
     @patch("validator.sync.download", _noop)
     def test_no_weight_set_when_already_current(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={}, current_block=700)
+        state = ValidatorState()
+        rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=400)
+        _set_winner(state, rec, current_block=400)
+        state.last_weights_set_block = 500
+        state.save(tmp_path)
+
+        summary = run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=False,
+        )
+
+        assert summary["weights_set"] is False
+        assert st.set_weights_calls == []
+
+
+# --------------------------------------------------------------------------- #
+# run_tick -- end-of-tick weight setting
+# --------------------------------------------------------------------------- #
+
+
+class TestRunTickEndOfTickWeights:
+    @patch("validator.cpu_validator._try_upload_state", _noop)
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", _noop)
+    @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
+    @patch("validator.gpu_orchestrator.run_gpu_eval")
+    def test_sets_weights_after_gpu_eval_updates_winner(
+        self, mock_run_gpu, _mock_gpu_cfg, tmp_path
+    ):
+        def _simulate_gpu(state_dir, _eval_job):
+            fresh = ValidatorState.load(state_dir)
+            rec = _make_eval_record(1, "hk1", 200, 0.9, eval_block=1000)
+            _set_winner(fresh, rec, current_block=1000)
+            fresh.last_weights_set_block = 800
+            fresh.save(state_dir)
+            return True
+
+        mock_run_gpu.side_effect = _simulate_gpu
+
+        st = FakeSubtensor(
+            hotkeys=["hk0", "hk1"],
+            revealed={"hk1": [(200, _commit_json("user/m:v1", "sha256:" + "b" * 64))]},
+            current_block=1000,
+        )
+        state = ValidatorState()
+        rec0 = _make_eval_record(0, "hk0", 100, 0.5, eval_block=800)
+        _set_winner(state, rec0, current_block=800)
+        state.last_weights_set_block = 800
+        state.save(tmp_path)
+
+        summary = run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=False,
+        )
+
+        assert summary["weights_set"] is True
+        assert summary["winner_uid"] == 1
+        assert len(st.set_weights_calls) == 1
+        assert 1 in st.set_weights_calls[0]["uids"]
+        assert 0 not in st.set_weights_calls[0]["uids"]
+
+    @patch("validator.cpu_validator._try_upload_state", _noop)
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", _noop)
+    @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
+    @patch("validator.gpu_orchestrator.run_gpu_eval")
+    def test_skips_weights_before_gpu_eval_when_winner_unchanged(
+        self, mock_run_gpu, _mock_gpu_cfg, tmp_path
+    ):
+        mock_run_gpu.return_value = True
+
+        st = FakeSubtensor(
+            hotkeys=["hk0"],
+            revealed={"hk0": [(100, _commit_json())]},
+            current_block=700,
+        )
         state = ValidatorState()
         rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=400)
         _set_winner(state, rec, current_block=400)
@@ -557,6 +653,86 @@ class TestRunTickWinnerDereg:
         assert summary["winner_uid"] is None
 
 
+class TestPostGpuDeregGuard:
+    @patch("validator.cpu_validator._try_upload_state", _noop)
+    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.sync.download", _noop)
+    @patch("validator.cpu_validator.fetch_metagraph")
+    def test_promotes_runner_up_before_weights_after_fresh_scan(
+        self, mock_fetch, tmp_path
+    ):
+        """Second metagraph read at tick end catches dereg after GPU state reload."""
+        mg_valid = FakeMetagraph(hotkeys=["hk0", "hk_old_winner", "hk_ru"])
+        mg_dereg = FakeMetagraph(hotkeys=["hk0", "hk_new", "hk_ru"])
+        mock_fetch.side_effect = [
+            (mg_valid, 1000, "0xdeadbeef"),
+            (mg_dereg, 1005, "0xdeadbeef"),
+        ]
+
+        st = FakeSubtensor(hotkeys=["hk0", "hk_old_winner", "hk_ru"], revealed={})
+        state = ValidatorState()
+        rec_w = _make_eval_record(1, "hk_old_winner", 100, 0.5, eval_block=500)
+        _set_winner(state, rec_w, current_block=500)
+        rec_ru = EvaluationRecord(
+            uid=2,
+            hotkey="hk_ru",
+            commit_block=200,
+            image="user/repo:v2",
+            digest="sha256:" + "b" * 64,
+            score=0.3,
+            speed_improvement=0.15,
+            token_match_rate=0.99,
+            disqualified=False,
+            disqualify_reason=None,
+            evaluated_at=1700000000.0,
+            evaluation_block=600,
+        )
+        state.record_evaluation(rec_ru, current_block=600)
+        state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
+        state.last_weights_set_block = 0
+        state.save(tmp_path)
+
+        summary = run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=False,
+        )
+
+        assert mock_fetch.call_count == 2
+        assert summary["winner_uid"] == 2
+        assert state.last_weights_set_block == 1005
+        assert len(st.set_weights_calls) == 1
+        assert 2 in st.set_weights_calls[0]["uids"]
+
+
+class TestApplyDeregistrationGuard:
+    def test_no_op_when_winner_registered(self):
+        state = ValidatorState()
+        rec = _make_eval_record(1, "hk_winner", 100, 0.5)
+        _set_winner(state, rec, current_block=500)
+        mg = FakeMetagraph(hotkeys=["hk0", "hk_winner"])
+
+        assert _apply_deregistration_guard(state, mg, 1000) is False
+        assert state.winner.uid == 1
+
+    def test_promotes_runner_up(self):
+        state = ValidatorState()
+        rec_w = _make_eval_record(1, "hk_old", 100, 0.5)
+        _set_winner(state, rec_w, current_block=500)
+        rec_ru = _make_eval_record(2, "hk_ru", 200, 0.3)
+        state.record_evaluation(rec_ru, current_block=600)
+        state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
+        mg = FakeMetagraph(hotkeys=["hk0", "hk_new", "hk_ru"])
+
+        assert _apply_deregistration_guard(state, mg, 1000) is True
+        assert state.winner.uid == 2
+        assert state.runner_up is None
+        assert state.last_weights_set_block == 0
+
+
 # --------------------------------------------------------------------------- #
 # run_tick -- S3 download failure is non-fatal
 # --------------------------------------------------------------------------- #
@@ -721,12 +897,14 @@ class TestCpuLogRotationOnTick:
 
 
 class TestCpuValidatorLogSync:
+    @patch("validator.cpu_validator.validator_config.SKIP_S3", False)
     @patch("validator.sync.upload")
     def test_pre_eval_upload_excludes_logs(self, mock_upload, tmp_path):
         _try_upload(str(tmp_path))
         mock_upload.assert_called_once_with(str(tmp_path), only=_CPU_UPLOAD_PRE_EVAL)
         assert "logs/" not in _CPU_UPLOAD_PRE_EVAL
 
+    @patch("validator.cpu_validator.validator_config.SKIP_S3", False)
     @patch("validator.sync.upload")
     def test_end_of_tick_uploads_logs_only(self, mock_upload, tmp_path):
         _try_upload_logs(str(tmp_path))
