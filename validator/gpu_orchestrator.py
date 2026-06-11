@@ -1,12 +1,14 @@
-"""Automated GPU pod lifecycle: search, rent, setup, eval, teardown.
+"""Automated GPU pod lifecycle: provision once, eval many times, teardown on shutdown.
 
-Called by ``cpu_validator.run_tick()`` when challengers are detected and
-either ``CACHEON_GPU_SSH`` or ``CACHEON_AUTO_RENT=1`` is set.
+Called by ``cpu_validator.run_tick()`` when challengers are detected and GPU
+eval is configured (``CACHEON_GPU_SSH`` or a provider API key).
 
 With ``CACHEON_GPU_SSH``, the orchestrator SSHs into a pre-provisioned pod
 (``setup-gpu.sh`` already run), runs eval, and leaves the pod up.
 
-With ``CACHEON_AUTO_RENT``, the pod is ephemeral: rent, setup, eval, teardown.
+With provider API keys, the orchestrator rents a pod on the first eval tick,
+runs ``setup-gpu.sh`` once, reuses that pod for later eval rounds, and tears
+down workload + volume when the validator container stops.
 
 The eval itself still runs on the remote pod via ``gpu_eval.py`` inside
 Docker Compose. S3 remains the handoff mechanism: the remote pod
@@ -20,6 +22,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as validator_config
@@ -33,13 +36,46 @@ SETUP_BRANCH = "main"
 SETUP_SCRIPT_URL = f"https://raw.githubusercontent.com/latent-to/cacheon/{SETUP_BRANCH}/validator/setup-gpu.sh"
 
 
-def _build_providers() -> list[GpuProvider]:
-    """Instantiate providers that have API keys configured.
+@dataclass
+class _GpuSession:
+    """In-memory rented GPU pod; lives for the validator container lifetime."""
 
-    When ``CACHEON_PREFERRED_PROVIDER`` is set (e.g. 'targon', 'lium', or
-    'shadeform'), only that provider is instantiated even if multiple keys
-    exist. ``CACHEON_PREFERRED_GPU`` pins GPU type independently of provider.
-    """
+    provider: GpuProvider
+    handle: PodHandle
+    setup_complete: bool = False
+
+
+_session: _GpuSession | None = None
+
+
+def gpu_eval_configured() -> bool:
+    """True when GPU eval can run (manual SSH or a cloud provider key)."""
+    return validator_config.GPU_SSH_ENABLED or validator_config.has_gpu_provider_key()
+
+
+def teardown_rented_gpu_session() -> None:
+    """Delete validator-rented workload + volume. No-op for manual ``CACHEON_GPU_SSH``."""
+    global _session
+    session = _session
+    _session = None
+    if session is None:
+        return
+    logger.info("Tearing down rented GPU pod %s...", session.handle.pod_id)
+    try:
+        session.provider.teardown(session.handle)
+    except Exception as exc:
+        logger.error(
+            "GPU session teardown failed for %s: %s", session.handle.pod_id, exc
+        )
+
+
+def _clear_session() -> None:
+    global _session
+    _session = None
+
+
+def _build_providers() -> list[GpuProvider]:
+    """Instantiate providers that have API keys configured."""
     pref = validator_config.PREFERRED_PROVIDER.lower().strip()
     gpu_pin = validator_config.PREFERRED_GPU or None
     providers: list[GpuProvider] = []
@@ -201,9 +237,7 @@ def _remote_setup(provider: GpuProvider, handle: PodHandle, state_dir: str) -> b
 
 
 def _calculate_eval_timeout_minutes(num_challengers: int) -> int:
-    """
-    Calculate the GPU eval timeout in minutes.
-    """
+    """Calculate the GPU eval timeout in minutes."""
     BASE_TIMEOUT_MINUTES = 30
     TIMEOUT_PER_CHALLENGER_MINUTES = 30
 
@@ -350,17 +384,23 @@ def _run_ssh_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
         return False
 
 
-def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
-    """Run GPU eval on a remote pod.
+def _abort_provision(provider: GpuProvider, handle: PodHandle | None) -> None:
+    """Tear down a partially provisioned pod and clear the in-memory session."""
+    if handle is not None:
+        try:
+            provider.teardown(handle)
+        except Exception as exc:
+            logger.error(
+                "Failed to tear down pod %s after provision error: %s",
+                handle.pod_id,
+                exc,
+            )
+    _clear_session()
 
-    When ``CACHEON_GPU_SSH`` is set, connects to that pod and skips search,
-    setup, and teardown. Otherwise searches cloud providers, rents a pod,
-    runs setup, eval, and tears down.
 
-    Returns True if the eval completed successfully and results are on S3.
-    """
-    if validator_config.GPU_SSH_ENABLED:
-        return _run_ssh_gpu_eval(state_dir, eval_job)
+def _provision_gpu_session(state_dir: str) -> tuple[GpuProvider, PodHandle] | None:
+    """Search, rent, and run setup once. Returns None on failure (pod torn down)."""
+    global _session
 
     providers = _build_providers()
     if not providers:
@@ -368,17 +408,10 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
             "❌ No GPU provider API keys configured "
             "(LIUM_API_KEY / TARGON_API_KEY / SHADEFORM_API_KEY)"
         )
-        return False
+        return None
 
     max_price = validator_config.MAX_HOURLY_PRICE
-    timeout_min = _calculate_eval_timeout_minutes(len(eval_job.challengers))
-    logger.info(
-        "\t Dynamic timeout: %d min (%d challengers)",
-        timeout_min,
-        len(eval_job.challengers),
-    )
 
-    # Search
     update_progress(state_dir, phase="gpu_searching")
     best = search_all_providers(
         providers,
@@ -390,7 +423,7 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
             "⚠️ No GPU instances available matching tier requirements (max $%.2f/hr)",
             max_price / 100,
         )
-        return False
+        return None
 
     provider = _find_provider_for_instance(providers, best)
     if provider is None:
@@ -399,7 +432,7 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
             best.provider,
             best.instance_id,
         )
-        return False
+        return None
 
     logger.info(
         "🎯 Best GPU match: %s %s (%dx %s) $%.2f/hr",
@@ -425,7 +458,6 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
 
     handle: PodHandle | None = None
     try:
-        # Rent
         logger.info("Renting pod from %s...", provider.name)
         handle = provider.rent(best)
         logger.info("☑️ Pod rented: %s (id=%s)", provider.name, handle.pod_id)
@@ -434,24 +466,59 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
             state_dir, phase="gpu_renting", gpu=gpu_info, pod_id=handle.pod_id
         )
 
-        # Wait ready (provider-specific)
         handle = provider.wait_ready(handle, timeout_s=provider.READY_TIMEOUT_S)
         logger.info("☑️ Pod %s is ready", handle.pod_id)
         update_progress(state_dir, phase="gpu_ready", pod_id=handle.pod_id)
 
-        # Step 1: curl setup-gpu.sh | sudo -E bash
         if not _remote_setup(provider, handle, state_dir):
-            return False
+            _abort_provision(provider, handle)
+            return None
 
-        return _start_eval_with_mirror(state_dir, provider, handle, eval_job)
+        _session = _GpuSession(provider=provider, handle=handle, setup_complete=True)
+        logger.info(
+            "GPU session ready (provider=%s, pod=%s); reusing until validator shutdown",
+            handle.provider,
+            handle.pod_id,
+        )
+        return provider, handle
 
     except TimeoutError as exc:
-        logger.error("GPU orchestration timed out: %s", exc)
-        return False
+        logger.error("GPU provisioning timed out: %s", exc)
+        _abort_provision(provider, handle)
+        return None
     except Exception as exc:
-        logger.exception("GPU orchestration failed: %s", exc)
+        logger.exception("GPU provisioning failed: %s", exc)
+        _abort_provision(provider, handle)
+        return None
+
+
+def _ensure_gpu_session(state_dir: str) -> tuple[GpuProvider, PodHandle] | None:
+    """Return an ready GPU session, provisioning on first use."""
+    if _session is not None and _session.setup_complete:
+        logger.info(
+            "Reusing GPU session (provider=%s, pod=%s)",
+            _session.handle.provider,
+            _session.handle.pod_id,
+        )
+        return _session.provider, _session.handle
+    return _provision_gpu_session(state_dir)
+
+
+def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
+    """Run GPU eval on a remote pod.
+
+    When ``CACHEON_GPU_SSH`` is set, connects to that pod and skips search,
+    setup, and teardown. Otherwise provisions (once) via cloud providers,
+    reuses the pod across eval rounds, and leaves teardown to shutdown.
+
+    Returns True if the eval completed successfully and results are on S3.
+    """
+    if validator_config.GPU_SSH_ENABLED:
+        return _run_ssh_gpu_eval(state_dir, eval_job)
+
+    session = _ensure_gpu_session(state_dir)
+    if session is None:
         return False
-    finally:
-        if handle is not None:
-            logger.info("Tearing down pod %s...", handle.pod_id)
-            provider.teardown(handle)
+
+    provider, handle = session
+    return _start_eval_with_mirror(state_dir, provider, handle, eval_job)

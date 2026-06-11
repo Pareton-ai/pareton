@@ -40,7 +40,7 @@ export LIUM_API_KEY=...
 python scripts/gpu_setup/create_lium_pod.py
 ```
 
-Both scripts register SSH keys with the provider, create a block volume at `/workspace`, inject environment variables from the repo-root `.env`, and poll until the pod is running. GPU picking differs by provider (see **GPU selection** above). The Targon script leaves the volume in your account until you delete it manually; auto-rent on the validator deletes workload and volume after each eval.
+Both scripts register SSH keys with the provider, create a block volume at `/workspace`, inject environment variables from the repo-root `.env`, and poll until the pod is running. GPU picking differs by provider (see **GPU selection** above). The Targon script leaves the volume in your account until you delete it manually; the validator deletes rented workload and volume when the compose stack stops.
 
 ## Files
 

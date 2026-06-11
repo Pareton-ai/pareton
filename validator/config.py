@@ -71,13 +71,8 @@ GPU_COUNT: int = int(os.environ.get("CACHEON_GPU_COUNT", "8"))
 """Number of GPUs on the host. Set to 8 for 8x H200/B200/B300 (the standard eval tier)."""
 
 # --------------------------------------------------------------------------- #
-# GPU orchestration (auto-rent)
+# GPU orchestration
 # --------------------------------------------------------------------------- #
-
-AUTO_RENT: bool = os.environ.get("CACHEON_AUTO_RENT", "0") == "1"
-"""When True, the validator automatically rents a GPU pod when challengers
-are detected, runs eval, and tears it down. Ignored when ``CACHEON_GPU_SSH``
-is set."""
 
 _ALLOWED_GPU_POD_PROFILES = frozenset({"targon", "lium", "shadeform"})
 
@@ -166,12 +161,18 @@ def _parse_preferred_gpu() -> str:
 
 
 PREFERRED_GPU: str = _parse_preferred_gpu()
-"""If set to H200, H100, B200, or B300, auto-rent only matches that GPU type.
+"""If set to H200, H100, B200, or B300, GPU rental only matches that GPU type.
 Empty uses tier A (H200/B200/B300) then tier B (H100). Invalid values are ignored."""
 
 LIUM_API_KEY: str = os.environ.get("LIUM_API_KEY", "")
 TARGON_API_KEY: str = os.environ.get("TARGON_API_KEY", "")
 SHADEFORM_API_KEY: str = os.environ.get("SHADEFORM_API_KEY", "")
+
+
+def has_gpu_provider_key() -> bool:
+    """True when at least one cloud GPU provider API key is configured."""
+    return bool(LIUM_API_KEY or TARGON_API_KEY or SHADEFORM_API_KEY)
+
 
 MAX_HOURLY_PRICE: int = int(os.environ.get("CACHEON_MAX_HOURLY_PRICE", "2000"))
 """Maximum hourly price in US cents. Refuse to rent above this."""

@@ -59,7 +59,7 @@ class TestRunGpuEvalSshPath:
 
     @patch("validator.gpu_orchestrator._build_providers")
     @patch("validator.gpu_orchestrator.validator_config.GPU_SSH_ENABLED", False)
-    def test_auto_rent_still_uses_providers(self, mock_build):
+    def test_provider_rent_uses_cloud_providers(self, mock_build):
         mock_build.return_value = []
         assert run_gpu_eval("/tmp/state", _eval_job()) is False
         mock_build.assert_called_once()
