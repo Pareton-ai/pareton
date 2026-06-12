@@ -147,11 +147,12 @@ class TargonProvider:
     def _wait_volume_ready(
         self, volume_uid: str, timeout_s: int = VOLUME_READY_TIMEOUT_S
     ) -> None:
+        """Wait until Targon reports the volume can attach to a workload."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             state = self._get(f"/volumes/{volume_uid}/state")
             status = state.get("status", "").upper()
-            if status == "READY":
+            if status == "READY" or status == "REGISTERED":
                 logger.info("Targon volume %s is ready", volume_uid)
                 return
             if status in ("FAILED", "ERROR", "DELETING"):
