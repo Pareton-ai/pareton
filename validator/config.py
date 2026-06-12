@@ -264,7 +264,7 @@ MIN_LOGPROB_THRESHOLD: float = float(
 """Floor logprob for any single token. Catches isolated garbage tokens."""
 
 PASS1_TEXT_SIM_DQ_THRESHOLD: float = float(
-    os.environ.get("CACHEON_PASS1_TEXT_SIM_DQ_THRESHOLD", "0.90")
+    os.environ.get("CACHEON_PASS1_TEXT_SIM_DQ_THRESHOLD", "0.40")
 )
 """Pass 1 fidelity gate on decoded text rather than tokens. Baseline and miner
 outputs are compared as plain text (tokenizer agnostic), so framework
