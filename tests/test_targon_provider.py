@@ -133,3 +133,35 @@ class TestTargonProviderTeardown:
 
         assert mock_post.call_count == 2
         mock_post.assert_called_with("/volumes/vol-retry/delete")
+
+
+class TestTargonVolumeReady:
+    @patch("validator.providers.targon_provider.time.sleep")
+    @patch.object(TargonProvider, "_get")
+    def test_wait_accepts_registered_status(
+        self, mock_get: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        mock_get.return_value = {
+            "uid": "vol-1",
+            "status": "registered",
+            "message": "Volume registered, awaiting deploy",
+        }
+
+        provider = TargonProvider("test-key")
+        provider._wait_volume_ready("vol-1")
+
+        mock_get.assert_called_once_with("/volumes/vol-1/state")
+        mock_sleep.assert_not_called()
+
+    @patch("validator.providers.targon_provider.time.sleep")
+    @patch.object(TargonProvider, "_get")
+    def test_wait_accepts_ready_status(
+        self, mock_get: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        mock_get.return_value = {"uid": "vol-1", "status": "READY"}
+
+        provider = TargonProvider("test-key")
+        provider._wait_volume_ready("vol-1")
+
+        mock_get.assert_called_once_with("/volumes/vol-1/state")
+        mock_sleep.assert_not_called()

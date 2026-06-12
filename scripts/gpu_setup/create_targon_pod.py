@@ -86,7 +86,7 @@ def wait_for_volume(volume_uid: str, interval: int = 10) -> None:
         resp = _req("GET", f"/volumes/{volume_uid}/state")
         status = resp.json().get("status", "UNKNOWN").upper()
         print(f"  status={status}")
-        if status == "READY":
+        if status == "READY" or status == "REGISTERED":
             print(f"  Volume {volume_uid} is ready.")
             return
         if status in ("FAILED", "ERROR", "DELETING"):
