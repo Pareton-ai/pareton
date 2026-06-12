@@ -23,6 +23,7 @@ services:
       - HIPPIUS_SECRET_KEY=${HIPPIUS_SECRET_KEY}
       - CACHEON_S3_BUCKET=${CACHEON_S3_BUCKET:-cacheon-validator}
       - CACHEON_S3_PREFIX=${CACHEON_S3_PREFIX:-state-mainnet}
+      - CACHEON_PASS1_TEXT_SIM_DQ_THRESHOLD=${CACHEON_PASS1_TEXT_SIM_DQ_THRESHOLD:-0.40}
 
 networks:
   cacheon-internal:

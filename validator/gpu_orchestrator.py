@@ -140,6 +140,9 @@ def _build_env_exports(handle: PodHandle) -> str:
         "CACHEON_GPU_COUNT": str(handle.gpu_count),
         "CACHEON_MODEL_VOLUME": "/workspace/models/Qwen2.5-72B-Instruct",
         "CACHEON_BASELINE_IMAGE": validator_config.BASELINE_IMAGE,
+        "CACHEON_PASS1_TEXT_SIM_DQ_THRESHOLD": str(
+            validator_config.PASS1_TEXT_SIM_DQ_THRESHOLD
+        ),
         "CACHEON_NESTED_DIN": "0" if handle.provider == "shadeform" else "1",
     }
     hf_token = validator_config.HF_TOKEN
