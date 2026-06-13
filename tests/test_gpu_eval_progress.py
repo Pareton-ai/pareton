@@ -18,6 +18,9 @@ pytestmark = pytest.mark.unit
 @patch("validator.gpu_eval.ValidatorState.load", return_value=ValidatorState())
 @patch("validator.gpu_eval.validator_config.SKIP_S3", True)
 @patch("validator.gpu_eval.validator_config.BASELINE_DIGEST", "sha256:abc")
-def test_no_work_clears_progress(mock_purge, mock_clear, mock_job, mock_state):
+def test_no_work_clears_progress(
+    mock_purge, mock_clear, mock_job, mock_state, monkeypatch
+):
+    monkeypatch.setenv("CACHEON_SKIP_DB", "1")
     assert main() == 0
     mock_clear.assert_called_once()

@@ -38,6 +38,7 @@ def _isolate_cpu_validator_tests(monkeypatch):
         "validator.cpu_validator.validator_config.SUBMISSION_FEE_RAO", 0
     )
     monkeypatch.setattr("validator.cpu_validator.validator_config.SKIP_S3", True)
+    monkeypatch.setenv("CACHEON_SKIP_DB", "1")
     monkeypatch.setattr("validator.sync.purge_remote_logs", lambda *a, **k: 0)
     monkeypatch.setattr("validator.gpu_orchestrator.gpu_eval_configured", lambda: False)
 

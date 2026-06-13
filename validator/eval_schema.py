@@ -265,6 +265,12 @@ class EvalJob:
             self.runner_up.hotkey[:16] if self.runner_up else "none",
             path,
         )
+        try:
+            from cacheon_db import sync_eval_job
+
+            sync_eval_job(self)
+        except Exception:
+            logger.debug("Postgres eval job mirror failed", exc_info=True)
 
     @classmethod
     def load(cls, state_dir: str | Path) -> EvalJob | None:

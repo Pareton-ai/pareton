@@ -46,7 +46,7 @@ from .content_fingerprint import (
     apply_fingerprint_supersede_records,
     load_fingerprint_registry,
 )
-from .state import EvaluationRecord, ValidatorState, append_winner_history
+from .state import EvaluationRecord, ValidatorState, append_leader_history
 
 from .eval_progress import (
     clear_progress,
@@ -678,7 +678,7 @@ def main() -> int:
                 threshold = (
                     new_winner.score * (1.0 + OVERTAKE_EPSILON) if prev_winner else 0.0
                 )
-                append_winner_history(
+                append_leader_history(
                     state_dir, winner_ev, prev_winner, block, threshold
                 )
             if new_winner is not None:

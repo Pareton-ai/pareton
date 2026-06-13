@@ -18,7 +18,7 @@ from validator.state import (
     ValidatorState,
     _atomic_write_json,
     _effective_overtake_threshold,
-    append_winner_history,
+    append_leader_history,
     current_timestamp,
     unknown_commits,
 )
@@ -883,44 +883,44 @@ class TestAppendWinnerHistory:
             won_at_block=1000,
         )
 
-    def test_first_winner_no_prev(self, tmp_path):
+    def test_first_leader_no_prev(self, tmp_path):
         ev = _make_eval(uid=1, score=0.5)
-        append_winner_history(
+        append_leader_history(
             tmp_path, ev, None, current_block=1000, overtake_threshold=0.0
         )
-        lines = (tmp_path / "winner-history.jsonl").read_text().strip().splitlines()
+        lines = (tmp_path / "leader-history.jsonl").read_text().strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry["new_winner_uid"] == 1
+        assert entry["new_leader_uid"] == 1
         assert entry["block"] == 1000
-        assert "prev_winner_uid" not in entry
+        assert "prev_leader_uid" not in entry
 
-    def test_overtake_includes_prev_winner(self, tmp_path):
+    def test_overtake_includes_prev_leader(self, tmp_path):
         ev = _make_eval(uid=2, hotkey="hk2", score=0.6)
         prev = self._winner(uid=1, score=0.4)
-        append_winner_history(
+        append_leader_history(
             tmp_path, ev, prev, current_block=2000, overtake_threshold=0.404
         )
-        entry = json.loads((tmp_path / "winner-history.jsonl").read_text().strip())
-        assert entry["prev_winner_uid"] == 1
-        assert entry["prev_winner_hotkey"] == "hk1"
-        assert entry["prev_winner_score"] == 0.4
-        assert entry["new_winner_score"] == 0.6
+        entry = json.loads((tmp_path / "leader-history.jsonl").read_text().strip())
+        assert entry["prev_leader_uid"] == 1
+        assert entry["prev_leader_hotkey"] == "hk1"
+        assert entry["prev_leader_score"] == 0.4
+        assert entry["new_leader_score"] == 0.6
 
     def test_multiple_appends(self, tmp_path):
         for i in range(3):
             ev = _make_eval(uid=i, hotkey=f"hk{i}", score=0.1 * (i + 1))
-            append_winner_history(
+            append_leader_history(
                 tmp_path, ev, None, current_block=1000 + i, overtake_threshold=0.0
             )
-        lines = (tmp_path / "winner-history.jsonl").read_text().strip().splitlines()
+        lines = (tmp_path / "leader-history.jsonl").read_text().strip().splitlines()
         assert len(lines) == 3
-        assert json.loads(lines[2])["new_winner_uid"] == 2
+        assert json.loads(lines[2])["new_leader_uid"] == 2
 
     def test_write_failure_does_not_raise(self, tmp_path):
         ro_dir = tmp_path / "readonly"
         ro_dir.mkdir()
-        (ro_dir / "winner-history.jsonl").write_text("")
-        (ro_dir / "winner-history.jsonl").chmod(0o000)
+        (ro_dir / "leader-history.jsonl").write_text("")
+        (ro_dir / "leader-history.jsonl").chmod(0o000)
         ev = _make_eval()
-        append_winner_history(ro_dir, ev, None, current_block=1, overtake_threshold=0.0)
+        append_leader_history(ro_dir, ev, None, current_block=1, overtake_threshold=0.0)

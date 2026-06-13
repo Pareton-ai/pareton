@@ -18,6 +18,7 @@ WORKDIR /app
 COPY validator/requirements-gpu.txt /app/validator/requirements-gpu.txt
 RUN pip install --no-cache-dir -r /app/validator/requirements-gpu.txt
 
+COPY cacheon_db/ /app/cacheon_db/
 COPY validator/ /app/validator/
 
 ENTRYPOINT ["python", "-m", "validator.gpu_eval"]
