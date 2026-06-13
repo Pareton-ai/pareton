@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r /app/validator/requirements-cpu.txt && \
     pip install --no-cache-dir --no-deps lium.io && \
     pip install --no-cache-dir -r /app/validator/requirements-lium-deps.txt
 
+COPY cacheon_db/ /app/cacheon_db/
 COPY validator/ /app/validator/
 
 ENTRYPOINT ["python", "-m", "validator.cpu_validator"]

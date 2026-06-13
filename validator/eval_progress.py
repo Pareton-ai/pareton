@@ -110,6 +110,12 @@ def _write_progress(state_dir: str | os.PathLike, payload: dict[str, Any]) -> No
 
     payload["updated_at"] = time.time()
     _atomic_write_json(Path(state_dir) / PROGRESS_FILE, payload)
+    try:
+        from cacheon_db import sync_eval_progress
+
+        sync_eval_progress(payload)
+    except Exception:
+        logger.debug("Postgres eval progress mirror failed", exc_info=True)
 
 
 def update_progress(
@@ -314,3 +320,10 @@ def clear_progress(state_dir: str | os.PathLike) -> None:
         delete_remote_keys([PROGRESS_FILE])
     except Exception:
         logger.debug("Failed to delete eval progress from S3", exc_info=True)
+
+    try:
+        from cacheon_db import clear_eval_progress
+
+        clear_eval_progress()
+    except Exception:
+        logger.debug("Postgres eval progress clear failed", exc_info=True)

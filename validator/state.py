@@ -304,6 +304,12 @@ class ValidatorState:
         self, hotkey: str, commit_block: int, reason: str
     ) -> None:
         self.precheck_failures[_eval_key(hotkey, commit_block)] = reason
+        try:
+            from cacheon_db import sync_precheck_failure
+
+            sync_precheck_failure(hotkey, commit_block, reason)
+        except Exception:
+            logger.debug("Postgres precheck mirror failed", exc_info=True)
 
     def record_evaluation(
         self,
@@ -342,6 +348,13 @@ class ValidatorState:
 
         self.evaluations[stored.eval_key] = stored
         self.precheck_failures.pop(stored.eval_key, None)
+
+        try:
+            from cacheon_db import sync_evaluation
+
+            sync_evaluation(stored)
+        except Exception:
+            logger.debug("Postgres evaluation mirror failed", exc_info=True)
 
         threshold = (
             _effective_overtake_threshold(self.winner.score)
@@ -523,6 +536,12 @@ class ValidatorState:
                 exc,
             )
             return False
+        try:
+            from cacheon_db import sync_validator_state
+
+            sync_validator_state(self)
+        except Exception:
+            logger.debug("Postgres state mirror failed", exc_info=True)
         return True
 
     # ------------------------------------------------------------------ #
@@ -537,6 +556,63 @@ def current_timestamp() -> float:
     return time.time()
 
 
+LEADER_HISTORY_FILE: str = "leader-history.jsonl"
+
+
+def append_leader_history(
+    state_dir: str | os.PathLike,
+    new_leader: EvaluationRecord,
+    prev_leader: WinnerRecord | None,
+    current_block: int,
+    overtake_threshold: float,
+) -> None:
+    """Append a single JSON line to ``leader-history.jsonl`` on overtake."""
+    ts = time.time()
+    path = Path(state_dir) / LEADER_HISTORY_FILE
+    entry = {
+        "ts": ts,
+        "block": current_block,
+        "new_leader_uid": new_leader.uid,
+        "new_leader_hotkey": new_leader.hotkey,
+        "new_leader_score": new_leader.score,
+        "new_leader_image": new_leader.image,
+        "new_leader_digest": new_leader.digest,
+        "overtake_threshold": overtake_threshold,
+    }
+    if prev_leader is not None:
+        entry["prev_leader_uid"] = prev_leader.uid
+        entry["prev_leader_hotkey"] = prev_leader.hotkey
+        entry["prev_leader_score"] = prev_leader.score
+    written = False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True) + "\n")
+        written = True
+    except Exception:
+        logger.warning("failed to append leader history to %s", path)
+    if not written:
+        return
+    try:
+        from cacheon_db import append_leader_history as db_append_leader_history
+
+        db_append_leader_history(
+            ts=ts,
+            block=current_block,
+            new_leader_uid=new_leader.uid,
+            new_leader_hotkey=new_leader.hotkey,
+            new_leader_score=new_leader.score,
+            new_leader_image=new_leader.image,
+            new_leader_digest=new_leader.digest,
+            overtake_threshold=overtake_threshold,
+            prev_leader_uid=prev_leader.uid if prev_leader else None,
+            prev_leader_hotkey=prev_leader.hotkey if prev_leader else None,
+            prev_leader_score=prev_leader.score if prev_leader else None,
+        )
+    except Exception:
+        logger.debug("Postgres leader history mirror failed", exc_info=True)
+
+
 def append_winner_history(
     state_dir: str | os.PathLike,
     new_winner: EvaluationRecord,
@@ -544,28 +620,14 @@ def append_winner_history(
     current_block: int,
     overtake_threshold: float,
 ) -> None:
-    """Append a single JSON line to ``winner-history.jsonl`` on overtake."""
-    path = Path(state_dir) / "winner-history.jsonl"
-    entry = {
-        "ts": time.time(),
-        "block": current_block,
-        "new_winner_uid": new_winner.uid,
-        "new_winner_hotkey": new_winner.hotkey,
-        "new_winner_score": new_winner.score,
-        "new_winner_image": new_winner.image,
-        "new_winner_digest": new_winner.digest,
-        "overtake_threshold": overtake_threshold,
-    }
-    if prev_winner is not None:
-        entry["prev_winner_uid"] = prev_winner.uid
-        entry["prev_winner_hotkey"] = prev_winner.hotkey
-        entry["prev_winner_score"] = prev_winner.score
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
-    except Exception:
-        logger.warning("failed to append winner history to %s", path)
+    """Deprecated alias for :func:`append_leader_history`."""
+    append_leader_history(
+        state_dir,
+        new_winner,
+        prev_winner,
+        current_block,
+        overtake_threshold,
+    )
 
 
 def unknown_commits(

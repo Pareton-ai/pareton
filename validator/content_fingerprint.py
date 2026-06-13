@@ -239,12 +239,32 @@ def register_fingerprint(
     }
     if existing is None:
         entries[fingerprint] = new_entry
+        _mirror_fingerprint(fingerprint, new_entry)
         return
     if existing.get("hotkey") == hotkey:
         entries[fingerprint] = new_entry
+        _mirror_fingerprint(fingerprint, new_entry)
         return
     if commit_block < int(existing.get("commit_block", 0)):
         entries[fingerprint] = new_entry
+        _mirror_fingerprint(fingerprint, new_entry)
+
+
+def _mirror_fingerprint(fingerprint: str, entry: FingerprintEntry) -> None:
+    try:
+        from cacheon_db import sync_fingerprint
+
+        sync_fingerprint(
+            fingerprint,
+            uid=int(entry["uid"]),
+            hotkey=str(entry["hotkey"]),
+            commit_block=int(entry["commit_block"]),
+            image=str(entry["image"]),
+            digest=str(entry["digest"]),
+            registered_at=float(entry["registered_at"]),
+        )
+    except Exception:
+        logger.debug("Postgres fingerprint mirror failed", exc_info=True)
 
 
 def duplicate_submission_reason(owner: FingerprintEntry) -> str:

@@ -5,7 +5,7 @@ import time
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from api.config import STATE_DIR
+from api import config
 from api.helpers.eval_progress import COMPLETE_LINGER_S, progress_expired
 from api.helpers.state_reader import safe_json_load, sanitize_floats
 
@@ -26,7 +26,7 @@ _STALE_THRESHOLD_S = 1800  # 30 minutes
     ),
 )
 def eval_progress():
-    data = safe_json_load(STATE_DIR / "eval_progress.json")
+    data = safe_json_load(config.STATE_DIR / "eval_progress.json")
     if data is None or progress_expired(data):
         return JSONResponse(
             content={"status": "idle"},
