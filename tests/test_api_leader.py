@@ -1,108 +1,63 @@
-"""Unit tests for api.routes.leader history loading and normalization."""
+"""API integration tests for Postgres-backed leader routes."""
 
 from __future__ import annotations
 
-import json
+from unittest.mock import patch
 
 import pytest
 
-from api.routes.leader import (
-    _load_leader_history_entries,
-    _normalize_history_entry,
-)
+from cacheon_db import config as db_config
 
 pytestmark = pytest.mark.unit
 
+try:
+    from api.server import app as _app  # noqa: F401
+    from starlette.testclient import TestClient
 
-def test_normalize_new_leader_fields():
-    entry = {
-        "ts": 1.0,
-        "block": 100,
-        "new_leader_uid": 3,
-        "new_leader_hotkey": "hk3",
-        "new_leader_score": 0.12,
-        "new_leader_image": "img3",
-        "new_leader_digest": "sha256:abc",
-        "overtake_threshold": 0.01,
-        "prev_leader_uid": 1,
-        "prev_leader_hotkey": "hk1",
-        "prev_leader_score": 0.10,
-    }
-    out = _normalize_history_entry(entry)
-    assert out["new_leader_uid"] == 3
-    assert out["new_leader_hotkey"] == "hk3"
-    assert out["prev_leader_uid"] == 1
+    _has_api_deps = True
+except ImportError:
+    _has_api_deps = False
 
 
-def test_normalize_legacy_winner_fields():
-    entry = {
-        "ts": 2.0,
-        "block": 200,
-        "new_winner_uid": 5,
-        "new_winner_hotkey": "hk5",
-        "new_winner_score": 0.20,
-        "new_winner_image": "img5",
-        "new_winner_digest": "sha256:def",
-        "overtake_threshold": 0.02,
-        "prev_winner_uid": 3,
-        "prev_winner_hotkey": "hk3",
-        "prev_winner_score": 0.15,
-    }
-    out = _normalize_history_entry(entry)
-    assert out["new_leader_uid"] == 5
-    assert out["new_leader_hotkey"] == "hk5"
-    assert out["prev_leader_uid"] == 3
+@pytest.mark.skipif(not _has_api_deps, reason="API dependencies not installed")
+class TestLeaderAPI:
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        monkeypatch.setenv("CACHEON_DATABASE_URL", "postgresql://test/db")
+        db_config.DATABASE_URL = "postgresql://test/db"
+        self.client = TestClient(_app)
 
-
-def test_merge_history_files_dedupes_and_keeps_legacy(tmp_path):
-    leader = tmp_path / "leader-history.jsonl"
-    winner = tmp_path / "winner-history.jsonl"
-    leader.write_text(
-        json.dumps(
+    @patch("api.routes.leader.get_leader_state")
+    def test_leader_with_runner_up(self, mock_state):
+        mock_state.return_value = (
             {
-                "ts": 3.0,
-                "block": 300,
-                "new_leader_uid": 9,
-                "new_leader_hotkey": "hk9",
-                "new_leader_score": 0.3,
-                "new_leader_image": "img9",
-                "new_leader_digest": "sha256:new",
-                "overtake_threshold": 0.0,
-            }
-        )
-        + "\n"
-    )
-    winner.write_text(
-        json.dumps(
+                "uid": 1,
+                "hotkey": "hk1",
+                "commit_block": 10,
+                "image": "img1",
+                "digest": "sha256:a",
+                "score": 0.1,
+                "speed_improvement": 0.1,
+                "token_match_rate": 0.9,
+                "evaluated_at": 1.0,
+                "evaluation_block": 100,
+                "won_at_block": 100,
+            },
             {
-                "ts": 1.0,
-                "block": 100,
-                "new_winner_uid": 1,
-                "new_winner_hotkey": "hk1",
-                "new_winner_score": 0.1,
-                "new_winner_image": "img1",
-                "new_winner_digest": "sha256:old",
-                "overtake_threshold": 0.0,
-            }
+                "uid": 2,
+                "hotkey": "hk2",
+                "commit_block": 11,
+                "image": "img2",
+                "digest": "sha256:b",
+                "score": 0.05,
+                "speed_improvement": 0.05,
+                "token_match_rate": 0.95,
+                "evaluated_at": 2.0,
+                "evaluation_block": 100,
+                "won_at_block": 0,
+            },
         )
-        + "\n"
-        + json.dumps(
-            {
-                "ts": 3.0,
-                "block": 300,
-                "new_winner_uid": 9,
-                "new_winner_hotkey": "hk9",
-                "new_winner_score": 0.3,
-                "new_winner_image": "img9",
-                "new_winner_digest": "sha256:dup",
-                "overtake_threshold": 0.0,
-            }
-        )
-        + "\n"
-    )
-
-    entries = _load_leader_history_entries(tmp_path)
-    assert len(entries) == 2
-    assert entries[0]["block"] == 100
-    assert entries[1]["block"] == 300
-    assert entries[1]["new_leader_uid"] == 9
+        resp = self.client.get("/api/leader")
+        body = resp.json()
+        assert body["leader"]["uid"] == 1
+        assert body["runner_up"]["uid"] == 2

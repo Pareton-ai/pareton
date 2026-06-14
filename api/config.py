@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+CACHEON_DATABASE_URL: str = os.environ.get("CACHEON_DATABASE_URL", "")
+
 STATE_DIR: Path = Path(
     os.environ.get(
         "CACHEON_STATE_DIR",
