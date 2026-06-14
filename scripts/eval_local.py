@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """Run ``validator.gpu_eval`` locally without S3 (GPU pod smoke test).
 
-Place ``eval_job.json`` (and optional ``state.json``) under ``CACHEON_STATE_DIR``,
-then:
-
-    python scripts/eval_local.py
-
-Equivalent to:
-
-    CACHEON_SKIP_S3=1 python -m validator.gpu_eval
+Requires ``CACHEON_DATABASE_URL`` with a pending eval job in Postgres. Set
+``CACHEON_SKIP_S3=1`` and run ``python -m validator.gpu_eval`` (or this wrapper).
 """
 
 from __future__ import annotations

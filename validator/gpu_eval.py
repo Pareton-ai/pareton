@@ -1,16 +1,15 @@
 """GPU eval entrypoint: Postgres-backed state, S3 for logs only.
 
 Zero bittensor dependency. Loads the pending eval job and validator state
-from Postgres (falls back to local JSON when ``CACHEON_SKIP_DB=1``), runs
-baseline + challenger evaluations, mirrors results to Postgres, and
-uploads eval logs to Hippius S3.
+from Postgres, runs baseline + challenger evaluations, mirrors results to
+Postgres, and uploads eval logs to Hippius S3.
 
 Usage (inside Docker):
     python -m validator.gpu_eval
 
 Env vars:
     CACHEON_STATE_DIR          (default: /app/state-mainnet)
-    CACHEON_DATABASE_URL       (required unless CACHEON_SKIP_DB=1)
+    CACHEON_DATABASE_URL       (required)
     CACHEON_MODEL_VOLUME       (default: /models)
     CACHEON_BASELINE_IMAGE     (default: vllm/vllm-openai:v0.22.0)
     CACHEON_BASELINE_DIGEST    (required)
@@ -58,7 +57,7 @@ from .eval_progress import (
     update_incumbent_status,
     update_progress,
 )
-from .eval_schema import EVAL_JOB_FILE, EvalJob
+from .eval_schema import EvalJob
 
 logger = logging.getLogger(__name__)
 
@@ -92,22 +91,10 @@ def _configure_logging(state_dir: str, block: int) -> str:
     return ts
 
 
-def _delete_eval_job(state_dir: str, block: int | None = None) -> None:
-    """Remove eval_job.json locally and mark the Postgres job complete."""
-    path = Path(state_dir) / EVAL_JOB_FILE
-    try:
-        if path.exists():
-            path.unlink()
-            logger.info("Deleted %s (eval complete)", EVAL_JOB_FILE)
-    except OSError as exc:
-        logger.warning("Could not delete %s: %s", EVAL_JOB_FILE, exc)
-    if block is not None:
-        try:
-            from cacheon_db.mirror import complete_eval_job
+def _complete_eval_job(block: int) -> None:
+    from cacheon_db.mirror import complete_eval_job
 
-            complete_eval_job(block)
-        except Exception:
-            logger.debug("Postgres eval job complete failed", exc_info=True)
+    complete_eval_job(block)
 
 
 _GPU_LOGS_ONLY = ["logs/", "container_logs/"]
@@ -126,6 +113,15 @@ def _upload_eval_logs(state_dir: str) -> None:
 
 
 def main() -> int:
+    from cacheon_db.config import require_database_url
+    from cacheon_db.exceptions import DatabaseNotConfigured
+
+    try:
+        require_database_url()
+    except DatabaseNotConfigured as exc:
+        logger.error("%s", exc)
+        return 2
+
     state_dir = str(validator_config.STATE_DIR)
     logging.basicConfig(
         level=logging.INFO,
@@ -181,24 +177,21 @@ def main() -> int:
             return 1
 
     # Load state and eval job (Postgres-first; local JSON fallback in tests).
-    state = ValidatorState.load_merged(state_dir)
-    fingerprint_registry = load_fingerprint_registry(state_dir)
-    eval_job = EvalJob.load(state_dir)
+    state = ValidatorState.load()
+    fingerprint_registry = load_fingerprint_registry()
+    eval_job = EvalJob.load()
     has_work = eval_job is not None and (
         eval_job.challengers or eval_job.leader or eval_job.runner_up
     )
     if not has_work:
-        logger.error(
-            "No pending eval job in Postgres and no local eval_job.json; "
-            "cannot run GPU eval"
-        )
-        clear_progress(state_dir)
+        logger.error("No pending eval job in Postgres; cannot run GPU eval")
+        clear_progress()
         return 2
 
     block = eval_job.block
     eval_ts = _configure_logging(state_dir, block)
     block_hash = eval_job.block_hash
-    seed_progress_from_eval_job(state_dir, eval_job)
+    seed_progress_from_eval_job(eval_job)
     logger.info(
         "Eval job: block=%d, block_hash=%s, %d challenger(s), leader=%s, runner_up=%s",
         block,
@@ -233,11 +226,10 @@ def main() -> int:
         mml,
     )
     update_progress(
-        state_dir,
         phase="prompts_generated",
         n_eval=len(eval_prompts),
     )
-    update_progress(state_dir, phase="baseline_running", image=baseline_image)
+    update_progress(phase="baseline_running", image=baseline_image)
     try:
         eval_baseline = run_baseline(
             eval_prompts,
@@ -252,7 +244,6 @@ def main() -> int:
     except Exception as exc:
         logger.exception("Baseline failed: %s", exc)
         update_progress(
-            state_dir,
             phase="baseline_failed",
             error=str(exc),
             challengers_affected=len(eval_job.challengers),
@@ -260,7 +251,7 @@ def main() -> int:
         _upload_eval_logs(state_dir)
         return 4
 
-    update_progress(state_dir, phase="baseline_complete")
+    update_progress(phase="baseline_complete")
 
     scoring_log_label = f"baseline_scoring_{block}_{eval_ts}"
     pending_tf: list[_PendingTeacherForcing] = []
@@ -335,7 +326,7 @@ def main() -> int:
             len(pending_tf),
             scoring_log_label,
         )
-        update_progress(state_dir, phase="teacher_forcing_running")
+        update_progress(phase="teacher_forcing_running")
         scoring_cid: str | None = None
         try:
             scoring_cid, scoring_url = start_baseline_for_scoring(
@@ -355,7 +346,7 @@ def main() -> int:
                 stop_scoring_baseline(
                     scoring_cid, state_dir, log_label=scoring_log_label
                 )
-        update_progress(state_dir, phase="teacher_forcing_complete")
+        update_progress(phase="teacher_forcing_complete")
         return True
 
     # ------------------------------------------------------------------ #
@@ -382,8 +373,8 @@ def main() -> int:
             com.hotkey[:16],
             com.image,
         )
-        update_progress(state_dir, phase=f"{label}_running")
-        update_incumbent_status(state_dir, label, status="evaluating")
+        update_progress(phase=f"{label}_running")
+        update_incumbent_status(label, status="evaluating")
         tf_output_texts: list[str] = []
         tf_miner_tokens: list[list[str]] = []
         fp_events: list[FingerprintCheckResult] = []
@@ -419,10 +410,10 @@ def main() -> int:
         )
         if record.disqualified:
             update_incumbent_status(
-                state_dir, label, status="dq", dq_reason=record.disqualify_reason
+                label, status="dq", dq_reason=record.disqualify_reason
             )
         else:
-            update_incumbent_status(state_dir, label, status="awaiting_correctness")
+            update_incumbent_status(label, status="awaiting_correctness")
         return record, fp_events, com
 
     leader_record: EvaluationRecord | None = None
@@ -451,14 +442,12 @@ def main() -> int:
             if fp_result.superseded_owner is not None:
                 if leader_record is not None and leader_record.disqualified:
                     update_incumbent_status(
-                        state_dir,
                         "leader",
                         status="dq",
                         dq_reason=leader_record.disqualify_reason,
                     )
                 if ru_record is not None and ru_record.disqualified:
                     update_incumbent_status(
-                        state_dir,
                         "runner_up",
                         status="dq",
                         dq_reason=ru_record.disqualify_reason,
@@ -482,7 +471,7 @@ def main() -> int:
         if state.is_known(ci.hotkey, ci.commit_block):
             logger.info("Skipping UID %d (already evaluated)", ci.uid)
             update_challenger_status(
-                state_dir, challenger_idx, status="skipped", detail="already_known"
+                challenger_idx, status="skipped", detail="already_known"
             )
             continue
 
@@ -502,12 +491,12 @@ def main() -> int:
             com.image,
         )
         update_challenger_status(
-            state_dir, challenger_idx, status="pulling", detail="pulling_image"
+            challenger_idx, status="pulling", detail="pulling_image"
         )
 
         def _on_challenger_pulled() -> None:
             update_challenger_status(
-                state_dir, challenger_idx, status="evaluating", detail="evaluating"
+                challenger_idx, status="evaluating", detail="evaluating"
             )
 
         tf_output_texts: list[str] = []
@@ -539,7 +528,6 @@ def main() -> int:
         )
         if record.disqualified:
             update_challenger_status(
-                state_dir,
                 challenger_idx,
                 status="dq",
                 dq_reason=record.disqualify_reason,
@@ -547,7 +535,6 @@ def main() -> int:
             )
         else:
             update_challenger_status(
-                state_dir,
                 challenger_idx,
                 status="awaiting_correctness",
                 detail="awaiting_correctness",
@@ -577,7 +564,6 @@ def main() -> int:
     for challenger_idx, record in challenger_persist:
         if record.eval_key in deferred_keys:
             update_challenger_status(
-                state_dir,
                 challenger_idx,
                 status="skipped",
                 detail=TF_DEFER_DETAIL,
@@ -594,7 +580,6 @@ def main() -> int:
         )
         if outcome.stored.disqualified:
             update_challenger_status(
-                state_dir,
                 challenger_idx,
                 status="dq",
                 score=outcome.stored.score,
@@ -603,7 +588,6 @@ def main() -> int:
             )
         else:
             update_challenger_status(
-                state_dir,
                 challenger_idx,
                 status="scored",
                 score=outcome.stored.score,
@@ -611,16 +595,13 @@ def main() -> int:
             )
         challenger_records.append(outcome.stored)
 
-        if not state.save(state_dir):
-            logger.error("Could not persist state.json; continuing eval round")
+        state.save()
 
     for label, rec in (("leader", leader_record), ("runner_up", ru_record)):
         if rec is None:
             continue
         if rec.eval_key in deferred_keys:
-            update_incumbent_status(
-                state_dir, label, status="skipped", detail=TF_DEFER_DETAIL
-            )
+            update_incumbent_status(label, status="skipped", detail=TF_DEFER_DETAIL)
             continue
         icon = "❌" if rec.disqualified else "📊"
         logger.info(
@@ -632,7 +613,6 @@ def main() -> int:
             rec.disqualify_reason or "no",
         )
         update_incumbent_status(
-            state_dir,
             label,
             status="dq" if rec.disqualified else "scored",
             score=rec.score,
@@ -679,9 +659,7 @@ def main() -> int:
                 threshold = (
                     new_winner.score * (1.0 + OVERTAKE_EPSILON) if prev_winner else 0.0
                 )
-                append_leader_history(
-                    state_dir, winner_ev, prev_winner, block, threshold
-                )
+                append_leader_history(winner_ev, prev_winner, block, threshold)
             if new_winner is not None:
                 logger.info(
                     "New winner: UID %d (score=%.4f)", new_winner.uid, new_winner.score
@@ -691,15 +669,14 @@ def main() -> int:
     else:
         logger.warning("Scoring round void; preserving winner/runner-up")
 
-    if not state.save(state_dir):
-        logger.error("Could not persist state.json; continuing eval round")
+    state.save()
 
     logger.info(
         "State saved. Winner: %s", f"UID {state.winner.uid}" if state.winner else "none"
     )
     logger.info("GPU eval complete")
-    _delete_eval_job(state_dir, block=block)
-    complete_progress(state_dir)
+    _complete_eval_job(block)
+    complete_progress()
     _upload_eval_logs(state_dir)
     return 0
 

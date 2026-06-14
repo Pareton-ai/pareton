@@ -1,7 +1,8 @@
-"""Hippius S3 state sync for the Cacheon validator.
+"""Hippius S3 log sync for the Cacheon validator.
 
-Upload and download the ``state/`` directory to/from Hippius S3-compatible
-storage so state survives across ephemeral GPU pods.
+Upload and download ``logs/`` and ``container_logs/`` under the state mount
+to/from Hippius S3-compatible storage so log artifacts survive across
+ephemeral GPU pods.
 
 Can be used as a library (``from validator.sync import download, upload``)
 or as a standalone CLI (``python -m validator.sync download``).
@@ -76,8 +77,7 @@ def upload(
 
     When *only* is provided, only relative paths (files or directories)
     matching those prefixes are uploaded. E.g.
-    ``only=["eval_job.json", "logs/"]`` uploads ``eval_job.json`` and
-    everything under ``logs/``.
+    ``only=["logs/"]`` uploads everything under ``logs/``.
     """
     bucket = bucket or BUCKET
     prefix = prefix or S3_PREFIX
@@ -137,8 +137,7 @@ def delete_remote_keys(
 ) -> None:
     """Delete specific keys from S3.
 
-    *relative_keys* are paths relative to ``state/``
-    (e.g. ``["eval_progress.json"]``).
+    *relative_keys* are paths relative to ``state/`` (e.g. ``["logs/foo.log"]``).
     """
     if not relative_keys:
         return

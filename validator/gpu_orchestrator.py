@@ -148,9 +148,9 @@ def _build_env_exports(handle: PodHandle) -> str:
         env["CACHEON_VLLM_CACHE_DIR"] = os.environ["CACHEON_VLLM_CACHE_DIR"]
 
     database_url = os.environ.get("CACHEON_DATABASE_URL", "")
-    if database_url:
-        env["CACHEON_DATABASE_URL"] = database_url
-    env["CACHEON_SKIP_DB"] = os.environ.get("CACHEON_SKIP_DB", "0")
+    if not database_url:
+        raise RuntimeError("CACHEON_DATABASE_URL is required for GPU eval exports")
+    env["CACHEON_DATABASE_URL"] = database_url
 
     return " && ".join(f'export {k}="{_dq_escape(v)}"' for k, v in env.items())
 
@@ -211,7 +211,7 @@ def _remote_setup(provider: GpuProvider, handle: PodHandle, state_dir: str) -> b
             if stripped.startswith("==="):
                 logger.info("  [setup] %s", stripped)
                 step_name = stripped.strip("= ")
-                update_progress(state_dir, phase="gpu_setup", step=step_name)
+                update_progress(phase="gpu_setup", step=step_name)
             elif stripped.startswith("ERROR"):
                 logger.warning("  [setup] %s", stripped)
             elif chunk.get("type") == "stderr" and stripped:
@@ -235,7 +235,7 @@ def _remote_setup(provider: GpuProvider, handle: PodHandle, state_dir: str) -> b
         return False
 
     logger.info("🛠 setup.sh completed on pod %s (%.0fs)", handle.pod_id, elapsed)
-    update_progress(state_dir, phase="gpu_setup_complete", elapsed_s=int(elapsed))
+    update_progress(phase="gpu_setup_complete", elapsed_s=int(elapsed))
     return True
 
 
@@ -308,7 +308,7 @@ def _start_remote_eval(
         timeout_min,
         len(eval_job.challengers),
     )
-    update_progress(state_dir, phase="gpu_eval_started", timeout_min=timeout_min)
+    update_progress(phase="gpu_eval_started", timeout_min=timeout_min)
     return _remote_run_eval(provider, handle, timeout_min)
 
 
@@ -329,15 +329,13 @@ def _run_ssh_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
         target.port,
         validator_config.GPU_POD_PROFILE,
     )
-    update_progress(
-        state_dir, phase="gpu_ssh_connecting", pod_id=f"{target.user}@{target.host}"
-    )
+    update_progress(phase="gpu_ssh_connecting", pod_id=f"{target.user}@{target.host}")
 
     try:
         handle = provider.connect()
         handle = provider.wait_ready(handle, timeout_s=provider.READY_TIMEOUT_S)
         logger.info("Pod %s is ready", handle.pod_id)
-        update_progress(state_dir, phase="gpu_ready", pod_id=handle.pod_id)
+        update_progress(phase="gpu_ready", pod_id=handle.pod_id)
         return _start_remote_eval(state_dir, provider, handle, eval_job)
     except TimeoutError as exc:
         logger.error("GPU SSH connection timed out: %s", exc)
@@ -375,7 +373,7 @@ def _provision_gpu_session(state_dir: str) -> tuple[GpuProvider, PodHandle] | No
 
     max_price = validator_config.MAX_HOURLY_PRICE
 
-    update_progress(state_dir, phase="gpu_searching")
+    update_progress(phase="gpu_searching")
     best = search_all_providers(
         providers,
         max_hourly_price_cents=max_price,
@@ -412,7 +410,6 @@ def _provision_gpu_session(state_dir: str) -> tuple[GpuProvider, PodHandle] | No
         "cost_per_hr": best.hourly_price_cents / 100,
     }
     update_progress(
-        state_dir,
         phase="gpu_match_found",
         gpu=gpu_info,
         provider=best.provider,
@@ -425,13 +422,11 @@ def _provision_gpu_session(state_dir: str) -> tuple[GpuProvider, PodHandle] | No
         handle = provider.rent(best)
         logger.info("☑️ Pod rented: %s (id=%s)", provider.name, handle.pod_id)
         gpu_info["pod_id"] = handle.pod_id
-        update_progress(
-            state_dir, phase="gpu_renting", gpu=gpu_info, pod_id=handle.pod_id
-        )
+        update_progress(phase="gpu_renting", gpu=gpu_info, pod_id=handle.pod_id)
 
         handle = provider.wait_ready(handle, timeout_s=provider.READY_TIMEOUT_S)
         logger.info("☑️ Pod %s is ready", handle.pod_id)
-        update_progress(state_dir, phase="gpu_ready", pod_id=handle.pod_id)
+        update_progress(phase="gpu_ready", pod_id=handle.pod_id)
 
         if not _remote_setup(provider, handle, state_dir):
             _abort_provision(provider, handle)

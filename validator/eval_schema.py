@@ -5,9 +5,9 @@
 dataclasses -- no Pydantic, no torch, no bittensor imports -- so they
 can be tested and serialized cheaply.
 
-``EvalJob`` is what the CPU writes to ``eval_job.json`` for the GPU
-entrypoint to read. It bundles the block context and challenger list
-so the GPU side needs zero chain access.
+``EvalJob`` is what the CPU mirrors to Postgres for the GPU entrypoint.
+It bundles the block context and challenger list so the GPU side needs
+zero chain access.
 
 The ``eval_fn`` contract:
     eval_fn(job: EvaluationJob) -> EvaluationResult
@@ -18,10 +18,8 @@ etc.) and is wired in by the CLI entry point.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
 from . import config as validator_config
@@ -178,10 +176,8 @@ class EvaluationResult:
 
 
 # --------------------------------------------------------------------------- #
-# EvalJob -- CPU -> GPU handoff via S3
+# EvalJob -- CPU -> GPU handoff via Postgres
 # --------------------------------------------------------------------------- #
-
-EVAL_JOB_FILE = "eval_job.json"
 
 
 @dataclass(frozen=True)
@@ -213,13 +209,7 @@ class ChallengerInfo:
 
 @dataclass(frozen=True)
 class EvalJob:
-    """What the CPU writes to ``eval_job.json`` for the GPU entrypoint.
-
-    Contains block context, a list of challengers, and optionally the
-    current leader and runner-up to re-evaluate on the same hardware.
-    The GPU pod reads this file, runs eval for each entry, and writes
-    results into ``state.json``.
-    """
+    """Pending eval round mirrored to Postgres for the GPU entrypoint."""
 
     block: int
     block_hash: str
@@ -253,63 +243,28 @@ class EvalJob:
             runner_up=ChallengerInfo.from_dict(ru_data) if ru_data else None,
         )
 
-    def save(self, state_dir: str | Path) -> None:
-        path = Path(state_dir) / EVAL_JOB_FILE
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+    def save(self) -> None:
+        from cacheon_db import sync_eval_job
+
+        sync_eval_job(self)
         logger.info(
-            "Wrote eval job: %d challenger(s), leader=%s, runner_up=%s to %s",
+            "Mirrored eval job: %d challenger(s), leader=%s, runner_up=%s",
             len(self.challengers),
             self.leader.hotkey[:16] if self.leader else "none",
             self.runner_up.hotkey[:16] if self.runner_up else "none",
-            path,
         )
-        try:
-            from cacheon_db import sync_eval_job
-
-            sync_eval_job(self)
-        except Exception:
-            logger.debug("Postgres eval job mirror failed", exc_info=True)
 
     @classmethod
-    def load_from_db(cls) -> EvalJob | None:
-        try:
-            from cacheon_db.loaders import load_pending_eval_job_dict
+    def load(cls) -> EvalJob | None:
+        from cacheon_db.loaders import load_pending_eval_job_dict
 
-            data = load_pending_eval_job_dict()
-            if data is None:
-                return None
-            job = cls.from_dict(data)
-            logger.info(
-                "Loaded eval job from Postgres: block=%d, %d challenger(s)",
-                job.block,
-                len(job.challengers),
-            )
-            return job
-        except Exception:
-            logger.debug("Postgres eval job load failed", exc_info=True)
+        data = load_pending_eval_job_dict()
+        if data is None:
             return None
-
-    @classmethod
-    def load(cls, state_dir: str | Path) -> EvalJob | None:
-        job = cls.load_from_db()
-        if job is not None:
-            return job
-        path = Path(state_dir) / EVAL_JOB_FILE
-        if not path.exists():
-            logger.warning("No eval job file at %s", path)
-            return None
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            job = cls.from_dict(data)
-            logger.info(
-                "Loaded eval job: block=%d, %d challenger(s)",
-                job.block,
-                len(job.challengers),
-            )
-            return job
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            logger.error("Failed to load eval job from %s: %s", path, exc)
-            return None
+        job = cls.from_dict(data)
+        logger.info(
+            "Loaded eval job from Postgres: block=%d, %d challenger(s)",
+            job.block,
+            len(job.challengers),
+        )
+        return job

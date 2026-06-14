@@ -7,20 +7,16 @@ from typing import Any
 
 from psycopg2.extras import RealDictCursor
 
-from .config import enabled
 from .connection import db_connection
+from .exceptions import DatabaseUnavailable
 
 logger = logging.getLogger(__name__)
 
 
 def load_eval_progress_payload() -> dict[str, Any] | None:
-    """Return the raw eval_progress row, or None when DB is disabled or idle."""
-    if not enabled():
-        return None
+    """Return the raw eval_progress row, or None when idle/missing."""
     try:
         with db_connection() as conn:
-            if conn is None:
-                return None
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -32,9 +28,8 @@ def load_eval_progress_payload() -> dict[str, Any] | None:
                     """
                 )
                 row = cur.fetchone()
-    except Exception:
-        logger.debug("Postgres eval progress load failed", exc_info=True)
-        return None
+    except Exception as exc:
+        raise DatabaseUnavailable("eval progress load failed") from exc
     if row is None:
         return None
     data = {k: row[k] for k in row.keys() if row[k] is not None}
@@ -44,12 +39,8 @@ def load_eval_progress_payload() -> dict[str, Any] | None:
 
 
 def load_pending_eval_job_dict() -> dict[str, Any] | None:
-    if not enabled():
-        return None
     try:
         with db_connection() as conn:
-            if conn is None:
-                return None
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -61,9 +52,8 @@ def load_pending_eval_job_dict() -> dict[str, Any] | None:
                     """
                 )
                 row = cur.fetchone()
-    except Exception:
-        logger.debug("Postgres eval job load failed", exc_info=True)
-        return None
+    except Exception as exc:
+        raise DatabaseUnavailable("eval job load failed") from exc
     if row is None:
         return None
     return {
@@ -92,14 +82,10 @@ def _leader_role_to_winner_dict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def load_validator_state_dict() -> dict[str, Any] | None:
-    """Build a ``state.json``-shaped dict from Postgres tables."""
-    if not enabled():
-        return None
+def load_validator_state_dict() -> dict[str, Any]:
+    """Build a state-shaped dict from Postgres tables."""
     try:
         with db_connection() as conn:
-            if conn is None:
-                return None
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -131,12 +117,11 @@ def load_validator_state_dict() -> dict[str, Any] | None:
                     "SELECT hotkey, commit_block, reason FROM precheck_failures"
                 )
                 precheck_rows = cur.fetchall()
-    except Exception:
-        logger.debug("Postgres validator state load failed", exc_info=True)
-        return None
+    except Exception as exc:
+        raise DatabaseUnavailable("validator state load failed") from exc
 
     if meta is None:
-        return None
+        raise DatabaseUnavailable("validator_meta row missing")
 
     winner = None
     runner_up = None
@@ -183,13 +168,9 @@ def load_validator_state_dict() -> dict[str, Any] | None:
     }
 
 
-def load_fingerprint_registry_dict() -> dict[str, Any] | None:
-    if not enabled():
-        return None
+def load_fingerprint_registry_dict() -> dict[str, Any]:
     try:
         with db_connection() as conn:
-            if conn is None:
-                return None
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -199,9 +180,8 @@ def load_fingerprint_registry_dict() -> dict[str, Any] | None:
                     """
                 )
                 rows = cur.fetchall()
-    except Exception:
-        logger.debug("Postgres fingerprint registry load failed", exc_info=True)
-        return None
+    except Exception as exc:
+        raise DatabaseUnavailable("fingerprint registry load failed") from exc
 
     entries: dict[str, Any] = {}
     for row in rows:

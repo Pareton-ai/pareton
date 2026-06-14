@@ -1417,7 +1417,6 @@ def evaluate_challenger(
             fingerprint_registry,
             container_id=cid,
             com=com,
-            state_dir=state_dir,
         )
         if fingerprint_result is not None:
             fingerprint_result.append(fp_result)

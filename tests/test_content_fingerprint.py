@@ -7,7 +7,6 @@ from unittest.mock import patch
 import pytest
 
 from validator.content_fingerprint import (
-    FINGERPRINT_FILE_NAME,
     FingerprintCheckResult,
     apply_fingerprint_supersede_records,
     check_and_register_fingerprint,
@@ -19,7 +18,6 @@ from validator.content_fingerprint import (
     load_fingerprint_registry,
     register_fingerprint,
     retro_dq_record,
-    save_fingerprint_registry,
 )
 from validator.chain import CommitmentRecord
 from validator.state import DUPLICATE_SUBMISSION_REASON, EvaluationRecord
@@ -137,16 +135,15 @@ class TestRegistryRules:
         assert "12345" in reason
 
 
-class TestRegistryPersistence:
-    def test_load_missing_returns_empty(self, tmp_path):
-        assert load_fingerprint_registry(tmp_path) == {"entries": {}}
-
-    def test_round_trip(self, tmp_path):
-        reg = {"entries": {"abc": {"hotkey": "hk", "commit_block": 1, "uid": 0}}}
-        save_fingerprint_registry(tmp_path, reg)
-        path = tmp_path / FINGERPRINT_FILE_NAME
-        assert path.exists()
-        loaded = load_fingerprint_registry(tmp_path)
+class TestRegistryLoad:
+    @patch(
+        "cacheon_db.loaders.load_fingerprint_registry_dict",
+        return_value={
+            "entries": {"abc": {"hotkey": "hk", "commit_block": 1, "uid": 0}}
+        },
+    )
+    def test_load_from_postgres(self, _mock):
+        loaded = load_fingerprint_registry()
         assert loaded["entries"]["abc"]["hotkey"] == "hk"
 
 
@@ -187,26 +184,22 @@ class TestCheckAndRegister:
             }
         }
         com = _make_commitment(hotkey="hk_copy", commit_block=200, uid=9)
-        result = check_and_register_fingerprint(
-            registry, container_id="cid", com=com, state_dir=tmp_path
-        )
+        result = check_and_register_fingerprint(registry, container_id="cid", com=com)
         assert result.dq_reason is not None
         assert DUPLICATE_SUBMISSION_REASON in result.dq_reason
         assert len(registry["entries"]) == 1
 
     @patch("validator.content_fingerprint.compute_content_fingerprint")
-    def test_success_registers_and_saves(self, mock_compute, tmp_path):
+    @patch("cacheon_db.mirror.sync_fingerprint")
+    def test_success_registers(self, _mock_sync, mock_compute):
         fp = composite_fingerprint({"/start.sh": "c" * 64})
         mock_compute.return_value = fp
         registry: dict = {"entries": {}}
         com = _make_commitment()
-        result = check_and_register_fingerprint(
-            registry, container_id="cid", com=com, state_dir=tmp_path
-        )
+        result = check_and_register_fingerprint(registry, container_id="cid", com=com)
         assert result.dq_reason is None
         assert result.superseded_owner is None
         assert fp in registry["entries"]
-        assert (tmp_path / FINGERPRINT_FILE_NAME).exists()
 
     @patch("validator.content_fingerprint.compute_content_fingerprint")
     def test_earlier_commit_supersedes_later_registry_owner(
@@ -227,9 +220,7 @@ class TestCheckAndRegister:
             }
         }
         com = _make_commitment(hotkey="hk_owner", commit_block=100, uid=1)
-        result = check_and_register_fingerprint(
-            registry, container_id="cid", com=com, state_dir=tmp_path
-        )
+        result = check_and_register_fingerprint(registry, container_id="cid", com=com)
         assert result.dq_reason is None
         assert result.superseded_owner is not None
         assert result.superseded_owner["uid"] == 5
