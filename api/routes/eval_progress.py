@@ -5,9 +5,8 @@ import time
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from api import config
-from api.helpers.eval_progress import COMPLETE_LINGER_S, progress_expired
-from api.helpers.state_reader import safe_json_load, sanitize_floats
+from api.helpers.state_reader import sanitize_floats
+from cacheon_db.readers import get_eval_progress
 
 router = APIRouter()
 
@@ -22,12 +21,12 @@ _STALE_THRESHOLD_S = 1800  # 30 minutes
         "Returns the current eval round progress, including phase, "
         "per-challenger status, GPU info, and a timestamped step timeline. "
         'Returns {"status": "idle"} when no eval is running. '
-        f'Finished rounds linger as {{"status": "complete"}} for {COMPLETE_LINGER_S // 60} minutes.'
+        "Finished rounds linger as complete for 15 minutes."
     ),
 )
 def eval_progress():
-    data = safe_json_load(config.STATE_DIR / "eval_progress.json")
-    if data is None or progress_expired(data):
+    data = get_eval_progress()
+    if data is None:
         return JSONResponse(
             content={"status": "idle"},
             headers={"Cache-Control": "public, max-age=5"},

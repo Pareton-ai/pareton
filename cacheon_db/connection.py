@@ -7,7 +7,8 @@ import logging
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from .config import DATABASE_URL, enabled
+from .config import DATABASE_URL, enabled, require_database_url
+from .exceptions import DatabaseUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,22 @@ def db_connection() -> Iterator[Any | None]:
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def read_db_connection() -> Iterator[Any]:
+    """Yield a psycopg2 connection for required API reads."""
+    import psycopg2
+
+    url = require_database_url()
+    try:
+        conn = psycopg2.connect(url)
+    except Exception as exc:
+        raise DatabaseUnavailable("database connection failed") from exc
+    try:
+        yield conn
     finally:
         conn.close()
 

@@ -5,17 +5,14 @@ GET /api/evaluations/{uid} -- eval history for a specific UID (slot, not stable 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
-from api.config import STATE_DIR
-from api.helpers.state_reader import safe_json_load, sanitize_floats
+from api.helpers.state_reader import sanitize_floats
+from cacheon_db.readers import (
+    get_evaluations_by_hotkey,
+    get_evaluations_by_uid,
+    list_evaluations,
+)
 
 router = APIRouter()
-
-
-def _load_evals() -> list[dict]:
-    state = safe_json_load(STATE_DIR / "state.json", {})
-    evals = list((state.get("evaluations") or {}).values())
-    evals.sort(key=lambda e: e.get("evaluated_at") or 0, reverse=True)
-    return evals
 
 
 @router.get(
@@ -27,17 +24,13 @@ def _load_evals() -> list[dict]:
         "Filter with ?status=dq for disqualified only, ?status=active for passing only."
     ),
 )
-def list_evaluations(
+def list_all_evaluations(
     status: str | None = Query(
         None,
         description="Filter: 'dq' for disqualified, 'active' for non-disqualified",
     ),
 ):
-    evals = _load_evals()
-    if status == "dq":
-        evals = [e for e in evals if e.get("disqualified")]
-    elif status == "active":
-        evals = [e for e in evals if not e.get("disqualified")]
+    evals = list_evaluations(status=status)
     return JSONResponse(
         content=sanitize_floats({"evaluations": evals, "total": len(evals)}),
         headers={"Cache-Control": "public, max-age=30"},
@@ -53,8 +46,8 @@ def list_evaluations(
         "Hotkey is the stable miner identity; UIDs can be recycled when a slot changes owner."
     ),
 )
-def get_evaluations_by_hotkey(hotkey: str):
-    evals = [e for e in _load_evals() if e.get("hotkey") == hotkey]
+def evaluations_by_hotkey(hotkey: str):
+    evals = get_evaluations_by_hotkey(hotkey)
     if not evals:
         return JSONResponse(
             status_code=404,
@@ -78,8 +71,8 @@ def get_evaluations_by_hotkey(hotkey: str):
         "Prefer GET /api/evaluations/hotkey/{hotkey} for stable lookups."
     ),
 )
-def get_evaluations_by_uid(uid: int):
-    evals = [e for e in _load_evals() if e.get("uid") == uid]
+def evaluations_by_uid(uid: int):
+    evals = get_evaluations_by_uid(uid)
     if not evals:
         return JSONResponse(
             status_code=404,

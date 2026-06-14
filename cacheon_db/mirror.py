@@ -105,6 +105,7 @@ def sync_validator_state(state: Any) -> None:
                 """,
                 _winner_record_to_leader_row(role, rec),
             )
+        cur.execute("DELETE FROM precheck_failures")
         for key, reason in (state.precheck_failures or {}).items():
             hotkey, commit_block = key.rsplit(":", 1)
             cur.execute(
@@ -145,6 +146,10 @@ def sync_evaluation(ev: Any) -> None:
             """,
             _evaluation_row(ev),
         )
+        cur.execute(
+            "DELETE FROM precheck_failures WHERE hotkey = %s AND commit_block = %s",
+            (ev.hotkey, ev.commit_block),
+        )
 
     run_best_effort("sync_evaluation", _write)
 
@@ -168,6 +173,10 @@ def sync_precheck_failure(hotkey: str, commit_block: int, reason: str) -> None:
 def sync_eval_job(job: Any) -> None:
     def _write(conn) -> None:
         cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM eval_jobs WHERE block = %s AND status = 'pending'",
+            (job.block,),
+        )
         cur.execute(
             """
             INSERT INTO eval_jobs (
@@ -215,12 +224,18 @@ def sync_eval_progress(payload: dict[str, Any]) -> None:
                 payload.get("round_block"),
                 payload.get("current_idx"),
                 _json(payload.get("challengers"))
-                if payload.get("challengers")
+                if payload.get("challengers") is not None
                 else None,
-                _json(payload.get("leader")) if payload.get("leader") else None,
-                _json(payload.get("runner_up")) if payload.get("runner_up") else None,
-                _json(payload.get("gpu")) if payload.get("gpu") else None,
-                _json(payload.get("steps")) if payload.get("steps") else None,
+                _json(payload.get("leader"))
+                if payload.get("leader") is not None
+                else None,
+                _json(payload.get("runner_up"))
+                if payload.get("runner_up") is not None
+                else None,
+                _json(payload.get("gpu")) if payload.get("gpu") is not None else None,
+                _json(payload.get("steps"))
+                if payload.get("steps") is not None
+                else None,
                 payload.get("started_at"),
                 payload.get("updated_at"),
                 payload.get("completed_at"),

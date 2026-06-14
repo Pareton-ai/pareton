@@ -1,4 +1,4 @@
-"""Cacheon monitoring API. Read-only surface over on-disk validator state."""
+"""Cacheon monitoring API. Structured state from Postgres; logs from local mount."""
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +8,11 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from api.config import ALLOWED_ORIGINS
+from api.errors import (
+    database_not_configured_handler,
+    database_unavailable_handler,
+)
+from cacheon_db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from api.routes.health import router as health_router
 from api.routes.status import router as status_router
 from api.routes.leader import router as leader_router
@@ -35,8 +40,8 @@ app = FastAPI(
     title="Cacheon Monitoring API",
     description=(
         "Read-only status surface for the Cacheon subnet (SN14). "
-        "Serves evaluation results, leader status, container logs, and round history "
-        "from the validator's on-disk state files."
+        "Serves evaluation results, leader status, and round history from Postgres. "
+        "Container and validator logs are read from the local state mount."
     ),
     version="0.1.0",
     docs_url="/docs",
@@ -58,6 +63,8 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(DatabaseNotConfigured, database_not_configured_handler)
+app.add_exception_handler(DatabaseUnavailable, database_unavailable_handler)
 app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,

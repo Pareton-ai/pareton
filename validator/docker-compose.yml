@@ -51,4 +51,5 @@ services:
       - ${CACHEON_STATE_DIR:-./state-mainnet}:/app/state-mainnet:ro
     environment:
       - CACHEON_STATE_DIR=/app/state-mainnet
+      - CACHEON_DATABASE_URL=${CACHEON_DATABASE_URL}
       - CACHEON_ALLOWED_ORIGINS=${CACHEON_ALLOWED_ORIGINS:-https://cacheon.ai,https://www.cacheon.ai}

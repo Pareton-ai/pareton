@@ -360,30 +360,36 @@ except ImportError:
 
 @pytest.mark.skipif(not _has_api_deps, reason="API dependencies not installed")
 class TestEvalProgressAPI:
-    """Tests for GET /api/eval-progress using FastAPI TestClient."""
+    """Tests for GET /api/eval-progress using mocked Postgres readers."""
 
     @pytest.fixture(autouse=True)
-    def _patch_state_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("api.config.STATE_DIR", tmp_path)
+    def _client(self, monkeypatch):
+        monkeypatch.setenv("CACHEON_DATABASE_URL", "postgresql://test/db")
+        from cacheon_db import config as db_config
+
+        db_config.DATABASE_URL = "postgresql://test/db"
         from api.server import app
 
         from starlette.testclient import TestClient
 
         self.client = TestClient(app)
-        self.state_dir = tmp_path
 
-    def test_idle_when_no_file(self):
+    @patch("api.routes.eval_progress.get_eval_progress")
+    def test_idle_when_no_progress(self, mock_get):
+        mock_get.return_value = None
         resp = self.client.get("/api/eval-progress")
         assert resp.status_code == 200
         assert resp.json() == {"status": "idle"}
 
-    def test_returns_data_when_running(self):
-        update_progress(
-            self.state_dir,
-            phase="challengers_found",
-            round_block=100,
-            challengers=SAMPLE_CHALLENGERS,
-        )
+    @patch("api.routes.eval_progress.get_eval_progress")
+    def test_returns_data_when_running(self, mock_get):
+        mock_get.return_value = {
+            "status": "running",
+            "phase": "challengers_found",
+            "round_block": 100,
+            "challengers": SAMPLE_CHALLENGERS,
+            "updated_at": time.time(),
+        }
         resp = self.client.get("/api/eval-progress")
         assert resp.status_code == 200
         body = resp.json()
@@ -391,47 +397,35 @@ class TestEvalProgressAPI:
         assert body["phase"] == "challengers_found"
         assert len(body["challengers"]) == 2
 
-    def test_stale_flag(self):
-        update_progress(
-            self.state_dir,
-            phase="challengers_found",
-            round_block=100,
-            challengers=SAMPLE_CHALLENGERS,
-        )
-        path = self.state_dir / PROGRESS_FILE
-        data = json.loads(path.read_text())
-        data["updated_at"] = time.time() - 3600
-        path.write_text(json.dumps(data))
-
+    @patch("api.routes.eval_progress.get_eval_progress")
+    def test_stale_flag(self, mock_get):
+        mock_get.return_value = {
+            "status": "running",
+            "phase": "challengers_found",
+            "round_block": 100,
+            "challengers": SAMPLE_CHALLENGERS,
+            "updated_at": time.time() - 3600,
+        }
         resp = self.client.get("/api/eval-progress")
         body = resp.json()
         assert body.get("possibly_stale") is True
 
-    def test_complete_status(self):
-        update_progress(
-            self.state_dir,
-            phase="challengers_found",
-            round_block=100,
-            challengers=SAMPLE_CHALLENGERS,
-        )
-        complete_progress(self.state_dir)
+    @patch("api.routes.eval_progress.get_eval_progress")
+    def test_complete_status(self, mock_get):
+        mock_get.return_value = {
+            "status": "complete",
+            "phase": "eval_complete",
+            "completed_at": time.time(),
+            "updated_at": time.time(),
+            "challengers": SAMPLE_CHALLENGERS,
+        }
         resp = self.client.get("/api/eval-progress")
         body = resp.json()
         assert body["status"] == "complete"
         assert body["phase"] == "eval_complete"
 
-    def test_idle_when_complete_expired(self):
-        update_progress(
-            self.state_dir,
-            phase="challengers_found",
-            round_block=100,
-            challengers=SAMPLE_CHALLENGERS,
-        )
-        complete_progress(self.state_dir)
-        path = self.state_dir / PROGRESS_FILE
-        data = json.loads(path.read_text())
-        data["completed_at"] = time.time() - 3600
-        path.write_text(json.dumps(data))
-
+    @patch("api.routes.eval_progress.get_eval_progress")
+    def test_idle_when_reader_returns_none_for_expired(self, mock_get):
+        mock_get.return_value = None
         resp = self.client.get("/api/eval-progress")
         assert resp.json() == {"status": "idle"}

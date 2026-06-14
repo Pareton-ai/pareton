@@ -5,8 +5,8 @@ import time
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from api.config import STATE_DIR
-from api.helpers.state_reader import safe_json_load, sanitize_floats
+from api.helpers.state_reader import sanitize_floats
+from cacheon_db.readers import count_evaluations, get_leader_state, get_validator_meta
 
 router = APIRouter()
 
@@ -21,14 +21,10 @@ router = APIRouter()
     ),
 )
 def status():
-    state = safe_json_load(STATE_DIR / "state.json", {})
-    evals = state.get("evaluations") or {}
-    winner = state.get("winner") or state.get("king")
+    meta = get_validator_meta()
+    leader, _runner_up = get_leader_state()
+    total, n_active, n_dq, last_eval_ts = count_evaluations()
 
-    n_dq = sum(1 for e in evals.values() if e.get("disqualified"))
-    n_active = sum(1 for e in evals.values() if not e.get("disqualified"))
-
-    last_eval_ts = max((e.get("evaluated_at") or 0 for e in evals.values()), default=0)
     last_eval_age_min = (
         round((time.time() - last_eval_ts) / 60, 1) if last_eval_ts else None
     )
@@ -36,16 +32,16 @@ def status():
     return JSONResponse(
         content=sanitize_floats(
             {
-                "leader_uid": winner.get("uid") if winner else None,
-                "leader_score": winner.get("score") if winner else None,
-                "leader_image": winner.get("image") if winner else None,
-                "n_evaluated": len(evals),
+                "leader_uid": leader.get("uid") if leader else None,
+                "leader_score": leader.get("score") if leader else None,
+                "leader_image": leader.get("image") if leader else None,
+                "n_evaluated": total,
                 "n_active": n_active,
                 "n_disqualified": n_dq,
-                "last_eval_ts": last_eval_ts or None,
+                "last_eval_ts": last_eval_ts,
                 "last_eval_age_min": last_eval_age_min,
-                "last_scan_block": state.get("last_scan_block"),
-                "last_weights_set_block": state.get("last_weights_set_block"),
+                "last_scan_block": meta.get("last_scan_block"),
+                "last_weights_set_block": meta.get("last_weights_set_block"),
             }
         ),
         headers={"Cache-Control": "public, max-age=30"},
