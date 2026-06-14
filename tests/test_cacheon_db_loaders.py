@@ -13,6 +13,8 @@ from cacheon_db.loaders import (
     load_validator_state_dict,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _enable_db(monkeypatch):

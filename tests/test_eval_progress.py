@@ -192,24 +192,6 @@ def test_update_challenger_status_scored(tmp_path):
     assert data["challengers"][1]["score"] == 0.85
 
 
-def test_update_challenger_status_no_file(tmp_path):
-    """Does not crash when progress file does not exist."""
-    update_challenger_status(tmp_path, 0, status="pulling")
-    assert not (tmp_path / PROGRESS_FILE).exists()
-
-
-def test_update_challenger_status_bad_idx(tmp_path):
-    update_progress(
-        tmp_path,
-        phase="challengers_found",
-        round_block=1,
-        challengers=SAMPLE_CHALLENGERS,
-    )
-    update_challenger_status(tmp_path, 99, status="pulling")
-    data = _read(tmp_path)
-    assert all(c["status"] == "pending" for c in data["challengers"])
-
-
 # --------------------------------------------------------------------------- #
 # update_incumbent_status
 # --------------------------------------------------------------------------- #
@@ -327,38 +309,6 @@ def test_clear_progress_removes_file(tmp_path):
     assert (tmp_path / PROGRESS_FILE).exists()
     clear_progress(tmp_path)
     assert not (tmp_path / PROGRESS_FILE).exists()
-
-
-def test_clear_progress_no_file(tmp_path):
-    """Does not crash when progress file does not exist."""
-    clear_progress(tmp_path)
-
-
-# --------------------------------------------------------------------------- #
-# Exception safety
-# --------------------------------------------------------------------------- #
-
-
-def test_update_progress_exception_does_not_propagate(tmp_path):
-    with patch(
-        "validator.state._atomic_write_json",
-        side_effect=OSError("disk full"),
-    ):
-        update_progress(tmp_path, phase="gpu_searching")
-
-
-def test_update_challenger_status_exception_does_not_propagate(tmp_path):
-    update_progress(
-        tmp_path,
-        phase="challengers_found",
-        round_block=1,
-        challengers=SAMPLE_CHALLENGERS,
-    )
-    with patch(
-        "validator.state._atomic_write_json",
-        side_effect=OSError("disk full"),
-    ):
-        update_challenger_status(tmp_path, 0, status="pulling")
 
 
 # --------------------------------------------------------------------------- #

@@ -10,6 +10,8 @@ import pytest
 from validator.gpu_orchestrator import _build_env_exports
 from validator.providers import PodHandle
 
+pytestmark = pytest.mark.unit
+
 
 def _handle(provider: str) -> PodHandle:
     return PodHandle(

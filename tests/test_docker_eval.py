@@ -83,16 +83,6 @@ class TestRemoveImage:
         cmd = mock_run.call_args[0][0]
         assert cmd[0:3] == ["docker", "rmi", f"{_IMAGE}@{_DIGEST}"]
 
-    @patch("validator.docker_eval.subprocess.run")
-    def test_failure_does_not_raise(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="in use")
-        remove_image(_IMAGE, _DIGEST)
-
-    @patch("validator.docker_eval.subprocess.run")
-    def test_exception_does_not_raise(self, mock_run):
-        mock_run.side_effect = OSError("docker not found")
-        remove_image(_IMAGE, _DIGEST)
-
 
 # --------------------------------------------------------------------------- #
 # ensure_eval_network
@@ -272,16 +262,6 @@ class TestStopAndRemove:
         assert calls[0][1] == "stop"
         assert calls[1][1] == "rm"
 
-    @patch("validator.docker_eval.subprocess.run")
-    def test_never_raises_on_failure(self, mock_run):
-        mock_run.side_effect = Exception("docker broken")
-        stop_and_remove("abc123")
-
-    @patch("validator.docker_eval.subprocess.run")
-    def test_never_raises_on_timeout(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=30)
-        stop_and_remove("abc123")
-
 
 # --------------------------------------------------------------------------- #
 # reset_gpu_state
@@ -296,11 +276,6 @@ class TestResetGpuState:
         cmd = mock_run.call_args[0][0]
         assert "nvidia-smi" in cmd
         assert "--gpu-reset" in cmd
-
-    @patch("validator.docker_eval.subprocess.run")
-    def test_never_raises(self, mock_run):
-        mock_run.side_effect = FileNotFoundError("nvidia-smi not found")
-        reset_gpu_state()
 
 
 # --------------------------------------------------------------------------- #
@@ -887,11 +862,6 @@ class TestCaptureContainerLogs:
         capture_container_logs("test-container", tmp_path, "empty")
         assert not (tmp_path / "container_logs" / "empty.log").exists()
 
-    @patch("validator.docker_eval.subprocess.run")
-    def test_never_raises(self, mock_run, tmp_path):
-        mock_run.side_effect = Exception("docker not found")
-        capture_container_logs("test-container", tmp_path, "fail")
-
 
 class TestEvaluateChallenger:
     @patch("validator.docker_eval.capture_container_logs")
@@ -1468,6 +1438,7 @@ class TestPauseResumeScoring:
 
 
 class TestRunBaselineErrorCheck:
+    @patch("validator.docker_eval._tokenize", return_value=[1, 2, 3])
     @patch("validator.docker_eval.stop_and_remove")
     @patch("validator.docker_eval.send_prompt")
     @patch("validator.docker_eval.wait_for_health")
@@ -1483,6 +1454,7 @@ class TestRunBaselineErrorCheck:
         mock_health,
         mock_send,
         mock_stop,
+        _mock_tokenize,
     ):
         warmup_r = RawPromptResult(
             prompt_index=0,

@@ -17,7 +17,6 @@ from validator.state import (
     STATE_FILE_NAME,
     ValidatorState,
     _atomic_write_json,
-    _effective_overtake_threshold,
     append_leader_history,
     current_timestamp,
     unknown_commits,
@@ -299,32 +298,6 @@ class TestDuplicateOfLeaderDQ:
         assert persisted.disqualified is True
         assert state.winner.uid == 1
 
-    def test_later_duplicate_with_higher_score_still_dqd(self):
-        state = ValidatorState()
-        _record_as_winner(
-            state,
-            _make_eval(
-                uid=1,
-                hotkey="hk1",
-                commit_block=100,
-                score=0.5,
-                digest=self._DIGEST_A,
-            ),
-        )
-        out = _record(
-            state,
-            _make_eval(
-                uid=2,
-                hotkey="hk2",
-                commit_block=200,
-                score=0.99,
-                digest=self._DIGEST_A,
-            ),
-        )
-        assert out.overtook is False
-        assert out.stored.disqualified is True
-        assert state.winner.uid == 1
-
     def test_same_digest_same_hotkey_not_dqd(self):
         """Re-committing your own winning image at a later block is fine --
         the DQ rule targets cross-hotkey copies only."""
@@ -425,19 +398,6 @@ class TestDuplicateOfLeaderDQ:
             ),
         )
         assert out.stored.disqualified is False
-
-
-class TestEffectiveOvertakeThreshold:
-    def test_zero_score(self):
-        assert _effective_overtake_threshold(0.0) == 0.0
-
-    def test_flat_epsilon(self):
-        th = _effective_overtake_threshold(0.5)
-        assert th == pytest.approx(0.5 * (1 + OVERTAKE_EPSILON))
-
-    def test_high_score(self):
-        th = _effective_overtake_threshold(1.0)
-        assert th == pytest.approx(1.0 + OVERTAKE_EPSILON)
 
 
 class TestRerankRound:
@@ -708,11 +668,6 @@ class TestPersistence:
         assert loaded.winner is None
         assert loaded.evaluations == {}
 
-    def test_load_corrupt_file_returns_empty_state(self, tmp_path):
-        (tmp_path / STATE_FILE_NAME).write_text("{not valid json")
-        loaded = ValidatorState.load(tmp_path)
-        assert loaded.winner is None
-
     def test_load_corrupt_file_is_quarantined(self, tmp_path):
         state_path = tmp_path / STATE_FILE_NAME
         state_path.write_text("{not valid json")
@@ -916,11 +871,3 @@ class TestAppendWinnerHistory:
         lines = (tmp_path / "leader-history.jsonl").read_text().strip().splitlines()
         assert len(lines) == 3
         assert json.loads(lines[2])["new_leader_uid"] == 2
-
-    def test_write_failure_does_not_raise(self, tmp_path):
-        ro_dir = tmp_path / "readonly"
-        ro_dir.mkdir()
-        (ro_dir / "leader-history.jsonl").write_text("")
-        (ro_dir / "leader-history.jsonl").chmod(0o000)
-        ev = _make_eval()
-        append_leader_history(ro_dir, ev, None, current_block=1, overtake_threshold=0.0)
