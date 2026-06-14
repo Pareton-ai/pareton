@@ -39,3 +39,23 @@ class TestBuildEnvExports:
             os.environ.pop("CACHEON_VLLM_CACHE_DIR", None)
             exports = _build_env_exports(_handle(provider))
         assert "CACHEON_VLLM_CACHE_DIR" not in exports
+
+    def test_exports_database_url_when_set(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CACHEON_DATABASE_URL": "postgresql://user:pass@host/db",
+                "CACHEON_SKIP_DB": "0",
+            },
+            clear=False,
+        ):
+            exports = _build_env_exports(_handle("targon"))
+        assert 'export CACHEON_DATABASE_URL="postgresql://user:pass@host/db"' in exports
+        assert 'export CACHEON_SKIP_DB="0"' in exports
+
+    def test_omits_database_url_when_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CACHEON_DATABASE_URL", None)
+            exports = _build_env_exports(_handle("targon"))
+        assert "CACHEON_DATABASE_URL" not in exports
+        assert 'export CACHEON_SKIP_DB="0"' in exports

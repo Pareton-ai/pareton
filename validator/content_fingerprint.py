@@ -38,6 +38,15 @@ def _registry_path(state_dir: str | Path) -> Path:
 
 
 def load_fingerprint_registry(state_dir: str | Path) -> FingerprintRegistry:
+    try:
+        from cacheon_db.loaders import load_fingerprint_registry_dict
+
+        data = load_fingerprint_registry_dict()
+        if data is not None:
+            return data
+    except Exception:
+        logger.debug("Postgres fingerprint registry load failed", exc_info=True)
+
     path = _registry_path(state_dir)
     if not path.exists():
         return {"entries": {}}

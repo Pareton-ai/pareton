@@ -525,6 +525,33 @@ class ValidatorState:
         _quarantine_corrupt_state(path)
         return cls()
 
+    @classmethod
+    def load_from_db(cls) -> ValidatorState | None:
+        try:
+            from cacheon_db.loaders import load_validator_state_dict
+
+            data = load_validator_state_dict()
+            if data is None:
+                return None
+            state = cls.from_dict(data)
+            logger.info(
+                "Loaded validator state from Postgres: %d eval(s), winner=%s",
+                len(state.evaluations),
+                f"UID {state.winner.uid}" if state.winner else "none",
+            )
+            return state
+        except Exception:
+            logger.debug("Postgres validator state load failed", exc_info=True)
+            return None
+
+    @classmethod
+    def load_merged(cls, state_dir: str | os.PathLike) -> ValidatorState:
+        """Prefer Postgres when enabled; fall back to local ``state.json``."""
+        state = cls.load_from_db()
+        if state is not None:
+            return state
+        return cls.load(state_dir)
+
     def save(self, state_dir: str | os.PathLike) -> bool:
         """Atomically write state to `<state_dir>/state.json`. Returns False on I/O failure."""
         path = Path(state_dir) / STATE_FILE_NAME

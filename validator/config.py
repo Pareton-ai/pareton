@@ -186,7 +186,7 @@ S3_BUCKET: str = os.environ.get("CACHEON_S3_BUCKET", "cacheon-validator")
 S3_PREFIX: str = os.environ.get("CACHEON_S3_PREFIX", "state-mainnet")
 
 SKIP_S3: bool = os.environ.get("CACHEON_SKIP_S3", "0") == "1"
-"""When True, ``gpu_eval`` skips Hippius S3 download and upload (local pod testing)."""
+"""When True, skip Hippius S3 log upload/download (structured state uses Postgres)."""
 
 # --------------------------------------------------------------------------- #
 # Winner defender-advantage window

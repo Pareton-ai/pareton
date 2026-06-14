@@ -1,17 +1,18 @@
 """CPU-side always-on validator: chain scan, challenger selection, weight setting.
 
-Runs continuously on a lightweight VPS. Does NOT evaluate miners; that
-happens on an ephemeral GPU pod reading ``eval_job.json`` from S3.
+Runs continuously on a lightweight VPS. Miner evaluation runs on an ephemeral
+GPU pod; structured state and eval jobs flow through Postgres. S3 is used for
+log artifacts only.
 
 Loop (every CACHEON_POLL_INTERVAL_S, default 600s):
-    1. Download latest state from Hippius S3
+    1. Reload structured state from Postgres (local JSON fallback)
     2. Chain scan: fetch metagraph + commitments
     3. If winner's hotkey deregistered, promote runner-up or clear
     4. Select new challengers not yet evaluated
-    5. If challengers found: write eval_job.json, upload to S3, run GPU eval
+    5. If challengers found: mirror eval job to Postgres, run GPU eval
     6. Re-scan metagraph; re-run deregistration guard on post-GPU state
     7. If new GPU eval results or weights stale: set_weights (end of tick)
-    7. Sleep
+    8. Sleep
 
 Usage:
     python -m validator.cpu_validator
@@ -143,9 +144,7 @@ def _needs_weight_set(state: ValidatorState, current_block: int) -> str | None:
     return None
 
 
-def _reload_state(state: ValidatorState, state_dir: str) -> None:
-    """Reload state from disk into the existing object (GPU may have updated it)."""
-    fresh = ValidatorState.load(state_dir)
+def _apply_fresh_state(state: ValidatorState, fresh: ValidatorState) -> None:
     state.winner = fresh.winner
     state.runner_up_record = fresh.runner_up_record
     state.evaluations = fresh.evaluations
@@ -154,13 +153,20 @@ def _reload_state(state: ValidatorState, state_dir: str) -> None:
     state.last_weights_set_block = fresh.last_weights_set_block
 
 
-_CPU_UPLOAD_PRE_EVAL = ["eval_job.json", "eval_progress.json"]
-"""Mid-tick upload before GPU eval. Excludes ``logs/`` (uploaded after tick)."""
+def _reload_state_from_disk(state: ValidatorState, state_dir: str) -> None:
+    """Reload from local state.json (tick start; avoids incomplete Postgres eval sets)."""
+    _apply_fresh_state(state, ValidatorState.load(state_dir))
 
-_CPU_UPLOAD_STATE = ["state.json"]
-"""Post-weight-set upload so ``last_weights_set_block`` persists to S3."""
 
-_CPU_LOGS_UPLOAD = ["logs/"]
+def _reload_state_after_gpu(state: ValidatorState, state_dir: str) -> None:
+    """Reload after GPU eval: Postgres first, local JSON fallback."""
+    fresh = ValidatorState.load_from_db()
+    if fresh is None:
+        fresh = ValidatorState.load(state_dir)
+    _apply_fresh_state(state, fresh)
+
+
+_CPU_LOGS_UPLOAD = ["logs/", "container_logs/"]
 
 # Never download validator logs onto the running CPU process (open FileHandler).
 _DOWNLOAD_SKIP_LOGS: tuple[str, ...] = ("logs/",)
@@ -175,26 +181,20 @@ def _flush_log_handlers() -> None:
             handler.flush()
 
 
-def _try_upload(state_dir: str) -> None:
+def _try_download_logs(state_dir: str) -> None:
+    """Pull GPU log artifacts from S3 after an eval round."""
     if validator_config.SKIP_S3:
         return
     try:
-        from .sync import upload
+        from .sync import download
 
-        upload(state_dir, only=_CPU_UPLOAD_PRE_EVAL)
+        download(
+            state_dir,
+            only=_CPU_LOGS_UPLOAD,
+            skip_prefixes=_DOWNLOAD_SKIP_CPU_LOGS,
+        )
     except Exception as exc:
-        logger.error("S3 upload failed: %s", exc)
-
-
-def _try_upload_state(state_dir: str) -> None:
-    if validator_config.SKIP_S3:
-        return
-    try:
-        from .sync import upload
-
-        upload(state_dir, only=_CPU_UPLOAD_STATE)
-    except Exception as exc:
-        logger.error("S3 state upload failed: %s", exc)
+        logger.error("S3 log download failed: %s", exc)
 
 
 def _try_upload_logs(state_dir: str) -> None:
@@ -211,34 +211,31 @@ def _try_upload_logs(state_dir: str) -> None:
 
 
 def _clean_stale_eval_job(state: ValidatorState, state_dir: str) -> bool:
-    """Remove ``eval_job.json`` if every challenger in it is already known.
-
-    Returns True if the file was deleted."""
+    """Remove a pending eval job when every challenger is already known."""
     from .eval_schema import EVAL_JOB_FILE, EvalJob
 
-    path = Path(state_dir) / EVAL_JOB_FILE
-    if not path.exists():
-        return False
     job = EvalJob.load(state_dir)
     if job is None:
         return False
-    if all(state.is_known(c.hotkey, c.commit_block) for c in job.challengers):
-        try:
+    if not all(state.is_known(c.hotkey, c.commit_block) for c in job.challengers):
+        return False
+    path = Path(state_dir) / EVAL_JOB_FILE
+    try:
+        if path.exists():
             path.unlink()
-            logger.info(
-                "Removed stale eval_job.json (%d challenger(s) all known)",
-                len(job.challengers),
-            )
-        except OSError:
-            return False
-        try:
-            from .sync import delete_remote_keys
+        logger.info(
+            "Removed stale eval job (%d challenger(s) all known)",
+            len(job.challengers),
+        )
+    except OSError:
+        return False
+    try:
+        from cacheon_db.mirror import delete_pending_eval_job
 
-            delete_remote_keys([EVAL_JOB_FILE])
-        except Exception:
-            logger.debug("Failed to delete eval_job.json from S3", exc_info=True)
-        return True
-    return False
+        delete_pending_eval_job(job.block)
+    except Exception:
+        logger.debug("Postgres eval job delete failed", exc_info=True)
+    return True
 
 
 def _gate_unpaid_commitments(
@@ -495,17 +492,12 @@ def run_tick(
 
     purge_old_logs(state_dir)
 
-    # S3 download
-    try:
-        from .sync import download
-
-        download(state_dir, skip_prefixes=_DOWNLOAD_SKIP_LOGS)
-    except Exception as exc:
-        logger.error("S3 download failed: %s -- using local state", exc)
+    # Sync log artifacts from S3 (structured state comes from Postgres).
+    _try_download_logs(state_dir)
 
     purge_old_logs(state_dir, remote=False)
 
-    _reload_state(state, state_dir)
+    _reload_state_from_disk(state, state_dir)
     _clean_stale_eval_job(state, state_dir)
 
     winner_desc = (
@@ -658,11 +650,11 @@ def run_tick(
         state.save(state_dir)
 
     if dirty:
-        _try_upload(state_dir)
+        state.save(state_dir)
 
     if challenger_set.challengers and block_hash is not None:
         logger.info(
-            "📤 %d challenger(s) ready for GPU eval (eval_job.json uploaded)",
+            "📤 %d challenger(s) ready for GPU eval (eval job mirrored to Postgres)",
             n_challengers,
         )
 
@@ -671,25 +663,27 @@ def run_tick(
         if gpu_eval_configured():
             success = run_gpu_eval(state_dir, eval_job)
             clear_stale_progress = not success
-            try:
-                from .sync import download
+            if not success:
+                try:
+                    from cacheon_db.mirror import delete_pending_eval_job
 
+                    delete_pending_eval_job(eval_job.block)
+                except Exception:
+                    logger.debug(
+                        "Postgres eval job delete failed after GPU failure",
+                        exc_info=True,
+                    )
+            try:
                 if success:
-                    download(state_dir, skip_prefixes=_DOWNLOAD_SKIP_CPU_LOGS)
-                    _reload_state(state, state_dir)
+                    _reload_state_after_gpu(state, state_dir)
+                    _try_download_logs(state_dir)
                 else:
                     logger.info(
-                        "GPU eval failed; downloading remote artifacts from S3 "
-                        "(container_logs/, gpu logs only)"
+                        "GPU eval failed; downloading remote log artifacts from S3"
                     )
-                    download(state_dir, only=["container_logs/"])
-                    download(
-                        state_dir,
-                        only=["logs/"],
-                        skip_prefixes=_DOWNLOAD_SKIP_CPU_LOGS,
-                    )
+                    _try_download_logs(state_dir)
             except Exception as exc:
-                logger.error("Post-eval S3 download failed: %s", exc)
+                logger.error("Post-eval log sync failed: %s", exc)
                 clear_stale_progress = True
             if clear_stale_progress:
                 from .eval_progress import clear_progress
@@ -712,7 +706,7 @@ def run_tick(
         version_key=version_key,
     )
     if weights_set:
-        _try_upload_state(state_dir)
+        state.save(state_dir)
 
     return {
         "block": current_block,

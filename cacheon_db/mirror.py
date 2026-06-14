@@ -179,10 +179,7 @@ def sync_precheck_failure(hotkey: str, commit_block: int, reason: str) -> None:
 def sync_eval_job(job: Any) -> None:
     def _write(conn) -> None:
         cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM eval_jobs WHERE block = %s AND status = 'pending'",
-            (job.block,),
-        )
+        cur.execute("DELETE FROM eval_jobs WHERE status = 'pending'")
         cur.execute(
             """
             INSERT INTO eval_jobs (
@@ -200,6 +197,32 @@ def sync_eval_job(job: Any) -> None:
         )
 
     run_best_effort("sync_eval_job", _write)
+
+
+def complete_eval_job(block: int) -> None:
+    def _write(conn) -> None:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE eval_jobs
+            SET status = 'complete'
+            WHERE block = %s AND status = 'pending'
+            """,
+            (block,),
+        )
+
+    run_best_effort("complete_eval_job", _write)
+
+
+def delete_pending_eval_job(block: int) -> None:
+    def _write(conn) -> None:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE FROM eval_jobs WHERE block = %s AND status = 'pending'",
+            (block,),
+        )
+
+    run_best_effort("delete_pending_eval_job", _write)
 
 
 def _eval_progress_params(payload: dict[str, Any]) -> tuple:

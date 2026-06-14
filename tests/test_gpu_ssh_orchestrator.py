@@ -30,7 +30,7 @@ def _eval_job() -> EvalJob:
 
 
 class TestRunGpuEvalSshPath:
-    @patch("validator.gpu_orchestrator._start_eval_with_mirror", return_value=True)
+    @patch("validator.gpu_orchestrator._start_remote_eval", return_value=True)
     @patch("validator.providers.static_ssh_provider.StaticSshProvider")
     @patch("validator.gpu_orchestrator.validator_config.GPU_SSH_ENABLED", True)
     @patch(

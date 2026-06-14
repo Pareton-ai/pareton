@@ -1,8 +1,8 @@
 """Ephemeral eval progress tracking.
 
-Writes ``eval_progress.json`` to the state directory at each phase
-transition during an eval round. The file is overwritten atomically
-on every update and deleted between rounds.
+Writes ``eval_progress.json`` locally at each phase transition and mirrors
+the same payload to Postgres. The local file is overwritten atomically on
+every update and deleted between rounds.
 
 All public functions swallow exceptions so a progress-write failure
 never interrupts the actual evaluation.
@@ -100,9 +100,20 @@ def _read_progress(state_dir: str | os.PathLike) -> dict[str, Any]:
     path = Path(state_dir) / PROGRESS_FILE
     try:
         with open(path) as f:
-            return json.load(f)
+            payload = json.load(f)
+        if payload:
+            return payload
     except (OSError, json.JSONDecodeError, ValueError):
-        return {}
+        pass
+    try:
+        from cacheon_db.loaders import load_eval_progress_payload
+
+        db_payload = load_eval_progress_payload()
+        if db_payload:
+            return db_payload
+    except Exception:
+        logger.debug("Postgres eval progress read failed", exc_info=True)
+    return {}
 
 
 def _write_progress(state_dir: str | os.PathLike, payload: dict[str, Any]) -> None:
@@ -116,6 +127,38 @@ def _write_progress(state_dir: str | os.PathLike, payload: dict[str, Any]) -> No
         sync_eval_progress(payload)
     except Exception:
         logger.debug("Postgres eval progress mirror failed", exc_info=True)
+
+
+def seed_progress_from_eval_job(state_dir: str | os.PathLike, eval_job: Any) -> None:
+    """Ensure progress has challenger rows when CPU wrote them only to Postgres."""
+    if _read_progress(state_dir).get("challengers"):
+        return
+    challengers = [
+        {"uid": c.uid, "hotkey": c.hotkey, "image": c.image}
+        for c in getattr(eval_job, "challengers", [])
+    ]
+    leader = None
+    if getattr(eval_job, "leader", None) is not None:
+        leader = {
+            "uid": eval_job.leader.uid,
+            "hotkey": eval_job.leader.hotkey,
+            "image": eval_job.leader.image,
+        }
+    runner_up = None
+    if getattr(eval_job, "runner_up", None) is not None:
+        runner_up = {
+            "uid": eval_job.runner_up.uid,
+            "hotkey": eval_job.runner_up.hotkey,
+            "image": eval_job.runner_up.image,
+        }
+    update_progress(
+        state_dir,
+        phase="challengers_found",
+        round_block=eval_job.block,
+        challengers=challengers,
+        leader=leader,
+        runner_up=runner_up,
+    )
 
 
 def update_progress(
@@ -306,20 +349,13 @@ def complete_progress(state_dir: str | os.PathLike) -> None:
 
 
 def clear_progress(state_dir: str | os.PathLike) -> None:
-    """Delete the progress file locally and on S3."""
+    """Delete the local progress file and clear Postgres."""
     path = Path(state_dir) / PROGRESS_FILE
     try:
         if path.exists():
             os.unlink(path)
     except OSError:
         logger.debug("Failed to delete local eval progress file", exc_info=True)
-
-    try:
-        from .sync import delete_remote_keys
-
-        delete_remote_keys([PROGRESS_FILE])
-    except Exception:
-        logger.debug("Failed to delete eval progress from S3", exc_info=True)
 
     try:
         from cacheon_db import clear_eval_progress

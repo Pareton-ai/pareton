@@ -1,23 +1,24 @@
-"""GPU eval entrypoint: S3 download -> eval all challengers -> S3 upload.
+"""GPU eval entrypoint: Postgres-backed state, S3 for logs only.
 
-Zero bittensor dependency. Reads ``eval_job.json`` (written by the CPU
-orchestrator) from the state directory, runs baseline + challenger
-evaluations, writes results into ``state.json``, then uploads everything
-back to Hippius S3.
+Zero bittensor dependency. Loads the pending eval job and validator state
+from Postgres (falls back to local JSON when ``CACHEON_SKIP_DB=1``), runs
+baseline + challenger evaluations, mirrors results to Postgres, and
+uploads eval logs to Hippius S3.
 
 Usage (inside Docker):
     python -m validator.gpu_eval
 
 Env vars:
     CACHEON_STATE_DIR          (default: /app/state-mainnet)
+    CACHEON_DATABASE_URL       (required unless CACHEON_SKIP_DB=1)
     CACHEON_MODEL_VOLUME       (default: /models)
     CACHEON_BASELINE_IMAGE     (default: vllm/vllm-openai:v0.22.0)
     CACHEON_BASELINE_DIGEST    (required)
     CACHEON_GPU_COUNT          (default: 8, auto-detect via nvidia-smi)
     CACHEON_VLLM_CACHE_DIR     (optional; host path for vLLM torch.compile cache)
-    HIPPIUS_ACCESS_KEY         (required for S3 unless CACHEON_SKIP_S3=1)
-    HIPPIUS_SECRET_KEY         (required for S3 unless CACHEON_SKIP_S3=1)
-    CACHEON_SKIP_S3            (default: 0; set 1 for local pod testing without S3)
+    HIPPIUS_ACCESS_KEY         (required for log upload unless CACHEON_SKIP_S3=1)
+    HIPPIUS_SECRET_KEY         (required for log upload unless CACHEON_SKIP_S3=1)
+    CACHEON_SKIP_S3            (default: 0; set 1 to skip log upload)
     CACHEON_S3_BUCKET          (default: cacheon-validator)
 """
 
@@ -52,6 +53,7 @@ from .eval_progress import (
     clear_progress,
     complete_progress,
     purge_old_logs,
+    seed_progress_from_eval_job,
     update_challenger_status,
     update_incumbent_status,
     update_progress,
@@ -90,8 +92,8 @@ def _configure_logging(state_dir: str, block: int) -> str:
     return ts
 
 
-def _delete_eval_job(state_dir: str) -> None:
-    """Remove eval_job.json locally after the GPU eval has finished."""
+def _delete_eval_job(state_dir: str, block: int | None = None) -> None:
+    """Remove eval_job.json locally and mark the Postgres job complete."""
     path = Path(state_dir) / EVAL_JOB_FILE
     try:
         if path.exists():
@@ -99,6 +101,28 @@ def _delete_eval_job(state_dir: str) -> None:
             logger.info("Deleted %s (eval complete)", EVAL_JOB_FILE)
     except OSError as exc:
         logger.warning("Could not delete %s: %s", EVAL_JOB_FILE, exc)
+    if block is not None:
+        try:
+            from cacheon_db.mirror import complete_eval_job
+
+            complete_eval_job(block)
+        except Exception:
+            logger.debug("Postgres eval job complete failed", exc_info=True)
+
+
+_GPU_LOGS_ONLY = ["logs/", "container_logs/"]
+
+
+def _upload_eval_logs(state_dir: str) -> None:
+    """Push eval log artifacts to S3 (structured state stays in Postgres)."""
+    if validator_config.SKIP_S3:
+        return
+    try:
+        from .sync import upload
+
+        upload(state_dir, only=_GPU_LOGS_ONLY)
+    except Exception:
+        logger.debug("Eval log upload failed", exc_info=True)
 
 
 def main() -> int:
@@ -156,33 +180,25 @@ def main() -> int:
             )
             return 1
 
-    # S3 download
-    if not validator_config.SKIP_S3:
-        try:
-            from .sync import download
-
-            download(state_dir)
-        except Exception as exc:
-            logger.error("S3 download failed: %s", exc)
-            return 2
-    else:
-        logger.info("CACHEON_SKIP_S3=1: skipping S3 download")
-
-    # Load state and eval job
-    state = ValidatorState.load(state_dir)
+    # Load state and eval job (Postgres-first; local JSON fallback in tests).
+    state = ValidatorState.load_merged(state_dir)
     fingerprint_registry = load_fingerprint_registry(state_dir)
     eval_job = EvalJob.load(state_dir)
     has_work = eval_job is not None and (
         eval_job.challengers or eval_job.leader or eval_job.runner_up
     )
     if not has_work:
-        logger.info("No challengers/leader/runner_up in eval job, nothing to do")
+        logger.error(
+            "No pending eval job in Postgres and no local eval_job.json; "
+            "cannot run GPU eval"
+        )
         clear_progress(state_dir)
-        return 0
+        return 2
 
     block = eval_job.block
     eval_ts = _configure_logging(state_dir, block)
     block_hash = eval_job.block_hash
+    seed_progress_from_eval_job(state_dir, eval_job)
     logger.info(
         "Eval job: block=%d, block_hash=%s, %d challenger(s), leader=%s, runner_up=%s",
         block,
@@ -221,10 +237,7 @@ def main() -> int:
         phase="prompts_generated",
         n_eval=len(eval_prompts),
     )
-    _upload_progress(state_dir)
-
     update_progress(state_dir, phase="baseline_running", image=baseline_image)
-    _upload_progress(state_dir)
     try:
         eval_baseline = run_baseline(
             eval_prompts,
@@ -244,12 +257,10 @@ def main() -> int:
             error=str(exc),
             challengers_affected=len(eval_job.challengers),
         )
-        _upload_state(state_dir)
-        _upload_progress(state_dir)
+        _upload_eval_logs(state_dir)
         return 4
 
     update_progress(state_dir, phase="baseline_complete")
-    _upload_state(state_dir)
 
     scoring_log_label = f"baseline_scoring_{block}_{eval_ts}"
     pending_tf: list[_PendingTeacherForcing] = []
@@ -325,7 +336,6 @@ def main() -> int:
             scoring_log_label,
         )
         update_progress(state_dir, phase="teacher_forcing_running")
-        _upload_progress(state_dir)
         scoring_cid: str | None = None
         try:
             scoring_cid, scoring_url = start_baseline_for_scoring(
@@ -346,7 +356,6 @@ def main() -> int:
                     scoring_cid, state_dir, log_label=scoring_log_label
                 )
         update_progress(state_dir, phase="teacher_forcing_complete")
-        _upload_progress(state_dir)
         return True
 
     # ------------------------------------------------------------------ #
@@ -375,7 +384,6 @@ def main() -> int:
         )
         update_progress(state_dir, phase=f"{label}_running")
         update_incumbent_status(state_dir, label, status="evaluating")
-        _upload_progress(state_dir)
         tf_output_texts: list[str] = []
         tf_miner_tokens: list[list[str]] = []
         fp_events: list[FingerprintCheckResult] = []
@@ -415,7 +423,6 @@ def main() -> int:
             )
         else:
             update_incumbent_status(state_dir, label, status="awaiting_correctness")
-        _upload_progress(state_dir)
         return record, fp_events, com
 
     leader_record: EvaluationRecord | None = None
@@ -497,13 +504,11 @@ def main() -> int:
         update_challenger_status(
             state_dir, challenger_idx, status="pulling", detail="pulling_image"
         )
-        _upload_progress(state_dir)
 
         def _on_challenger_pulled() -> None:
             update_challenger_status(
                 state_dir, challenger_idx, status="evaluating", detail="evaluating"
             )
-            _upload_progress(state_dir)
 
         tf_output_texts: list[str] = []
         tf_miner_tokens: list[list[str]] = []
@@ -547,7 +552,6 @@ def main() -> int:
                 status="awaiting_correctness",
                 detail="awaiting_correctness",
             )
-        _upload_progress(state_dir)
         challenger_persist.append((challenger_idx, record))
 
     scoring_available = _batch_run_teacher_forcing()
@@ -609,7 +613,6 @@ def main() -> int:
 
         if not state.save(state_dir):
             logger.error("Could not persist state.json; continuing eval round")
-        _upload_state(state_dir)
 
     for label, rec in (("leader", leader_record), ("runner_up", ru_record)):
         if rec is None:
@@ -635,8 +638,6 @@ def main() -> int:
             score=rec.score,
             dq_reason=rec.disqualify_reason,
         )
-    _upload_progress(state_dir)
-
     # ------------------------------------------------------------------ #
     # Upsert leader/RU fresh scores and rerank
     # ------------------------------------------------------------------ #
@@ -692,41 +693,15 @@ def main() -> int:
 
     if not state.save(state_dir):
         logger.error("Could not persist state.json; continuing eval round")
-    _upload_state(state_dir)
 
     logger.info(
         "State saved. Winner: %s", f"UID {state.winner.uid}" if state.winner else "none"
     )
     logger.info("GPU eval complete")
-    _delete_eval_job(state_dir)
-    _upload_state(state_dir)
+    _delete_eval_job(state_dir, block=block)
     complete_progress(state_dir)
-    _upload_progress(state_dir)
+    _upload_eval_logs(state_dir)
     return 0
-
-
-def _upload_state(state_dir: str) -> None:
-    if validator_config.SKIP_S3:
-        return
-    try:
-        from .sync import upload
-
-        upload(state_dir)
-    except Exception as exc:
-        logger.error("S3 upload failed: %s", exc)
-
-
-def _upload_progress(state_dir: str) -> None:
-    """Push only eval_progress.json to S3 (< 1 KB vs full state)."""
-    if validator_config.SKIP_S3:
-        return
-    try:
-        from .eval_progress import PROGRESS_FILE
-        from .sync import upload
-
-        upload(state_dir, only=[PROGRESS_FILE])
-    except Exception:
-        logger.debug("Progress-only upload failed", exc_info=True)
 
 
 if __name__ == "__main__":

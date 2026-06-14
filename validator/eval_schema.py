@@ -273,7 +273,29 @@ class EvalJob:
             logger.debug("Postgres eval job mirror failed", exc_info=True)
 
     @classmethod
+    def load_from_db(cls) -> EvalJob | None:
+        try:
+            from cacheon_db.loaders import load_pending_eval_job_dict
+
+            data = load_pending_eval_job_dict()
+            if data is None:
+                return None
+            job = cls.from_dict(data)
+            logger.info(
+                "Loaded eval job from Postgres: block=%d, %d challenger(s)",
+                job.block,
+                len(job.challengers),
+            )
+            return job
+        except Exception:
+            logger.debug("Postgres eval job load failed", exc_info=True)
+            return None
+
+    @classmethod
     def load(cls, state_dir: str | Path) -> EvalJob | None:
+        job = cls.load_from_db()
+        if job is not None:
+            return job
         path = Path(state_dir) / EVAL_JOB_FILE
         if not path.exists():
             logger.warning("No eval job file at %s", path)

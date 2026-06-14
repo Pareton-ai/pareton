@@ -147,7 +147,7 @@ class TestGpuSessionReuse:
 
 
 class TestRunGpuEvalCloudPath:
-    @patch("validator.gpu_orchestrator._start_eval_with_mirror", return_value=True)
+    @patch("validator.gpu_orchestrator._start_remote_eval", return_value=True)
     @patch("validator.gpu_orchestrator._ensure_gpu_session")
     @patch("validator.gpu_orchestrator.validator_config.GPU_SSH_ENABLED", False)
     def test_does_not_teardown_after_eval(self, mock_session, mock_eval):
