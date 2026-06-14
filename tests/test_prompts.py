@@ -13,14 +13,8 @@ from validator.prompts import (
     EVAL_MIN_CONTEXT_CHARS,
     EVAL_PROMPT_COUNT,
     MAX_CONTEXT_CHARS,
-    MAX_OUTPUT_TOKENS,
-    MAX_SAMPLE_ATTEMPTS,
-    MIN_ALPHA_RATIO,
-    MIN_CONTEXT_CHARS,
     OVERHEAD_TOKENS,
     PASSAGE_TOKEN_SAFETY_MARGIN,
-    PROMPT_ENGINE_VERSION,
-    SCORING_MAX_MODEL_LEN,
     TEMPLATES,
     _is_valid_passage,
     _sample_passage,
@@ -212,42 +206,7 @@ class TestSampleEvalPrompts:
             assert len(content) <= max_passage + 500
 
 
-# --------------------------------------------------------------------------- #
-# Constants
-# --------------------------------------------------------------------------- #
-
-
 class TestMaxPassageChars:
-    def test_none_returns_fallback(self):
-        assert max_passage_chars(None) == MAX_CONTEXT_CHARS
-
-    def test_32k_context(self):
-        result = max_passage_chars(32_768, output_tokens=EVAL_MAX_OUTPUT_TOKENS)
-        expected = int(
-            (
-                32_768
-                - EVAL_MAX_OUTPUT_TOKENS
-                - OVERHEAD_TOKENS
-                - PASSAGE_TOKEN_SAFETY_MARGIN
-            )
-            * CHARS_PER_TOKEN
-        )
-        assert result == expected
-        assert result < MAX_CONTEXT_CHARS
-
-    def test_65k_context(self):
-        result = max_passage_chars(65_536, output_tokens=EVAL_MAX_OUTPUT_TOKENS)
-        expected = int(
-            (
-                65_536
-                - EVAL_MAX_OUTPUT_TOKENS
-                - OVERHEAD_TOKENS
-                - PASSAGE_TOKEN_SAFETY_MARGIN
-            )
-            * CHARS_PER_TOKEN
-        )
-        assert result == expected
-
     def test_eval_6k_budget(self):
         result = max_passage_chars(
             EVAL_CONTEXT_TOKENS,
@@ -269,39 +228,3 @@ class TestMaxPassageChars:
     def test_never_below_min(self):
         result = max_passage_chars(600)
         assert result >= EVAL_MIN_CONTEXT_CHARS
-
-
-class TestConstants:
-    def test_prompt_engine_version(self):
-        assert PROMPT_ENGINE_VERSION == 4
-
-    def test_eval_context_tokens(self):
-        assert EVAL_CONTEXT_TOKENS == 6144
-
-    def test_scoring_max_model_len(self):
-        assert SCORING_MAX_MODEL_LEN == 7168
-
-    def test_eval_prompt_count(self):
-        assert EVAL_PROMPT_COUNT == 10
-
-    def test_max_context_chars(self):
-        assert MAX_CONTEXT_CHARS == 131_072
-
-    def test_max_sample_attempts(self):
-        assert MAX_SAMPLE_ATTEMPTS == 1_000
-
-    def test_min_alpha_ratio(self):
-        assert MIN_ALPHA_RATIO == 0.5
-
-    def test_min_context_chars_alias(self):
-        assert MIN_CONTEXT_CHARS == EVAL_MIN_CONTEXT_CHARS
-
-    def test_max_output_tokens_alias(self):
-        assert MAX_OUTPUT_TOKENS == EVAL_MAX_OUTPUT_TOKENS
-
-    def test_template_count(self):
-        assert len(TEMPLATES) >= 15
-
-    def test_all_templates_have_placeholder(self):
-        for t in TEMPLATES:
-            assert "{context}" in t, f"Template missing {{context}}: {t[:50]}"

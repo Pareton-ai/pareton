@@ -16,6 +16,8 @@ from validator.gpu_orchestrator import (
 )
 from validator.providers import GpuInstance, PodHandle
 
+pytestmark = pytest.mark.unit
+
 
 def _eval_job() -> EvalJob:
     return EvalJob(

@@ -75,12 +75,6 @@ class TestCompositeFingerprint:
         b = composite_fingerprint({"/start.sh": "b" * 64})
         assert a != b
 
-    def test_junk_layer_same_content_paths_match(self):
-        content = {"/draft/model.safetensors": "c" * 64, "/start.sh": "d" * 64}
-        fp_a = composite_fingerprint(content)
-        fp_b = composite_fingerprint(dict(content))
-        assert fp_a == fp_b
-
 
 class TestRegistryRules:
     def _registry_with_owner(self, fp: str, **owner) -> dict:

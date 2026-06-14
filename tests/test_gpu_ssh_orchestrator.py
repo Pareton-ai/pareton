@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from validator.config import GpuSshTarget
 from validator.eval_schema import ChallengerInfo, EvalJob
 from validator.gpu_orchestrator import run_gpu_eval
 from validator.providers import PodHandle
+
+pytestmark = pytest.mark.unit
 
 
 def _eval_job() -> EvalJob:

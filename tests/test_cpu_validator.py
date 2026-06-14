@@ -203,9 +203,11 @@ class TestRunTickNoChallengers:
         assert summary["winner_uid"] is None
         assert state.last_scan_block == 1000
 
+    @pytest.mark.parametrize("dry_run", [True, False])
     @patch("validator.sync.download", _noop)
-    def test_winner_with_new_evals_sets_weights_dry_run(self, tmp_path):
-        st = FakeSubtensor(hotkeys=["hk0"], revealed={})
+    def test_winner_with_new_evals_sets_weights(self, tmp_path, dry_run):
+        hotkeys = ["hk0"] if dry_run else ["hk0", "hk1"]
+        st = FakeSubtensor(hotkeys=hotkeys, revealed={})
         state = ValidatorState()
         rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=800)
         _set_winner(state, rec, current_block=800)
@@ -218,38 +220,19 @@ class TestRunTickNoChallengers:
             state=state,
             netuid=14,
             state_dir=str(tmp_path),
-            dry_run=True,
+            dry_run=dry_run,
         )
 
         assert summary["weights_set"] is True
         assert summary["winner_uid"] == 0
         assert state.last_weights_set_block == 1000
-        assert st.set_weights_calls == []
-
-    @patch("validator.sync.download", _noop)
-    def test_winner_with_new_evals_sets_weights_live(self, tmp_path):
-        st = FakeSubtensor(hotkeys=["hk0", "hk1"], revealed={})
-        state = ValidatorState()
-        rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=800)
-        _set_winner(state, rec, current_block=800)
-        state.last_weights_set_block = 0
-        state.save(tmp_path)
-
-        summary = run_tick(
-            subtensor=st,
-            wallet=FAKE_WALLET,
-            state=state,
-            netuid=14,
-            state_dir=str(tmp_path),
-            dry_run=False,
-        )
-
-        assert summary["weights_set"] is True
-        assert len(st.set_weights_calls) == 1
-        call = st.set_weights_calls[0]
-        w = call["weights"]
-        assert w[0] > 0
-        assert sum(w) == pytest.approx(1.0)
+        if dry_run:
+            assert st.set_weights_calls == []
+        else:
+            assert len(st.set_weights_calls) == 1
+            w = st.set_weights_calls[0]["weights"]
+            assert w[0] > 0
+            assert sum(w) == pytest.approx(1.0)
 
     @patch("validator.sync.download", _noop)
     def test_no_weight_set_when_already_current(self, tmp_path):

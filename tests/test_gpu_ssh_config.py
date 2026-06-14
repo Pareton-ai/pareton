@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from validator.config import GpuSshTarget, parse_gpu_ssh_target
+
+pytestmark = pytest.mark.unit
 
 
 class TestParseGpuSshTarget:
