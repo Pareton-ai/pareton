@@ -10,23 +10,18 @@ With provider API keys, the orchestrator rents a pod on the first eval tick,
 runs ``setup-gpu.sh`` once, reuses that pod for later eval rounds, and tears
 down workload + volume when the validator container stops.
 
-The eval itself still runs on the remote pod via ``gpu_eval.py`` inside
-Docker Compose. S3 remains the handoff mechanism: the remote pod
-uploads ``state.json`` after eval, and the CPU process downloads it
-after the run finishes.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as validator_config
-from .eval_progress import PROGRESS_FILE, update_progress
+from .eval_progress import update_progress
 from .eval_schema import EvalJob
 from .providers import GpuInstance, GpuProvider, PodHandle, search_all_providers
 
@@ -151,6 +146,11 @@ def _build_env_exports(handle: PodHandle) -> str:
 
     if "CACHEON_VLLM_CACHE_DIR" in os.environ:
         env["CACHEON_VLLM_CACHE_DIR"] = os.environ["CACHEON_VLLM_CACHE_DIR"]
+
+    database_url = os.environ.get("CACHEON_DATABASE_URL", "")
+    if database_url:
+        env["CACHEON_DATABASE_URL"] = database_url
+    env["CACHEON_SKIP_DB"] = os.environ.get("CACHEON_SKIP_DB", "0")
 
     return " && ".join(f'export {k}="{_dq_escape(v)}"' for k, v in env.items())
 
@@ -295,13 +295,13 @@ def _remote_run_eval(
     return False
 
 
-def _start_eval_with_mirror(
+def _start_remote_eval(
     state_dir: str,
     provider: GpuProvider,
     handle: PodHandle,
     eval_job: EvalJob,
 ) -> bool:
-    """Run remote docker compose eval while mirroring progress from S3."""
+    """Run remote docker compose eval; progress mirrors to Postgres on each update."""
     timeout_min = _calculate_eval_timeout_minutes(len(eval_job.challengers))
     logger.info(
         "\t Dynamic timeout: %d min (%d challengers)",
@@ -309,47 +309,7 @@ def _start_eval_with_mirror(
         len(eval_job.challengers),
     )
     update_progress(state_dir, phase="gpu_eval_started", timeout_min=timeout_min)
-
-    try:
-        from .sync import upload as s3_upload
-
-        s3_upload(state_dir, only=[PROGRESS_FILE])
-    except Exception:
-        logger.debug(
-            "Failed to upload eval_progress before mirror start", exc_info=True
-        )
-
-    stop_event = threading.Event()
-    mirror = threading.Thread(
-        target=_mirror_progress_loop,
-        args=(state_dir, stop_event),
-        daemon=True,
-    )
-    mirror.start()
-    try:
-        return _remote_run_eval(provider, handle, timeout_min)
-    finally:
-        stop_event.set()
-        mirror.join(timeout=5)
-
-
-def _mirror_progress_loop(
-    state_dir: str, stop_event: threading.Event, interval: float = 15
-) -> None:
-    """Background thread: poll S3 for eval_progress.json while GPU runs."""
-    try:
-        from .sync import BUCKET, S3_PREFIX, _client
-
-        s3 = _client()
-    except Exception:
-        return
-    key = f"{S3_PREFIX}/{PROGRESS_FILE}" if S3_PREFIX else PROGRESS_FILE
-    local = str(Path(state_dir) / PROGRESS_FILE)
-    while not stop_event.wait(interval):
-        try:
-            s3.download_file(BUCKET, key, local)
-        except Exception:
-            pass
+    return _remote_run_eval(provider, handle, timeout_min)
 
 
 def _run_ssh_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
@@ -378,7 +338,7 @@ def _run_ssh_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
         handle = provider.wait_ready(handle, timeout_s=provider.READY_TIMEOUT_S)
         logger.info("Pod %s is ready", handle.pod_id)
         update_progress(state_dir, phase="gpu_ready", pod_id=handle.pod_id)
-        return _start_eval_with_mirror(state_dir, provider, handle, eval_job)
+        return _start_remote_eval(state_dir, provider, handle, eval_job)
     except TimeoutError as exc:
         logger.error("GPU SSH connection timed out: %s", exc)
         return False
@@ -524,4 +484,4 @@ def run_gpu_eval(state_dir: str, eval_job: EvalJob) -> bool:
         return False
 
     provider, handle = session
-    return _start_eval_with_mirror(state_dir, provider, handle, eval_job)
+    return _start_remote_eval(state_dir, provider, handle, eval_job)

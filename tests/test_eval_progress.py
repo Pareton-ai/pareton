@@ -44,6 +44,22 @@ SAMPLE_CHALLENGERS = [
 # --------------------------------------------------------------------------- #
 
 
+def test_read_progress_falls_back_to_postgres(tmp_path, monkeypatch):
+    db_payload = {
+        "status": "running",
+        "phase": "gpu_searching",
+        "challengers": [{"idx": 0, "uid": 1, "status": "pending"}],
+        "updated_at": 1.0,
+    }
+    monkeypatch.setattr(
+        "cacheon_db.loaders.load_eval_progress_payload",
+        lambda: db_payload,
+    )
+    from validator.eval_progress import _read_progress
+
+    assert _read_progress(tmp_path) == db_payload
+
+
 def test_update_progress_creates_file(tmp_path):
     update_progress(
         tmp_path,

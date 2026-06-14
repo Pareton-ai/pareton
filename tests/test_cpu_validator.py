@@ -14,12 +14,11 @@ from validator.chain import CommitmentRecord
 from validator.cpu_validator import (
     WEIGHTS_REFRESH_BLOCKS,
     _CPU_LOGS_UPLOAD,
-    _CPU_UPLOAD_PRE_EVAL,
     _apply_deregistration_guard,
     _clean_stale_eval_job,
     _needs_weight_set,
     _rotate_log_for_block,
-    _try_upload,
+    _try_download_logs,
     _try_upload_logs,
     run_tick,
 )
@@ -183,7 +182,6 @@ class TestNeedsWeightSet:
 
 
 class TestRunTickNoChallengers:
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_empty_chain_no_winner(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0", "hk1"], revealed={})
@@ -205,7 +203,6 @@ class TestRunTickNoChallengers:
         assert summary["winner_uid"] is None
         assert state.last_scan_block == 1000
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_winner_with_new_evals_sets_weights_dry_run(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
@@ -229,7 +226,6 @@ class TestRunTickNoChallengers:
         assert state.last_weights_set_block == 1000
         assert st.set_weights_calls == []
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_winner_with_new_evals_sets_weights_live(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0", "hk1"], revealed={})
@@ -255,7 +251,6 @@ class TestRunTickNoChallengers:
         assert w[0] > 0
         assert sum(w) == pytest.approx(1.0)
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_no_weight_set_when_already_current(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={}, current_block=700)
@@ -284,8 +279,6 @@ class TestRunTickNoChallengers:
 
 
 class TestRunTickEndOfTickWeights:
-    @patch("validator.cpu_validator._try_upload_state", _noop)
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.gpu_orchestrator.run_gpu_eval")
@@ -328,8 +321,6 @@ class TestRunTickEndOfTickWeights:
         assert 1 in st.set_weights_calls[0]["uids"]
         assert 0 not in st.set_weights_calls[0]["uids"]
 
-    @patch("validator.cpu_validator._try_upload_state", _noop)
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.gpu_orchestrator.run_gpu_eval")
@@ -368,7 +359,6 @@ class TestRunTickEndOfTickWeights:
 
 
 class TestRunTickWithChallengers:
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_writes_eval_job(self, tmp_path):
         st = FakeSubtensor(
@@ -396,7 +386,6 @@ class TestRunTickWithChallengers:
         assert job.block == 1000
         assert job.block_hash == "0xdeadbeef"
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_already_evaluated_not_in_eval_job(self, tmp_path):
         st = FakeSubtensor(
@@ -421,7 +410,6 @@ class TestRunTickWithChallengers:
         assert summary["challengers"] == 0
         assert not (tmp_path / EVAL_JOB_FILE).exists()
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_no_eval_job_when_block_hash_none(self, tmp_path):
         st = FakeSubtensor(
@@ -444,7 +432,6 @@ class TestRunTickWithChallengers:
         assert summary["challengers"] == 1
         assert not (tmp_path / EVAL_JOB_FILE).exists()
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_multiple_challengers_all_in_eval_job(self, tmp_path):
         st = FakeSubtensor(
@@ -480,7 +467,6 @@ class TestRunTickWithChallengers:
 
 
 class TestRunTickWinnerDereg:
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_recycled_hotkey_clears_winner(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0", "hk_new"], revealed={})
@@ -503,7 +489,6 @@ class TestRunTickWinnerDereg:
         assert summary["weights_set"] is False
         assert state.winner is None
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_winner_uid_out_of_range_clears_winner(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
@@ -525,7 +510,6 @@ class TestRunTickWinnerDereg:
         assert summary["winner_uid"] is None
         assert state.winner is None
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_matching_hotkey_keeps_winner(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0", "hk_winner"], revealed={})
@@ -547,7 +531,6 @@ class TestRunTickWinnerDereg:
         assert state.winner is not None
         assert state.winner.hotkey == "hk_winner"
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_winner_dereg_promotes_runner_up(self, tmp_path):
         """When the winner deregisters, the runner-up (if registered) gets promoted."""
@@ -591,7 +574,6 @@ class TestRunTickWinnerDereg:
         assert state.winner.hotkey == "hk_ru"
         assert summary["winner_uid"] == 2
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_winner_dereg_runner_up_also_dereg_clears(self, tmp_path):
         """When both the winner and runner-up deregister, winner is cleared."""
@@ -629,7 +611,6 @@ class TestRunTickWinnerDereg:
         assert state.winner is None
         assert summary["winner_uid"] is None
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     def test_winner_dereg_no_runner_up_clears(self, tmp_path):
         """When the winner deregisters and there is no runner-up, winner is cleared."""
@@ -655,8 +636,6 @@ class TestRunTickWinnerDereg:
 
 
 class TestPostGpuDeregGuard:
-    @patch("validator.cpu_validator._try_upload_state", _noop)
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.cpu_validator.fetch_metagraph")
     def test_promotes_runner_up_before_weights_after_fresh_scan(
@@ -740,7 +719,7 @@ class TestApplyDeregistrationGuard:
 
 
 class TestRunTickS3Failure:
-    @patch("validator.cpu_validator._try_upload", _noop)
+    @patch("validator.cpu_validator.validator_config.SKIP_S3", False)
     @patch("validator.sync.download", side_effect=RuntimeError("S3 down"))
     def test_continues_on_s3_download_failure(self, _mock_dl, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
@@ -765,13 +744,13 @@ class TestRunTickS3Failure:
 
 
 class TestGpuEvalFailureClearsProgress:
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=False)
     @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.eval_progress.clear_progress")
-    def test_clears_progress_when_gpu_eval_fails(
-        self, mock_clear, mock_run_gpu, tmp_path
+    @patch("cacheon_db.mirror.delete_pending_eval_job")
+    def test_clears_progress_and_pending_job_when_gpu_eval_fails(
+        self, mock_delete_job, mock_clear, mock_run_gpu, tmp_path
     ):
         st = FakeSubtensor(
             hotkeys=["hk0"],
@@ -790,14 +769,17 @@ class TestGpuEvalFailureClearsProgress:
         )
 
         mock_clear.assert_called_once_with(str(tmp_path))
+        mock_delete_job.assert_called_once_with(1000)
 
-    @patch("validator.cpu_validator._try_upload", _noop)
-    @patch("validator.sync.download", side_effect=RuntimeError("S3 down"))
+    @patch(
+        "validator.cpu_validator._try_download_logs",
+        side_effect=[None, RuntimeError("S3 down")],
+    )
     @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=True)
     @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.eval_progress.clear_progress")
     def test_clears_progress_when_success_download_fails(
-        self, mock_clear, mock_run_gpu, mock_dl, tmp_path
+        self, mock_clear, mock_run_gpu, mock_logs, tmp_path
     ):
         st = FakeSubtensor(
             hotkeys=["hk0"],
@@ -850,7 +832,6 @@ class TestRotateLogForBlock:
 
 
 class TestCpuLogRotationOnTick:
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.cpu_validator._rotate_log_for_block")
     def test_quiet_tick_does_not_rotate(self, mock_rotate, tmp_path):
@@ -869,7 +850,6 @@ class TestCpuLogRotationOnTick:
 
         mock_rotate.assert_not_called()
 
-    @patch("validator.cpu_validator._try_upload", _noop)
     @patch("validator.sync.download", _noop)
     @patch("validator.cpu_validator._rotate_log_for_block")
     def test_rotates_when_eval_job_written(self, mock_rotate, tmp_path):
@@ -900,20 +880,22 @@ class TestCpuLogRotationOnTick:
 class TestCpuValidatorLogSync:
     @patch("validator.cpu_validator.validator_config.SKIP_S3", False)
     @patch("validator.sync.upload")
-    def test_pre_eval_upload_excludes_logs(self, mock_upload, tmp_path):
-        _try_upload(str(tmp_path))
-        mock_upload.assert_called_once_with(str(tmp_path), only=_CPU_UPLOAD_PRE_EVAL)
-        assert "logs/" not in _CPU_UPLOAD_PRE_EVAL
-
-    @patch("validator.cpu_validator.validator_config.SKIP_S3", False)
-    @patch("validator.sync.upload")
     def test_end_of_tick_uploads_logs_only(self, mock_upload, tmp_path):
         _try_upload_logs(str(tmp_path))
         mock_upload.assert_called_once_with(str(tmp_path), only=_CPU_LOGS_UPLOAD)
 
+    @patch("validator.cpu_validator.validator_config.SKIP_S3", False)
     @patch("validator.sync.download")
-    @patch("validator.cpu_validator._try_upload", _noop)
-    def test_tick_start_download_skips_logs(self, mock_download, tmp_path):
+    def test_tick_start_downloads_logs_only(self, mock_download, tmp_path):
+        _try_download_logs(str(tmp_path))
+        mock_download.assert_called_once_with(
+            str(tmp_path),
+            only=_CPU_LOGS_UPLOAD,
+            skip_prefixes=("logs/cpu_",),
+        )
+
+    @patch("validator.cpu_validator._try_download_logs")
+    def test_tick_start_calls_log_sync(self, mock_logs, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
         state = ValidatorState()
         state.save(tmp_path)
@@ -927,8 +909,7 @@ class TestCpuValidatorLogSync:
             dry_run=True,
         )
 
-        mock_download.assert_called_once()
-        assert mock_download.call_args.kwargs.get("skip_prefixes") == ("logs/",)
+        mock_logs.assert_called_once()
 
 
 # --------------------------------------------------------------------------- #

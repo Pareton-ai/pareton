@@ -131,7 +131,8 @@ def test_sync_eval_job_deletes_pending_first(mock_conn, _enabled):
     sync_eval_job(job)
     assert cursor.execute.call_count == 2
     delete_sql = cursor.execute.call_args_list[0].args[0]
-    assert "DELETE FROM eval_jobs" in delete_sql
+    assert "DELETE FROM eval_jobs WHERE status = 'pending'" in delete_sql
+    assert "%s" not in delete_sql
 
 
 @patch("cacheon_db.connection.enabled", return_value=True)
