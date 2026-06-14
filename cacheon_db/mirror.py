@@ -55,26 +55,32 @@ def _evaluation_row(ev: Any) -> tuple:
     )
 
 
+def _validator_meta_params(state: Any) -> tuple:
+    return (
+        state.last_scan_block,
+        state.last_weights_set_block,
+        state.schema_version,
+    )
+
+
+_VALIDATOR_META_UPSERT = """
+    INSERT INTO validator_meta (
+        id, last_scan_block, last_weights_set_block, schema_version
+    ) VALUES (1, %s, %s, %s)
+    ON CONFLICT (id) DO UPDATE SET
+        last_scan_block = EXCLUDED.last_scan_block,
+        last_weights_set_block = EXCLUDED.last_weights_set_block,
+        schema_version = EXCLUDED.schema_version,
+        updated_at = now()
+"""
+
+
 def sync_validator_state(state: Any) -> None:
     """Mirror validator meta, leader roles, and precheck failures."""
 
     def _write(conn) -> None:
         cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE validator_meta
-            SET last_scan_block = %s,
-                last_weights_set_block = %s,
-                schema_version = %s,
-                updated_at = now()
-            WHERE id = 1
-            """,
-            (
-                state.last_scan_block,
-                state.last_weights_set_block,
-                state.schema_version,
-            ),
-        )
+        cur.execute(_VALIDATOR_META_UPSERT, _validator_meta_params(state))
         for role, rec in (
             ("leader", state.winner),
             ("runner_up", state.runner_up_record),
@@ -196,51 +202,55 @@ def sync_eval_job(job: Any) -> None:
     run_best_effort("sync_eval_job", _write)
 
 
+def _eval_progress_params(payload: dict[str, Any]) -> tuple:
+    return (
+        payload.get("status", "idle"),
+        payload.get("phase"),
+        payload.get("detail"),
+        payload.get("round_block"),
+        payload.get("current_idx"),
+        _json(payload.get("challengers"))
+        if payload.get("challengers") is not None
+        else None,
+        _json(payload.get("leader")) if payload.get("leader") is not None else None,
+        _json(payload.get("runner_up"))
+        if payload.get("runner_up") is not None
+        else None,
+        _json(payload.get("gpu")) if payload.get("gpu") is not None else None,
+        _json(payload.get("steps")) if payload.get("steps") is not None else None,
+        payload.get("started_at"),
+        payload.get("updated_at"),
+        payload.get("completed_at"),
+    )
+
+
+_EVAL_PROGRESS_UPSERT = """
+    INSERT INTO eval_progress (
+        id, status, phase, detail, round_block, current_idx,
+        challengers, leader, runner_up, gpu, steps,
+        started_at, updated_at, completed_at
+    ) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO UPDATE SET
+        status = EXCLUDED.status,
+        phase = EXCLUDED.phase,
+        detail = EXCLUDED.detail,
+        round_block = EXCLUDED.round_block,
+        current_idx = EXCLUDED.current_idx,
+        challengers = EXCLUDED.challengers,
+        leader = EXCLUDED.leader,
+        runner_up = EXCLUDED.runner_up,
+        gpu = EXCLUDED.gpu,
+        steps = EXCLUDED.steps,
+        started_at = EXCLUDED.started_at,
+        updated_at = EXCLUDED.updated_at,
+        completed_at = EXCLUDED.completed_at
+"""
+
+
 def sync_eval_progress(payload: dict[str, Any]) -> None:
     def _write(conn) -> None:
         cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE eval_progress SET
-                status = %s,
-                phase = %s,
-                detail = %s,
-                round_block = %s,
-                current_idx = %s,
-                challengers = %s,
-                leader = %s,
-                runner_up = %s,
-                gpu = %s,
-                steps = %s,
-                started_at = %s,
-                updated_at = %s,
-                completed_at = %s
-            WHERE id = 1
-            """,
-            (
-                payload.get("status", "idle"),
-                payload.get("phase"),
-                payload.get("detail"),
-                payload.get("round_block"),
-                payload.get("current_idx"),
-                _json(payload.get("challengers"))
-                if payload.get("challengers") is not None
-                else None,
-                _json(payload.get("leader"))
-                if payload.get("leader") is not None
-                else None,
-                _json(payload.get("runner_up"))
-                if payload.get("runner_up") is not None
-                else None,
-                _json(payload.get("gpu")) if payload.get("gpu") is not None else None,
-                _json(payload.get("steps"))
-                if payload.get("steps") is not None
-                else None,
-                payload.get("started_at"),
-                payload.get("updated_at"),
-                payload.get("completed_at"),
-            ),
-        )
+        cur.execute(_EVAL_PROGRESS_UPSERT, _eval_progress_params(payload))
 
     run_best_effort("sync_eval_progress", _write)
 
@@ -250,7 +260,8 @@ def clear_eval_progress() -> None:
         cur = conn.cursor()
         cur.execute(
             """
-            UPDATE eval_progress SET
+            INSERT INTO eval_progress (id, status) VALUES (1, 'idle')
+            ON CONFLICT (id) DO UPDATE SET
                 status = 'idle',
                 phase = NULL,
                 detail = NULL,
@@ -264,7 +275,6 @@ def clear_eval_progress() -> None:
                 started_at = NULL,
                 updated_at = NULL,
                 completed_at = NULL
-            WHERE id = 1
             """
         )
 

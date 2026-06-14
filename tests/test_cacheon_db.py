@@ -105,6 +105,9 @@ def test_sync_validator_state_writes_meta_and_leader(mock_conn, _enabled):
     assert cursor.execute.call_count >= 2
     sqls = [call.args[0] for call in cursor.execute.call_args_list]
     assert any("validator_meta" in sql for sql in sqls)
+    meta_sql = next(sql for sql in sqls if "validator_meta" in sql)
+    assert "INSERT INTO validator_meta" in meta_sql
+    assert "ON CONFLICT (id) DO UPDATE" in meta_sql
 
 
 @patch("cacheon_db.connection.enabled", return_value=True)
@@ -171,3 +174,43 @@ def test_sync_evaluation_clears_precheck(mock_conn, _enabled):
     assert cursor.execute.call_count == 2
     delete_sql = cursor.execute.call_args_list[1].args[0]
     assert "DELETE FROM precheck_failures" in delete_sql
+
+
+@patch("cacheon_db.connection.enabled", return_value=True)
+@patch("cacheon_db.connection.db_connection")
+def test_sync_eval_progress_upserts_when_row_missing(mock_conn, _enabled):
+    cursor = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    mock_conn.return_value.__enter__.return_value = conn
+
+    from cacheon_db.mirror import sync_eval_progress
+
+    sync_eval_progress(
+        {
+            "status": "running",
+            "phase": "gpu_searching",
+            "round_block": 100,
+            "updated_at": 1.0,
+        }
+    )
+    sql = cursor.execute.call_args[0][0]
+    assert "INSERT INTO eval_progress" in sql
+    assert "ON CONFLICT (id) DO UPDATE" in sql
+
+
+@patch("cacheon_db.connection.enabled", return_value=True)
+@patch("cacheon_db.connection.db_connection")
+def test_clear_eval_progress_upserts_idle(mock_conn, _enabled):
+    cursor = MagicMock()
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    mock_conn.return_value.__enter__.return_value = conn
+
+    from cacheon_db.mirror import clear_eval_progress
+
+    clear_eval_progress()
+    sql = cursor.execute.call_args[0][0]
+    assert "INSERT INTO eval_progress" in sql
+    assert "ON CONFLICT (id) DO UPDATE" in sql
+    assert "status = 'idle'" in sql
