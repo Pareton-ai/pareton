@@ -14,9 +14,7 @@ from validator.state import (
     WinnerRecord,
     RecordResult,
     SCHEMA_VERSION,
-    STATE_FILE_NAME,
     ValidatorState,
-    _atomic_write_json,
     append_leader_history,
     current_timestamp,
     unknown_commits,
@@ -618,68 +616,8 @@ class TestScoreHistory:
         assert state.score_history_for_hotkey("hk_nobody") == []
 
 
-class TestPersistence:
-    def test_save_then_load_round_trip(self, tmp_path):
-        state = ValidatorState()
-        _record(
-            state,
-            _make_eval(uid=1, hotkey="hk1", score=0.4, digest="sha256:" + "a" * 64),
-        )
-        ev2 = _make_eval(
-            uid=2,
-            hotkey="hk2",
-            commit_block=200,
-            score=0.6,
-            digest="sha256:" + "b" * 64,
-        )
-        _record_as_winner(state, ev2, current_block=210)
-        ev_ru = _make_eval(uid=1, hotkey="hk1", score=0.4, digest="sha256:" + "a" * 64)
-        state.runner_up_record = WinnerRecord.from_evaluation(ev_ru, won_at_block=210)
-        state.record_precheck_failure("hk3", 300, "container startup timeout")
-        state.last_scan_block = 1234
-        state.last_weights_set_block = 1234
-
-        state.save(tmp_path)
-        reloaded = ValidatorState.load(tmp_path)
-
-        assert reloaded.winner is not None
-        assert reloaded.winner.uid == 2
-        assert reloaded.winner.score == 0.6
-        assert reloaded.winner.digest == "sha256:" + "b" * 64
-        assert reloaded.winner.won_at_block == 210
-        assert reloaded.has_evaluation("hk1", 100)
-        assert reloaded.has_evaluation("hk2", 200)
-        assert reloaded.has_precheck_failure("hk3", 300)
-        assert reloaded.last_scan_block == 1234
-        assert reloaded.last_weights_set_block == 1234
-        assert reloaded.schema_version == SCHEMA_VERSION
-        assert reloaded.runner_up_record is not None
-        assert reloaded.runner_up_record.uid == 1
-        assert reloaded.runner_up_record.score == 0.4
-
-    @patch("validator.state._atomic_write_json")
-    def test_save_returns_false_on_enospc(self, mock_write, tmp_path):
-        mock_write.side_effect = OSError(28, "No space left on device")
-        state = ValidatorState()
-        assert state.save(tmp_path) is False
-
-    def test_load_missing_file_returns_empty_state(self, tmp_path):
-        loaded = ValidatorState.load(tmp_path)
-        assert loaded.winner is None
-        assert loaded.evaluations == {}
-
-    def test_load_corrupt_file_is_quarantined(self, tmp_path):
-        state_path = tmp_path / STATE_FILE_NAME
-        state_path.write_text("{not valid json")
-        loaded = ValidatorState.load(tmp_path)
-        assert loaded.winner is None
-        assert not state_path.exists()
-        quarantined = list(tmp_path.glob(f"{STATE_FILE_NAME}.corrupt.*"))
-        assert len(quarantined) == 1
-        assert quarantined[0].read_text() == "{not valid json"
-
-    def test_load_legacy_king_key_fallback(self, tmp_path):
-        """State files with the old `king` key should load correctly."""
+class TestFromDictLegacy:
+    def test_from_dict_legacy_king_key_fallback(self):
         old_payload = {
             "schema_version": 1,
             "king": {
@@ -701,74 +639,13 @@ class TestPersistence:
             "last_scan_block": 0,
             "last_weights_set_block": 0,
         }
-        (tmp_path / STATE_FILE_NAME).write_text(json.dumps(old_payload))
-        loaded = ValidatorState.load(tmp_path)
+        loaded = ValidatorState.from_dict(old_payload)
         assert loaded.winner is not None
         assert loaded.winner.uid == 7
         assert loaded.winner.won_at_block == 105
         assert loaded.winner.speed_improvement == pytest.approx(0.2)
 
-    def test_load_stale_field_names_does_not_crash(self, tmp_path):
-        """A state file with old KV-cache field names must fall back to
-        fresh state, not crash on startup."""
-        old_payload = {
-            "schema_version": 1,
-            "king": {
-                "uid": 1,
-                "hotkey": "hk_old",
-                "commit_block": 100,
-                "image": "old/server:latest",
-                "digest": "sha256:" + "a" * 64,
-                "score": 0.5,
-                "kl_divergence": 0.01,
-                "memory_reduction": 0.4,
-                "latency_improvement": 0.2,
-                "evaluated_at": 123.0,
-                "evaluation_block": 150,
-            },
-            "evaluations": {
-                "hk_old:100": {
-                    "uid": 1,
-                    "hotkey": "hk_old",
-                    "commit_block": 100,
-                    "image": "old/server:latest",
-                    "digest": "sha256:" + "a" * 64,
-                    "score": 0.5,
-                    "kl_divergence": 0.01,
-                    "memory_reduction": 0.4,
-                    "latency_improvement": 0.2,
-                    "disqualified": False,
-                    "disqualify_reason": None,
-                    "evaluated_at": 123.0,
-                    "evaluation_block": 150,
-                },
-            },
-            "precheck_failures": {},
-            "last_scan_block": 0,
-            "last_weights_set_block": 0,
-        }
-        (tmp_path / STATE_FILE_NAME).write_text(json.dumps(old_payload))
-        loaded = ValidatorState.load(tmp_path)
-        assert loaded.winner is None
-        assert loaded.evaluations == {}
-
-    def test_load_malformed_record_does_not_crash(self, tmp_path):
-        bad_payload = {
-            "schema_version": SCHEMA_VERSION,
-            "king": None,
-            "evaluations": {
-                "hk:100": {"not": "a real record"},
-            },
-            "precheck_failures": {},
-            "last_scan_block": 0,
-            "last_weights_set_block": 0,
-        }
-        (tmp_path / STATE_FILE_NAME).write_text(json.dumps(bad_payload))
-        loaded = ValidatorState.load(tmp_path)
-        assert loaded.winner is None
-        assert loaded.evaluations == {}
-
-    def test_newer_schema_rejected(self, tmp_path):
+    def test_from_dict_newer_schema_rejected(self):
         payload = {
             "schema_version": SCHEMA_VERSION + 99,
             "king": None,
@@ -777,16 +654,16 @@ class TestPersistence:
             "last_scan_block": 0,
             "last_weights_set_block": 0,
         }
-        (tmp_path / STATE_FILE_NAME).write_text(json.dumps(payload))
         with pytest.raises(ValueError, match="schema_version"):
-            ValidatorState.load(tmp_path)
+            ValidatorState.from_dict(payload)
 
-    def test_atomic_write_leaves_no_tmp_on_success(self, tmp_path):
-        target = tmp_path / "x.json"
-        _atomic_write_json(target, {"a": 1})
-        assert target.exists()
-        leftovers = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
-        assert leftovers == []
+
+@patch("cacheon_db.sync_validator_state")
+class TestPostgresSave:
+    def test_save_calls_mirror(self, mock_sync):
+        state = ValidatorState()
+        state.save()
+        mock_sync.assert_called_once_with(state)
 
 
 class TestUnknownCommits:
@@ -838,36 +715,27 @@ class TestAppendWinnerHistory:
             won_at_block=1000,
         )
 
-    def test_first_leader_no_prev(self, tmp_path):
+    @patch("cacheon_db.append_leader_history")
+    def test_first_leader_no_prev(self, mock_append):
         ev = _make_eval(uid=1, score=0.5)
-        append_leader_history(
-            tmp_path, ev, None, current_block=1000, overtake_threshold=0.0
-        )
-        lines = (tmp_path / "leader-history.jsonl").read_text().strip().splitlines()
-        assert len(lines) == 1
-        entry = json.loads(lines[0])
-        assert entry["new_leader_uid"] == 1
-        assert entry["block"] == 1000
-        assert "prev_leader_uid" not in entry
+        append_leader_history(ev, None, current_block=1000, overtake_threshold=0.0)
+        mock_append.assert_called_once()
+        assert mock_append.call_args.kwargs["new_leader_uid"] == 1
+        assert mock_append.call_args.kwargs["prev_leader_uid"] is None
 
-    def test_overtake_includes_prev_leader(self, tmp_path):
+    @patch("cacheon_db.append_leader_history")
+    def test_overtake_includes_prev_leader(self, mock_append):
         ev = _make_eval(uid=2, hotkey="hk2", score=0.6)
         prev = self._winner(uid=1, score=0.4)
-        append_leader_history(
-            tmp_path, ev, prev, current_block=2000, overtake_threshold=0.404
-        )
-        entry = json.loads((tmp_path / "leader-history.jsonl").read_text().strip())
-        assert entry["prev_leader_uid"] == 1
-        assert entry["prev_leader_hotkey"] == "hk1"
-        assert entry["prev_leader_score"] == 0.4
-        assert entry["new_leader_score"] == 0.6
+        append_leader_history(ev, prev, current_block=2000, overtake_threshold=0.404)
+        assert mock_append.call_args.kwargs["prev_leader_uid"] == 1
+        assert mock_append.call_args.kwargs["new_leader_score"] == 0.6
 
-    def test_multiple_appends(self, tmp_path):
+    @patch("cacheon_db.append_leader_history")
+    def test_multiple_appends(self, mock_append):
         for i in range(3):
             ev = _make_eval(uid=i, hotkey=f"hk{i}", score=0.1 * (i + 1))
             append_leader_history(
-                tmp_path, ev, None, current_block=1000 + i, overtake_threshold=0.0
+                ev, None, current_block=1000 + i, overtake_threshold=0.0
             )
-        lines = (tmp_path / "leader-history.jsonl").read_text().strip().splitlines()
-        assert len(lines) == 3
-        assert json.loads(lines[2])["new_leader_uid"] == 2
+        assert mock_append.call_count == 3

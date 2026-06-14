@@ -19,9 +19,7 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(autouse=True)
 def _enable_db(monkeypatch):
     monkeypatch.setenv("CACHEON_DATABASE_URL", "postgresql://test/db")
-    monkeypatch.setenv("CACHEON_SKIP_DB", "0")
     db_config.DATABASE_URL = "postgresql://test/db"
-    db_config.SKIP_DB = False
 
 
 def _mock_conn(rows_by_query: dict[str, list[dict]]):

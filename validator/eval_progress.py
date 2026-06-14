@@ -1,8 +1,4 @@
-"""Ephemeral eval progress tracking.
-
-Writes ``eval_progress.json`` locally at each phase transition and mirrors
-the same payload to Postgres. The local file is overwritten atomically on
-every update and deleted between rounds.
+"""Ephemeral eval progress tracking in Postgres.
 
 All public functions swallow exceptions so a progress-write failure
 never interrupts the actual evaluation.
@@ -10,9 +6,7 @@ never interrupts the actual evaluation.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import time
 from datetime import datetime, timedelta
@@ -22,6 +16,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _LOG_TS_RE = re.compile(r"_(\d{8})_\d{6}\.log$")
+
+COMPLETE_LINGER_S = 900  # 15 minutes
 
 
 def log_cutoff() -> datetime | None:
@@ -47,7 +43,7 @@ def log_is_stale(filename: str, cutoff: datetime) -> bool:
 
 
 def purge_old_logs(
-    state_dir: str | os.PathLike,
+    state_dir: str | Path,
     *,
     remote: bool = True,
     local: bool = True,
@@ -91,78 +87,54 @@ def purge_old_logs(
     return removed
 
 
-PROGRESS_FILE = "eval_progress.json"
-"""How long a finished round stays visible in ``eval_progress.json`` before expiring."""
-COMPLETE_LINGER_S = 900  # 15 minutes
+def _read_progress() -> dict[str, Any]:
+    from cacheon_db.loaders import load_eval_progress_payload
+
+    return load_eval_progress_payload() or {}
 
 
-def _read_progress(state_dir: str | os.PathLike) -> dict[str, Any]:
-    path = Path(state_dir) / PROGRESS_FILE
-    try:
-        with open(path) as f:
-            payload = json.load(f)
-        if payload:
-            return payload
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
-    try:
-        from cacheon_db.loaders import load_eval_progress_payload
-
-        db_payload = load_eval_progress_payload()
-        if db_payload:
-            return db_payload
-    except Exception:
-        logger.debug("Postgres eval progress read failed", exc_info=True)
-    return {}
-
-
-def _write_progress(state_dir: str | os.PathLike, payload: dict[str, Any]) -> None:
-    from .state import _atomic_write_json
+def _write_progress(payload: dict[str, Any]) -> None:
+    from cacheon_db import sync_eval_progress
 
     payload["updated_at"] = time.time()
-    _atomic_write_json(Path(state_dir) / PROGRESS_FILE, payload)
-    try:
-        from cacheon_db import sync_eval_progress
-
-        sync_eval_progress(payload)
-    except Exception:
-        logger.debug("Postgres eval progress mirror failed", exc_info=True)
+    sync_eval_progress(payload)
 
 
-def seed_progress_from_eval_job(state_dir: str | os.PathLike, eval_job: Any) -> None:
+def seed_progress_from_eval_job(eval_job: Any) -> None:
     """Ensure progress has challenger rows when CPU wrote them only to Postgres."""
-    if _read_progress(state_dir).get("challengers"):
-        return
-    challengers = [
-        {"uid": c.uid, "hotkey": c.hotkey, "image": c.image}
-        for c in getattr(eval_job, "challengers", [])
-    ]
-    leader = None
-    if getattr(eval_job, "leader", None) is not None:
-        leader = {
-            "uid": eval_job.leader.uid,
-            "hotkey": eval_job.leader.hotkey,
-            "image": eval_job.leader.image,
-        }
-    runner_up = None
-    if getattr(eval_job, "runner_up", None) is not None:
-        runner_up = {
-            "uid": eval_job.runner_up.uid,
-            "hotkey": eval_job.runner_up.hotkey,
-            "image": eval_job.runner_up.image,
-        }
-    update_progress(
-        state_dir,
-        phase="challengers_found",
-        round_block=eval_job.block,
-        challengers=challengers,
-        leader=leader,
-        runner_up=runner_up,
-    )
+    try:
+        if _read_progress().get("challengers"):
+            return
+        challengers = [
+            {"uid": c.uid, "hotkey": c.hotkey, "image": c.image}
+            for c in getattr(eval_job, "challengers", [])
+        ]
+        leader = None
+        if getattr(eval_job, "leader", None) is not None:
+            leader = {
+                "uid": eval_job.leader.uid,
+                "hotkey": eval_job.leader.hotkey,
+                "image": eval_job.leader.image,
+            }
+        runner_up = None
+        if getattr(eval_job, "runner_up", None) is not None:
+            runner_up = {
+                "uid": eval_job.runner_up.uid,
+                "hotkey": eval_job.runner_up.hotkey,
+                "image": eval_job.runner_up.image,
+            }
+        update_progress(
+            phase="challengers_found",
+            round_block=eval_job.block,
+            challengers=challengers,
+            leader=leader,
+            runner_up=runner_up,
+        )
+    except Exception:
+        logger.debug("Failed to seed eval progress from eval job", exc_info=True)
 
 
 def update_progress(
-    state_dir: str | os.PathLike,
     *,
     phase: str,
     round_block: int | None = None,
@@ -173,12 +145,7 @@ def update_progress(
     gpu: dict[str, Any] | None = None,
     **extra: Any,
 ) -> None:
-    """Write or update the progress file.
-
-    When *phase* is ``"challengers_found"``, a fresh file is created with
-    the provided *challengers* list (all set to ``"pending"``).  Otherwise
-    the existing file is read-modify-written to preserve accumulated state.
-    """
+    """Write or update eval progress in Postgres."""
     try:
         now = time.time()
         step: dict[str, Any] = {"ts": now, "phase": phase}
@@ -215,7 +182,7 @@ def update_progress(
                 "started_at": now,
             }
         else:
-            payload = _read_progress(state_dir)
+            payload = _read_progress()
             if not payload:
                 payload = {
                     "round_block": round_block,
@@ -239,13 +206,12 @@ def update_progress(
         if gpu is not None:
             payload["gpu"] = gpu
 
-        _write_progress(state_dir, payload)
+        _write_progress(payload)
     except Exception:
         logger.debug("Failed to update eval progress", exc_info=True)
 
 
 def update_challenger_status(
-    state_dir: str | os.PathLike,
     idx: int,
     *,
     status: str,
@@ -253,9 +219,9 @@ def update_challenger_status(
     dq_reason: str | None = None,
     detail: str | None = None,
 ) -> None:
-    """Advance a single challenger's status in the progress file."""
+    """Advance a single challenger's status in eval progress."""
     try:
-        payload = _read_progress(state_dir)
+        payload = _read_progress()
         if not payload:
             return
 
@@ -281,13 +247,12 @@ def update_challenger_status(
         }
         payload.setdefault("steps", []).append(step)
 
-        _write_progress(state_dir, payload)
+        _write_progress(payload)
     except Exception:
         logger.debug("Failed to update challenger status", exc_info=True)
 
 
 def update_incumbent_status(
-    state_dir: str | os.PathLike,
     role: str,
     *,
     status: str,
@@ -295,11 +260,11 @@ def update_incumbent_status(
     dq_reason: str | None = None,
     detail: str | None = None,
 ) -> None:
-    """Advance leader or runner-up status in the progress file."""
+    """Advance leader or runner-up status in eval progress."""
     if role not in ("leader", "runner_up"):
         return
     try:
-        payload = _read_progress(state_dir)
+        payload = _read_progress()
         if not payload:
             return
 
@@ -327,15 +292,15 @@ def update_incumbent_status(
             step["score"] = score
         payload.setdefault("steps", []).append(step)
 
-        _write_progress(state_dir, payload)
+        _write_progress(payload)
     except Exception:
         logger.debug("Failed to update incumbent status", exc_info=True)
 
 
-def complete_progress(state_dir: str | os.PathLike) -> None:
-    """Mark the current round finished but keep the file for dashboard linger."""
+def complete_progress() -> None:
+    """Mark the current round finished but keep progress for dashboard linger."""
     try:
-        payload = _read_progress(state_dir)
+        payload = _read_progress()
         if not payload:
             return
         now = time.time()
@@ -343,20 +308,13 @@ def complete_progress(state_dir: str | os.PathLike) -> None:
         payload["phase"] = "eval_complete"
         payload["completed_at"] = now
         payload.setdefault("steps", []).append({"ts": now, "phase": "eval_complete"})
-        _write_progress(state_dir, payload)
+        _write_progress(payload)
     except Exception:
         logger.debug("Failed to complete eval progress", exc_info=True)
 
 
-def clear_progress(state_dir: str | os.PathLike) -> None:
-    """Delete the local progress file and clear Postgres."""
-    path = Path(state_dir) / PROGRESS_FILE
-    try:
-        if path.exists():
-            os.unlink(path)
-    except OSError:
-        logger.debug("Failed to delete local eval progress file", exc_info=True)
-
+def clear_progress() -> None:
+    """Clear eval progress in Postgres."""
     try:
         from cacheon_db import clear_eval_progress
 

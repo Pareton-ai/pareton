@@ -24,7 +24,7 @@ from validator.cpu_validator import (
 )
 import validator.cpu_validator as cpu_validator_module
 from validator.eval_progress import purge_old_logs
-from validator.eval_schema import EVAL_JOB_FILE, ChallengerInfo, EvalJob
+from validator.eval_schema import ChallengerInfo, EvalJob
 from validator.state import EvaluationRecord, ValidatorState, WinnerRecord
 
 pytestmark = pytest.mark.unit
@@ -37,9 +37,17 @@ def _isolate_cpu_validator_tests(monkeypatch):
         "validator.cpu_validator.validator_config.SUBMISSION_FEE_RAO", 0
     )
     monkeypatch.setattr("validator.cpu_validator.validator_config.SKIP_S3", True)
-    monkeypatch.setenv("CACHEON_SKIP_DB", "1")
+    monkeypatch.setenv("CACHEON_DATABASE_URL", "postgresql://test/db")
+    import cacheon_db.config as db_config
+
+    db_config.DATABASE_URL = "postgresql://test/db"
     monkeypatch.setattr("validator.sync.purge_remote_logs", lambda *a, **k: 0)
     monkeypatch.setattr("validator.gpu_orchestrator.gpu_eval_configured", lambda: False)
+    monkeypatch.setattr("validator.cpu_validator._reload_state", lambda state: True)
+    monkeypatch.setattr("cacheon_db.sync_validator_state", lambda state: None)
+    monkeypatch.setattr("cacheon_db.sync_eval_job", lambda job: None)
+    monkeypatch.setattr("cacheon_db.sync_eval_progress", lambda payload: None)
+    monkeypatch.setattr("validator.eval_schema.EvalJob.load", lambda: None)
 
 
 # --------------------------------------------------------------------------- #
@@ -186,7 +194,7 @@ class TestRunTickNoChallengers:
     def test_empty_chain_no_winner(self, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0", "hk1"], revealed={})
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -212,7 +220,7 @@ class TestRunTickNoChallengers:
         rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=800)
         _set_winner(state, rec, current_block=800)
         state.last_weights_set_block = 0
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -241,7 +249,7 @@ class TestRunTickNoChallengers:
         rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=400)
         _set_winner(state, rec, current_block=400)
         state.last_weights_set_block = 500
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -265,18 +273,18 @@ class TestRunTickEndOfTickWeights:
     @patch("validator.sync.download", _noop)
     @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
     @patch("validator.gpu_orchestrator.run_gpu_eval")
+    @patch("validator.cpu_validator._reload_state")
     def test_sets_weights_after_gpu_eval_updates_winner(
-        self, mock_run_gpu, _mock_gpu_cfg, tmp_path
+        self, mock_reload, mock_run_gpu, _mock_gpu_cfg, tmp_path
     ):
-        def _simulate_gpu(state_dir, _eval_job):
-            fresh = ValidatorState.load(state_dir)
+        def _apply_reload(state):
             rec = _make_eval_record(1, "hk1", 200, 0.9, eval_block=1000)
-            _set_winner(fresh, rec, current_block=1000)
-            fresh.last_weights_set_block = 800
-            fresh.save(state_dir)
+            _set_winner(state, rec, current_block=1000)
+            state.last_weights_set_block = 800
             return True
 
-        mock_run_gpu.side_effect = _simulate_gpu
+        mock_reload.side_effect = _apply_reload
+        mock_run_gpu.return_value = True
 
         st = FakeSubtensor(
             hotkeys=["hk0", "hk1"],
@@ -287,7 +295,7 @@ class TestRunTickEndOfTickWeights:
         rec0 = _make_eval_record(0, "hk0", 100, 0.5, eval_block=800)
         _set_winner(state, rec0, current_block=800)
         state.last_weights_set_block = 800
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -321,7 +329,7 @@ class TestRunTickEndOfTickWeights:
         rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=400)
         _set_winner(state, rec, current_block=400)
         state.last_weights_set_block = 500
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -343,13 +351,14 @@ class TestRunTickEndOfTickWeights:
 
 class TestRunTickWithChallengers:
     @patch("validator.sync.download", _noop)
-    def test_writes_eval_job(self, tmp_path):
+    @patch("cacheon_db.sync_eval_job")
+    def test_writes_eval_job(self, mock_sync, tmp_path):
         st = FakeSubtensor(
             hotkeys=["hk0", "hk1"],
             revealed={"hk1": [(200, _commit_json("user/m:v1", "sha256:" + "b" * 64))]},
         )
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -361,8 +370,8 @@ class TestRunTickWithChallengers:
         )
 
         assert summary["challengers"] == 1
-        job = EvalJob.load(str(tmp_path))
-        assert job is not None
+        mock_sync.assert_called_once()
+        job = mock_sync.call_args[0][0]
         assert len(job.challengers) == 1
         assert job.challengers[0].uid == 1
         assert job.challengers[0].hotkey == "hk1"
@@ -379,7 +388,7 @@ class TestRunTickWithChallengers:
         rec = _make_eval_record(0, "hk0", 100, 0.5, eval_block=500)
         _set_winner(state, rec, current_block=500)
         state.last_weights_set_block = 600
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -391,7 +400,6 @@ class TestRunTickWithChallengers:
         )
 
         assert summary["challengers"] == 0
-        assert not (tmp_path / EVAL_JOB_FILE).exists()
 
     @patch("validator.sync.download", _noop)
     def test_no_eval_job_when_block_hash_none(self, tmp_path):
@@ -401,7 +409,7 @@ class TestRunTickWithChallengers:
             block_hash=None,
         )
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -413,10 +421,10 @@ class TestRunTickWithChallengers:
         )
 
         assert summary["challengers"] == 1
-        assert not (tmp_path / EVAL_JOB_FILE).exists()
 
     @patch("validator.sync.download", _noop)
-    def test_multiple_challengers_all_in_eval_job(self, tmp_path):
+    @patch("cacheon_db.sync_eval_job")
+    def test_multiple_challengers_all_in_eval_job(self, mock_sync, tmp_path):
         st = FakeSubtensor(
             hotkeys=["hk0", "hk1", "hk2"],
             revealed={
@@ -425,7 +433,7 @@ class TestRunTickWithChallengers:
             },
         )
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -437,8 +445,7 @@ class TestRunTickWithChallengers:
         )
 
         assert summary["challengers"] == 2
-        job = EvalJob.load(str(tmp_path))
-        assert job is not None
+        job = mock_sync.call_args[0][0]
         assert len(job.challengers) == 2
         uids = {c.uid for c in job.challengers}
         assert uids == {0, 2}
@@ -456,7 +463,7 @@ class TestRunTickWinnerDereg:
         state = ValidatorState()
         rec = _make_eval_record(1, "hk_old_winner", 100, 0.5, eval_block=500)
         _set_winner(state, rec, current_block=500)
-        state.save(tmp_path)
+        state.save()
         assert state.winner is not None
 
         summary = run_tick(
@@ -478,7 +485,7 @@ class TestRunTickWinnerDereg:
         state = ValidatorState()
         rec = _make_eval_record(5, "hk_far", 100, 0.5, eval_block=500)
         _set_winner(state, rec, current_block=500)
-        state.save(tmp_path)
+        state.save()
         assert state.winner is not None
 
         summary = run_tick(
@@ -499,7 +506,7 @@ class TestRunTickWinnerDereg:
         state = ValidatorState()
         rec = _make_eval_record(1, "hk_winner", 100, 0.5, eval_block=500)
         _set_winner(state, rec, current_block=500)
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -537,7 +544,7 @@ class TestRunTickWinnerDereg:
         )
         state.record_evaluation(rec_ru, current_block=600)
         state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
-        state.save(tmp_path)
+        state.save()
 
         assert state.winner.uid == 1
         assert state.runner_up is not None
@@ -580,7 +587,7 @@ class TestRunTickWinnerDereg:
         )
         state.record_evaluation(rec_ru, current_block=600)
         state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -601,7 +608,7 @@ class TestRunTickWinnerDereg:
         state = ValidatorState()
         rec_w = _make_eval_record(1, "hk_old_winner", 100, 0.5, eval_block=500)
         _set_winner(state, rec_w, current_block=500)
-        state.save(tmp_path)
+        state.save()
 
         assert state.runner_up is None
 
@@ -653,7 +660,7 @@ class TestPostGpuDeregGuard:
         state.record_evaluation(rec_ru, current_block=600)
         state.runner_up_record = WinnerRecord.from_evaluation(rec_ru, won_at_block=600)
         state.last_weights_set_block = 0
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -707,7 +714,7 @@ class TestRunTickS3Failure:
     def test_continues_on_s3_download_failure(self, _mock_dl, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         summary = run_tick(
             subtensor=st,
@@ -740,7 +747,7 @@ class TestGpuEvalFailureClearsProgress:
             revealed={"hk0": [(100, _commit_json())]},
         )
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         run_tick(
             subtensor=st,
@@ -751,7 +758,7 @@ class TestGpuEvalFailureClearsProgress:
             dry_run=True,
         )
 
-        mock_clear.assert_called_once_with(str(tmp_path))
+        mock_clear.assert_called_once()
         mock_delete_job.assert_called_once_with(1000)
 
     @patch(
@@ -769,7 +776,7 @@ class TestGpuEvalFailureClearsProgress:
             revealed={"hk0": [(100, _commit_json())]},
         )
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         run_tick(
             subtensor=st,
@@ -780,7 +787,60 @@ class TestGpuEvalFailureClearsProgress:
             dry_run=True,
         )
 
-        mock_clear.assert_called_once_with(str(tmp_path))
+        mock_clear.assert_called_once()
+
+
+class TestPostGpuReloadSkipsWeights:
+    @patch("validator.sync.download", _noop)
+    @patch("validator.gpu_orchestrator.run_gpu_eval", return_value=True)
+    @patch("validator.gpu_orchestrator.gpu_eval_configured", return_value=True)
+    @patch("validator.cpu_validator._reload_state", return_value=False)
+    @patch("validator.cpu_validator._try_set_weights")
+    def test_skips_weights_when_postgres_reload_fails(
+        self, mock_weights, _mock_reload, _mock_gpu_cfg, _mock_run, tmp_path
+    ):
+        st = FakeSubtensor(
+            hotkeys=["hk0"],
+            revealed={"hk0": [(100, _commit_json())]},
+        )
+        state = ValidatorState()
+        state.save()
+
+        summary = run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_weights.assert_not_called()
+        assert summary["weights_set"] is False
+
+
+class TestTickStartReloadSkipsWeights:
+    @patch("validator.sync.download", _noop)
+    @patch("validator.cpu_validator._reload_state", return_value=False)
+    @patch("validator.cpu_validator._try_set_weights")
+    def test_skips_weights_when_tick_reload_fails(
+        self, mock_weights, _mock_reload, tmp_path
+    ):
+        st = FakeSubtensor(hotkeys=["hk0"], revealed={})
+        state = ValidatorState()
+        state.save()
+
+        summary = run_tick(
+            subtensor=st,
+            wallet=FAKE_WALLET,
+            state=state,
+            netuid=14,
+            state_dir=str(tmp_path),
+            dry_run=True,
+        )
+
+        mock_weights.assert_not_called()
+        assert summary["weights_set"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -820,7 +880,7 @@ class TestCpuLogRotationOnTick:
     def test_quiet_tick_does_not_rotate(self, mock_rotate, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         run_tick(
             subtensor=st,
@@ -841,7 +901,7 @@ class TestCpuLogRotationOnTick:
             revealed={"hk0": [(100, _commit_json())]},
         )
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         run_tick(
             subtensor=st,
@@ -881,7 +941,7 @@ class TestCpuValidatorLogSync:
     def test_tick_start_calls_log_sync(self, mock_logs, tmp_path):
         st = FakeSubtensor(hotkeys=["hk0"], revealed={})
         state = ValidatorState()
-        state.save(tmp_path)
+        state.save()
 
         run_tick(
             subtensor=st,
@@ -901,12 +961,14 @@ class TestCpuValidatorLogSync:
 
 
 class TestCleanStaleEvalJob:
-    def test_removes_when_all_challengers_known(self, tmp_path):
+    @patch("cacheon_db.mirror.delete_pending_eval_job")
+    @patch("validator.eval_schema.EvalJob.load")
+    def test_removes_when_all_challengers_known(self, mock_load, mock_delete, tmp_path):
         state = ValidatorState()
         rec = _make_eval_record(1, "hk1", 200, 0.5, eval_block=500)
         _set_winner(state, rec, current_block=500)
 
-        job = EvalJob(
+        mock_load.return_value = EvalJob(
             block=1000,
             block_hash="0xabc",
             challengers=[
@@ -920,17 +982,15 @@ class TestCleanStaleEvalJob:
             ],
             created_at=1700000000.0,
         )
-        job.save(str(tmp_path))
-        assert (tmp_path / EVAL_JOB_FILE).exists()
 
-        removed = _clean_stale_eval_job(state, str(tmp_path))
+        removed = _clean_stale_eval_job(state)
         assert removed is True
-        assert not (tmp_path / EVAL_JOB_FILE).exists()
+        mock_delete.assert_called_once_with(1000)
 
-    def test_keeps_when_challenger_unknown(self, tmp_path):
+    @patch("validator.eval_schema.EvalJob.load")
+    def test_keeps_when_challenger_unknown(self, mock_load, tmp_path):
         state = ValidatorState()
-
-        job = EvalJob(
+        mock_load.return_value = EvalJob(
             block=1000,
             block_hash="0xabc",
             challengers=[
@@ -944,22 +1004,29 @@ class TestCleanStaleEvalJob:
             ],
             created_at=1700000000.0,
         )
-        job.save(str(tmp_path))
 
-        removed = _clean_stale_eval_job(state, str(tmp_path))
+        removed = _clean_stale_eval_job(state)
         assert removed is False
-        assert (tmp_path / EVAL_JOB_FILE).exists()
 
-    def test_noop_when_no_file(self, tmp_path):
+    def test_noop_when_no_job(self, tmp_path):
         state = ValidatorState()
-        assert _clean_stale_eval_job(state, str(tmp_path)) is False
+        with patch("validator.eval_schema.EvalJob.load", return_value=None):
+            assert _clean_stale_eval_job(state) is False
 
-    def test_mixed_known_and_unknown(self, tmp_path):
+    @patch("validator.eval_schema.EvalJob.load")
+    def test_db_error_returns_false(self, mock_load, tmp_path):
+        from cacheon_db.connection import DatabaseUnavailable
+
+        mock_load.side_effect = DatabaseUnavailable("eval job load failed")
+        assert _clean_stale_eval_job(ValidatorState()) is False
+
+    @patch("validator.eval_schema.EvalJob.load")
+    def test_mixed_known_and_unknown(self, mock_load, tmp_path):
         state = ValidatorState()
         rec = _make_eval_record(1, "hk1", 200, 0.5, eval_block=500)
         _set_winner(state, rec, current_block=500)
 
-        job = EvalJob(
+        mock_load.return_value = EvalJob(
             block=1000,
             block_hash="0xabc",
             challengers=[
@@ -980,11 +1047,9 @@ class TestCleanStaleEvalJob:
             ],
             created_at=1700000000.0,
         )
-        job.save(str(tmp_path))
 
-        removed = _clean_stale_eval_job(state, str(tmp_path))
+        removed = _clean_stale_eval_job(state)
         assert removed is False
-        assert (tmp_path / EVAL_JOB_FILE).exists()
 
 
 # --------------------------------------------------------------------------- #

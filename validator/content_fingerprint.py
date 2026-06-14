@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any
 
 from . import config as validator_config
 from .chain import CommitmentRecord
-from .state import DUPLICATE_SUBMISSION_REASON, EvaluationRecord, _atomic_write_json
+from .state import DUPLICATE_SUBMISSION_REASON, EvaluationRecord
 
 logger = logging.getLogger(__name__)
-
-FINGERPRINT_FILE_NAME = "content_fingerprints.json"
 
 FingerprintEntry = dict[str, Any]
 FingerprintRegistry = dict[str, Any]
@@ -33,38 +29,10 @@ class FingerprintCheckResult:
     superseded_owner: FingerprintEntry | None = None
 
 
-def _registry_path(state_dir: str | Path) -> Path:
-    return Path(state_dir) / FINGERPRINT_FILE_NAME
+def load_fingerprint_registry() -> FingerprintRegistry:
+    from cacheon_db.loaders import load_fingerprint_registry_dict
 
-
-def load_fingerprint_registry(state_dir: str | Path) -> FingerprintRegistry:
-    try:
-        from cacheon_db.loaders import load_fingerprint_registry_dict
-
-        data = load_fingerprint_registry_dict()
-        if data is not None:
-            return data
-    except Exception:
-        logger.debug("Postgres fingerprint registry load failed", exc_info=True)
-
-    path = _registry_path(state_dir)
-    if not path.exists():
-        return {"entries": {}}
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Could not load %s (%s); starting fresh", path, exc)
-        return {"entries": {}}
-    entries = data.get("entries")
-    if not isinstance(entries, dict):
-        return {"entries": {}}
-    return {"entries": entries}
-
-
-def save_fingerprint_registry(
-    state_dir: str | Path, registry: FingerprintRegistry
-) -> None:
-    _atomic_write_json(_registry_path(state_dir), registry)
+    return load_fingerprint_registry_dict()
 
 
 def composite_fingerprint(file_hashes: dict[str, str]) -> str:
@@ -366,7 +334,6 @@ def check_and_register_fingerprint(
     *,
     container_id: str,
     com: CommitmentRecord,
-    state_dir: str | Path,
 ) -> FingerprintCheckResult:
     """Check for duplicates, register on success, surface incumbent supersession."""
     if registry is None:
@@ -405,8 +372,6 @@ def check_and_register_fingerprint(
         image=com.image,
         digest=com.digest,
     )
-    if state_dir:
-        save_fingerprint_registry(state_dir, registry)
 
     if superseded is not None:
         logger.info(

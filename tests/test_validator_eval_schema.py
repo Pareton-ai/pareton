@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import patch
 
 from validator.eval_schema import (
-    EVAL_JOB_FILE,
     ChallengerInfo,
     ChatMessage,
     EvalJob,
@@ -135,21 +135,15 @@ class TestEvalJob:
         assert len(restored.challengers) == 2
         assert restored.challengers[0] == job.challengers[0]
 
-    def test_save_and_load(self, tmp_path):
+    @patch("cacheon_db.sync_eval_job")
+    def test_save_mirrors_to_postgres(self, mock_sync):
         job = self._make_job(3)
-        job.save(tmp_path)
-        assert (tmp_path / EVAL_JOB_FILE).exists()
-        loaded = EvalJob.load(tmp_path)
-        assert loaded is not None
-        assert loaded.block == 4501234
-        assert len(loaded.challengers) == 3
+        job.save()
+        mock_sync.assert_called_once_with(job)
 
-    def test_load_missing_returns_none(self, tmp_path):
-        assert EvalJob.load(tmp_path) is None
-
-    def test_load_corrupt_returns_none(self, tmp_path):
-        (tmp_path / EVAL_JOB_FILE).write_text("{bad json")
-        assert EvalJob.load(tmp_path) is None
+    @patch("cacheon_db.loaders.load_pending_eval_job_dict", return_value=None)
+    def test_load_missing_returns_none(self, _mock):
+        assert EvalJob.load() is None
 
     def test_empty_challengers(self):
         job = EvalJob(block=1, block_hash="0x0", challengers=[])

@@ -1,15 +1,12 @@
-"""On-disk memory for the validator: who is winning and what we already scored.
+"""Validator memory: who is winning and what we already scored.
 
-`ValidatorState` holds the current winner (best-scoring miner), a set of
-`(hotkey, commit_block)` pairs that have finished evaluation, per-miner
-score history, and reasons for pre-rejects. The loop loads this from
-`state.json`, updates it each tick, and saves again.
-
-Writes use a temp file + rename so a crash never leaves a torn JSON
-file. `SCHEMA_VERSION` applies to this file only.
+`ValidatorState` holds the current winner (best-scoring miner), evaluation
+history, and pre-reject reasons. Structured state lives in Neon Postgres;
+the loop loads on startup and after each GPU round, mutates in memory, and
+mirrors writes back to Postgres.
 
 Scoring convention: **higher = better**. A miner's score is
-``score`` is ``speed_improvement``: median end-to-end speedup vs baseline,
+``speed_improvement``: median end-to-end speedup vs baseline,
 where improvements are relative to the vLLM baseline (median across
 prompts). The winner is the miner with the highest score. Disqualified
 runs store score `0.0` and cannot win.
@@ -17,17 +14,13 @@ runs store score `0.0` and cannot win.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
-import os
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
 from typing import Any, Iterable
 
-from . import config as validator_config
+from cacheon_db.exceptions import DatabaseUnavailable
 
 OVERTAKE_EPSILON: float = 0.01
 """Fixed 1% moat: a challenger must strictly exceed
@@ -36,53 +29,9 @@ within the same round."""
 
 logger = logging.getLogger(__name__)
 
+
 SCHEMA_VERSION: int = 1
-"""Nothing shipped yet. Start fresh at 1; bump when the first production
-state format needs a backward-incompatible change."""
-
-STATE_FILE_NAME: str = "state.json"
-
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    """Write JSON to `path` atomically (tmp file + os.replace).
-
-    Never leaves a half-written file even on SIGKILL. Does NOT fsync the
-    directory -- validator state loss on a kernel panic is acceptable
-    (we re-eval any unknown challenger on next startup).
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-
-
-def _quarantine_corrupt_state(path: Path) -> None:
-    """Move a broken `state.json` aside so it isn't overwritten on save."""
-    try:
-        quarantined = path.with_suffix(path.suffix + f".corrupt.{int(time.time())}")
-        os.replace(path, quarantined)
-        logger.warning(
-            "Quarantined corrupt state file to %s for post-mortem.",
-            quarantined,
-        )
-    except OSError as exc:
-        logger.warning(
-            "Could not quarantine %s (%s); it will be overwritten on next save.",
-            path,
-            exc,
-        )
+"""Bump when the persisted state format needs a backward-incompatible change."""
 
 
 def _eval_key(hotkey: str, commit_block: int) -> str:
@@ -479,97 +428,33 @@ class ValidatorState:
         )
 
     # ------------------------------------------------------------------ #
-    # Disk I/O
+    # Postgres I/O
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def load(cls, state_dir: str | os.PathLike) -> ValidatorState:
-        """Load state from `<state_dir>/state.json`, or return a fresh
-        state if the file is missing, unreadable, or unparseable.
+    def load(cls) -> ValidatorState:
+        """Load validator state from Postgres."""
+        from cacheon_db.loaders import load_validator_state_dict
 
-        Recovery policy:
-          * Missing file -> fresh state, info log.
-          * Unreadable / malformed JSON / schema drift -> fresh state,
-            error log, and the offending file is renamed to
-            ``state.json.corrupt.<unix_ts>`` for post-mortem.
-          * `schema_version` newer than this validator supports -> hard
-            `ValueError` re-raise.
-        """
-        path = Path(state_dir) / STATE_FILE_NAME
-        if not path.exists():
-            logger.info("No existing state file at %s -- starting fresh.", path)
-            return cls()
-
-        corrupt_reason: str | None = None
         try:
-            with open(path) as f:
-                data = json.load(f)
-            return cls.from_dict(data)
-        except ValueError as exc:
-            if isinstance(exc, json.JSONDecodeError):
-                corrupt_reason = f"malformed JSON: {exc}"
-            elif "newer than" in str(exc):
-                raise
-            else:
-                corrupt_reason = f"schema mismatch: {exc}"
-        except OSError as exc:
-            corrupt_reason = f"unreadable: {exc}"
-        except (TypeError, KeyError) as exc:
-            corrupt_reason = f"incompatible shape: {exc!r}"
-
-        logger.error(
-            "Failed to load state from %s (%s) -- starting fresh.",
-            path,
-            corrupt_reason,
-        )
-        _quarantine_corrupt_state(path)
-        return cls()
-
-    @classmethod
-    def load_from_db(cls) -> ValidatorState | None:
-        try:
-            from cacheon_db.loaders import load_validator_state_dict
-
             data = load_validator_state_dict()
-            if data is None:
-                return None
-            state = cls.from_dict(data)
-            logger.info(
-                "Loaded validator state from Postgres: %d eval(s), winner=%s",
-                len(state.evaluations),
-                f"UID {state.winner.uid}" if state.winner else "none",
-            )
-            return state
-        except Exception:
-            logger.debug("Postgres validator state load failed", exc_info=True)
-            return None
+        except DatabaseUnavailable:
+            raise
+        except Exception as exc:
+            raise DatabaseUnavailable("validator state load failed") from exc
+        state = cls.from_dict(data)
+        logger.info(
+            "Loaded validator state from Postgres: %d eval(s), winner=%s",
+            len(state.evaluations),
+            f"UID {state.winner.uid}" if state.winner else "none",
+        )
+        return state
 
-    @classmethod
-    def load_merged(cls, state_dir: str | os.PathLike) -> ValidatorState:
-        """Prefer Postgres when enabled; fall back to local ``state.json``."""
-        state = cls.load_from_db()
-        if state is not None:
-            return state
-        return cls.load(state_dir)
+    def save(self) -> None:
+        """Mirror validator state to Postgres."""
+        from cacheon_db import sync_validator_state
 
-    def save(self, state_dir: str | os.PathLike) -> bool:
-        """Atomically write state to `<state_dir>/state.json`. Returns False on I/O failure."""
-        path = Path(state_dir) / STATE_FILE_NAME
-        try:
-            _atomic_write_json(path, self.to_dict())
-        except OSError as exc:
-            logger.error(
-                "state.save failed (disk full?): %s",
-                exc,
-            )
-            return False
-        try:
-            from cacheon_db import sync_validator_state
-
-            sync_validator_state(self)
-        except Exception:
-            logger.debug("Postgres state mirror failed", exc_info=True)
-        return True
+        sync_validator_state(self)
 
     # ------------------------------------------------------------------ #
     # Copy helpers (useful in tests)
@@ -583,43 +468,14 @@ def current_timestamp() -> float:
     return time.time()
 
 
-LEADER_HISTORY_FILE: str = "leader-history.jsonl"
-
-
 def append_leader_history(
-    state_dir: str | os.PathLike,
     new_leader: EvaluationRecord,
     prev_leader: WinnerRecord | None,
     current_block: int,
     overtake_threshold: float,
 ) -> None:
-    """Append a single JSON line to ``leader-history.jsonl`` on overtake."""
+    """Record an overtake in Postgres leader history."""
     ts = time.time()
-    path = Path(state_dir) / LEADER_HISTORY_FILE
-    entry = {
-        "ts": ts,
-        "block": current_block,
-        "new_leader_uid": new_leader.uid,
-        "new_leader_hotkey": new_leader.hotkey,
-        "new_leader_score": new_leader.score,
-        "new_leader_image": new_leader.image,
-        "new_leader_digest": new_leader.digest,
-        "overtake_threshold": overtake_threshold,
-    }
-    if prev_leader is not None:
-        entry["prev_leader_uid"] = prev_leader.uid
-        entry["prev_leader_hotkey"] = prev_leader.hotkey
-        entry["prev_leader_score"] = prev_leader.score
-    written = False
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, sort_keys=True) + "\n")
-        written = True
-    except Exception:
-        logger.warning("failed to append leader history to %s", path)
-    if not written:
-        return
     try:
         from cacheon_db import append_leader_history as db_append_leader_history
 
@@ -641,7 +497,6 @@ def append_leader_history(
 
 
 def append_winner_history(
-    state_dir: str | os.PathLike,
     new_winner: EvaluationRecord,
     prev_winner: WinnerRecord | None,
     current_block: int,
@@ -649,7 +504,6 @@ def append_winner_history(
 ) -> None:
     """Deprecated alias for :func:`append_leader_history`."""
     append_leader_history(
-        state_dir,
         new_winner,
         prev_winner,
         current_block,

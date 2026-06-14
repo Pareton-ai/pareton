@@ -23,6 +23,10 @@ def _handle(provider: str) -> PodHandle:
 
 
 class TestBuildEnvExports:
+    @pytest.fixture(autouse=True)
+    def _db_url(self, monkeypatch):
+        monkeypatch.setenv("CACHEON_DATABASE_URL", "postgresql://user:pass@host/db")
+
     def test_exports_vllm_cache_dir_when_set(self):
         with patch.dict(
             os.environ, {"CACHEON_VLLM_CACHE_DIR": "/custom/vllm-cache"}, clear=False
@@ -45,19 +49,14 @@ class TestBuildEnvExports:
     def test_exports_database_url_when_set(self):
         with patch.dict(
             os.environ,
-            {
-                "CACHEON_DATABASE_URL": "postgresql://user:pass@host/db",
-                "CACHEON_SKIP_DB": "0",
-            },
+            {"CACHEON_DATABASE_URL": "postgresql://user:pass@host/db"},
             clear=False,
         ):
             exports = _build_env_exports(_handle("targon"))
         assert 'export CACHEON_DATABASE_URL="postgresql://user:pass@host/db"' in exports
-        assert 'export CACHEON_SKIP_DB="0"' in exports
 
-    def test_omits_database_url_when_unset(self):
+    def test_raises_when_database_url_unset(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CACHEON_DATABASE_URL", None)
-            exports = _build_env_exports(_handle("targon"))
-        assert "CACHEON_DATABASE_URL" not in exports
-        assert 'export CACHEON_SKIP_DB="0"' in exports
+            with pytest.raises(RuntimeError, match="CACHEON_DATABASE_URL"):
+                _build_env_exports(_handle("targon"))

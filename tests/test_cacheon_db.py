@@ -14,43 +14,13 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def _skip_db(monkeypatch):
-    monkeypatch.setenv("CACHEON_SKIP_DB", "1")
-    monkeypatch.delenv("CACHEON_DATABASE_URL", raising=False)
-    db_config.SKIP_DB = True
-    db_config.DATABASE_URL = ""
+def _db_url(monkeypatch):
+    monkeypatch.setenv("CACHEON_DATABASE_URL", "postgresql://test/db")
+    db_config.DATABASE_URL = "postgresql://test/db"
 
 
-def test_sync_evaluation_noop_when_disabled():
-    ev = EvaluationRecord(
-        uid=1,
-        hotkey="hk1",
-        commit_block=100,
-        image="img",
-        digest="sha256:abc",
-        score=0.1,
-        speed_improvement=0.1,
-        token_match_rate=0.9,
-        disqualified=False,
-        disqualify_reason=None,
-        evaluated_at=1.0,
-        evaluation_block=200,
-    )
-    with patch("cacheon_db.connection.db_connection") as mock_conn:
-        sync_evaluation(ev)
-        mock_conn.assert_not_called()
-
-
-def test_sync_validator_state_noop_when_disabled():
-    state = ValidatorState()
-    with patch("cacheon_db.connection.db_connection") as mock_conn:
-        sync_validator_state(state)
-        mock_conn.assert_not_called()
-
-
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_sync_evaluation_executes_sql(mock_conn, _enabled):
+def test_sync_evaluation_executes_sql(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor
@@ -76,9 +46,8 @@ def test_sync_evaluation_executes_sql(mock_conn, _enabled):
     assert "INSERT INTO evaluations" in sql
 
 
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_sync_validator_state_writes_meta_and_leader(mock_conn, _enabled):
+def test_sync_validator_state_writes_meta_and_leader(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor
@@ -110,9 +79,8 @@ def test_sync_validator_state_writes_meta_and_leader(mock_conn, _enabled):
     assert "ON CONFLICT (id) DO UPDATE" in meta_sql
 
 
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_sync_eval_job_deletes_pending_first(mock_conn, _enabled):
+def test_sync_eval_job_deletes_pending_first(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor
@@ -135,9 +103,8 @@ def test_sync_eval_job_deletes_pending_first(mock_conn, _enabled):
     assert "%s" not in delete_sql
 
 
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_sync_validator_state_reconciles_precheck(mock_conn, _enabled):
+def test_sync_validator_state_reconciles_precheck(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor
@@ -149,9 +116,8 @@ def test_sync_validator_state_reconciles_precheck(mock_conn, _enabled):
     assert any("DELETE FROM precheck_failures" in sql for sql in sqls)
 
 
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_sync_evaluation_clears_precheck(mock_conn, _enabled):
+def test_sync_evaluation_clears_precheck(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor
@@ -177,9 +143,8 @@ def test_sync_evaluation_clears_precheck(mock_conn, _enabled):
     assert "DELETE FROM precheck_failures" in delete_sql
 
 
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_sync_eval_progress_upserts_when_row_missing(mock_conn, _enabled):
+def test_sync_eval_progress_upserts_when_row_missing(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor
@@ -200,9 +165,8 @@ def test_sync_eval_progress_upserts_when_row_missing(mock_conn, _enabled):
     assert "ON CONFLICT (id) DO UPDATE" in sql
 
 
-@patch("cacheon_db.connection.enabled", return_value=True)
 @patch("cacheon_db.connection.db_connection")
-def test_clear_eval_progress_upserts_idle(mock_conn, _enabled):
+def test_clear_eval_progress_upserts_idle(mock_conn):
     cursor = MagicMock()
     conn = MagicMock()
     conn.cursor.return_value = cursor

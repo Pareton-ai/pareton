@@ -153,17 +153,14 @@ def _apply_fresh_state(state: ValidatorState, fresh: ValidatorState) -> None:
     state.last_weights_set_block = fresh.last_weights_set_block
 
 
-def _reload_state_from_disk(state: ValidatorState, state_dir: str) -> None:
-    """Reload from local state.json (tick start; avoids incomplete Postgres eval sets)."""
-    _apply_fresh_state(state, ValidatorState.load(state_dir))
-
-
-def _reload_state_after_gpu(state: ValidatorState, state_dir: str) -> None:
-    """Reload after GPU eval: Postgres first, local JSON fallback."""
-    fresh = ValidatorState.load_from_db()
-    if fresh is None:
-        fresh = ValidatorState.load(state_dir)
-    _apply_fresh_state(state, fresh)
+def _reload_state(state: ValidatorState) -> bool:
+    """Reload validator state from Postgres."""
+    try:
+        _apply_fresh_state(state, ValidatorState.load())
+        return True
+    except Exception as exc:
+        logger.error("Postgres state reload failed: %s", exc)
+        return False
 
 
 _CPU_LOGS_UPLOAD = ["logs/", "container_logs/"]
@@ -210,31 +207,30 @@ def _try_upload_logs(state_dir: str) -> None:
         logger.error("S3 log upload failed: %s", exc)
 
 
-def _clean_stale_eval_job(state: ValidatorState, state_dir: str) -> bool:
+def _clean_stale_eval_job(state: ValidatorState) -> bool:
     """Remove a pending eval job when every challenger is already known."""
-    from .eval_schema import EVAL_JOB_FILE, EvalJob
+    from .eval_schema import EvalJob
 
-    job = EvalJob.load(state_dir)
+    try:
+        job = EvalJob.load()
+    except Exception as exc:
+        logger.debug("Stale eval job check skipped: %s", exc)
+        return False
     if job is None:
         return False
     if not all(state.is_known(c.hotkey, c.commit_block) for c in job.challengers):
-        return False
-    path = Path(state_dir) / EVAL_JOB_FILE
-    try:
-        if path.exists():
-            path.unlink()
-        logger.info(
-            "Removed stale eval job (%d challenger(s) all known)",
-            len(job.challengers),
-        )
-    except OSError:
         return False
     try:
         from cacheon_db.mirror import delete_pending_eval_job
 
         delete_pending_eval_job(job.block)
+        logger.info(
+            "Removed stale eval job (%d challenger(s) all known)",
+            len(job.challengers),
+        )
     except Exception:
         logger.debug("Postgres eval job delete failed", exc_info=True)
+        return False
     return True
 
 
@@ -451,7 +447,7 @@ def _try_set_weights(
     if dry_run:
         logger.info("🧪 [DRY-RUN] would set_weights (see weight vector above)")
         state.last_weights_set_block = current_block
-        state.save(state_dir)
+        state.save()
         return True
 
     try:
@@ -464,7 +460,7 @@ def _try_set_weights(
             version_key=version_key,
         )
         state.last_weights_set_block = current_block
-        state.save(state_dir)
+        state.save()
         return True
     except ChainError as exc:
         logger.error("set_weights failed: %s", exc)
@@ -497,8 +493,8 @@ def run_tick(
 
     purge_old_logs(state_dir, remote=False)
 
-    _reload_state_from_disk(state, state_dir)
-    _clean_stale_eval_job(state, state_dir)
+    reloaded_after_gpu = _reload_state(state)
+    _clean_stale_eval_job(state)
 
     winner_desc = (
         f"UID {state.winner.uid} score={state.winner.score:.4f}"
@@ -533,7 +529,7 @@ def run_tick(
         state.record_precheck_failure(com.hotkey, com.commit_block, rej_reason)
 
     if _apply_deregistration_guard(state, metagraph, current_block):
-        state.save(state_dir)
+        state.save()
 
     dirty = False
 
@@ -615,7 +611,6 @@ def run_tick(
             from .eval_progress import update_progress
 
             update_progress(
-                state_dir,
                 phase="challengers_found",
                 round_block=current_block,
                 challengers=[
@@ -642,15 +637,15 @@ def run_tick(
                 ),
             )
             _rotate_log_for_block(state_dir, current_block)
-            eval_job.save(state_dir)
-            state.save(state_dir)
+            eval_job.save()
+            state.save()
             dirty = True
 
     if not challenger_set.challengers:
-        state.save(state_dir)
+        state.save()
 
     if dirty:
-        state.save(state_dir)
+        state.save()
 
     if challenger_set.challengers and block_hash is not None:
         logger.info(
@@ -663,6 +658,7 @@ def run_tick(
         if gpu_eval_configured():
             success = run_gpu_eval(state_dir, eval_job)
             clear_stale_progress = not success
+            reloaded_after_gpu = True
             if not success:
                 try:
                     from cacheon_db.mirror import delete_pending_eval_job
@@ -675,7 +671,7 @@ def run_tick(
                     )
             try:
                 if success:
-                    _reload_state_after_gpu(state, state_dir)
+                    reloaded_after_gpu = _reload_state(state)
                     _try_download_logs(state_dir)
                 else:
                     logger.info(
@@ -685,28 +681,35 @@ def run_tick(
             except Exception as exc:
                 logger.error("Post-eval log sync failed: %s", exc)
                 clear_stale_progress = True
+                reloaded_after_gpu = False
             if clear_stale_progress:
                 from .eval_progress import clear_progress
 
-                clear_progress(state_dir)
+                clear_progress()
+        else:
+            reloaded_after_gpu = True
 
     metagraph, weights_block, _ = fetch_metagraph(subtensor, netuid)
     if _apply_deregistration_guard(state, metagraph, weights_block):
-        state.save(state_dir)
+        state.save()
 
-    weights_set = _try_set_weights(
-        state=state,
-        metagraph=metagraph,
-        current_block=weights_block,
-        subtensor=subtensor,
-        wallet=wallet,
-        netuid=netuid,
-        state_dir=state_dir,
-        dry_run=dry_run,
-        version_key=version_key,
-    )
-    if weights_set:
-        state.save(state_dir)
+    weights_set = False
+    if reloaded_after_gpu:
+        weights_set = _try_set_weights(
+            state=state,
+            metagraph=metagraph,
+            current_block=weights_block,
+            subtensor=subtensor,
+            wallet=wallet,
+            netuid=netuid,
+            state_dir=state_dir,
+            dry_run=dry_run,
+            version_key=version_key,
+        )
+        if weights_set:
+            state.save()
+    else:
+        logger.error("Skipping weight set: post-GPU Postgres reload failed")
 
     return {
         "block": current_block,
@@ -792,7 +795,20 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("%s", exc)
         return 4
 
-    state = ValidatorState.load(args.state_dir)
+    from cacheon_db.config import require_database_url
+    from cacheon_db.exceptions import DatabaseNotConfigured
+
+    try:
+        require_database_url()
+    except DatabaseNotConfigured as exc:
+        logger.error("%s", exc)
+        return 4
+
+    try:
+        state = ValidatorState.load()
+    except Exception as exc:
+        logger.error("Failed to load validator state from Postgres: %s", exc)
+        return 4
     winner_desc = (
         f"winner=UID {state.winner.uid} (score={state.winner.score:.4f})"
         if state.winner
@@ -841,7 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         from .gpu_orchestrator import teardown_rented_gpu_session
 
         teardown_rented_gpu_session()
-        clear_progress(args.state_dir)
+        clear_progress()
         return 0
 
     return 0

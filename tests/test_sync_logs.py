@@ -71,9 +71,8 @@ class TestDownloadSkipPrefixes:
         mock_paginator.paginate.return_value = [
             {
                 "Contents": [
-                    {"Key": "state-mainnet/state.json"},
-                    {"Key": "state-mainnet/logs/cpu_100_20260101_120000.log"},
                     {"Key": "state-mainnet/container_logs/uid1_abcd_100.log"},
+                    {"Key": "state-mainnet/logs/cpu_100_20260101_120000.log"},
                 ]
             }
         ]
@@ -89,12 +88,11 @@ class TestDownloadSkipPrefixes:
 
             count = download(tmp_path, skip_prefixes=("logs/",))
 
-        assert count == 2
-        assert mock_s3.download_file.call_count == 2
+        assert count == 1
+        assert mock_s3.download_file.call_count == 1
         downloaded_locals = {
             call.args[2] for call in mock_s3.download_file.call_args_list
         }
-        assert str(tmp_path / "state.json") in downloaded_locals
         assert str(tmp_path / "container_logs/uid1_abcd_100.log") in downloaded_locals
         assert not (tmp_path / "logs/cpu_100_20260101_120000.log").exists()
 

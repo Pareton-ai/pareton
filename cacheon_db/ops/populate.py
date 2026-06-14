@@ -138,12 +138,37 @@ def _leader_row(role: str, rec) -> tuple:
     )
 
 
+def _load_state_json(state_dir: Path):
+    from validator.state import ValidatorState
+
+    path = state_dir / "state.json"
+    if not path.is_file():
+        raise SystemExit(f"Missing {path}")
+    return ValidatorState.from_dict(json.loads(path.read_text()))
+
+
+def _load_eval_job_json(state_dir: Path):
+    from validator.eval_schema import EvalJob
+
+    path = state_dir / "eval_job.json"
+    if not path.is_file():
+        return None
+    return EvalJob.from_dict(json.loads(path.read_text()))
+
+
+def _load_fingerprints_json(state_dir: Path) -> dict:
+    path = state_dir / "content_fingerprints.json"
+    if not path.is_file():
+        return {"entries": {}}
+    data = json.loads(path.read_text())
+    entries = data.get("entries")
+    if not isinstance(entries, dict):
+        return {"entries": {}}
+    return {"entries": entries}
+
+
 def _write_all(cur, state_dir: Path) -> dict[str, int]:
     from psycopg2.extras import Json
-
-    from validator.content_fingerprint import load_fingerprint_registry
-    from validator.eval_schema import EvalJob
-    from validator.state import ValidatorState
 
     counts = {
         "evaluations": 0,
@@ -152,7 +177,7 @@ def _write_all(cur, state_dir: Path) -> dict[str, int]:
         "eval_jobs": 0,
     }
 
-    state = ValidatorState.load(state_dir)
+    state = _load_state_json(state_dir)
     from cacheon_db.mirror import _VALIDATOR_META_UPSERT, _validator_meta_params
 
     cur.execute(_VALIDATOR_META_UPSERT, _validator_meta_params(state))
@@ -261,7 +286,7 @@ def _write_all(cur, state_dir: Path) -> dict[str, int]:
         )
         counts["leader_history"] += 1
 
-    registry = load_fingerprint_registry(state_dir)
+    registry = _load_fingerprints_json(state_dir)
     for fingerprint, entry in (registry.get("entries") or {}).items():
         cur.execute(
             """
@@ -288,7 +313,7 @@ def _write_all(cur, state_dir: Path) -> dict[str, int]:
         )
         counts["fingerprints"] += 1
 
-    job = EvalJob.load(state_dir)
+    job = _load_eval_job_json(state_dir)
     if job is not None:
         cur.execute(
             "DELETE FROM eval_jobs WHERE block = %s AND status = 'pending'",
