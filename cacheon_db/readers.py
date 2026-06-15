@@ -139,7 +139,14 @@ def list_evaluations(*, status: str | None = None) -> list[dict[str, Any]]:
         SELECT uid, hotkey, commit_block, image, digest, score,
                speed_improvement, token_match_rate, disqualified,
                disqualify_reason, evaluated_at, evaluation_block, per_prompt
-        FROM evaluations
+        FROM (
+            SELECT DISTINCT ON (hotkey, commit_block)
+                   uid, hotkey, commit_block, image, digest, score,
+                   speed_improvement, token_match_rate, disqualified,
+                   disqualify_reason, evaluated_at, evaluation_block, per_prompt
+            FROM evaluations
+            ORDER BY hotkey, commit_block, evaluated_at DESC
+        ) latest
     """
     params: tuple[Any, ...] = ()
     if status == "dq":
@@ -191,7 +198,7 @@ def get_evaluations_by_uid(uid: int) -> list[dict[str, Any]]:
 
 
 def count_evaluations() -> tuple[int, int, int, float | None]:
-    """Return (total, active, dq, last_eval_ts)."""
+    """Return (total, active, dq, last_eval_ts) for latest row per submission."""
     with read_db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
@@ -201,7 +208,12 @@ def count_evaluations() -> tuple[int, int, int, float | None]:
                     COUNT(*) FILTER (WHERE NOT disqualified) AS active,
                     COUNT(*) FILTER (WHERE disqualified) AS dq,
                     MAX(evaluated_at) AS last_eval_ts
-                FROM evaluations
+                FROM (
+                    SELECT DISTINCT ON (hotkey, commit_block)
+                           disqualified, evaluated_at
+                    FROM evaluations
+                    ORDER BY hotkey, commit_block, evaluated_at DESC
+                ) latest
                 """
             )
             row = cur.fetchone()
@@ -217,25 +229,37 @@ def count_evaluations() -> tuple[int, int, int, float | None]:
 
 
 def list_rounds() -> list[dict[str, Any]]:
-    evals = list_evaluations()
+    with read_db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT uid, hotkey, commit_block, image, digest, score,
+                       speed_improvement, token_match_rate, disqualified,
+                       disqualify_reason, evaluated_at, evaluation_block
+                FROM evaluations
+                ORDER BY evaluation_block DESC, evaluated_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
     by_block: dict[int, list[dict]] = defaultdict(list)
     ts_by_block: dict[int, float] = {}
-    for e in evals:
-        block = e.get("evaluation_block", 0)
+    for row in rows:
+        block = row.get("evaluation_block", 0)
         by_block[block].append(
             {
-                "uid": e.get("uid"),
-                "hotkey": e.get("hotkey"),
-                "image": e.get("image"),
-                "commit_block": e.get("commit_block"),
-                "score": e.get("score"),
-                "speed_improvement": e.get("speed_improvement"),
-                "token_match_rate": e.get("token_match_rate"),
-                "disqualified": e.get("disqualified"),
-                "disqualify_reason": e.get("disqualify_reason"),
+                "uid": row.get("uid"),
+                "hotkey": row.get("hotkey"),
+                "image": row.get("image"),
+                "commit_block": row.get("commit_block"),
+                "score": row.get("score"),
+                "speed_improvement": row.get("speed_improvement"),
+                "token_match_rate": row.get("token_match_rate"),
+                "disqualified": row.get("disqualified"),
+                "disqualify_reason": row.get("disqualify_reason"),
             }
         )
-        ts = e.get("evaluated_at") or 0
+        ts = row.get("evaluated_at") or 0
         if ts > ts_by_block.get(block, 0):
             ts_by_block[block] = ts
 

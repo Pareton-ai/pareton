@@ -1,7 +1,7 @@
 """Validator memory: who is winning and what we already scored.
 
 `ValidatorState` holds the current winner (best-scoring miner), evaluation
-history, and pre-reject reasons. Structured state lives in Neon Postgres;
+history, and pre-reject reasons. Structured state lives in Postgres;
 the loop loads on startup and after each GPU round, mutates in memory, and
 mirrors writes back to Postgres.
 

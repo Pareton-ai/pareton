@@ -106,10 +106,12 @@ def load_validator_state_dict() -> dict[str, Any]:
                 leader_rows = cur.fetchall()
                 cur.execute(
                     """
-                    SELECT hotkey, commit_block, uid, image, digest, score,
+                    SELECT DISTINCT ON (hotkey, commit_block)
+                           hotkey, commit_block, uid, image, digest, score,
                            speed_improvement, token_match_rate, disqualified,
                            disqualify_reason, evaluated_at, evaluation_block, per_prompt
                     FROM evaluations
+                    ORDER BY hotkey, commit_block, evaluated_at DESC
                     """
                 )
                 eval_rows = cur.fetchall()
