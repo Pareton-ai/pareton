@@ -137,9 +137,9 @@ def test_count_evaluations(mock_conn):
     assert last_ts == 123.0
 
 
-@patch("cacheon_db.readers.list_evaluations")
-def test_list_rounds_groups_by_block(mock_list):
-    mock_list.return_value = [
+@patch("cacheon_db.readers.read_db_connection")
+def test_list_rounds_groups_by_block(mock_conn):
+    rows = [
         {
             "uid": 1,
             "hotkey": "hk1",
@@ -167,6 +167,7 @@ def test_list_rounds_groups_by_block(mock_list):
             "evaluation_block": 100,
         },
     ]
+    mock_conn.return_value.__enter__.return_value = _mock_read_conn(rows)
     rounds = list_rounds()
     assert len(rounds) == 1
     assert rounds[0]["evaluation_block"] == 100

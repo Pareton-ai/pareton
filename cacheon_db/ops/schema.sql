@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS evaluations (
   evaluation_block INTEGER NOT NULL,
   per_prompt JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (hotkey, commit_block)
+  UNIQUE (hotkey, commit_block, evaluation_block)
 );
 
 CREATE INDEX IF NOT EXISTS evaluations_evaluated_at_idx ON evaluations (evaluated_at DESC);

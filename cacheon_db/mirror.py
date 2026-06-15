@@ -137,7 +137,7 @@ def sync_evaluation(ev: Any) -> None:
                 speed_improvement, token_match_rate, disqualified,
                 disqualify_reason, evaluated_at, evaluation_block, per_prompt
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (hotkey, commit_block) DO UPDATE SET
+            ON CONFLICT (hotkey, commit_block, evaluation_block) DO UPDATE SET
                 uid = EXCLUDED.uid,
                 image = EXCLUDED.image,
                 digest = EXCLUDED.digest,
@@ -147,7 +147,6 @@ def sync_evaluation(ev: Any) -> None:
                 disqualified = EXCLUDED.disqualified,
                 disqualify_reason = EXCLUDED.disqualify_reason,
                 evaluated_at = EXCLUDED.evaluated_at,
-                evaluation_block = EXCLUDED.evaluation_block,
                 per_prompt = EXCLUDED.per_prompt
             """,
             _evaluation_row(ev),

@@ -603,31 +603,32 @@ def main() -> int:
         if rec.eval_key in deferred_keys:
             update_incumbent_status(label, status="skipped", detail=TF_DEFER_DETAIL)
             continue
-        icon = "❌" if rec.disqualified else "📊"
+        outcome = state.record_evaluation(rec, current_block=block)
+        stored = outcome.stored
+        if label == "leader":
+            leader_record = stored
+        else:
+            ru_record = stored
+        icon = "❌" if stored.disqualified else "📊"
         logger.info(
             "%s %s UID %d score=%.4f (dq=%s) [after teacher-forcing]",
             icon,
             label,
-            rec.uid,
-            rec.score,
-            rec.disqualify_reason or "no",
+            stored.uid,
+            stored.score,
+            stored.disqualify_reason or "no",
         )
         update_incumbent_status(
             label,
-            status="dq" if rec.disqualified else "scored",
-            score=rec.score,
-            dq_reason=rec.disqualify_reason,
+            status="dq" if stored.disqualified else "scored",
+            score=stored.score,
+            dq_reason=stored.disqualify_reason,
         )
     # ------------------------------------------------------------------ #
-    # Upsert leader/RU fresh scores and rerank
+    # Rerank leader/RU fresh scores against challengers
     # ------------------------------------------------------------------ #
 
     if scoring_available:
-        if leader_record is not None:
-            state.evaluations[f"{leader_record.eval_key}:{block}"] = leader_record
-        if ru_record is not None:
-            state.evaluations[f"{ru_record.eval_key}:{block}"] = ru_record
-
         prev_winner = state.winner
         from .state import OVERTAKE_EPSILON
 

@@ -658,7 +658,6 @@ def run_tick(
         if gpu_eval_configured():
             success = run_gpu_eval(state_dir, eval_job)
             clear_stale_progress = not success
-            reloaded_after_gpu = True
             if not success:
                 try:
                     from cacheon_db.mirror import delete_pending_eval_job
@@ -686,8 +685,6 @@ def run_tick(
                 from .eval_progress import clear_progress
 
                 clear_progress()
-        else:
-            reloaded_after_gpu = True
 
     metagraph, weights_block, _ = fetch_metagraph(subtensor, netuid)
     if _apply_deregistration_guard(state, metagraph, weights_block):
