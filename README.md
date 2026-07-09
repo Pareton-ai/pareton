@@ -1,97 +1,23 @@
-<div align="center">
+# Pareton (SN10)
 
-# Cacheon (SN14)
+**Inference optimization campaigns.** Seeded from [Cacheon](https://github.com/latent-to/cacheon); this repo is the Pareton product on Bittensor SN10.
 
-**Inference optimization. Fastest server wins.**
+Cacheon (SN14) code remains in-tree as legacy reference while Stage 0 is built. New work lives under `pareton/`.
 
-[![Discord](https://img.shields.io/discord/308323056592486420.svg)](https://discord.gg/bittensor)
-[![Docs](https://img.shields.io/badge/docs-cacheon.ai-blue)](https://cacheon.ai/docs)
-[![TAO.app](https://img.shields.io/badge/TAO.app-SN14-purple)](https://tao.app/subnets/14)
-[![X](https://img.shields.io/badge/X-@cacheon__ai-000000?logo=x&logoColor=white)](https://x.com/cacheon_ai)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+## Stage 0 (in progress)
 
-[Website](https://cacheon.ai) | [Docs](https://cacheon.ai/docs) | [Discord](https://discord.gg/bittensor) | [TAO.app](https://tao.app/subnets/14)
+Campaign pipeline: profile → pinned campaign manifest → miner patch commitment → provenance & build gate → content-addressed engine image.
 
----
+See:
 
-</div>
+- [`Pareton_Engineering_Architecture_v0.pdf`](Pareton_Engineering_Architecture_v0.pdf)
+- [`Pareton_Optimization_Profile.pdf`](Pareton_Optimization_Profile.pdf)
 
-Cacheon is a Bittensor subnet (SN14) that runs an open competition for **production-grade LLM inference optimization**. Miners submit containerized inference servers. Validators evaluate them against a vLLM baseline on the same hardware. The fastest correct server earns the majority of emission; a runner-up receives a share.
+## Legacy Cacheon layout
 
-**V1 arena:** `Qwen2.5-72B-Instruct` on 8-GPU TP=8 pods (8x H200, 8x B200, or 8x B300). Beat the pinned vLLM baseline on end-to-end response time while passing a greedy-decoding correctness gate.
+Frozen Cacheon (SN14) code — not the Pareton runtime path:
 
-## How It Works
-
-1. **Miners** build an inference server, package it as a Docker image, pay the submission fee, and commit the image reference, digest, and payment proof on-chain.
-2. **Validators** scan the chain for new commitments, pull the image, and run it with model weights mounted at `/models`.
-3. **Scoring** measures end-to-end response time improvement over the vLLM baseline. Correctness is checked first; fail it and the score is zero.
-4. **The fastest correct server** becomes the winner and earns 80% of the competition pool. The runner-up earns 20%.
-5. **Challengers** must exceed the winner's fresh score by a fixed 1% margin to prevent noise-driven churn.
-
-Score formula:
-
-```python
-if not correctness_pass:
-    score = 0.0
-else:
-    speed_improvement = median(max(0, (baseline_e2e - miner_e2e) / baseline_e2e))
-    score = speed_improvement
-```
-
-Full detail: [cacheon.ai/docs/evaluation/scoring](https://cacheon.ai/docs/evaluation/scoring)
-
-## For Miners
-
-Build an inference server that serves `Qwen2.5-72B-Instruct` via `/v1/chat/completions` with streaming and logprobs. Package it as a Docker image (maximum 20 GB; model weights are mounted at runtime, not baked into the image). Push it to a public registry, then run `miner/commit.py` to pay the submission fee and commit on-chain in one flow.
-
-**Requirements:** public container registry, Bittensor wallet registered on SN14, coldkey balance for the submission fee. GPU hardware is only needed for local testing.
-
-```bash
-# Push your image
-docker tag my-server:latest docker.io/myuser/cacheon-miner:v1
-docker push docker.io/myuser/cacheon-miner:v1
-
-# Pay fee + commit on-chain (test locally first)
-python miner/commit.py \
-  --wallet-name <wallet> \
-  --wallet-hotkey <hotkey> \
-  --image "docker.io/myuser/cacheon-miner:v1" \
-  --digest "sha256:..." \
-  --fee 0.1 \
-  --network finney \
-  --netuid 14
-```
-
-Full guide: [cacheon.ai/docs/miners/overview](https://cacheon.ai/docs/miners/overview)
-
-## For Validators
-
-The validator has two components: an always-on CPU host (chain scanning, weight setting) and an ephemeral GPU pod (eval). The GPU pod is rented on-demand only when challengers are queued.
-
-**GPU requirements:** NVLink/SXM 8-GPU pod (8x H200, 8x B200, or 8x B300 are Tier A; 8x H100 is Tier B fallback), 400 GB storage, model weights at `/workspace/models/Qwen2.5-72B-Instruct`. See [GPU requirements](https://cacheon.ai/docs/validators/overview#gpu-requirements).
-
-```bash
-# CPU host (always-on)
-git clone https://github.com/latent-to/cacheon
-cd cacheon
-cp .env.example .env   # add wallet and S3 config
-docker compose up --build
-
-# GPU pod (on-demand, run when challengers appear)
-bash scripts/gpu_setup/setup.sh
-docker compose -f validator/gpu-compose.yml up --build -d
-```
-
-Full guide: [cacheon.ai/docs/validators/overview](https://cacheon.ai/docs/validators/overview)
-
-## Documentation
-
-|                | Miners                                                      | Validators                                                           | Evaluation                                            |
-| -------------- | ----------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------- |
-| **Start here** | [Overview](https://cacheon.ai/docs/miners/overview)         | [Overview](https://cacheon.ai/docs/validators/overview)              | [Scoring](https://cacheon.ai/docs/evaluation/scoring) |
-| **Reference**  | [API contract](https://cacheon.ai/docs/miners/api-contract) | [Architecture](https://cacheon.ai/docs/validators/architecture)      | [Harness](https://cacheon.ai/docs/evaluation/harness) |
-| **Setup**      | [Quickstart](https://cacheon.ai/docs/miners/registration)   | [Validator setup](https://cacheon.ai/docs/validators/setup)          | [Prompts](https://cacheon.ai/docs/evaluation/prompts) |
-| **Rules**      | [Rules](https://cacheon.ai/docs/miners/rules)               | [Manual GPU setup](https://cacheon.ai/docs/validators/gpu-pod-setup) | [Roadmap](https://cacheon.ai/docs/roadmap)            |
+- `validator/`, `cacheon_db/`, `api/`, `miner/commit.py`, `example-miner/`, `scripts/`
 
 ## License
 

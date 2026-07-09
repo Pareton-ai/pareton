@@ -177,3 +177,5 @@ docs/running_knowledge_base.md
 # Phase 5 validator runtime state (atomic JSON; regenerated on startup)
 state/
 state-mainnet/
+
+.DS_Store
