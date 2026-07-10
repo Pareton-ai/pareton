@@ -1,85 +1,141 @@
-"""Cacheon monitoring API. Structured state from Postgres; logs from local mount."""
+"""Pareton Stage 0 API: campaigns, submissions, presigned patch uploads."""
 
-from fastapi import FastAPI, Request
+from __future__ import annotations
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
+from pydantic import BaseModel, Field
 
-from api.config import ALLOWED_ORIGINS
-from api.errors import (
-    database_not_configured_handler,
-    database_unavailable_handler,
+import config
+from campaign.store import (
+    get_campaign,
+    get_submission,
+    list_campaigns,
+    list_events,
+    list_submissions,
 )
-from cacheon_db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
-from api.routes.health import router as health_router
-from api.routes.status import router as status_router
-from api.routes.leader import router as leader_router
-from api.routes.evaluations import router as evaluations_router
-from api.routes.eval_progress import router as eval_progress_router
-from api.routes.logs import router as logs_router
-from api.routes.rounds import router as rounds_router
-
-TRUSTED_PROXIES = {"127.0.0.1", "::1"}
-
-
-def _client_ip(request: Request) -> str:
-    """Use X-Forwarded-For when the direct peer is the local reverse proxy."""
-    peer = request.client.host if request.client else "127.0.0.1"
-    if peer in TRUSTED_PROXIES:
-        forwarded = request.headers.get("x-forwarded-for", "")
-        if forwarded:
-            return forwarded.split(",")[-1].strip()
-    return peer
-
-
-limiter = Limiter(key_func=_client_ip, default_limits=["600/minute"])
+from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
+from storage.s3 import create_presigned_patch_upload
 
 app = FastAPI(
-    title="Cacheon Monitoring API",
-    description=(
-        "Read-only status surface for the Cacheon subnet (SN14). "
-        "Serves evaluation results, leader status, and round history from Postgres. "
-        "Container and validator logs are read from the local state mount."
-    ),
+    title="Pareton API",
+    description="Stage 0 campaign + submission surface (SN10).",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_tags=[
-        {"name": "Overview", "description": "Health check and validator status"},
-        {"name": "Leader", "description": "Current leader and overtake history"},
-        {
-            "name": "Evaluations",
-            "description": "Completed evaluation records and per-UID history",
-        },
-        {
-            "name": "Logs",
-            "description": "Raw Docker container logs from eval runs and validator process logs",
-        },
-        {"name": "Rounds", "description": "Eval rounds and pending eval jobs"},
-    ],
 )
 
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-app.add_exception_handler(DatabaseNotConfigured, database_not_configured_handler)
-app.add_exception_handler(DatabaseUnavailable, database_unavailable_handler)
-app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET"],
+    allow_origins=config.API_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-app.include_router(health_router)
-app.include_router(status_router)
-app.include_router(leader_router)
-app.include_router(evaluations_router)
-app.include_router(eval_progress_router)
-app.include_router(logs_router)
-app.include_router(rounds_router)
+
+@app.exception_handler(DatabaseNotConfigured)
+async def _db_not_configured(_request, exc: DatabaseNotConfigured):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(DatabaseUnavailable)
+async def _db_unavailable(_request, exc: DatabaseUnavailable):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+class PresignRequest(BaseModel):
+    campaign_id: str
+    hotkey: str = Field(min_length=8, max_length=128)
+
+
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "pareton", "stage": 0}
+
+
+@app.get("/v1/campaigns")
+def campaigns(status: str | None = Query(default=None)):
+    items = list_campaigns(status=status)
+    return {"campaigns": [c.to_public_dict() for c in items]}
+
+
+@app.get("/v1/campaigns/{campaign_id}")
+def campaign_detail(campaign_id: str):
+    c = get_campaign(campaign_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return c.to_public_dict()
+
+
+@app.get("/v1/campaigns/{campaign_id}/submissions")
+def campaign_submissions(campaign_id: str):
+    c = get_campaign(campaign_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    rows = list_submissions(campaign_id)
+    return {
+        "campaign_id": campaign_id,
+        "submissions": [
+            {
+                **{k: (str(v) if k in ("id", "campaign_id") else v) for k, v in r.items()},
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/v1/submissions/{patch_hash}")
+def submission_detail(patch_hash: str):
+    row = get_submission(patch_hash)
+    if row is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    events = list_events(row["id"])
+    return {
+        "submission": {
+            **{
+                k: (str(v) if k in ("id", "campaign_id") else v)
+                for k, v in row.items()
+            }
+        },
+        "events": [
+            {
+                "state": e["state"],
+                "evidence_ref": e.get("evidence_ref"),
+                "detail": e.get("detail") or {},
+                "created_at": e["created_at"].isoformat()
+                if hasattr(e["created_at"], "isoformat")
+                else str(e["created_at"]),
+            }
+            for e in events
+        ],
+    }
+
+
+@app.post("/v1/uploads/patch")
+def presign_patch(body: PresignRequest):
+    c = get_campaign(body.campaign_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    if c.status != "open":
+        raise HTTPException(status_code=400, detail="campaign is not open")
+    try:
+        result = create_presigned_patch_upload(
+            campaign_id=body.campaign_id,
+            hotkey=body.hotkey,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"presign failed: {exc}") from exc
+    return {
+        "upload_url": result.upload_url,
+        "retrieval_url": result.retrieval_url,
+        "object_key": result.object_key,
+        "expires_in": result.expires_in,
+    }
 
 
 @app.get("/", include_in_schema=False)

@@ -1,5 +1,0 @@
-bittensor>=10
-boto3
-paramiko
-psycopg2-binary
-requests
