@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "name": "pareton-synthetic-v0",
+    "model": "Qwen2.5-72B-Instruct",
+    "p50_input": 1024,
+    "p90_input": 8192,
+    "p99_input": 32768,
+    "p50_output": 200,
+    "p90_output": 800,
+    "p99_output": 2000,
+    "shared_prefix_ratio": 0.4,
+    "serving_mode": "latency"
+  },
+  "requests": [
+    {
+      "id": "syn-001",
+      "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Summarize the benefits of continuous batching in LLM serving."}
+      ],
+      "max_tokens": 128
+    },
+    {
+      "id": "syn-002",
+      "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Explain KV cache paging in one paragraph."}
+      ],
+      "max_tokens": 128
+    }
+  ]
+}

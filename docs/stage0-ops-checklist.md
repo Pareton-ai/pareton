@@ -1,0 +1,132 @@
+# Stage 0 Ops Checklist
+
+Everything code-side is done; these are the manual/account steps to go from
+"mock build on a laptop" to "real gate pipeline on SN10". Work top to bottom.
+
+## 1. AWS S3 (`pareton-s3`)
+
+Bucket: `s3://pareton-s3`, prefix `stage0/` (already the config defaults).
+
+- [ ] Create the bucket in the region you want (default config assumes `us-east-1`;
+      if different, set `PARETON_S3_REGION`).
+- [ ] Keep the bucket **private** (block public access ON). Miners upload via
+      presigned PUT; the worker fetches via the same AWS-signed path — but note the
+      worker currently fetches `retrieval_url` with plain HTTPS GET, so either:
+  - attach a bucket policy allowing public **read** on `stage0/campaigns/*` only, or
+  - set `PARETON_S3_PUBLIC_BASE_URL` to a CloudFront distribution in front of the bucket.
+- [ ] Create an IAM user `pareton-api` with a policy scoped to
+      `s3:PutObject`/`s3:GetObject` on `arn:aws:s3:::pareton-s3/stage0/*`.
+- [ ] Put the keys in `.env` on the VPS:
+
+```dotenv
+PARETON_S3_ACCESS_KEY=...
+PARETON_S3_SECRET_KEY=...
+PARETON_S3_BUCKET=pareton-s3
+PARETON_S3_REGION=us-east-1
+```
+
+## 2. GitHub / GHCR
+
+Org: [`Pareton-ai`](https://github.com/Pareton-ai) (already exists, holds the
+vLLM fork). GHCR namespaces are lowercase: `ghcr.io/pareton-ai/...`.
+
+Current auth state: the token in the GitHub MCP cannot create repos (403), and
+the local `gh` CLI keyring token is invalid.
+
+- [ ] Fix local auth: `gh auth refresh -h github.com` (needs `repo` + `write:packages` scopes, with org access to Pareton-ai).
+- [ ] Create the repo `github.com/Pareton-ai/pareton` (private) and push:
+
+```bash
+cd /Users/xavierlu/Desktop/pareton
+gh repo create Pareton-ai/pareton --private --source . --push
+```
+
+- [ ] Create a classic PAT with `write:packages` (authorized for the Pareton-ai
+      org) for the builder and set on the VPS:
+
+```dotenv
+PARETON_GHCR_OWNER=pareton-ai
+PARETON_GHCR_USERNAME=xavierlyu
+PARETON_GHCR_TOKEN=ghp_...
+```
+
+## 3. Baseline image
+
+The campaign manifest needs a **real** `base_image_digest` before real builds.
+
+- [ ] On the VPS (or any amd64 box with Docker):
+
+```bash
+docker build -t ghcr.io/pareton-ai/pareton-baseline:v0 images/baseline
+docker push ghcr.io/pareton-ai/pareton-baseline:v0
+docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/pareton-ai/pareton-baseline:v0
+```
+
+- [ ] Re-seed (or seed the first real campaign) passing that digest so the
+      manifest stops using the `sha256:bbb...` placeholder.
+
+Baseline pin (already the seed default): vLLM **v0.24.0** =
+`ee0da84ab9e04ac7610e28580af62c365e898389`.
+
+## 4. Bittensor wallet / hotkey (SN10)
+
+Chain **reads** (metagraph, revealed commitments) need no wallet, so the watcher
+runs without one. A wallet is needed for miner test commits now and
+weight-setting later (Stage 1+).
+
+- [ ] Create owner coldkey + a hotkey:
+
+```bash
+btcli wallet new_coldkey --wallet.name pareton-owner
+btcli wallet new_hotkey --wallet.name pareton-owner --wallet.hotkey watcher
+```
+
+- [ ] Back up both mnemonics offline. The coldkey controlling SN10 is the crown jewel.
+- [ ] For an end-to-end test commit on finney, register a throwaway miner hotkey
+      on netuid 10 and run `miner/commit_patch.py` against the live API.
+- [ ] Set on the VPS once weight-setting lands:
+
+```dotenv
+PARETON_WALLET_NAME=pareton-owner
+PARETON_WALLET_HOTKEY=watcher
+```
+
+## 5. VPS deploy (worker + builder + watcher, one box)
+
+One dedicated CPU VPS (8+ cores / 16 GB+ RAM recommended — vLLM compiles are
+30–60+ min; more cores = faster gate turnaround). Hetzner/OVH dedicated CPU
+tiers are fine.
+
+- [ ] Install Docker + Python 3.11+, clone the repo, `pip install -r requirements.txt` in a venv.
+- [ ] Copy `.env` (Neon URL + S3 keys + GHCR token). Never commit it.
+- [ ] Run the API and worker (systemd units or `docker compose`; simplest is two units):
+
+```ini
+# /etc/systemd/system/pareton-worker.service
+[Service]
+WorkingDirectory=/opt/pareton
+EnvironmentFile=/opt/pareton/.env
+ExecStart=/opt/pareton/.venv/bin/python -m worker.main --scan-chain
+Restart=always
+
+# /etc/systemd/system/pareton-api.service
+[Service]
+WorkingDirectory=/opt/pareton
+EnvironmentFile=/opt/pareton/.env
+ExecStart=/opt/pareton/.venv/bin/python -m api
+Restart=always
+```
+
+- [ ] Put the API behind TLS (Caddy/nginx) so miners can hit the presign endpoint.
+
+`--scan-chain` makes the single worker process poll SN10 revealed commitments
+each cycle, enqueue new submissions, and use the live metagraph hotkeys for the
+identity gate. Without the flag it only drains the DB queue (local/mock mode).
+
+## 6. Open the first campaign
+
+Whenever ready — no fixed cadence.
+
+- [ ] Seed with real pins: `python -m campaign.seed --base-image-digest sha256:<real> ...`
+- [ ] Flip status to `open` (seed CLI flag or SQL) and share the campaign id +
+      API base URL with miners.

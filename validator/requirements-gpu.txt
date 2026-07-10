@@ -1,5 +1,0 @@
-# GPU eval entrypoint requirements. No bittensor -- chain access is on the CPU side.
-boto3
-datasets>=3
-huggingface-hub>=1.13.0
-psycopg2-binary
