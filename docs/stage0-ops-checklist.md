@@ -30,17 +30,8 @@ PARETON_S3_REGION=us-east-1
 Org: [`Pareton-ai`](https://github.com/Pareton-ai) (already exists, holds the
 vLLM fork). GHCR namespaces are lowercase: `ghcr.io/pareton-ai/...`.
 
-Current auth state: the token in the GitHub MCP cannot create repos (403), and
-the local `gh` CLI keyring token is invalid.
-
-- [ ] Fix local auth: `gh auth refresh -h github.com` (needs `repo` + `write:packages` scopes, with org access to Pareton-ai).
-- [ ] Create the repo `github.com/Pareton-ai/pareton` (private) and push:
-
-```bash
-cd /Users/xavierlu/Desktop/pareton
-gh repo create Pareton-ai/pareton --private --source . --push
-```
-
+- [x] Fix local auth: `gh auth refresh -h github.com` (done 2026-07-09; scopes: gist, read:org, repo, workflow).
+- [x] Create the repo [`github.com/Pareton-ai/pareton`](https://github.com/Pareton-ai/pareton) (private) and push `main` (done 2026-07-09).
 - [ ] Create a classic PAT with `write:packages` (authorized for the Pareton-ai
       org) for the builder and set on the VPS:
 
