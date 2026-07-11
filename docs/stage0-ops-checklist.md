@@ -5,24 +5,21 @@ Everything code-side is done; these are the manual/account steps to go from
 
 ## 1. AWS S3 (`pareton-s3`)
 
-Bucket: `s3://pareton-s3`, prefix `stage0/` (already the config defaults).
+Bucket: `s3://pareton-s3` in **`us-east-2`** (not us-east-1), prefix `stage0/`.
 
-- [ ] Create the bucket in the region you want (default config assumes `us-east-1`;
-      if different, set `PARETON_S3_REGION`).
-- [ ] Keep the bucket **private** (block public access ON). Miners upload via
-      presigned PUT; the worker fetches via the same AWS-signed path — but note the
-      worker currently fetches `retrieval_url` with plain HTTPS GET, so either:
-  - attach a bucket policy allowing public **read** on `stage0/campaigns/*` only, or
-  - set `PARETON_S3_PUBLIC_BASE_URL` to a CloudFront distribution in front of the bucket.
-- [ ] Create an IAM user `pareton-api` with a policy scoped to
-      `s3:PutObject`/`s3:GetObject` on `arn:aws:s3:::pareton-s3/stage0/*`.
-- [ ] Put the keys in `.env` on the VPS:
+- [x] Bucket `pareton-s3` exists (us-east-2).
+- [x] IAM user `pareton-api` with `PutObject`/`GetObject` on `stage0/*` (policy `pareton-api-s3-stage0`).
+- [x] Access key created; credentials in local `.env` (never commit).
+- [x] Bucket policy: public **read** on `stage0/campaigns/*` only (worker plain-HTTPS GET).
+- [x] Smoke test passed: presigned PUT + public GET via `storage/s3.py`.
+
+Set on the VPS (same values as local `.env`):
 
 ```dotenv
 PARETON_S3_ACCESS_KEY=...
 PARETON_S3_SECRET_KEY=...
 PARETON_S3_BUCKET=pareton-s3
-PARETON_S3_REGION=us-east-1
+PARETON_S3_REGION=us-east-2
 ```
 
 ## 2. GitHub / GHCR

@@ -22,7 +22,7 @@ S3_ACCESS_KEY: str = os.environ.get("PARETON_S3_ACCESS_KEY", "")
 S3_SECRET_KEY: str = os.environ.get("PARETON_S3_SECRET_KEY", "")
 S3_BUCKET: str = os.environ.get("PARETON_S3_BUCKET", "pareton-s3")
 S3_PREFIX: str = os.environ.get("PARETON_S3_PREFIX", "stage0")
-S3_REGION: str = os.environ.get("PARETON_S3_REGION", "us-east-1")
+S3_REGION: str = os.environ.get("PARETON_S3_REGION", "us-east-2")
 S3_PUBLIC_BASE_URL: str = os.environ.get("PARETON_S3_PUBLIC_BASE_URL", "")
 PRESIGN_EXPIRES_S: int = int(os.environ.get("PARETON_PRESIGN_EXPIRES_S", "3600"))
 
