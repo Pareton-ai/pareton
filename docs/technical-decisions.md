@@ -184,3 +184,4 @@ From business / inference optimization docs — **for orientation only:**
 | 2026-07-09 | Initial record after Stage 0 foundation + repo flatten + legacy strip. |
 | 2026-07-09 | Ops decisions: AWS S3 `pareton-s3`, vLLM v0.24.0 pin, single-VPS deploy, worker `--scan-chain`. |
 | 2026-07-10 | S3 ops complete: IAM `pareton-api`, bucket policy, region `us-east-2`, smoke test passed. |
+| 2026-07-14 | Bench (Stages 1–3) built in-house with AI agents, not outsourced. Lives in this repo as `bench/` with a `python -m bench` entrypoint — worker (CPU VPS) invokes it remotely on rented GPU pods (Targon/Lium/Shadeform), so it needs a process boundary even though it is not a separate repo. Full plan: `docs/roadmap.md`. |
