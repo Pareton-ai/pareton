@@ -339,7 +339,11 @@ class MockEngine:
         self._server = MockEngineServer(self.cfg)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        logger.info("mock engine listening on %s (tampered=%s)", self.base_url, self.cfg.tampered)
+        logger.info(
+            "mock engine listening on %s (tampered=%s)",
+            self.base_url,
+            self.cfg.tampered,
+        )
         return self
 
     def stop(self) -> None:
@@ -434,4 +438,3 @@ def response_shape_fingerprint(resp: dict[str, Any]) -> dict[str, Any]:
         return type(v).__name__
 
     return _type_of(resp)
-

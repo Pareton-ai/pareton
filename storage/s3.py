@@ -55,7 +55,9 @@ def public_retrieval_url(object_key: str) -> str:
     if config.S3_ENDPOINT_URL:
         endpoint = config.S3_ENDPOINT_URL.rstrip("/")
         return f"{endpoint}/{config.S3_BUCKET}/{object_key}"
-    return f"https://{config.S3_BUCKET}.s3.{config.S3_REGION}.amazonaws.com/{object_key}"
+    return (
+        f"https://{config.S3_BUCKET}.s3.{config.S3_REGION}.amazonaws.com/{object_key}"
+    )
 
 
 def create_presigned_patch_upload(
@@ -128,7 +130,9 @@ def fetch_patch_bytes(url: str) -> bytes:
     for attempt in range(1, config.PATCH_FETCH_RETRIES + 1):
         try:
             req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=config.PATCH_FETCH_TIMEOUT_S) as resp:
+            with urllib.request.urlopen(
+                req, timeout=config.PATCH_FETCH_TIMEOUT_S
+            ) as resp:
                 data = resp.read(config.PATCH_MAX_BYTES + 1)
             if len(data) > config.PATCH_MAX_BYTES:
                 raise ValueError(

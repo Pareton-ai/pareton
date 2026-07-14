@@ -10,7 +10,11 @@ pytestmark = pytest.mark.unit
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from campaign.manifest import build_manifest, compute_manifest_hash, freeze_manifest_fields
+from campaign.manifest import (
+    build_manifest,
+    compute_manifest_hash,
+    freeze_manifest_fields,
+)
 from campaign.models import SLA
 
 

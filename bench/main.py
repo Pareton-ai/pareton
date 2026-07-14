@@ -148,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m bench",
         description="Pareton bench harness (Stages 1–3). Stub mode until modules land.",
     )
-    p.add_argument("--request", required=True, type=Path, help="Path to bench_request.json")
+    p.add_argument(
+        "--request", required=True, type=Path, help="Path to bench_request.json"
+    )
     p.add_argument("--output-dir", required=True, type=Path, help="Output directory")
     p.add_argument(
         "--mock-engine",

@@ -39,14 +39,18 @@ class TraceRequest:
         prompt = d.get("prompt")
         prompt_token_ids = d.get("prompt_token_ids")
         if prompt is None and prompt_token_ids is None:
-            raise ValueError(f"trace request {d.get('id')!r}: need prompt or prompt_token_ids")
+            raise ValueError(
+                f"trace request {d.get('id')!r}: need prompt or prompt_token_ids"
+            )
         return cls(
             id=str(d["id"]),
             arrival_offset_ms=int(d["arrival_offset_ms"]),
             max_tokens=int(d["max_tokens"]),
             sampling=TraceSampling.from_dict(d["sampling"]),
             prompt=None if prompt is None else str(prompt),
-            prompt_token_ids=None if prompt_token_ids is None else list(prompt_token_ids),
+            prompt_token_ids=None
+            if prompt_token_ids is None
+            else list(prompt_token_ids),
         )
 
 
@@ -57,7 +61,9 @@ class TraceMeta:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceMeta:
-        return cls(name=str(d.get("name", "")), description=str(d.get("description", "")))
+        return cls(
+            name=str(d.get("name", "")), description=str(d.get("description", ""))
+        )
 
 
 @dataclass
@@ -111,7 +117,9 @@ class HardwareSpec:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> HardwareSpec:
-        return cls(gpu_count=int(d["gpu_count"]), gpu_sku_expected=str(d["gpu_sku_expected"]))
+        return cls(
+            gpu_count=int(d["gpu_count"]), gpu_sku_expected=str(d["gpu_sku_expected"])
+        )
 
 
 @dataclass
@@ -204,7 +212,9 @@ class SlaThresholds:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SlaThresholds:
-        return cls(p99_ttft_ms=float(d["p99_ttft_ms"]), p99_itl_ms=float(d["p99_itl_ms"]))
+        return cls(
+            p99_ttft_ms=float(d["p99_ttft_ms"]), p99_itl_ms=float(d["p99_itl_ms"])
+        )
 
 
 @dataclass
@@ -265,9 +275,7 @@ class BenchRequest:
 # bench_report.json (§4.4)
 # ---------------------------------------------------------------------------
 
-Verdict = Literal[
-    "pass", "fail_correctness", "fail_perf_screen", "fail_sla", "error"
-]
+Verdict = Literal["pass", "fail_correctness", "fail_perf_screen", "fail_sla", "error"]
 
 
 @dataclass

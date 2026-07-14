@@ -82,8 +82,12 @@ def test_http_server_completions():
 
 
 def test_tampered_mode_alters_logprobs():
-    clean_cfg = MockEngineConfig(tampered=False, logprob_base=-0.5, tamper_logprob_offset=1.25)
-    dirty_cfg = MockEngineConfig(tampered=True, logprob_base=-0.5, tamper_logprob_offset=1.25)
+    clean_cfg = MockEngineConfig(
+        tampered=False, logprob_base=-0.5, tamper_logprob_offset=1.25
+    )
+    dirty_cfg = MockEngineConfig(
+        tampered=True, logprob_base=-0.5, tamper_logprob_offset=1.25
+    )
     prompt = "Hello world"
     clean = build_completion_response(
         cfg=clean_cfg,
