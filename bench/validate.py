@@ -1,0 +1,261 @@
+"""Load and validate bench_request.json / workload_trace.json."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from bench.schemas import BenchRequest, WorkloadTrace
+
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
+
+
+class RequestValidationError(ValueError):
+    """Raised when bench_request.json fails schema / semantic checks (exit 1)."""
+
+
+def sha256_bytes(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return f"sha256:{h.hexdigest()}"
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RequestValidationError(f"cannot read {path}: {exc}") from exc
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RequestValidationError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise RequestValidationError(f"{path}: top-level JSON must be an object")
+    return obj
+
+
+def _require_keys(d: dict[str, Any], keys: list[str], *, ctx: str) -> None:
+    missing = [k for k in keys if k not in d]
+    if missing:
+        raise RequestValidationError(f"{ctx}: missing required fields: {missing}")
+
+
+def validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
+    """Validate a parsed request dict; raise RequestValidationError on failure."""
+    _require_keys(
+        d,
+        [
+            "schema_version",
+            "task_id",
+            "mode",
+            "model",
+            "hardware",
+            "engines",
+            "workload_trace",
+            "correctness",
+            "perf_screen",
+            "sla_bench",
+        ],
+        ctx="bench_request",
+    )
+    if int(d["schema_version"]) != 1:
+        raise RequestValidationError(
+            f"unsupported schema_version {d['schema_version']!r} (expected 1)"
+        )
+    if not _UUID_RE.match(str(d["task_id"])):
+        raise RequestValidationError(f"task_id must be a UUID, got {d['task_id']!r}")
+
+    model = d["model"]
+    if not isinstance(model, dict):
+        raise RequestValidationError("model must be an object")
+    _require_keys(
+        model,
+        ["hf_repo", "hf_revision", "dtype", "max_model_len"],
+        ctx="model",
+    )
+    if "quantization" not in model:
+        raise RequestValidationError("model: missing required fields: ['quantization']")
+    if not _GIT_SHA_RE.match(str(model["hf_revision"])):
+        raise RequestValidationError(
+            f"model.hf_revision must be a git commit sha, got {model['hf_revision']!r}"
+        )
+
+    hardware = d["hardware"]
+    if not isinstance(hardware, dict):
+        raise RequestValidationError("hardware must be an object")
+    _require_keys(hardware, ["gpu_count", "gpu_sku_expected"], ctx="hardware")
+    if int(hardware["gpu_count"]) < 1:
+        raise RequestValidationError("hardware.gpu_count must be >= 1")
+
+    engines = d["engines"]
+    if not isinstance(engines, dict):
+        raise RequestValidationError("engines must be an object")
+    _require_keys(engines, ["baseline", "candidate"], ctx="engines")
+    for role in ("baseline", "candidate"):
+        eng = engines[role]
+        if not isinstance(eng, dict):
+            raise RequestValidationError(f"engines.{role} must be an object")
+        _require_keys(eng, ["image"], ctx=f"engines.{role}")
+        if "@sha256:" not in str(eng["image"]) and "sha256:" not in str(eng["image"]):
+            raise RequestValidationError(
+                f"engines.{role}.image must be digest-referenced "
+                f"(contain @sha256:...), got {eng['image']!r}"
+            )
+
+    wt = d["workload_trace"]
+    if not isinstance(wt, dict):
+        raise RequestValidationError("workload_trace must be an object")
+    _require_keys(wt, ["path", "sha256"], ctx="workload_trace")
+    if not _SHA256_RE.match(str(wt["sha256"]).lower()):
+        raise RequestValidationError(
+            f"workload_trace.sha256 must match sha256:<64 hex>, got {wt['sha256']!r}"
+        )
+
+    corr = d["correctness"]
+    if not isinstance(corr, dict):
+        raise RequestValidationError("correctness must be an object")
+    _require_keys(corr, ["num_prompts", "max_new_tokens", "thresholds"], ctx="correctness")
+    thr = corr["thresholds"]
+    if not isinstance(thr, dict):
+        raise RequestValidationError("correctness.thresholds must be an object")
+    _require_keys(
+        thr,
+        ["mean_abs_logprob_diff", "max_abs_logprob_diff", "argmax_mismatch_rate"],
+        ctx="correctness.thresholds",
+    )
+
+    ps = d["perf_screen"]
+    if not isinstance(ps, dict):
+        raise RequestValidationError("perf_screen must be an object")
+    _require_keys(
+        ps, ["num_requests", "concurrency", "min_throughput_ratio"], ctx="perf_screen"
+    )
+
+    sla = d["sla_bench"]
+    if not isinstance(sla, dict):
+        raise RequestValidationError("sla_bench must be an object")
+    _require_keys(sla, ["repetitions", "warmup_requests", "thresholds"], ctx="sla_bench")
+    sla_thr = sla["thresholds"]
+    if not isinstance(sla_thr, dict):
+        raise RequestValidationError("sla_bench.thresholds must be an object")
+    _require_keys(sla_thr, ["p99_ttft_ms", "p99_itl_ms"], ctx="sla_bench.thresholds")
+
+    try:
+        return BenchRequest.from_dict(d)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RequestValidationError(str(exc)) from exc
+
+
+def load_bench_request(path: Path) -> tuple[BenchRequest, bytes]:
+    """Load + validate request file. Returns (request, raw_bytes) for fingerprinting."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RequestValidationError(f"cannot read {path}: {exc}") from exc
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RequestValidationError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise RequestValidationError(f"{path}: top-level JSON must be an object")
+    return validate_bench_request_dict(obj), raw
+
+
+def validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
+    _require_keys(d, ["schema_version", "requests"], ctx="workload_trace")
+    if int(d["schema_version"]) != 1:
+        raise RequestValidationError(
+            f"unsupported trace schema_version {d['schema_version']!r} (expected 1)"
+        )
+    if not isinstance(d["requests"], list) or not d["requests"]:
+        raise RequestValidationError("workload_trace.requests must be a non-empty list")
+    try:
+        return WorkloadTrace.from_dict(d)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RequestValidationError(f"workload_trace: {exc}") from exc
+
+
+def load_workload_trace(path: Path, *, expected_sha256: str | None = None) -> WorkloadTrace:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RequestValidationError(f"cannot read trace {path}: {exc}") from exc
+    if expected_sha256 is not None:
+        actual = sha256_bytes(raw)
+        if actual.lower() != expected_sha256.lower():
+            raise RequestValidationError(
+                f"trace sha256 mismatch: expected {expected_sha256}, got {actual}"
+            )
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RequestValidationError(f"invalid JSON in trace {path}: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise RequestValidationError(f"{path}: top-level JSON must be an object")
+    return validate_workload_trace_dict(obj)
+
+
+def validate_report_dict(d: dict[str, Any]) -> None:
+    """Lightweight structural check that a report dict matches the §4.4 skeleton."""
+    _require_keys(
+        d,
+        [
+            "schema_version",
+            "task_id",
+            "verdict",
+            "started_at",
+            "finished_at",
+            "environment",
+            "inputs_fingerprint",
+        ],
+        ctx="bench_report",
+    )
+    if d["verdict"] not in (
+        "pass",
+        "fail_correctness",
+        "fail_perf_screen",
+        "fail_sla",
+        "error",
+    ):
+        raise RequestValidationError(f"invalid verdict {d['verdict']!r}")
+    env = d["environment"]
+    _require_keys(
+        env,
+        [
+            "gpu",
+            "driver_version",
+            "cuda_version",
+            "docker_version",
+            "harness_version",
+            "hostname_hash",
+        ],
+        ctx="environment",
+    )
+    fp = d["inputs_fingerprint"]
+    _require_keys(
+        fp,
+        [
+            "baseline_image_digest",
+            "candidate_image_digest",
+            "model_repo",
+            "model_revision",
+            "model_weights_sha256",
+            "trace_sha256",
+            "request_sha256",
+        ],
+        ctx="inputs_fingerprint",
+    )

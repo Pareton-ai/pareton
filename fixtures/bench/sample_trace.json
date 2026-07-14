@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "name": "bench_stub_v0",
+    "description": "Minimal trace for bench skeleton / mock-engine tests"
+  },
+  "requests": [
+    {
+      "id": "r-000001",
+      "arrival_offset_ms": 0,
+      "prompt": "Hello world",
+      "max_tokens": 8,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "r-000002",
+      "arrival_offset_ms": 100,
+      "prompt": "Second prompt",
+      "max_tokens": 8,
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 0.9
+      }
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "_comment": "Structural shape of a vLLM-compatible /v1/completions response with echo=true and logprobs. Values are illustrative. Re-validate against a real vLLM server in WS-B7.",
+  "example": {
+    "id": "cmpl-mock-FIXED000000",
+    "object": "text_completion",
+    "created": 1700000000,
+    "model": "mock-model",
+    "choices": [
+      {
+        "index": 0,
+        "text": "Hello world OK",
+        "logprobs": {
+          "tokens": [
+            "Hello ",
+            "world",
+            " ",
+            "OK"
+          ],
+          "token_logprobs": [
+            null,
+            -0.51,
+            -0.52,
+            -0.53
+          ],
+          "top_logprobs": [
+            null,
+            {
+              "world": -0.51,
+              "world_": -2.51
+            },
+            {
+              " ": -0.52,
+              " _": -2.52
+            },
+            {
+              "OK": -0.53,
+              "OK_": -2.5300000000000002
+            }
+          ],
+          "text_offset": [
+            0,
+            6,
+            11,
+            12
+          ]
+        },
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 2,
+      "completion_tokens": 2,
+      "total_tokens": 4
+    }
+  },
+  "fingerprint": {
+    "choices": [
+      {
+        "finish_reason": "str",
+        "index": "int",
+        "logprobs": {
+          "text_offset": [
+            "int"
+          ],
+          "token_logprobs": [
+            "float|null"
+          ],
+          "tokens": [
+            "str"
+          ],
+          "top_logprobs": [
+            "dict|null"
+          ]
+        },
+        "text": "str"
+      }
+    ],
+    "created": "int",
+    "id": "str",
+    "model": "str",
+    "object": "str",
+    "usage": {
+      "completion_tokens": "int",
+      "prompt_tokens": "int",
+      "total_tokens": "int"
+    }
+  }
+}
