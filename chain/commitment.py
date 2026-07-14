@@ -65,7 +65,9 @@ def parse_patch_commitment(raw: str) -> dict[str, str] | None:
         baseline_commit.strip().lower()
     ):
         return None
-    if not isinstance(patch_hash, str) or not PATCH_HASH_RE.match(patch_hash.strip().lower()):
+    if not isinstance(patch_hash, str) or not PATCH_HASH_RE.match(
+        patch_hash.strip().lower()
+    ):
         return None
     if not isinstance(retrieval_url, str) or not retrieval_url.strip().startswith(
         ("https://", "http://")

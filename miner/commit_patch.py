@@ -94,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Fetch campaign for baseline_commit
     try:
-        campaign = _http_json("GET", f"{args.api_base.rstrip('/')}/v1/campaigns/{args.campaign_id}")
+        campaign = _http_json(
+            "GET", f"{args.api_base.rstrip('/')}/v1/campaigns/{args.campaign_id}"
+        )
     except Exception as exc:
         print(f"error: failed to fetch campaign: {exc}", file=sys.stderr)
         return 1

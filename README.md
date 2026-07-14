@@ -8,6 +8,7 @@ Docs:
 
 - [`Pareton_Engineering_Architecture_v0.pdf`](Pareton_Engineering_Architecture_v0.pdf)
 - [`Pareton_Optimization_Profile.pdf`](Pareton_Optimization_Profile.pdf)
+- [`docs/roadmap.md`](docs/roadmap.md) — what's done, what's not, agent task briefs
 - [`docs/technical-decisions.md`](docs/technical-decisions.md)
 - [`docs/stage0-ops-checklist.md`](docs/stage0-ops-checklist.md)
 

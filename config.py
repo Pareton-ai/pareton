@@ -22,13 +22,17 @@ S3_ACCESS_KEY: str = os.environ.get("PARETON_S3_ACCESS_KEY", "")
 S3_SECRET_KEY: str = os.environ.get("PARETON_S3_SECRET_KEY", "")
 S3_BUCKET: str = os.environ.get("PARETON_S3_BUCKET", "pareton-s3")
 S3_PREFIX: str = os.environ.get("PARETON_S3_PREFIX", "stage0")
-S3_REGION: str = os.environ.get("PARETON_S3_REGION", "us-east-1")
+S3_REGION: str = os.environ.get("PARETON_S3_REGION", "us-east-2")
 S3_PUBLIC_BASE_URL: str = os.environ.get("PARETON_S3_PUBLIC_BASE_URL", "")
 PRESIGN_EXPIRES_S: int = int(os.environ.get("PARETON_PRESIGN_EXPIRES_S", "3600"))
 
 # Patch fetch bounds
-PATCH_MAX_BYTES: int = int(os.environ.get("PARETON_PATCH_MAX_BYTES", str(5 * 1024 * 1024)))
-PATCH_FETCH_TIMEOUT_S: float = float(os.environ.get("PARETON_PATCH_FETCH_TIMEOUT_S", "30"))
+PATCH_MAX_BYTES: int = int(
+    os.environ.get("PARETON_PATCH_MAX_BYTES", str(5 * 1024 * 1024))
+)
+PATCH_FETCH_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_PATCH_FETCH_TIMEOUT_S", "30")
+)
 PATCH_FETCH_RETRIES: int = int(os.environ.get("PARETON_PATCH_FETCH_RETRIES", "3"))
 
 # Builder / registry (GitHub org: Pareton-ai; GHCR namespaces are lowercase)

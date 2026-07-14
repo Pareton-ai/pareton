@@ -124,7 +124,7 @@ Fail-fast order: **identity → integrity → base apply → surface → hermeti
 
 | Decision | Choice | Why (if non-obvious) |
 |---|---|---|
-| Patch storage | **AWS S3, bucket `pareton-s3`**, prefix `stage0/` | Confirmed by ops; `PARETON_S3_ENDPOINT_URL` stays empty for AWS. |
+| Patch storage | **AWS S3, bucket `pareton-s3` in `us-east-2`**, prefix `stage0/` | Bucket already existed in us-east-2; config default region updated to match. Public read on `stage0/campaigns/*` via bucket policy. |
 | GHCR owner | **`Pareton-ai` GitHub org** (`ghcr.io/pareton-ai/pareton-engine`) | Org exists and holds the vLLM fork; GHCR namespaces are lowercase. |
 | vLLM baseline pin | **v0.24.0** = `ee0da84ab9e04ac7610e28580af62c365e898389` | Latest stable at pin time; customer had no specific version. Wired as seed default. |
 | GPU SKUs in manifest | Keep `["H200-SXM-141GB", "B200"]` placeholder | Meaningless until Stage 1 benchmarks. |
@@ -183,4 +183,7 @@ From business / inference optimization docs — **for orientation only:**
 |---|---|
 | 2026-07-09 | Initial record after Stage 0 foundation + repo flatten + legacy strip. |
 | 2026-07-09 | Ops decisions: AWS S3 `pareton-s3`, vLLM v0.24.0 pin, single-VPS deploy, worker `--scan-chain`. |
-| 2026-07-09 | GHCR owner corrected to the `Pareton-ai` GitHub org (`ghcr.io/pareton-ai/...`). |
+| 2026-07-10 | S3 ops complete: IAM `pareton-api`, bucket policy, region `us-east-2`, smoke test passed. |
+| 2026-07-14 | Two distinct baseline images: the **build base image** (`images/baseline/Dockerfile`, compile env for miner patches) and the **baseline serving engine image** (`ghcr.io/pareton-ai/pareton-engine:baseline`, vanilla vLLM at the pin, serving-ready). The latter is the bench harness's "before" engine and will be pinned into campaign manifests as `baseline_engine_image_digest` (WS-D). Built via the hermetic builder with an empty patch. Tracked as roadmap WS-A item 2b. |
+| 2026-07-14 | Bench (Stages 1–3) built in-house with AI agents, not outsourced. Lives in this repo as `bench/` with a `python -m bench` entrypoint — worker (CPU VPS) invokes it remotely on rented GPU pods (Targon/Lium/Shadeform), so it needs a process boundary even though it is not a separate repo. Full plan: `docs/roadmap.md`. |
+| 2026-07-14 | WS-B1–B2 landed: `bench/` skeleton (schemas transcribed from outsource spec §4, env fingerprint, evidence layout, stub CLI with exit codes 0/1/2/3) + in-process mock `/v1/completions` engine (echo+logprobs, first prompt logprob null, configurable latencies, tampered mode). Stub report uses `verdict=error` + non-spec `stub_note` until Modules A–C land. Shape fixture must be re-validated against real vLLM in WS-B7. |
