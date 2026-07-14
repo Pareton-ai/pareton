@@ -115,6 +115,7 @@ def build_logprobs_payload(
     *,
     cfg: MockEngineConfig,
     prompt_token_count: int,
+    top_k: int | None = None,
 ) -> dict[str, Any]:
     """Build vLLM-shaped logprobs object.
 
@@ -122,7 +123,10 @@ def build_logprobs_payload(
     - first prompt token logprob is null
     - subsequent tokens have float logprobs
     - top_logprobs entries align 1:1 (null for first prompt token)
+    - each non-null top_logprobs dict has exactly ``top_k`` entries
     """
+    # Request count wins when provided; otherwise MockEngineConfig.top_logprobs_k.
+    k = max(0, int(top_k) if top_k is not None else cfg.top_logprobs_k)
     token_logprobs: list[float | None] = []
     top_logprobs: list[dict[str, float] | None] = []
     text_offset: list[int] = []
@@ -138,10 +142,11 @@ def build_logprobs_payload(
         # Index used for deterministic series is absolute position in the echoed sequence.
         lp = _logprob_at(cfg, i)
         token_logprobs.append(lp)
-        top = {tok: lp}
-        # Add a decoy second entry so top_logprobs looks non-trivial when k>=1
-        decoy = tok + "_"
-        top[decoy] = lp - 2.0
+        top: dict[str, float] = {}
+        if k >= 1:
+            top[tok] = lp
+        for j in range(1, k):
+            top[f"{tok}_{j}"] = lp - (2.0 * j)
         top_logprobs.append(top)
 
     return {
@@ -189,19 +194,16 @@ def build_completion_response(
 
     logprobs_obj = None
     if logprobs_requested is not None and logprobs_requested != 0:
-        if echo:
-            logprobs_obj = build_logprobs_payload(
-                all_tokens,
-                cfg=cfg,
-                prompt_token_count=prompt_count,
-            )
-        else:
-            # Completion tokens only (OpenAI shape when echo=false).
-            logprobs_obj = build_logprobs_payload(
-                completion_tokens,
-                cfg=cfg,
-                prompt_token_count=0,
-            )
+        # Client `logprobs` count overrides config default.
+        top_k = int(logprobs_requested)
+        tokens_for_lp = all_tokens if echo else completion_tokens
+        prompt_count_for_lp = prompt_count if echo else 0
+        logprobs_obj = build_logprobs_payload(
+            tokens_for_lp,
+            cfg=cfg,
+            prompt_token_count=prompt_count_for_lp,
+            top_k=top_k,
+        )
 
     if max_tokens <= 0:
         finish_reason = "length"
