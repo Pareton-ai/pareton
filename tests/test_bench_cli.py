@@ -29,7 +29,11 @@ def test_cli_stub_valid_request(tmp_path: Path):
     assert (out / "evidence" / "sla_bench").is_dir()
     # Fingerprints populated from request
     assert report["inputs_fingerprint"]["model_repo"] == "Qwen/Qwen2.5-7B-Instruct"
-    assert report["inputs_fingerprint"]["baseline_image_digest"].startswith("sha256:")
+    baseline_digest = report["inputs_fingerprint"]["baseline_image_digest"]
+    assert baseline_digest.startswith("sha256:")
+    assert len(baseline_digest) == len("sha256:") + 64
+    # Must be the digest alone, not the full image ref
+    assert "/" not in baseline_digest
     assert report["environment"]["harness_version"]
 
 

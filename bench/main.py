@@ -25,6 +25,7 @@ from bench.output import JsonlFileHandler, OutputLayout
 from bench.schemas import BenchReport, InputsFingerprint
 from bench.validate import (
     RequestValidationError,
+    extract_image_digest,
     load_bench_request,
     sha256_bytes,
     validate_report_dict,
@@ -36,16 +37,6 @@ EXIT_ENV = 2
 EXIT_ENGINE = 3
 
 logger = logging.getLogger("bench")
-
-
-def _extract_digest(image_ref: str) -> str:
-    """Pull sha256:... out of an image reference for inputs_fingerprint."""
-    if "@sha256:" in image_ref:
-        return "sha256:" + image_ref.split("@sha256:", 1)[1]
-    if image_ref.startswith("sha256:"):
-        return image_ref
-    # Spec requires digest refs; validation already enforces this. Fallback:
-    return image_ref
 
 
 def build_stub_report(
@@ -69,8 +60,8 @@ def build_stub_report(
         finished_at=iso,
         environment=env,
         inputs_fingerprint=InputsFingerprint(
-            baseline_image_digest=_extract_digest(baseline_image),
-            candidate_image_digest=_extract_digest(candidate_image),
+            baseline_image_digest=extract_image_digest(baseline_image),
+            candidate_image_digest=extract_image_digest(candidate_image),
             model_repo=model_repo,
             model_revision=model_revision,
             model_weights_sha256="sha256:" + ("0" * 64),  # not downloaded yet (WS-B5)
