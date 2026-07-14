@@ -1,16 +1,30 @@
+<div align="center">
+
 # Pareton (SN10)
 
-**Inference optimization campaigns** on Bittensor SN10.
+**Inference Optimization. Compounding Improvements.**
 
-Stage 0: profile → pinned campaign manifest → miner patch commitment → provenance & build gate → content-addressed engine image.
+[![Discord](https://img.shields.io/discord/308323056592486420.svg)](https://discord.gg/bittensor)
+[![Docs](https://img.shields.io/badge/docs-pareton.ai-blue)](https://pareton.ai)
+[![X](https://img.shields.io/badge/X-@pareton__ai-000000?logo=x&logoColor=white)](https://x.com/pareton_ai)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Docs:
+[Website](https://pareton.ai) | [GitHub](https://github.com/pareton-ai) | [Discord](https://discord.gg/bittensor)
 
-- [`Pareton_Engineering_Architecture_v0.pdf`](Pareton_Engineering_Architecture_v0.pdf)
-- [`Pareton_Optimization_Profile.pdf`](Pareton_Optimization_Profile.pdf)
-- [`docs/roadmap.md`](docs/roadmap.md) — what's done, what's not, agent task briefs
-- [`docs/technical-decisions.md`](docs/technical-decisions.md)
-- [`docs/stage0-ops-checklist.md`](docs/stage0-ops-checklist.md)
+---
+
+</div>
+
+Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM baseline. Pareton verifies provenance, builds hermetically, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
+
+## How It Works
+
+1. **Campaigns** pin a baseline commit, base image digest, allowed/denied path globs, and a content-addressed workload trace. Once open, the manifest is frozen.
+2. **Miners** author a git patch against that baseline, upload it via Pareton-presigned S3, and commit `campaign_id`, `baseline_commit`, `patch_hash`, and `retrieval_url` on-chain.
+3. **The worker** scans SN10 for new commitments, fetches the patch, and runs provenance gates (identity, integrity, base-apply, surface).
+4. **Hermetic build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
+5. **Later stages** add correctness, perf screen, SLA benchmark, cross-env validation, and on-chain scoring — so only real, transferable gains earn emission.
+
 
 ## Layout
 
@@ -28,36 +42,6 @@ Docs:
 | `fixtures/` | Synthetic campaign fixtures |
 | `images/baseline/` | Baseline Dockerfile |
 
-## Quick start
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # set PARETON_DATABASE_URL
-
-python -m campaign.seed
-python -m api                 # API on :8000
-python -m worker.main --mock-build --once
-
-pytest tests -q
-```
-
-Production worker (VPS) also polls SN10 for commitments:
-
-```bash
-python -m worker.main --scan-chain
-```
-
-Miner commit (after patch upload via API presign):
-
-```bash
-python miner/commit_patch.py \
-  --campaign-id <uuid> --patch ./change.diff \
-  --api-base http://127.0.0.1:8000 \
-  --wallet-name <wallet> --wallet-hotkey default \
-  --network finney --netuid 10
-```
-
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE).
