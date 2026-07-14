@@ -27,8 +27,12 @@ S3_PUBLIC_BASE_URL: str = os.environ.get("PARETON_S3_PUBLIC_BASE_URL", "")
 PRESIGN_EXPIRES_S: int = int(os.environ.get("PARETON_PRESIGN_EXPIRES_S", "3600"))
 
 # Patch fetch bounds
-PATCH_MAX_BYTES: int = int(os.environ.get("PARETON_PATCH_MAX_BYTES", str(5 * 1024 * 1024)))
-PATCH_FETCH_TIMEOUT_S: float = float(os.environ.get("PARETON_PATCH_FETCH_TIMEOUT_S", "30"))
+PATCH_MAX_BYTES: int = int(
+    os.environ.get("PARETON_PATCH_MAX_BYTES", str(5 * 1024 * 1024))
+)
+PATCH_FETCH_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_PATCH_FETCH_TIMEOUT_S", "30")
+)
 PATCH_FETCH_RETRIES: int = int(os.environ.get("PARETON_PATCH_FETCH_RETRIES", "3"))
 
 # Builder / registry (GitHub org: Pareton-ai; GHCR namespaces are lowercase)

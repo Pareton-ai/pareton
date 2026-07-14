@@ -128,7 +128,9 @@ def validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     corr = d["correctness"]
     if not isinstance(corr, dict):
         raise RequestValidationError("correctness must be an object")
-    _require_keys(corr, ["num_prompts", "max_new_tokens", "thresholds"], ctx="correctness")
+    _require_keys(
+        corr, ["num_prompts", "max_new_tokens", "thresholds"], ctx="correctness"
+    )
     thr = corr["thresholds"]
     if not isinstance(thr, dict):
         raise RequestValidationError("correctness.thresholds must be an object")
@@ -148,7 +150,9 @@ def validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     sla = d["sla_bench"]
     if not isinstance(sla, dict):
         raise RequestValidationError("sla_bench must be an object")
-    _require_keys(sla, ["repetitions", "warmup_requests", "thresholds"], ctx="sla_bench")
+    _require_keys(
+        sla, ["repetitions", "warmup_requests", "thresholds"], ctx="sla_bench"
+    )
     sla_thr = sla["thresholds"]
     if not isinstance(sla_thr, dict):
         raise RequestValidationError("sla_bench.thresholds must be an object")
@@ -189,7 +193,9 @@ def validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
         raise RequestValidationError(f"workload_trace: {exc}") from exc
 
 
-def load_workload_trace(path: Path, *, expected_sha256: str | None = None) -> WorkloadTrace:
+def load_workload_trace(
+    path: Path, *, expected_sha256: str | None = None
+) -> WorkloadTrace:
     try:
         raw = path.read_bytes()
     except OSError as exc:

@@ -76,9 +76,7 @@ index 1111111..2222222 100644
 """
     # git may encode odd paths; also cover explicit absolute in header parse
     changes = parse_diff_paths(
-        "diff --git a/vllm/x.py b/etc/passwd\n"
-        "--- a/vllm/x.py\n"
-        "+++ b/etc/passwd\n"
+        "diff --git a/vllm/x.py b/etc/passwd\n--- a/vllm/x.py\n+++ b/etc/passwd\n"
     )
     # Prefer a true absolute path in the b/ side
     abs_diff = (

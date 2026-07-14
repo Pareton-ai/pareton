@@ -62,9 +62,7 @@ def insert_profile(name: str, data: dict[str, Any]) -> UUID:
 
 def insert_campaign(manifest: CampaignManifest) -> UUID:
     signoff = (
-        Json(manifest.customer_signoff.to_dict())
-        if manifest.customer_signoff
-        else None
+        Json(manifest.customer_signoff.to_dict()) if manifest.customer_signoff else None
     )
     with db_connection() as conn:
         with conn.cursor() as cur:
