@@ -4,7 +4,6 @@
 > Purpose: single source of truth for **what is done, what is not, and how to finish it**.
 > Last updated: 2026-07-14. Update this doc whenever a workstream changes state.
 
----
 
 ## 1. Big picture
 
@@ -36,7 +35,6 @@ Key repo docs:
   written for outsourcing, now the reference spec for workstream B. Schemas, thresholds,
   and method definitions in it are authoritative unless this doc says otherwise).
 
----
 
 ## 2. Current state — what is DONE
 
@@ -70,7 +68,6 @@ Key repo docs:
 `committed → fetched → verified → applied → surface_ok → built` (or `rejected`),
 append-only in `submission_events`. See `gate/types.py`.
 
----
 
 ## 3. Conventions agents MUST follow
 
@@ -87,7 +84,6 @@ append-only in `submission_events`. See `gate/types.py`.
 7. Legacy Cacheon code lives in `/Users/xavierlu/Desktop/cacheon` (read-only reference).
    Reuse patterns from it, but adapt into Pareton packages — do not import from it.
 
----
 
 ## 4. Workstreams (the TODOs)
 
@@ -103,7 +99,6 @@ WS-G (frontend API), WS-H (miner docs) — independent, any time
 WS-B and WS-C can be built in parallel; WS-D needs both. WS-A is independent and
 mostly human-ops (agent-assisted).
 
----
 
 ### WS-A — Finish Stage 0 ops  `[PARTIALLY DONE — mostly human + agent-assisted]`
 
@@ -112,9 +107,17 @@ mostly human-ops (agent-assisted).
 **Context:** `docs/stage0-ops-checklist.md` has the full step-by-step with exact
 commands. Remaining items:
 
-1. GHCR PAT with `write:packages` (human creates; goes in `.env` as `PARETON_GHCR_TOKEN`).
-2. Build + push the baseline image (`images/baseline/Dockerfile`), capture its digest.
-   Agent can do this on any amd64 Docker box once the PAT exists.
+1. ~~GHCR PAT with `write:packages`~~ **DONE 2026-07-14** — in `.env` as
+   `PARETON_GHCR_TOKEN`, verified against ghcr.io.
+2. Build + push the baseline **build** image (`images/baseline/Dockerfile`), capture
+   its digest. Agent can do this on any amd64 Docker box once the PAT exists.
+2b. Build + push the baseline **serving engine** image
+   `ghcr.io/pareton-ai/pareton-engine:baseline` — vanilla vLLM at the pinned
+   commit, serving-ready (`/v1/completions`). This is the "before" side of every
+   bench comparison (WS-B) and the `baseline_engine_image_digest` the campaign
+   manifest needs (WS-D item 4). Simplest path: run the hermetic builder with an
+   empty patch, which also dogfoods the builder. Distinct from item 2 — the build
+   base image is a compile environment, not a runnable engine.
 3. Upload the workload trace fixture to S3 and re-seed the campaign with the real
    `base_image_digest` and an https trace URL (currently `file://...` placeholder).
 4. Rent the CPU VPS, deploy API + worker (`--scan-chain`) with systemd, TLS via Caddy.
@@ -124,7 +127,6 @@ commands. Remaining items:
 **Acceptance:** a real patch committed on SN10 ends `built` with an image on GHCR and
 a full `submission_events` trail.
 
----
 
 ### WS-B — Bench harness (Stages 1–3)  `[NOT STARTED — biggest workstream]`
 
@@ -185,7 +187,6 @@ containers on an internal Docker network with no egress.
 `mode=all` runs with a real small model and produces a schema-valid report + evidence
 bundle; adversarial fixtures produce the right failures.
 
----
 
 ### WS-C — GPU pod orchestration  `[NOT STARTED — resurrect from Cacheon]`
 
@@ -226,7 +227,6 @@ Cacheon pattern. Env vars: `PARETON_TARGON_API_KEY`, `PARETON_LIUM_API_KEY`,
 availability), runs `python -m bench` on it with the mock engine, copies the report
 back, destroys the pod, and proves TTL reaping works.
 
----
 
 ### WS-D — Pipeline integration (worker runs Stages 1–3)  `[NOT STARTED — after B and C]`
 
@@ -264,7 +264,6 @@ on a rented GPU pod and records verdicts.
 on real infra, one submission goes chain-commit → build → GPU pod → SLA report,
 fully unattended.
 
----
 
 ### WS-E — Stage 4: cross-environment validation  `[NOT STARTED — thin layer on D]`
 
@@ -281,7 +280,6 @@ record). Store one `bench_reports` row per SKU plus an aggregated verdict event.
 **Acceptance:** mock e2e with two fake SKUs produces per-SKU reports + aggregate;
 design note added to `docs/technical-decisions.md`.
 
----
 
 ### WS-F — Stage 5: scoring & reward weights  `[DESIGN ONLY — do not build yet]`
 
@@ -303,7 +301,6 @@ blindly): Cacheon `validator/scoring.py`, weight-setting in the old validator lo
 
 **Trigger to start:** WS-D running unattended on a real campaign with ≥1 external miner.
 
----
 
 ### WS-G — Frontend read API alignment  `[SMALL — anytime]`
 
@@ -315,7 +312,6 @@ on submission lists, and a `/v1/stats` summary endpoint (campaign counts, submis
 counts by state). Keep all endpoints unauthenticated reads; anything mutating stays
 out of the public API.
 
----
 
 ### WS-H — Miner-facing docs  `[SMALL — before opening a real campaign]`
 
@@ -326,7 +322,6 @@ correctness gate locally against their own patch before committing (reuse the
 bench `baseline vs baseline` mode), and where to see status (API/frontend).
 Written last-mile once WS-B thresholds are calibrated.
 
----
 
 ## 5. Suggested execution order
 
@@ -345,7 +340,6 @@ Written last-mile once WS-B thresholds are calibrated.
 
 Items 2–4 are safe to run as parallel agent tasks; they touch disjoint packages.
 
----
 
 ## 6. Verification checklist for every agent task
 
