@@ -82,7 +82,10 @@ def campaign_submissions(campaign_id: str):
         "campaign_id": campaign_id,
         "submissions": [
             {
-                **{k: (str(v) if k in ("id", "campaign_id") else v) for k, v in r.items()},
+                **{
+                    k: (str(v) if k in ("id", "campaign_id") else v)
+                    for k, v in r.items()
+                },
             }
             for r in rows
         ],
@@ -97,10 +100,7 @@ def submission_detail(patch_hash: str):
     events = list_events(row["id"])
     return {
         "submission": {
-            **{
-                k: (str(v) if k in ("id", "campaign_id") else v)
-                for k, v in row.items()
-            }
+            **{k: (str(v) if k in ("id", "campaign_id") else v) for k, v in row.items()}
         },
         "events": [
             {

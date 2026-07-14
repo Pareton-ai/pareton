@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "mode": "all",
+  "model": {
+    "hf_repo": "Qwen/Qwen2.5-7B-Instruct",
+    "hf_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+    "dtype": "bfloat16",
+    "quantization": null,
+    "max_model_len": 8192
+  },
+  "hardware": {
+    "gpu_count": 1,
+    "gpu_sku_expected": "NVIDIA-H200"
+  },
+  "engines": {
+    "baseline": {
+      "image": "ghcr.io/example/engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "serve_args": [
+        "--enable-prefix-caching"
+      ],
+      "env": {}
+    },
+    "candidate": {
+      "image": "ghcr.io/example/engine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "serve_args": [
+        "--enable-prefix-caching"
+      ],
+      "env": {}
+    }
+  },
+  "workload_trace": {
+    "path": "./fixtures/bench/sample_trace.json",
+    "sha256": "sha256:43953c2732b7216909f2b661b28cdee67232def6521aeb58035a7cf9d92aca9d"
+  },
+  "correctness": {
+    "num_prompts": 2,
+    "max_new_tokens": 8,
+    "thresholds": {
+      "mean_abs_logprob_diff": 0.005,
+      "max_abs_logprob_diff": 0.05,
+      "argmax_mismatch_rate": 0.001
+    }
+  },
+  "perf_screen": {
+    "num_requests": 2,
+    "concurrency": 1,
+    "min_throughput_ratio": 1.0
+  },
+  "sla_bench": {
+    "repetitions": 3,
+    "warmup_requests": 0,
+    "thresholds": {
+      "p99_ttft_ms": 2000,
+      "p99_itl_ms": 50
+    }
+  },
+  "hf_token_env": "HF_TOKEN"
+}

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import time
 
 import config
@@ -62,7 +61,9 @@ def run_once(*, mock_build: bool, registered_hotkeys: list[str] | None) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Pareton Stage 0 gate worker")
-    p.add_argument("--once", action="store_true", help="Process at most one job and exit")
+    p.add_argument(
+        "--once", action="store_true", help="Process at most one job and exit"
+    )
     p.add_argument(
         "--mock-build",
         action="store_true",
