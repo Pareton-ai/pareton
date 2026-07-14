@@ -128,7 +128,7 @@ commands. Remaining items:
 a full `submission_events` trail.
 
 
-### WS-B — Bench harness (Stages 1–3)  `[NOT STARTED — biggest workstream]`
+### WS-B — Bench harness (Stages 1–3)  `[IN PROGRESS — steps 1–2 done]`
 
 **Goal:** a `bench/` package that answers: *does candidate engine image X beat baseline
 image Y on workload trace T without changing model outputs?*
@@ -166,10 +166,14 @@ containers on an internal Docker network with no egress.
 
 **Build order for agents (each step = one agent task, keep PRs reviewable):**
 
-1. `bench/` skeleton: request/report dataclasses + JSON schema validation, environment
-   fingerprinting, output/evidence layout. Pure-Python unit tests.
-2. Mock engine: in-process OpenAI-compatible server with configurable logprobs and
-   token latencies. This unlocks CI for everything else.
+1. ~~`bench/` skeleton: request/report dataclasses + JSON schema validation, environment
+   fingerprinting, output/evidence layout. Pure-Python unit tests.~~
+   **DONE 2026-07-14** — `bench/{schemas,validate,env,output,main}.py`, fixtures under
+   `fixtures/bench/`, stub CLI writes schema-valid report (`verdict=error` + `stub_note`).
+2. ~~Mock engine: in-process OpenAI-compatible server with configurable logprobs and
+   token latencies.~~ **DONE 2026-07-14** — `bench/mock_engine.py` + shape fixture
+   `fixtures/bench/vllm_completion_response_shape.json` (re-validate vs real vLLM in B7).
+   Tampered mode offsets logprobs for Module A adversarial tests.
 3. Engine lifecycle manager: docker run/health-check/teardown, internal network,
    weights mount. Test against mock engine in a container (or subprocess).
 4. Module A (correctness) end-to-end vs mock engine, incl. adversarial fixtures
