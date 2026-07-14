@@ -11,6 +11,11 @@ from typing import Any
 from bench.schemas import BenchRequest, WorkloadTrace
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Bare digest, or registry ref pinned with @sha256:<64 hex> (optional #fragment).
+_IMAGE_DIGEST_RE = re.compile(
+    r"^(?:sha256:[0-9a-f]{64}|.+@sha256:[0-9a-f]{64})(?:#.*)?$",
+    re.IGNORECASE,
+)
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -20,6 +25,42 @@ _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 
 class RequestValidationError(ValueError):
     """Raised when bench_request.json fails schema / semantic checks (exit 1)."""
+
+
+def extract_image_digest(image_ref: str) -> str:
+    """Return canonical sha256:<64 hex> from a digest-pinned image ref.
+
+    Accepts bare ``sha256:...`` or ``registry/name@sha256:...``.
+    Raises RequestValidationError if the ref is not digest-pinned.
+    """
+    s = str(image_ref).strip()
+    if not _IMAGE_DIGEST_RE.match(s):
+        raise RequestValidationError(
+            f"engine image must be digest-referenced "
+            f"(sha256:<64 hex> or name@sha256:<64 hex>), got {image_ref!r}"
+        )
+    # Strip optional URL fragment, then take the digest suffix (case-insensitive).
+    s = s.split("#", 1)[0]
+    lower = s.lower()
+    if lower.startswith("sha256:"):
+        hex_part = s.split(":", 1)[1]
+    else:
+        idx = lower.rfind("@sha256:")
+        hex_part = s[idx + len("@sha256:") :]
+    digest = f"sha256:{hex_part.lower()}"
+    if not _SHA256_RE.match(digest):
+        raise RequestValidationError(
+            f"engine image digest malformed after parse: {digest!r} from {image_ref!r}"
+        )
+    return digest
+
+
+def is_digest_pinned_image(image_ref: str) -> bool:
+    try:
+        extract_image_digest(image_ref)
+        return True
+    except RequestValidationError:
+        return False
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -110,11 +151,10 @@ def validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         if not isinstance(eng, dict):
             raise RequestValidationError(f"engines.{role} must be an object")
         _require_keys(eng, ["image"], ctx=f"engines.{role}")
-        if "@sha256:" not in str(eng["image"]) and "sha256:" not in str(eng["image"]):
-            raise RequestValidationError(
-                f"engines.{role}.image must be digest-referenced "
-                f"(contain @sha256:...), got {eng['image']!r}"
-            )
+        try:
+            extract_image_digest(str(eng["image"]))
+        except RequestValidationError as exc:
+            raise RequestValidationError(f"engines.{role}.image: {exc}") from exc
 
     wt = d["workload_trace"]
     if not isinstance(wt, dict):

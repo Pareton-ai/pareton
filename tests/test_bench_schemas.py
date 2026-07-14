@@ -73,6 +73,38 @@ def test_invalid_request_image_without_digest():
         validate_bench_request_dict(raw)
 
 
+@pytest.mark.parametrize(
+    "bad_image",
+    [
+        # substring "sha256:" but not a digest pin
+        "ghcr.io/example/sha256:notadigest/engine:latest",
+        # tag that happens to include the substring
+        "ghcr.io/example/engine:sha256-fake",
+        # @sha256: with wrong length
+        "ghcr.io/example/engine@sha256:abcd",
+        # @sha256: with non-hex
+        "ghcr.io/example/engine@sha256:" + ("g" * 64),
+    ],
+)
+def test_invalid_request_image_loose_sha256_substring(bad_image: str):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["engines"]["baseline"]["image"] = bad_image
+    with pytest.raises(RequestValidationError, match="digest"):
+        validate_bench_request_dict(raw)
+
+
+def test_extract_image_digest_canonicalizes():
+    from bench.validate import extract_image_digest
+
+    digest = "sha256:" + ("a" * 64)
+    assert extract_image_digest(digest) == digest
+    assert extract_image_digest(f"ghcr.io/pareton-ai/pareton-engine@{digest}") == digest
+    assert (
+        extract_image_digest(f"ghcr.io/pareton-ai/pareton-engine@{digest.upper()}")
+        == digest
+    )
+
+
 def test_invalid_request_bad_task_id():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["task_id"] = "not-a-uuid"
