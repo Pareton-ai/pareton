@@ -112,6 +112,20 @@ def test_invalid_request_bad_task_id():
         validate_bench_request_dict(raw)
 
 
+def test_invalid_request_non_numeric_gpu_count():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["hardware"]["gpu_count"] = None
+    with pytest.raises(RequestValidationError):
+        validate_bench_request_dict(raw)
+
+
+def test_invalid_trace_non_numeric_schema_version():
+    with pytest.raises(RequestValidationError):
+        validate_workload_trace_dict(
+            {"schema_version": "x", "requests": [{"id": "r1"}]}
+        )
+
+
 def test_report_dict_validation_accepts_stub_shape():
     report = {
         "schema_version": 1,

@@ -97,6 +97,15 @@ def _require_keys(d: dict[str, Any], keys: list[str], *, ctx: str) -> None:
 
 def validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     """Validate a parsed request dict; raise RequestValidationError on failure."""
+    try:
+        return _validate_bench_request_dict(d)
+    except RequestValidationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RequestValidationError(str(exc)) from exc
+
+
+def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     _require_keys(
         d,
         [
@@ -198,10 +207,7 @@ def validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         raise RequestValidationError("sla_bench.thresholds must be an object")
     _require_keys(sla_thr, ["p99_ttft_ms", "p99_itl_ms"], ctx="sla_bench.thresholds")
 
-    try:
-        return BenchRequest.from_dict(d)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RequestValidationError(str(exc)) from exc
+    return BenchRequest.from_dict(d)
 
 
 def load_bench_request(path: Path) -> tuple[BenchRequest, bytes]:
@@ -220,6 +226,15 @@ def load_bench_request(path: Path) -> tuple[BenchRequest, bytes]:
 
 
 def validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
+    try:
+        return _validate_workload_trace_dict(d)
+    except RequestValidationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RequestValidationError(f"workload_trace: {exc}") from exc
+
+
+def _validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
     _require_keys(d, ["schema_version", "requests"], ctx="workload_trace")
     if int(d["schema_version"]) != 1:
         raise RequestValidationError(
@@ -227,10 +242,7 @@ def validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
         )
     if not isinstance(d["requests"], list) or not d["requests"]:
         raise RequestValidationError("workload_trace.requests must be a non-empty list")
-    try:
-        return WorkloadTrace.from_dict(d)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RequestValidationError(f"workload_trace: {exc}") from exc
+    return WorkloadTrace.from_dict(d)
 
 
 def load_workload_trace(
