@@ -85,53 +85,66 @@ def run_stub(request_path: Path, output_dir: Path) -> int:
     layout = OutputLayout(output_dir)
     layout.prepare()
 
-    # Structured log into harness.log
+    # Attach run-scoped handlers; always remove so repeated calls don't leak.
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+    added: list[logging.Handler] = []
     handler = JsonlFileHandler(layout)
     handler.setFormatter(logging.Formatter("%(asctime)s"))
     root_logger.addHandler(handler)
+    added.append(handler)
     if not any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers):
         sh = logging.StreamHandler(sys.stderr)
         sh.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
         root_logger.addHandler(sh)
+        added.append(sh)
 
-    env = collect_environment()
-    warn = warn_gpu_sku_mismatch(env, req.hardware.gpu_sku_expected)
-    if warn:
-        logger.warning(warn)
-
-    layout.write_env_dumps(collect_env_raw_dumps())
-    layout.append_log(
-        {
-            "event": "stub_start",
-            "task_id": req.task_id,
-            "mode": req.mode,
-            "harness_version": __version__,
-        }
-    )
-
-    report = build_stub_report(
-        request_raw=raw,
-        task_id=req.task_id,
-        model_repo=req.model.hf_repo,
-        model_revision=req.model.hf_revision,
-        baseline_image=req.engines.baseline.image,
-        candidate_image=req.engines.candidate.image,
-        trace_sha256=req.workload_trace.sha256,
-        env=env,
-    )
-    report_dict = report.to_dict()
     try:
-        validate_report_dict(report_dict)
-    except RequestValidationError as exc:
-        print(f"error: stub report failed self-validation: {exc}", file=sys.stderr)
-        return EXIT_ENV
+        env = collect_environment()
+        warn = warn_gpu_sku_mismatch(env, req.hardware.gpu_sku_expected)
+        if warn:
+            logger.warning(warn)
 
-    layout.write_report(report)
-    layout.append_log({"event": "stub_done", "report": str(layout.report_path)})
-    print(f"wrote {layout.report_path}")
-    return EXIT_OK
+        layout.write_env_dumps(collect_env_raw_dumps())
+        layout.append_log(
+            {
+                "event": "stub_start",
+                "task_id": req.task_id,
+                "mode": req.mode,
+                "harness_version": __version__,
+            }
+        )
+
+        report = build_stub_report(
+            request_raw=raw,
+            task_id=req.task_id,
+            model_repo=req.model.hf_repo,
+            model_revision=req.model.hf_revision,
+            baseline_image=req.engines.baseline.image,
+            candidate_image=req.engines.candidate.image,
+            trace_sha256=req.workload_trace.sha256,
+            env=env,
+        )
+        report_dict = report.to_dict()
+        try:
+            validate_report_dict(report_dict)
+        except RequestValidationError as exc:
+            # Internal schema failure — not GPU/Docker/model (EXIT_ENV). Closest
+            # spec bucket is schema validation (exit 1).
+            print(
+                f"error: stub report failed self-validation: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_BAD_REQUEST
+
+        layout.write_report(report)
+        layout.append_log({"event": "stub_done", "report": str(layout.report_path)})
+        print(f"wrote {layout.report_path}")
+        return EXIT_OK
+    finally:
+        for h in added:
+            root_logger.removeHandler(h)
+            h.close()
 
 
 def main(argv: list[str] | None = None) -> int:

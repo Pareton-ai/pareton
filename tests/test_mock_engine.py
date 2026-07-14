@@ -132,3 +132,40 @@ def test_configurable_explicit_logprobs_list():
     # index 0 null; index 1 uses logprobs[1], etc.
     assert lps[0] is None
     assert lps[1] == -2.0
+
+
+def test_top_logprobs_respects_requested_k():
+    cfg = MockEngineConfig()
+    one = build_completion_response(
+        cfg=cfg,
+        prompt="Hello world",
+        max_tokens=0,
+        echo=True,
+        temperature=0.0,
+        logprobs_requested=1,
+    )
+    three = build_completion_response(
+        cfg=cfg,
+        prompt="Hello world",
+        max_tokens=0,
+        echo=True,
+        temperature=0.0,
+        logprobs_requested=3,
+    )
+    top1 = one["choices"][0]["logprobs"]["top_logprobs"][1]
+    top3 = three["choices"][0]["logprobs"]["top_logprobs"][1]
+    assert top1 is not None and len(top1) == 1
+    assert top3 is not None and len(top3) == 3
+
+
+def test_run_stub_does_not_accumulate_root_handlers(tmp_path: Path):
+    import logging
+
+    from bench.main import main
+
+    root = logging.getLogger()
+    before = len(root.handlers)
+    sample = ROOT / "fixtures" / "bench" / "sample_request.json"
+    assert main(["--request", str(sample), "--output-dir", str(tmp_path / "a")]) == 0
+    assert main(["--request", str(sample), "--output-dir", str(tmp_path / "b")]) == 0
+    assert len(root.handlers) == before
