@@ -15,32 +15,31 @@
 
 </div>
 
-Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM baseline. Pareton verifies provenance, builds hermetically, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
+Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM baseline. Pareton validates patch integrity and allowed changes, builds patches in a reproducible container environment, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
 
 ## How It Works
 
 1. **Campaigns** pin a baseline commit, base image digest, allowed/denied path globs, and a content-addressed workload trace. Once open, the manifest is frozen.
 2. **Miners** author a git patch against that baseline, upload it via Pareton-presigned S3, and commit `campaign_id`, `baseline_commit`, `patch_hash`, and `retrieval_url` on-chain.
-3. **The worker** scans SN10 for new commitments, fetches the patch, and runs provenance gates (identity, integrity, base-apply, surface).
-4. **Hermetic build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
+3. **The worker** scans SN10 for new commitments, fetches the patch, and runs validation gates (identity, integrity, base-apply, surface).
+4. **Reproducible container build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
 5. **Later stages** add correctness, perf screen, SLA benchmark, cross-env validation, and on-chain scoring — so only real, transferable gains earn emission.
-
 
 ## Layout
 
-| Path | Role |
-|---|---|
-| `campaign/` | Profiles, manifests, seed CLI |
-| `chain/` | Patch commitment parse + chain watcher/RPC |
-| `gate/` | Provenance gates a–d |
-| `builder/` | Hermetic build + GHCR tagging |
-| `storage/` | Pareton-presigned S3 uploads |
-| `db/` | Neon schema + connection |
-| `worker/` | Job loop (gates → build) |
-| `api/` | HTTP API (campaigns, submissions, presign) |
-| `miner/commit_patch.py` | Miner commit CLI |
-| `fixtures/` | Synthetic campaign fixtures |
-| `images/baseline/` | Baseline Dockerfile |
+| Path                    | Role                                       |
+| ----------------------- | ------------------------------------------ |
+| `campaign/`             | Profiles, manifests, seed CLI              |
+| `chain/`                | Patch commitment parse + chain watcher/RPC |
+| `gate/`                 | Patch validation gates a–d                 |
+| `builder/`              | Reproducible container build + GHCR tagging |
+| `storage/`              | Pareton-presigned S3 uploads               |
+| `db/`                   | Neon schema + connection                   |
+| `worker/`               | Job loop (gates → build)                   |
+| `api/`                  | HTTP API (campaigns, submissions, presign) |
+| `miner/commit_patch.py` | Miner commit CLI                           |
+| `fixtures/`             | Synthetic campaign fixtures                |
+| `images/baseline/`      | Baseline Dockerfile                        |
 
 ## License
 

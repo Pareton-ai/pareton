@@ -168,11 +168,18 @@ testing/
 .dependencies_installed
 
 # Editors
-.vscode/settings.json
+.vscode/
 .cursor/
 *.code-workspace
 AGENTS.md
 docs/running_knowledge_base.md
+
+# Local planning / private docs (keep on disk, not in git)
+docs/roadmap.md
+docs/technical-decisions.md
+
+# PDFs (architecture/business memos — local only)
+*.pdf
 
 # Phase 5 validator runtime state (atomic JSON; regenerated on startup)
 state/
