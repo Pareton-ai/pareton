@@ -2,7 +2,7 @@
 
 # Pareton (SN10)
 
-**Inference Optimization. Compounding Improvements.**
+**Workload-Specific Inference Optimization. Every Improvement Raises the Baseline.**
 
 [![Discord](https://img.shields.io/discord/308323056592486420.svg)](https://discord.gg/bittensor)
 [![Docs](https://img.shields.io/badge/docs-pareton.ai-blue)](https://pareton.ai)
@@ -27,19 +27,19 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 
 ## Layout
 
-| Path                    | Role                                       |
-| ----------------------- | ------------------------------------------ |
-| `campaign/`             | Profiles, manifests, seed CLI              |
-| `chain/`                | Patch commitment parse + chain watcher/RPC |
-| `gate/`                 | Patch validation gates a–d                 |
+| Path                    | Role                                        |
+| ----------------------- | ------------------------------------------- |
+| `campaign/`             | Profiles, manifests, seed CLI               |
+| `chain/`                | Patch commitment parse + chain watcher/RPC  |
+| `gate/`                 | Patch validation gates a–d                  |
 | `builder/`              | Reproducible container build + GHCR tagging |
-| `storage/`              | Pareton-presigned S3 uploads               |
-| `db/`                   | Neon schema + connection                   |
-| `worker/`               | Job loop (gates → build)                   |
-| `api/`                  | HTTP API (campaigns, submissions, presign) |
-| `miner/commit_patch.py` | Miner commit CLI                           |
-| `fixtures/`             | Synthetic campaign fixtures                |
-| `images/baseline/`      | Baseline Dockerfile                        |
+| `storage/`              | Pareton-presigned S3 uploads                |
+| `db/`                   | Neon schema + connection                    |
+| `worker/`               | Job loop (gates → build)                    |
+| `api/`                  | HTTP API (campaigns, submissions, presign)  |
+| `miner/commit_patch.py` | Miner commit CLI                            |
+| `fixtures/`             | Synthetic campaign fixtures                 |
+| `images/baseline/`      | Baseline Dockerfile                         |
 
 ## License
 
