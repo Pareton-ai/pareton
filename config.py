@@ -48,6 +48,19 @@ WORK_DIR: Path = Path(
     os.environ.get("PARETON_WORK_DIR", str(REPO_ROOT / ".pareton-work"))
 ).resolve()
 
+# Bench harness (engine lifecycle). Overridable per-call; defaults for fresh pods.
+BENCH_HEALTH_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_BENCH_HEALTH_TIMEOUT_S", "600")
+)
+BENCH_HEALTH_POLL_S: float = float(os.environ.get("PARETON_BENCH_HEALTH_POLL_S", "2"))
+BENCH_ENGINE_PORT: int = int(os.environ.get("PARETON_BENCH_ENGINE_PORT", "8000"))
+BENCH_DOCKER_PULL_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_BENCH_DOCKER_PULL_TIMEOUT_S", "1800")
+)
+BENCH_DOCKER_CMD_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_BENCH_DOCKER_CMD_TIMEOUT_S", "120")
+)
+
 API_ALLOWED_ORIGINS: list[str] = [
     o.strip()
     for o in os.environ.get("PARETON_ALLOWED_ORIGINS", "*").split(",")
