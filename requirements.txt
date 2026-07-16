@@ -1,4 +1,5 @@
 pytest>=8
+ruff>=0.15
 psycopg2-binary
 boto3>=1.34
 -r api/requirements.txt
