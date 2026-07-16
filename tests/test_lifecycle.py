@@ -223,9 +223,7 @@ def test_resolve_digest_uses_repo_digests_when_present():
 def test_published_host_port_parses_docker_port():
     fake = FakeDocker()
     fake.published_ports["cid1"] = "127.0.0.1:54321"
-    assert (
-        published_host_port("cid1", 8000, runner=fake, cmd_timeout_s=30) == 54321
-    )
+    assert published_host_port("cid1", 8000, runner=fake, cmd_timeout_s=30) == 54321
 
 
 # ---------------------------------------------------------------------------
@@ -437,12 +435,9 @@ def test_pull_timeout_budget_is_generous():
     finally:
         life.wait_until_healthy = original_wait  # type: ignore[assignment]
 
-    pull_timeouts = [
-        t
-        for (c, t) in fake.calls
-        if c[:2] == ["docker", "pull"]
-    ]
-    # fake.calls stores the timeout from FakeDocker.__call__; also check tracking
+    pull_timeouts = [t for (c, t) in fake.calls if c[:2] == ["docker", "pull"]]
+    assert any(t >= 1800 for t in pull_timeouts)
+    # tracking_runner sees the same timeouts as FakeDocker.__call__
     assert any(t >= 1800 for t in timeouts)
 
 

@@ -187,9 +187,9 @@ def test_internal_network_blocks_egress(mock_engine_image: str):
             f"but wget succeeded: {probe.stdout[:200]}"
         )
 
-    assert not [
-        n for n in _names_matching_prefix("network") if run_id in n
-    ], "leaked network after egress test"
+    assert not [n for n in _names_matching_prefix("network") if run_id in n], (
+        "leaked network after egress test"
+    )
 
 
 def test_internal_network_lifecycle_when_ip_reachable(
@@ -278,12 +278,12 @@ def test_internal_network_lifecycle_when_ip_reachable(
             )
             assert resp["object"] == "text_completion"
 
-    assert not [
-        n for n in _names_matching_prefix("container") if run_id in n
-    ], "leaked containers for run_id"
-    assert not [
-        n for n in _names_matching_prefix("network") if run_id in n
-    ], "leaked network for run_id"
+    assert not [n for n in _names_matching_prefix("container") if run_id in n], (
+        "leaked containers for run_id"
+    )
+    assert not [n for n in _names_matching_prefix("network") if run_id in n], (
+        "leaked network for run_id"
+    )
 
 
 def test_two_publish_port_engines_no_port_collision(

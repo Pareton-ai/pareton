@@ -1,0 +1,3 @@
+[lint.per-file-ignores]
+# Tests set pytestmark before imports, which trips E402 intentionally.
+"tests/**" = ["E402"]
