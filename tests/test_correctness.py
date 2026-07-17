@@ -240,7 +240,7 @@ def test_baseline_vs_baseline_passes(tmp_path: Path):
 
 
 def test_threshold_equality_is_fail(tmp_path: Path):
-    """Spec §5.1 requires strictly below threshold; equality fails."""
+    """Thresholds are exclusive: equality fails."""
     prompts = [PromptCase(id="p1", prompt="Hello world")]
     with (
         MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,

@@ -1,4 +1,4 @@
-"""Output / evidence-bundle directory layout (spec §4.5)."""
+"""Output / evidence-bundle directory layout."""
 
 from __future__ import annotations
 
