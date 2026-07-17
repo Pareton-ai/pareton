@@ -161,7 +161,45 @@ def test_stream_coalesced_multi_token_is_engine_error(monkeypatch: pytest.Monkey
         return _FakeResp(body)
 
     monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
-    with pytest.raises(EngineError, match="no inter-token gaps"):
+    with pytest.raises(EngineError, match="coalesced stream"):
+        post_completion_stream("http://example", prompt="p", max_tokens=5)
+
+
+def test_stream_partial_coalesce_is_engine_error(monkeypatch: pytest.MonkeyPatch):
+    """Two chunks for five tokens under-samples ITL; empty-only guard misses this."""
+
+    def fake_urlopen(req, timeout=60):
+        body = _sse(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "a",
+                        "finish_reason": None,
+                        "logprobs": None,
+                    }
+                ],
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "bcde",
+                        "finish_reason": "length",
+                        "logprobs": None,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 5,
+                    "total_tokens": 6,
+                },
+            },
+        )
+        return _FakeResp(body)
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    with pytest.raises(EngineError, match="coalesced stream"):
         post_completion_stream("http://example", prompt="p", max_tokens=5)
 
 
