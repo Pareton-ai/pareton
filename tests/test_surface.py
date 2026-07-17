@@ -66,14 +66,6 @@ index 1111111..2222222 100644
 
 
 def test_rejects_absolute_path():
-    bad = b"""diff --git a/vllm/x.py b|/etc/passwd
-index 1111111..2222222 100644
---- a/vllm/x.py
-+++ b|/etc/passwd
-@@ -1 +1 @@
--x
-+y
-"""
     # git may encode odd paths; also cover explicit absolute in header parse
     changes = parse_diff_paths(
         "diff --git a/vllm/x.py b/etc/passwd\n--- a/vllm/x.py\n+++ b/etc/passwd\n"

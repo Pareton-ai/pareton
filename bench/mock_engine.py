@@ -440,3 +440,77 @@ def response_shape_fingerprint(resp: dict[str, Any]) -> dict[str, Any]:
         return type(v).__name__
 
     return _type_of(resp)
+
+
+# ---------------------------------------------------------------------------
+# CLI (containerized / subprocess mock engine)
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Serve the mock engine until SIGTERM/SIGINT. Exit 0 on clean shutdown."""
+    import argparse
+    import signal
+
+    p = argparse.ArgumentParser(
+        prog="python -m bench.mock_engine",
+        description="In-process OpenAI-compatible mock engine for bench CI.",
+    )
+    p.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0)")
+    p.add_argument("--port", type=int, default=8000, help="Bind port (default 8000)")
+    p.add_argument("--model", default="mock-model", help="Reported model id")
+    p.add_argument(
+        "--tampered",
+        action="store_true",
+        help="Offset logprobs so Module A adversarial tests fail",
+    )
+    p.add_argument(
+        "--token-latency-s",
+        type=float,
+        default=0.0,
+        help="Per-output-token sleep in seconds",
+    )
+    p.add_argument(
+        "--startup-delay-s",
+        type=float,
+        default=0.0,
+        help="Sleep before listening (tests health-check wait)",
+    )
+    p.add_argument(
+        "--tamper-logprob-offset",
+        type=float,
+        default=1.0,
+        help="Additive logprob offset when --tampered",
+    )
+    args = p.parse_args(argv)
+
+    if args.startup_delay_s > 0:
+        time.sleep(args.startup_delay_s)
+
+    cfg = MockEngineConfig(
+        model=args.model,
+        tampered=args.tampered,
+        tamper_logprob_offset=args.tamper_logprob_offset,
+        token_latency_s=args.token_latency_s,
+        host=args.host,
+        port=args.port,
+    )
+    engine = MockEngine(cfg)
+    engine.start()
+
+    stop = threading.Event()
+
+    def _shutdown(*_args: Any) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    try:
+        stop.wait()
+    finally:
+        engine.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
