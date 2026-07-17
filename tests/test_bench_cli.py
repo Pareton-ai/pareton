@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from bench.correctness import PromptCase
-from bench.main import EXIT_BAD_REQUEST, EXIT_OK, main
+from bench.main import EXIT_BAD_REQUEST, EXIT_ENV, EXIT_OK, main
 from bench.validate import validate_report_dict
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,6 +152,21 @@ def test_cli_bad_trace_sha_exits_before_engines(tmp_path: Path, monkeypatch):
     )
     assert code == EXIT_BAD_REQUEST
     assert called["n"] == 0
+    assert not (out / "bench_report.json").exists()
+
+
+def test_cli_host_environment_error_exit_2(tmp_path: Path, monkeypatch):
+    """Docker unavailable must be exit 2, not engine exit 3."""
+    from bench.lifecycle import HostEnvironmentError
+
+    def boom(**_kwargs):
+        raise HostEnvironmentError("docker CLI not found on PATH")
+
+    monkeypatch.setattr("bench.main.run_with_docker_engines", boom)
+    req = _write_request(tmp_path, mode="correctness")
+    out = tmp_path / "out"
+    code = main(["--request", str(req), "--output-dir", str(out)])
+    assert code == EXIT_ENV
     assert not (out / "bench_report.json").exists()
 
 

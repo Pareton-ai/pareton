@@ -19,10 +19,12 @@ from bench.lifecycle import (
     DockerResult,
     EngineContainer,
     EngineError,
+    HostEnvironmentError,
     _redact_cmd_for_log,
     extract_digest_from_image_ref,
     normalize_image_id,
     published_host_port,
+    raise_docker_failure,
     resolve_image_digest,
     wait_until_healthy,
 )
@@ -180,6 +182,44 @@ def test_redact_env_values_from_logged_commands():
     assert "HF_TOKEN=***" in redacted
     assert "FOO=***" in redacted
     assert "<redacted>" in redacted
+
+
+def test_raise_docker_failure_daemon_down_is_host_env():
+    with pytest.raises(HostEnvironmentError, match="Cannot connect"):
+        raise_docker_failure(
+            "docker network create failed",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+            "Is the docker daemon running?",
+        )
+
+
+def test_raise_docker_failure_other_errors_stay_engine():
+    with pytest.raises(EngineError, match="network create"):
+        raise_docker_failure("docker network create failed", "network already exists")
+
+
+def test_default_runner_missing_docker_is_host_env(monkeypatch: pytest.MonkeyPatch):
+    from bench.lifecycle import default_docker_runner
+
+    def boom(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr("bench.lifecycle.subprocess.run", boom)
+    with pytest.raises(HostEnvironmentError, match="docker CLI not found"):
+        default_docker_runner(["docker", "info"], timeout=5)
+
+
+def test_network_create_daemon_down_raises_host_env():
+    def runner(cmd, *, timeout, input_text=None):
+        return DockerResult(
+            1,
+            "",
+            "Cannot connect to the Docker daemon. Is the docker daemon running?",
+        )
+
+    with pytest.raises(HostEnvironmentError, match="docker"):
+        with BenchNetwork(run_id="envtest000001", runner=runner, cmd_timeout_s=5):
+            pass
 
 
 def test_extract_digest_from_pinned_ref():

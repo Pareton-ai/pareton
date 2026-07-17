@@ -32,6 +32,7 @@ from bench.lifecycle import (
     BenchNetwork,
     EngineContainer,
     EngineError,
+    HostEnvironmentError,
     new_run_id,
 )
 from bench.output import JsonlFileHandler, OutputLayout
@@ -407,6 +408,10 @@ def run_bench(
                     layout=layout,
                     prompts=prompts,
                 )
+        except HostEnvironmentError as exc:
+            logger.error("environment error: %s", exc)
+            print(f"error: environment: {exc}", file=sys.stderr)
+            return EXIT_ENV
         except EngineError as exc:
             logger.error("engine failure: %s", exc)
             print(f"error: engine failure: {exc}", file=sys.stderr)
@@ -482,11 +487,6 @@ def main(argv: list[str] | None = None) -> int:
         mock_engine=args.mock_engine,
         mock_tampered_candidate=args.mock_tampered_candidate,
     )
-
-
-# Re-export for tests that imported the old stub helpers.
-def run_stub(request_path: Path, output_dir: Path) -> int:
-    return run_bench(request_path, output_dir, mock_engine=False)
 
 
 if __name__ == "__main__":
