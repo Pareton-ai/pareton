@@ -323,7 +323,10 @@ def run_all_modules(
             trace.requests, req.perf_screen, layout.perf_screen_dir
         )
         if perf.verdict != "pass":
-            return corr, perf, None, "perf_screen failed; sla_bench skipped"
+            skipped_note = (
+                "perf_screen failed; sla_bench skipped" if req.mode == "all" else None
+            )
+            return corr, perf, None, skipped_note
 
     if req.mode in ("all", "sla_bench"):
         sla = provider.run_sla_bench(trace, req.sla_bench, layout.sla_bench_dir)

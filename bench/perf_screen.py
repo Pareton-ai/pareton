@@ -41,6 +41,10 @@ def _run_engine(
     rows: list[dict] = []
     rows_lock = threading.Lock()
     errors: list[str] = []
+    # Closed-loop wall = first request send → last response. Summing per-request
+    # latencies is wrong when concurrency > 1 (parallel work would be double-counted).
+    state = {"first_send": None, "last_done": None}
+    state_lock = threading.Lock()
 
     def worker() -> None:
         while True:
@@ -50,6 +54,9 @@ def _run_engine(
                 return
             req = requests[idx]
             start = time.monotonic()
+            with state_lock:
+                if state["first_send"] is None:
+                    state["first_send"] = start
             try:
                 resp = post_completion(
                     base_url,
@@ -83,6 +90,9 @@ def _run_engine(
                     "error": str(exc),
                 }
                 errors.append(f"{role}/{req.id}: {exc}")
+            finally:
+                with state_lock:
+                    state["last_done"] = time.monotonic()
             with rows_lock:
                 rows.append(row)
 
@@ -97,24 +107,20 @@ def _run_engine(
             f"perf_screen {role} had {len(errors)} failed request(s): {errors[0]}"
         )
 
-    # Throughput from measured per-request latency, not wall time: at
-    # concurrency=1 the busy window equals the sum of latencies, and wall time
-    # also absorbs thread startup/HTTP overhead that swamps sub-ms requests and
-    # makes the ratio non-deterministic on fast (mock) engines.
-    busy_s = sum(float(r["latency_s"]) for r in rows)
+    wall = (state["last_done"] - state["first_send"]) if state["first_send"] else 0.0
     total_tokens = sum(int(r["completion_tokens"] or 0) for r in rows)
-    if busy_s <= 0:
-        raise EngineError(f"perf_screen {role}: non-positive cumulative latency")
-    tps = total_tokens / busy_s
+    if wall <= 0:
+        raise EngineError(f"perf_screen {role}: non-positive wall time")
+    tps = total_tokens / wall
     logger.info(
-        "perf_screen %s: %d requests, %d tokens, %.3fs busy, %.1f tok/s",
+        "perf_screen %s: %d requests, %d tokens, %.3fs wall, %.1f tok/s",
         role,
         len(rows),
         total_tokens,
-        busy_s,
+        wall,
         tps,
     )
-    return busy_s, total_tokens, tps, rows
+    return wall, total_tokens, tps, rows
 
 
 def run_perf_screen(

@@ -67,6 +67,38 @@ def test_subset_uses_first_num_requests(tmp_path: Path):
     assert ids == {"r-1", "r-2"}
 
 
+def test_concurrent_throughput_uses_wall_not_latency_sum(tmp_path: Path):
+    """With concurrency > 1, tok/s must use first-send→last-done wall time.
+
+    Summing per-request latencies double-counts parallel work and understates
+    throughput. Four equal requests at concurrency=2 should finish in ~2 waves,
+    so wall ≈ half the latency sum (within slack for thread/HTTP overhead).
+    """
+    from bench.perf_screen import run_perf_screen_engine
+
+    reqs = [_req(i, max_tokens=4) for i in range(4)]
+    cfg = PerfScreenConfig(num_requests=4, concurrency=2, min_throughput_ratio=0.5)
+    with MockEngine(MockEngineConfig(model="b", token_latency_s=0.02)) as eng:
+        metrics = run_perf_screen_engine(
+            eng.base_url,
+            role="baseline",
+            requests=reqs,
+            cfg=cfg,
+            evidence_dir=tmp_path,
+        )
+    wall = float(metrics["wall_s"])
+    latency_sum = sum(
+        float(json.loads(line)["latency_s"])
+        for line in (tmp_path / "baseline_rows.jsonl").read_text().splitlines()
+        if line.strip()
+    )
+    assert latency_sum > 0
+    # Parallelism must make wall materially shorter than the latency sum.
+    assert wall < 0.75 * latency_sum
+    expected_tps = metrics["completion_tokens"] / wall
+    assert metrics["output_tokens_per_s"] == pytest.approx(expected_tps)
+
+
 def test_verdict_pass_at_ratio_boundary(tmp_path: Path):
     # Candidate strictly faster -> ratio > 1 -> pass at min_throughput_ratio=1.0.
     cfg = PerfScreenConfig(num_requests=2, concurrency=1, min_throughput_ratio=1.0)
