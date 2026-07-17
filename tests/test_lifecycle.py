@@ -293,7 +293,9 @@ def test_engine_container_command_construction(tmp_path: Path):
     run = run_calls[0]
     assert "--network" in run
     assert net.name in run
-    assert "--gpus" in run and "all" in run
+    assert "--gpus" in run
+    assert run[run.index("--gpus") + 1] == "1"
+    assert "all" not in run
     vol = next(a for a in run if a.startswith(str(weights)))
     assert vol.endswith(":/model:ro")
     assert "--env-file" in run
@@ -378,6 +380,69 @@ def test_teardown_on_exception_still_removes(tmp_path: Path):
 
     assert any(c[:2] == ["docker", "rm"] for c, _ in fake.calls)
     assert not fake.containers
+
+
+def test_teardown_on_keyboard_interrupt(tmp_path: Path):
+    """BaseException (Ctrl-C) during health check must still rm the container."""
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("7" * 64)
+
+    import bench.lifecycle as life
+
+    def interrupt(*_a, **_k):
+        raise KeyboardInterrupt()
+
+    original_wait = life.wait_until_healthy
+    life.wait_until_healthy = interrupt  # type: ignore[assignment]
+    try:
+        with BenchNetwork(run_id="kbinterrupt01", runner=fake, cmd_timeout_s=30) as net:
+            with pytest.raises(KeyboardInterrupt):
+                with EngineContainer(
+                    spec=spec,
+                    network=net,
+                    pull=False,
+                    logs_dir=tmp_path,
+                    health_timeout_s=1,
+                    health_poll_s=0.05,
+                    cmd_timeout_s=30,
+                ):
+                    pass
+    finally:
+        life.wait_until_healthy = original_wait  # type: ignore[assignment]
+
+    assert any(c[:2] == ["docker", "rm"] for c, _ in fake.calls)
+    assert not fake.containers
+
+
+def test_gpu_count_passed_as_docker_count_not_all():
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("8" * 64)
+
+    import bench.lifecycle as life
+
+    original_wait = life.wait_until_healthy
+    life.wait_until_healthy = lambda *a, **k: None  # type: ignore[assignment]
+    try:
+        with BenchNetwork(run_id="gpucount0002", runner=fake, cmd_timeout_s=30) as net:
+            with EngineContainer(
+                spec=spec,
+                network=net,
+                pull=False,
+                gpu_count=2,
+                health_timeout_s=1,
+                health_poll_s=0.05,
+                cmd_timeout_s=30,
+            ):
+                pass
+    finally:
+        life.wait_until_healthy = original_wait  # type: ignore[assignment]
+
+    run = next(c for c, _ in fake.calls if c[:2] == ["docker", "run"])
+    assert run[run.index("--gpus") + 1] == "2"
 
 
 def test_fail_fast_when_container_exits_during_health():
