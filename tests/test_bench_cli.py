@@ -52,6 +52,32 @@ def test_cli_mock_engine_mode_perf_screen_pass(tmp_path: Path):
     assert (out / "evidence" / "perf_screen" / "perf_screen.jsonl").is_file()
 
 
+def test_cli_perf_only_fail_has_no_skipped_note(tmp_path: Path):
+    """mode=perf_screen fail must not claim sla_bench was skipped."""
+    req = _write_request(tmp_path, mode="perf_screen")
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.005",
+            "--mock-candidate-token-latency-s",
+            "0.02",
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    validate_report_dict(report)
+    assert report["verdict"] == "fail_perf_screen"
+    assert report["perf_screen"]["verdict"] == "fail_perf_screen"
+    assert "sla_bench" not in report
+    assert "skipped_note" not in report
+
+
 def test_cli_invalid_request_exit_1(tmp_path: Path):
     bad = tmp_path / "bad.json"
     bad.write_text('{"schema_version": 1}\n', encoding="utf-8")
