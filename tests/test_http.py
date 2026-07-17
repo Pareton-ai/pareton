@@ -128,3 +128,38 @@ def test_stream_missing_done_is_engine_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
     with pytest.raises(EngineError, match="without \\[DONE\\]"):
         post_completion_stream("http://example", prompt="p", max_tokens=1)
+
+
+def test_stream_done_only_is_engine_error(monkeypatch: pytest.MonkeyPatch):
+    def fake_urlopen(req, timeout=60):
+        return _FakeResp(_sse(done=True))
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    with pytest.raises(EngineError, match="no choice chunks"):
+        post_completion_stream("http://example", prompt="p", max_tokens=1)
+
+
+def test_stream_coalesced_multi_token_is_engine_error(monkeypatch: pytest.MonkeyPatch):
+    def fake_urlopen(req, timeout=60):
+        body = _sse(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "hello",
+                        "finish_reason": "length",
+                        "logprobs": None,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 5,
+                    "total_tokens": 6,
+                },
+            },
+        )
+        return _FakeResp(body)
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    with pytest.raises(EngineError, match="no inter-token gaps"):
+        post_completion_stream("http://example", prompt="p", max_tokens=5)

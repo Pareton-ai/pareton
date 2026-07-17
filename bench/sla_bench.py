@@ -104,6 +104,14 @@ def aggregate_rep_metrics(
     good = 0
     for r in rows:
         req_itl = [float(x) for x in (r.get("itl_ms") or [])]
+        n_tok = int(r.get("completion_tokens") or 0)
+        # Multi-token replies must expose inter-token gaps; empty ITL would
+        # otherwise vacuous-pass the ITL gate and report p99 ITL as 0.
+        if n_tok >= 2 and not req_itl:
+            raise EngineError(
+                f"sla_bench: request {r.get('request_id')!r} has {n_tok} "
+                f"completion tokens but no inter-token latency samples"
+            )
         itl_ok = True if not req_itl else percentile(req_itl, 99) <= p99_itl_ms
         if float(r["ttft_ms"]) <= p99_ttft_ms and itl_ok:
             good += 1

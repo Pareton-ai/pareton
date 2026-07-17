@@ -186,7 +186,17 @@ def post_completion_stream(
 
     if not saw_done:
         raise EngineError(f"completions stream from {url} ended without [DONE]")
-    e2e_s = (last_chunk - send) if last_chunk is not None else 0.0
+    if last_chunk is None:
+        raise EngineError(
+            f"completions stream from {url} produced no choice chunks "
+            f"(cannot measure TTFT/ITL)"
+        )
+    if completion_tokens is not None and completion_tokens > 1 and not itl_s:
+        raise EngineError(
+            f"completions stream from {url}: completion_tokens={completion_tokens} "
+            f"but no inter-token gaps (coalesced stream)"
+        )
+    e2e_s = last_chunk - send
     return StreamResult(
         text="".join(text_parts),
         finish_reason=finish_reason,

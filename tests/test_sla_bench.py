@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from bench.lifecycle import EngineError
 from bench.sla_bench import (
     aggregate_rep_metrics,
     percentile,
@@ -88,6 +89,19 @@ def test_goodput_ratio_threshold():
     ]
     m = aggregate_rep_metrics(rows, wall_s=1.0, p99_ttft_ms=100.0, p99_itl_ms=100.0)
     assert m["sla_goodput_ratio"] == 0.5
+
+
+def test_single_token_empty_itl_vacuous_ok():
+    rows = [_row("a", 10.0, [], 20.0, tokens=1)]
+    m = aggregate_rep_metrics(rows, wall_s=1.0, p99_ttft_ms=100.0, p99_itl_ms=100.0)
+    assert m["itl_ms"].p99 == 0.0
+    assert m["sla_goodput_ratio"] == 1.0
+
+
+def test_multi_token_empty_itl_raises():
+    rows = [_row("a", 10.0, [], 20.0, tokens=2)]
+    with pytest.raises(EngineError, match="inter-token latency"):
+        aggregate_rep_metrics(rows, wall_s=1.0, p99_ttft_ms=100.0, p99_itl_ms=100.0)
 
 
 def test_engine_metrics_median_of_reps():
