@@ -1,16 +1,21 @@
 """Docker integration: Module A via B3 lifecycle + containerized mock engines.
 
-Skipped automatically when Docker is unavailable.
+Skipped automatically when Docker is unavailable. Self-skips on Docker Desktop
+where the host cannot reach container-bridge IPs (production path uses
+``--internal`` + container IP; no published ports).
 """
 
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
+from bench.lifecycle import NAME_PREFIX, BenchNetwork, default_docker_runner
 from bench.main import EXIT_OK, main
 from bench.validate import validate_report_dict
 
@@ -39,6 +44,14 @@ pytestmark = [
     pytest.mark.docker,
     pytest.mark.skipif(not _docker_available(), reason="docker not available"),
 ]
+
+
+def _host_can_reach(ip: str, port: int = 8000) -> bool:
+    try:
+        with socket.create_connection((ip, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
 
 
 @pytest.fixture(scope="module")
@@ -80,9 +93,70 @@ def mock_image_digest() -> str:
     return f"sha256:{hex_part}"
 
 
+def _require_container_ip_reachable(mock_image_digest: str) -> None:
+    """Skip when host cannot reach bridge IPs (Docker Desktop)."""
+    run_id = "itpre" + "0" * 7
+    with BenchNetwork(
+        run_id=run_id,
+        internal=True,
+        runner=default_docker_runner,
+        cmd_timeout_s=60,
+    ) as net:
+        run = subprocess.run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                f"{NAME_PREFIX}{run_id}-probe",
+                "--network",
+                net.name,
+                mock_image_digest,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if run.returncode != 0:
+            pytest.fail(f"probe container failed: {run.stderr}")
+        cid = run.stdout.strip()
+        try:
+            ip_r = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    f'{{{{index .NetworkSettings.Networks "{net.name}" "IPAddress"}}}}',
+                    cid,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            ip = ip_r.stdout.strip()
+            time.sleep(1.0)
+            if not ip or not _host_can_reach(ip, 8000):
+                pytest.skip(
+                    "container-bridge IP not reachable from host "
+                    "(Docker Desktop); production path is Linux GPU pods"
+                )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", cid],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+
 def test_cli_correctness_via_lifecycle_baseline_vs_baseline(
     mock_image_digest: str, tmp_path: Path
 ):
+    _require_container_ip_reachable(mock_image_digest)
+
     req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     req["mode"] = "correctness"
     req["workload_trace"]["path"] = str(SAMPLE_TRACE)
