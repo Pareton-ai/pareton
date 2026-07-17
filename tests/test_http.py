@@ -163,3 +163,24 @@ def test_stream_coalesced_multi_token_is_engine_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
     with pytest.raises(EngineError, match="no inter-token gaps"):
         post_completion_stream("http://example", prompt="p", max_tokens=5)
+
+
+def test_stream_missing_usage_is_engine_error(monkeypatch: pytest.MonkeyPatch):
+    def fake_urlopen(req, timeout=60):
+        body = _sse(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "hello",
+                        "finish_reason": "length",
+                        "logprobs": None,
+                    }
+                ],
+            },
+        )
+        return _FakeResp(body)
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    with pytest.raises(EngineError, match="usage.completion_tokens"):
+        post_completion_stream("http://example", prompt="p", max_tokens=5)
