@@ -191,7 +191,13 @@ def post_completion_stream(
             f"completions stream from {url} produced no choice chunks "
             f"(cannot measure TTFT/ITL)"
         )
-    if completion_tokens is not None and completion_tokens > 1 and not itl_s:
+    # include_usage was requested; without a count the coalesced-stream and
+    # Module C multi-token ITL guards cannot run and fail open.
+    if completion_tokens is None:
+        raise EngineError(
+            f"completions stream from {url} omitted usage.completion_tokens"
+        )
+    if completion_tokens > 1 and not itl_s:
         raise EngineError(
             f"completions stream from {url}: completion_tokens={completion_tokens} "
             f"but no inter-token gaps (coalesced stream)"
