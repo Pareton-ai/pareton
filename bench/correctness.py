@@ -359,7 +359,6 @@ def finish_correctness_with_candidate(
     evidence_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = evidence_dir / EVIDENCE_FILENAME
     partial_path = evidence_dir / f"{EVIDENCE_FILENAME}.partial"
-    evidence_path.unlink(missing_ok=True)
 
     abs_diffs: list[float] = []
     argmax_mismatches = 0

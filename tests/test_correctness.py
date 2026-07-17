@@ -277,6 +277,9 @@ def test_partial_evidence_left_on_engine_error(
     monkeypatch.setattr("bench.correctness.extract_output_logprobs", fail_on_candidate)
     prompts = [PromptCase(id="p1", prompt="Hello world")]
     evidence_dir = tmp_path / "correctness"
+    evidence_dir.mkdir(parents=True)
+    prior = evidence_dir / "logprob_diffs.jsonl"
+    prior.write_text('{"prior":true}\n', encoding="utf-8")
     with (
         MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
         MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
@@ -291,7 +294,8 @@ def test_partial_evidence_left_on_engine_error(
                 evidence_dir=evidence_dir,
             )
     assert (evidence_dir / "logprob_diffs.jsonl.partial").is_file()
-    assert not (evidence_dir / "logprob_diffs.jsonl").exists()
+    # Failed retry must not erase a prior successful evidence file.
+    assert prior.read_text(encoding="utf-8") == '{"prior":true}\n'
 
 
 def test_tampered_candidate_fails(tmp_path: Path):
