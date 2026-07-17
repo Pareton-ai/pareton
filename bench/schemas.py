@@ -411,6 +411,8 @@ class BenchReport:
     sla_bench: SlaBenchReport | None = None
     # Stub/skeleton note (omitted from to_dict when empty).
     stub_note: str | None = None
+    # Fail-fast skip note (omitted from to_dict when empty).
+    skipped_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -430,4 +432,6 @@ class BenchReport:
             out["sla_bench"] = self.sla_bench.to_dict()
         if self.stub_note:
             out["stub_note"] = self.stub_note
+        if self.skipped_note:
+            out["skipped_note"] = self.skipped_note
         return out

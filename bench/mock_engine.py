@@ -172,11 +172,13 @@ def build_completion_response(
         # Score-only / teacher-force path: no new tokens; echo prompt logprobs.
         completion_tokens: list[str] = []
     else:
-        # Greedy-ish fixed continuation, truncated to max_tokens mock tokens.
+        # Greedy continuation, cycled to fill max_tokens (long completions let
+        # perf/SLA tests measure throughput); Module A uses short max_tokens and
+        # is unaffected. Truncate when max_tokens is smaller than the cycle.
         cont = mock_tokenize(cfg.greedy_text)
         if not cont:
             cont = [" OK"]
-        completion_tokens = cont[:max_tokens]
+        completion_tokens = [cont[i % len(cont)] for i in range(max_tokens)]
         # Apply per-token latency (sleep) for completion tokens only.
         for i in range(len(completion_tokens)):
             delay = _latency_at(cfg, i)
@@ -258,6 +260,64 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _write_sse(self, payload: dict[str, Any]) -> None:
+        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _stream_completion(
+        self, *, prompt: str, max_tokens: int, temperature: float
+    ) -> None:
+        """vLLM-shaped SSE: one chunk per completion token with per-token delay.
+
+        First-chunk delay ⇒ TTFT; inter-chunk gaps ⇒ ITL. Final chunk carries
+        finish_reason + usage; stream ends with ``data: [DONE]``.
+        """
+        cfg = self.server.cfg
+        cont = mock_tokenize(cfg.greedy_text) or [" OK"]
+        n = max(1, max_tokens)
+        completion_tokens = [cont[i % len(cont)] for i in range(n)]
+        prompt_count = len(mock_tokenize(prompt))
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        resp_id = f"cmpl-mock-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+        try:
+            for i, tok in enumerate(completion_tokens):
+                delay = _latency_at(cfg, i)
+                if delay > 0:
+                    time.sleep(delay)
+                last = i == len(completion_tokens) - 1
+                chunk: dict[str, Any] = {
+                    "id": resp_id,
+                    "object": "text_completion",
+                    "created": created,
+                    "model": cfg.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": tok,
+                            "logprobs": None,
+                            "finish_reason": "length" if last else None,
+                        }
+                    ],
+                }
+                if last:
+                    chunk["usage"] = {
+                        "prompt_tokens": prompt_count,
+                        "completion_tokens": len(completion_tokens),
+                        "total_tokens": prompt_count + len(completion_tokens),
+                    }
+                self._write_sse(chunk)
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug("mock_engine: client disconnected mid-stream")
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/health", "/v1/models"):
@@ -289,6 +349,7 @@ class _Handler(BaseHTTPRequestHandler):
         max_tokens = int(req.get("max_tokens", 16))
         echo = bool(req.get("echo", False))
         temperature = float(req.get("temperature", 1.0))
+        stream = bool(req.get("stream", False))
         logprobs_raw = req.get("logprobs", None)
         logprobs_requested: int | None
         if logprobs_raw is None:
@@ -298,6 +359,12 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Ignore unused fields (model, seed, top_p, ...) — accepted for compatibility.
         _ = req.get("model"), req.get("seed"), req.get("top_p"), temperature
+
+        if stream:
+            self._stream_completion(
+                prompt=prompt, max_tokens=max_tokens, temperature=temperature
+            )
+            return
 
         resp = build_completion_response(
             cfg=self.server.cfg,

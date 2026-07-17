@@ -13,9 +13,8 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
+from bench.http import post_completion
 from bench.lifecycle import EngineError
 from bench.schemas import CorrectnessConfig, CorrectnessReport, TraceRequest
 from bench.validate import RequestValidationError, load_workload_trace
@@ -92,59 +91,6 @@ def _prompt_case_from_trace_request(req: TraceRequest) -> PromptCase:
             f"(prompt_token_ids-only entries are not supported yet)"
         )
     return PromptCase(id=req.id, prompt=req.prompt)
-
-
-def post_completion(
-    base_url: str,
-    *,
-    prompt: str,
-    max_tokens: int = 16,
-    echo: bool = False,
-    logprobs: int | None = 1,
-    temperature: float = 0.0,
-    seed: int | None = 0,
-    timeout: float = 60.0,
-) -> dict[str, Any]:
-    """Serial OpenAI-compatible /v1/completions client (stdlib only)."""
-    url = base_url.rstrip("/") + "/v1/completions"
-    body: dict[str, Any] = {
-        "prompt": prompt,
-        "max_tokens": max_tokens,
-        "echo": echo,
-        "temperature": temperature,
-    }
-    if logprobs is not None:
-        body["logprobs"] = logprobs
-    if seed is not None:
-        body["seed"] = seed
-    data = json.dumps(body).encode("utf-8")
-    req = Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-            payload = json.loads(raw.decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise EngineError(f"completions HTTP {exc.code} from {url}: {detail}") from exc
-    except URLError as exc:
-        raise EngineError(f"completions request failed for {url}: {exc}") from exc
-    except TimeoutError as exc:
-        raise EngineError(f"completions timed out for {url}") from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EngineError(
-            f"invalid JSON from completions endpoint {url}: {exc}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise EngineError(
-            f"completions response from {url} must be a JSON object, "
-            f"got {type(payload).__name__}"
-        )
-    return payload
 
 
 def probe_logprob_capability(base_url: str, *, timeout: float = 30.0) -> None:
