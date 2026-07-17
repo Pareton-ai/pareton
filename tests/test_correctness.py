@@ -180,3 +180,46 @@ def test_tampered_candidate_fails(tmp_path: Path):
     # Tamper offset is +1.0 — well above thresholds.
     assert report.mean_abs_logprob_diff >= 0.9
     assert report.max_abs_logprob_diff >= 0.9
+
+
+def test_forced_token_mismatch_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Logprob diffs are undefined when engines report different forced tokens."""
+    from bench.correctness import _PositionScore, extract_output_logprobs
+
+    real_extract = extract_output_logprobs
+    calls = {"n": 0}
+
+    def mutate_candidate_tokens(resp, *, original_prompt: str):
+        scores = real_extract(resp, original_prompt=original_prompt)
+        calls["n"] += 1
+        # Even calls are candidate scores in run_correctness (base then cand).
+        if calls["n"] % 2 == 0 and scores:
+            return [
+                _PositionScore(
+                    position=s.position,
+                    token=s.token + "_X",
+                    text_offset=s.text_offset,
+                    logprob=s.logprob,
+                    top1=s.top1,
+                )
+                for s in scores
+            ]
+        return scores
+
+    monkeypatch.setattr(
+        "bench.correctness.extract_output_logprobs", mutate_candidate_tokens
+    )
+    prompts = [PromptCase(id="p1", prompt="Hello world")]
+    with (
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
+    ):
+        with pytest.raises(EngineError, match="forced token mismatch"):
+            run_correctness(
+                base.base_url,
+                cand.base_url,
+                prompts=prompts,
+                cfg=_cfg(num_prompts=1),
+                task_id="550e8400-e29b-41d4-a716-446655440000",
+                evidence_dir=tmp_path / "correctness",
+            )
