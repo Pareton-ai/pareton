@@ -12,6 +12,7 @@ from bench.correctness import (
     extract_output_logprobs,
     post_completion,
     probe_logprob_capability,
+    resolve_trace_path,
     run_correctness,
     scoring_order,
     select_correctness_prompts,
@@ -53,6 +54,22 @@ def test_select_correctness_prompts_from_trace():
     assert len(prompts) == 2
     assert prompts[0].id == "r-000001"
     assert prompts[0].prompt == "Hello world"
+
+
+def test_resolve_trace_path_prefers_request_dir(tmp_path: Path, monkeypatch):
+    """Relative path: request directory wins over a same-named CWD file."""
+    req_dir = tmp_path / "req"
+    cwd = tmp_path / "cwd"
+    req_dir.mkdir()
+    cwd.mkdir()
+    (req_dir / "trace.json").write_text('{"from":"request"}', encoding="utf-8")
+    (cwd / "trace.json").write_text('{"from":"cwd"}', encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    resolved = resolve_trace_path(
+        "trace.json", request_path=req_dir / "bench_request.json"
+    )
+    assert resolved == (req_dir / "trace.json").resolve()
+    assert resolved.read_text(encoding="utf-8") == '{"from":"request"}'
 
 
 def test_select_rejects_token_ids_only(tmp_path: Path):
@@ -173,8 +190,64 @@ def test_baseline_vs_baseline_passes(tmp_path: Path):
     assert report.argmax_mismatch_rate == 0.0
     evidence = tmp_path / "correctness" / "logprob_diffs.jsonl"
     assert evidence.is_file()
+    assert not (tmp_path / "correctness" / "logprob_diffs.jsonl.partial").exists()
     lines = evidence.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == report.num_positions_compared
+
+
+def test_threshold_equality_is_fail(tmp_path: Path):
+    """Spec §5.1 requires strictly below threshold; equality fails."""
+    prompts = [PromptCase(id="p1", prompt="Hello world")]
+    with (
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
+    ):
+        report = run_correctness(
+            base.base_url,
+            cand.base_url,
+            prompts=prompts,
+            cfg=_cfg(mean=0.0, max_d=0.0, argmax=0.0, num_prompts=1),
+            task_id="550e8400-e29b-41d4-a716-446655440000",
+            evidence_dir=tmp_path / "correctness",
+        )
+    assert report.mean_abs_logprob_diff == 0.0
+    assert report.verdict == "fail_correctness"
+
+
+def test_partial_evidence_left_on_engine_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Mid-run EngineError must not promote .partial to the final evidence name."""
+    from bench.correctness import extract_output_logprobs
+
+    real_extract = extract_output_logprobs
+    calls = {"n": 0}
+
+    def fail_on_candidate(resp, *, original_prompt: str):
+        scores = real_extract(resp, original_prompt=original_prompt)
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise EngineError("simulated candidate score failure")
+        return scores
+
+    monkeypatch.setattr("bench.correctness.extract_output_logprobs", fail_on_candidate)
+    prompts = [PromptCase(id="p1", prompt="Hello world")]
+    evidence_dir = tmp_path / "correctness"
+    with (
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
+    ):
+        with pytest.raises(EngineError, match="simulated candidate"):
+            run_correctness(
+                base.base_url,
+                cand.base_url,
+                prompts=prompts,
+                cfg=_cfg(num_prompts=1),
+                task_id="550e8400-e29b-41d4-a716-446655440000",
+                evidence_dir=evidence_dir,
+            )
+    assert (evidence_dir / "logprob_diffs.jsonl.partial").is_file()
+    assert not (evidence_dir / "logprob_diffs.jsonl").exists()
 
 
 def test_tampered_candidate_fails(tmp_path: Path):
@@ -210,8 +283,8 @@ def test_forced_token_mismatch_raises(tmp_path: Path, monkeypatch: pytest.Monkey
     def mutate_candidate_tokens(resp, *, original_prompt: str):
         scores = real_extract(resp, original_prompt=original_prompt)
         calls["n"] += 1
-        # Even calls are candidate scores in run_correctness (base then cand).
-        if calls["n"] % 2 == 0 and scores:
+        # Baseline phase extracts first; candidate phase extracts afterward.
+        if calls["n"] > 1 and scores:
             return [
                 _PositionScore(
                     position=s.position,

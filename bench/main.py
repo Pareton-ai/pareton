@@ -17,9 +17,11 @@ from pathlib import Path
 
 from bench import __version__
 from bench.correctness import (
-    resolve_trace_path,
+    PromptCase,
+    collect_baseline_correctness,
+    finish_correctness_with_candidate,
+    load_correctness_prompts,
     run_correctness,
-    select_correctness_prompts,
 )
 from bench.env import (
     collect_env_raw_dumps,
@@ -119,17 +121,11 @@ def _write_validated_report(layout: OutputLayout, report: BenchReport) -> int:
 def run_correctness_against_urls(
     *,
     req: BenchRequest,
-    request_path: Path,
     layout: OutputLayout,
+    prompts: list[PromptCase],
     baseline_url: str,
     candidate_url: str,
 ) -> CorrectnessReport:
-    trace_path = resolve_trace_path(req.workload_trace.path, request_path=request_path)
-    prompts = select_correctness_prompts(
-        trace_path=trace_path,
-        expected_sha256=req.workload_trace.sha256,
-        num_prompts=req.correctness.num_prompts,
-    )
     return run_correctness(
         baseline_url,
         candidate_url,
@@ -143,8 +139,8 @@ def run_correctness_against_urls(
 def run_with_mock_engines(
     *,
     req: BenchRequest,
-    request_path: Path,
     layout: OutputLayout,
+    prompts: list[PromptCase],
     tampered_candidate: bool,
 ) -> tuple[CorrectnessReport, str, str]:
     """In-process mock engines. Digests come from the request image pins."""
@@ -167,8 +163,8 @@ def run_with_mock_engines(
     ):
         report = run_correctness_against_urls(
             req=req,
-            request_path=request_path,
             layout=layout,
+            prompts=prompts,
             baseline_url=base.base_url,
             candidate_url=cand.base_url,
         )
@@ -205,48 +201,51 @@ def _effective_gpu_count(requested: int) -> int:
 def run_with_docker_engines(
     *,
     req: BenchRequest,
-    request_path: Path,
     layout: OutputLayout,
+    prompts: list[PromptCase],
 ) -> tuple[CorrectnessReport, str, str]:
-    """Containerized engines via B3 lifecycle (baseline + candidate coexist).
+    """Containerized engines via B3 lifecycle, sequential baseline then candidate.
 
-    Spec §2.4: engines run on an ``--internal`` Docker network with no egress
-    and no published ports. The harness reaches them via container IP (Linux
-    GPU pods). Docker Desktop cannot route to bridge IPs — that is a local-dev
-    limitation; production never uses publish_port for Module A.
+    Spec §3 allows Module A coexistence, but two full-size vLLM loads on one GPU
+    commonly OOM. Generate+score on baseline, tear it down, then score candidate.
+    Engines use an ``--internal`` network with no published ports.
     """
     run_id = new_run_id()
     logs_dir = layout.correctness_dir / "engine_logs"
     gpu_count = _effective_gpu_count(req.hardware.gpu_count)
     with BenchNetwork(run_id=run_id, internal=True) as net:
-        with (
-            EngineContainer(
-                spec=req.engines.baseline,
-                network=net,
-                role="baseline",
-                gpu_count=gpu_count,
-                publish_port=False,
-                pull=_should_pull_image(req.engines.baseline.image),
-                logs_dir=logs_dir,
-            ) as base,
-            EngineContainer(
-                spec=req.engines.candidate,
-                network=net,
-                role="candidate",
-                gpu_count=gpu_count,
-                publish_port=False,
-                pull=_should_pull_image(req.engines.candidate.image),
-                logs_dir=logs_dir,
-            ) as cand,
-        ):
-            report = run_correctness_against_urls(
-                req=req,
-                request_path=request_path,
-                layout=layout,
-                baseline_url=base.base_url,
-                candidate_url=cand.base_url,
+        with EngineContainer(
+            spec=req.engines.baseline,
+            network=net,
+            role="baseline",
+            gpu_count=gpu_count,
+            publish_port=False,
+            pull=_should_pull_image(req.engines.baseline.image),
+            logs_dir=logs_dir,
+        ) as base:
+            baseline_phase = collect_baseline_correctness(
+                base.base_url,
+                prompts=prompts,
+                cfg=req.correctness,
+                task_id=req.task_id,
             )
-            return report, base.image_digest, cand.image_digest
+            baseline_digest = base.image_digest
+        with EngineContainer(
+            spec=req.engines.candidate,
+            network=net,
+            role="candidate",
+            gpu_count=gpu_count,
+            publish_port=False,
+            pull=_should_pull_image(req.engines.candidate.image),
+            logs_dir=logs_dir,
+        ) as cand:
+            report = finish_correctness_with_candidate(
+                cand.base_url,
+                baseline_phase,
+                cfg=req.correctness,
+                evidence_dir=layout.correctness_dir,
+            )
+            return report, baseline_digest, cand.image_digest
 
 
 def build_stub_remainder_report(
@@ -387,19 +386,26 @@ def run_bench(
             report = build_legacy_stub_report(request_raw=raw, req=req, env=env)
             return _write_validated_report(layout, report)
 
+        prompts = load_correctness_prompts(
+            trace_ref_path=req.workload_trace.path,
+            expected_sha256=req.workload_trace.sha256,
+            num_prompts=req.correctness.num_prompts,
+            request_path=request_path,
+        )
+
         try:
             if mock_engine:
                 corr, base_d, cand_d = run_with_mock_engines(
                     req=req,
-                    request_path=request_path,
                     layout=layout,
+                    prompts=prompts,
                     tampered_candidate=mock_tampered_candidate,
                 )
             else:
                 corr, base_d, cand_d = run_with_docker_engines(
                     req=req,
-                    request_path=request_path,
                     layout=layout,
+                    prompts=prompts,
                 )
         except EngineError as exc:
             logger.error("engine failure: %s", exc)

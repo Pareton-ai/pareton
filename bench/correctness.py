@@ -32,18 +32,36 @@ class PromptCase:
 
 
 def resolve_trace_path(trace_path: str, *, request_path: Path | None = None) -> Path:
-    """Resolve workload_trace.path relative to request dir, then CWD."""
+    """Resolve workload_trace.path: absolute as-is; relative = request dir, then CWD."""
     p = Path(trace_path)
-    if p.is_file():
-        return p.resolve()
+    if p.is_absolute():
+        if p.is_file():
+            return p.resolve()
+        raise RequestValidationError(f"workload trace not found: {trace_path}")
     candidates: list[Path] = []
     if request_path is not None:
         candidates.append((request_path.parent / p).resolve())
-    candidates.append(Path.cwd() / p)
+    candidates.append((Path.cwd() / p).resolve())
     for c in candidates:
         if c.is_file():
             return c
     raise RequestValidationError(f"workload trace not found: {trace_path}")
+
+
+def load_correctness_prompts(
+    *,
+    trace_ref_path: str,
+    expected_sha256: str,
+    num_prompts: int,
+    request_path: Path,
+) -> list[PromptCase]:
+    """Resolve, verify, and select prompts before engines start."""
+    trace_path = resolve_trace_path(trace_ref_path, request_path=request_path)
+    return select_correctness_prompts(
+        trace_path=trace_path,
+        expected_sha256=expected_sha256,
+        num_prompts=num_prompts,
+    )
 
 
 def select_correctness_prompts(
@@ -240,24 +258,28 @@ def scoring_order(prompt_ids: list[str], task_id: str) -> list[str]:
     return order
 
 
-def run_correctness(
+@dataclass
+class BaselineCorrectnessPhase:
+    """Baseline generate+score results; candidate can run after baseline teardown."""
+
+    prompts: list[PromptCase]
+    scored: list[tuple[PromptCase, str, list[_PositionScore]]]
+
+
+def collect_baseline_correctness(
     baseline_url: str,
-    candidate_url: str,
     *,
     prompts: list[PromptCase],
     cfg: CorrectnessConfig,
     task_id: str,
-    evidence_dir: Path,
     request_timeout_s: float = 60.0,
-) -> CorrectnessReport:
-    """Run Module A against two healthy OpenAI-compatible base URLs."""
+) -> BaselineCorrectnessPhase:
+    """Generate forced continuations and score them on the baseline engine."""
     if not prompts:
         raise RequestValidationError("correctness: no prompts to evaluate")
 
     probe_logprob_capability(baseline_url, timeout=request_timeout_s)
-    probe_logprob_capability(candidate_url, timeout=request_timeout_s)
 
-    # Phase 1: baseline greedy generation (serial, original order).
     forced: dict[str, str] = {}
     for case in prompts:
         gen = post_completion(
@@ -286,27 +308,49 @@ def run_correctness(
 
     by_id = {c.id: c for c in prompts}
     order = scoring_order([c.id for c in prompts], task_id)
+    scored: list[tuple[PromptCase, str, list[_PositionScore]]] = []
+    for pid in order:
+        case = by_id[pid]
+        continuation = forced[pid]
+        full = case.prompt + continuation
+        base_resp = post_completion(
+            baseline_url,
+            prompt=full,
+            max_tokens=0,
+            echo=True,
+            logprobs=1,
+            temperature=0.0,
+            seed=0,
+            timeout=request_timeout_s,
+        )
+        base_scores = extract_output_logprobs(base_resp, original_prompt=case.prompt)
+        scored.append((case, continuation, base_scores))
+    return BaselineCorrectnessPhase(prompts=prompts, scored=scored)
+
+
+def finish_correctness_with_candidate(
+    candidate_url: str,
+    baseline: BaselineCorrectnessPhase,
+    *,
+    cfg: CorrectnessConfig,
+    evidence_dir: Path,
+    request_timeout_s: float = 60.0,
+) -> CorrectnessReport:
+    """Score forced sequences on the candidate and compare to baseline."""
+    probe_logprob_capability(candidate_url, timeout=request_timeout_s)
 
     evidence_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = evidence_dir / EVIDENCE_FILENAME
+    partial_path = evidence_dir / f"{EVIDENCE_FILENAME}.partial"
+    evidence_path.unlink(missing_ok=True)
+
     abs_diffs: list[float] = []
     argmax_mismatches = 0
     positions_compared = 0
 
-    with evidence_path.open("w", encoding="utf-8") as ef:
-        for pid in order:
-            case = by_id[pid]
-            full = case.prompt + forced[pid]
-            base_resp = post_completion(
-                baseline_url,
-                prompt=full,
-                max_tokens=0,
-                echo=True,
-                logprobs=1,
-                temperature=0.0,
-                seed=0,
-                timeout=request_timeout_s,
-            )
+    with partial_path.open("w", encoding="utf-8") as ef:
+        for case, continuation, base_scores in baseline.scored:
+            full = case.prompt + continuation
             cand_resp = post_completion(
                 candidate_url,
                 prompt=full,
@@ -317,28 +361,25 @@ def run_correctness(
                 seed=0,
                 timeout=request_timeout_s,
             )
-            base_scores = extract_output_logprobs(
-                base_resp, original_prompt=case.prompt
-            )
             cand_scores = extract_output_logprobs(
                 cand_resp, original_prompt=case.prompt
             )
             if len(base_scores) != len(cand_scores):
                 raise EngineError(
-                    f"output logprob length mismatch for {pid}: "
+                    f"output logprob length mismatch for {case.id}: "
                     f"baseline={len(base_scores)} candidate={len(cand_scores)}"
                 )
             for b, c in zip(base_scores, cand_scores, strict=True):
                 if b.text_offset != c.text_offset:
                     raise EngineError(
-                        f"text_offset mismatch for {pid} at position "
+                        f"text_offset mismatch for {case.id} at position "
                         f"{b.position}: baseline={b.text_offset} "
                         f"candidate={c.text_offset}"
                     )
                 # Same forced token is required before any logprob comparison.
                 if b.token != c.token:
                     raise EngineError(
-                        f"forced token mismatch for {pid} at position "
+                        f"forced token mismatch for {case.id} at position "
                         f"{b.position} (offset={b.text_offset}): "
                         f"baseline={b.token!r} candidate={c.token!r}"
                     )
@@ -351,7 +392,7 @@ def run_correctness(
                 ef.write(
                     json.dumps(
                         {
-                            "prompt_id": pid,
+                            "prompt_id": case.id,
                             "position": b.position,
                             "text_offset": b.text_offset,
                             "token_baseline": b.token,
@@ -374,14 +415,17 @@ def run_correctness(
             "(empty continuations or alignment produced no scores)"
         )
 
+    partial_path.replace(evidence_path)
+
     mean_diff = sum(abs_diffs) / positions_compared
     max_diff = max(abs_diffs)
     argmax_rate = argmax_mismatches / positions_compared
     thr = cfg.thresholds
+    # Spec §5.1: all three metrics must be strictly below their thresholds.
     passed = (
-        mean_diff <= thr.mean_abs_logprob_diff
-        and max_diff <= thr.max_abs_logprob_diff
-        and argmax_rate <= thr.argmax_mismatch_rate
+        mean_diff < thr.mean_abs_logprob_diff
+        and max_diff < thr.max_abs_logprob_diff
+        and argmax_rate < thr.argmax_mismatch_rate
     )
     verdict = "pass" if passed else "fail_correctness"
     rel_evidence = f"evidence/correctness/{EVIDENCE_FILENAME}"
@@ -395,10 +439,37 @@ def run_correctness(
     )
     return CorrectnessReport(
         verdict=verdict,
-        num_prompts=len(prompts),
+        num_prompts=len(baseline.prompts),
         num_positions_compared=positions_compared,
         mean_abs_logprob_diff=mean_diff,
         max_abs_logprob_diff=max_diff,
         argmax_mismatch_rate=argmax_rate,
         evidence=rel_evidence,
+    )
+
+
+def run_correctness(
+    baseline_url: str,
+    candidate_url: str,
+    *,
+    prompts: list[PromptCase],
+    cfg: CorrectnessConfig,
+    task_id: str,
+    evidence_dir: Path,
+    request_timeout_s: float = 60.0,
+) -> CorrectnessReport:
+    """Run Module A when both engines are reachable (e.g. in-process mocks)."""
+    baseline = collect_baseline_correctness(
+        baseline_url,
+        prompts=prompts,
+        cfg=cfg,
+        task_id=task_id,
+        request_timeout_s=request_timeout_s,
+    )
+    return finish_correctness_with_candidate(
+        candidate_url,
+        baseline,
+        cfg=cfg,
+        evidence_dir=evidence_dir,
+        request_timeout_s=request_timeout_s,
     )
