@@ -119,10 +119,49 @@ def test_invalid_request_non_numeric_gpu_count():
         validate_bench_request_dict(raw)
 
 
+def test_invalid_request_zero_max_new_tokens():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["max_new_tokens"] = 0
+    with pytest.raises(RequestValidationError, match="max_new_tokens"):
+        validate_bench_request_dict(raw)
+
+
+def test_invalid_request_zero_num_prompts():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["num_prompts"] = 0
+    with pytest.raises(RequestValidationError, match="num_prompts"):
+        validate_bench_request_dict(raw)
+
+
 def test_invalid_trace_non_numeric_schema_version():
     with pytest.raises(RequestValidationError):
         validate_workload_trace_dict(
             {"schema_version": "x", "requests": [{"id": "r1"}]}
+        )
+
+
+def test_invalid_trace_duplicate_request_ids():
+    with pytest.raises(RequestValidationError, match="duplicate id"):
+        validate_workload_trace_dict(
+            {
+                "schema_version": 1,
+                "requests": [
+                    {
+                        "id": "r1",
+                        "arrival_offset_ms": 0,
+                        "prompt": "a",
+                        "max_tokens": 1,
+                        "sampling": {"temperature": 0.0, "top_p": 1.0},
+                    },
+                    {
+                        "id": "r1",
+                        "arrival_offset_ms": 1,
+                        "prompt": "b",
+                        "max_tokens": 1,
+                        "sampling": {"temperature": 0.0, "top_p": 1.0},
+                    },
+                ],
+            }
         )
 
 
