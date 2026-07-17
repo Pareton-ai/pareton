@@ -197,10 +197,15 @@ def post_completion_stream(
         raise EngineError(
             f"completions stream from {url} omitted usage.completion_tokens"
         )
-    if completion_tokens > 1 and not itl_s:
+    # ITL is inter-choice-chunk gaps; Module C treats them as inter-token. Reject
+    # under-count (full or partial coalesce). Do not require exact equality:
+    # empty-text choice chunks can add extra gaps on real engines.
+    expected_gaps = completion_tokens - 1
+    if completion_tokens > 1 and len(itl_s) < expected_gaps:
         raise EngineError(
             f"completions stream from {url}: completion_tokens={completion_tokens} "
-            f"but no inter-token gaps (coalesced stream)"
+            f"but only {len(itl_s)} inter-token gap(s) "
+            f"(expected at least {expected_gaps}; coalesced stream)"
         )
     e2e_s = last_chunk - send
     return StreamResult(
