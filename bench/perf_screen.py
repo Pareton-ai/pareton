@@ -26,6 +26,16 @@ EVIDENCE_FILENAME = "perf_screen.jsonl"
 SUMMARY_FILENAME = "summary.json"
 
 
+def _earliest(prev: float | None, t: float) -> float:
+    """Keep the earliest timestamp (first lock winner is not earliest send)."""
+    return t if prev is None else min(prev, t)
+
+
+def _latest(prev: float | None, t: float) -> float:
+    """Keep the latest timestamp (last lock writer is not necessarily last done)."""
+    return t if prev is None else max(prev, t)
+
+
 def _require_text_prompt(req: TraceRequest) -> str:
     if req.prompt is None or req.prompt == "":
         raise RequestValidationError(
@@ -65,8 +75,7 @@ def _run_engine(
             req = requests[idx]
             start = time.monotonic()
             with state_lock:
-                if state["first_send"] is None:
-                    state["first_send"] = start
+                state["first_send"] = _earliest(state["first_send"], start)
             try:
                 resp = post_completion(
                     base_url,
@@ -103,7 +112,7 @@ def _run_engine(
                 errors.append(f"{role}/{req.id}: {exc}")
             finally:
                 with state_lock:
-                    state["last_done"] = time.monotonic()
+                    state["last_done"] = _latest(state["last_done"], time.monotonic())
             with rows_lock:
                 rows.append(row)
 
