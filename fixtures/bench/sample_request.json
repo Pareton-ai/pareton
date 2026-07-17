@@ -16,16 +16,12 @@
   "engines": {
     "baseline": {
       "image": "ghcr.io/example/engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "serve_args": [
-        "--enable-prefix-caching"
-      ],
+      "serve_args": ["--enable-prefix-caching"],
       "env": {}
     },
     "candidate": {
       "image": "ghcr.io/example/engine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "serve_args": [
-        "--enable-prefix-caching"
-      ],
+      "serve_args": ["--enable-prefix-caching"],
       "env": {}
     }
   },
@@ -49,7 +45,7 @@
   },
   "sla_bench": {
     "repetitions": 3,
-    "warmup_requests": 0,
+    "warmup_requests": 1,
     "thresholds": {
       "p99_ttft_ms": 2000,
       "p99_itl_ms": 50
