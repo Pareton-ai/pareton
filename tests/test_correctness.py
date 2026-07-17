@@ -127,6 +127,50 @@ def test_extract_skips_null_and_prompt_portion():
     assert all(s.position > 0 for s in scores)
 
 
+def test_extract_non_numeric_logprobs_is_engine_error():
+    resp = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": ["a", "b"],
+                    "token_logprobs": [None, "not-a-float"],
+                    "top_logprobs": [None, {"b": -0.1}],
+                    "text_offset": [0, 1],
+                }
+            }
+        ]
+    }
+    with pytest.raises(EngineError, match="malformed logprobs.token_logprobs"):
+        extract_output_logprobs(resp, original_prompt="")
+
+
+def test_empty_baseline_continuation_is_engine_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A prompt with empty greedy output must not be silently skipped."""
+    from bench.correctness import post_completion
+
+    real_post = post_completion
+
+    def empty_generate(url, *, prompt, max_tokens=16, echo=False, **kwargs):
+        if not echo and max_tokens > 0:
+            return {"choices": [{"text": ""}]}
+        return real_post(url, prompt=prompt, max_tokens=max_tokens, echo=echo, **kwargs)
+
+    monkeypatch.setattr("bench.correctness.post_completion", empty_generate)
+    prompts = [PromptCase(id="p1", prompt="Hello world")]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base:
+        with pytest.raises(EngineError, match="empty continuation"):
+            run_correctness(
+                base.base_url,
+                base.base_url,
+                prompts=prompts,
+                cfg=_cfg(num_prompts=1),
+                task_id="550e8400-e29b-41d4-a716-446655440000",
+                evidence_dir=tmp_path / "correctness",
+            )
+
+
 def test_probe_logprob_capability_ok():
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as eng:
         probe_logprob_capability(eng.base_url)

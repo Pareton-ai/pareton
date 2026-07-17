@@ -230,12 +230,23 @@ def extract_output_logprobs(
     prompt_len = len(original_prompt)
     out: list[_PositionScore] = []
     for i in range(n):
-        off = int(text_offset[i])
+        try:
+            off = int(text_offset[i])
+        except (TypeError, ValueError) as exc:
+            raise EngineError(
+                f"malformed logprobs.text_offset[{i}]: {text_offset[i]!r}"
+            ) from exc
         if off < prompt_len:
             continue
         raw_lp = token_logprobs[i]
         if raw_lp is None:
             continue
+        try:
+            lp_val = float(raw_lp)
+        except (TypeError, ValueError) as exc:
+            raise EngineError(
+                f"malformed logprobs.token_logprobs[{i}]: {raw_lp!r}"
+            ) from exc
         top = top_logprobs[i]
         top_dict = top if isinstance(top, dict) else None
         out.append(
@@ -243,7 +254,7 @@ def extract_output_logprobs(
                 position=i,
                 token=str(tokens[i]),
                 text_offset=off,
-                logprob=float(raw_lp),
+                logprob=lp_val,
                 top1=_top1_token(top_dict),
             )
         )
@@ -298,6 +309,8 @@ def collect_baseline_correctness(
             raise EngineError(
                 f"baseline generation malformed for {case.id}: {exc}"
             ) from exc
+        if continuation == "":
+            raise EngineError(f"baseline generated empty continuation for {case.id}")
         forced[case.id] = continuation
         logger.info(
             "correctness generate id=%s prompt_len=%d cont_len=%d",
@@ -324,6 +337,10 @@ def collect_baseline_correctness(
             timeout=request_timeout_s,
         )
         base_scores = extract_output_logprobs(base_resp, original_prompt=case.prompt)
+        if not base_scores:
+            raise EngineError(
+                f"baseline echo scoring produced 0 output positions for {case.id}"
+            )
         scored.append((case, continuation, base_scores))
     return BaselineCorrectnessPhase(prompts=prompts, scored=scored)
 
