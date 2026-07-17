@@ -166,6 +166,20 @@ def test_run_stub_does_not_accumulate_root_handlers(tmp_path: Path):
     root = logging.getLogger()
     before = len(root.handlers)
     sample = ROOT / "fixtures" / "bench" / "sample_request.json"
-    assert main(["--request", str(sample), "--output-dir", str(tmp_path / "a")]) == 0
-    assert main(["--request", str(sample), "--output-dir", str(tmp_path / "b")]) == 0
+    argv_a = [
+        "--request",
+        str(sample),
+        "--output-dir",
+        str(tmp_path / "a"),
+        "--mock-engine",
+    ]
+    argv_b = [
+        "--request",
+        str(sample),
+        "--output-dir",
+        str(tmp_path / "b"),
+        "--mock-engine",
+    ]
+    assert main(argv_a) == 0
+    assert main(argv_b) == 0
     assert len(root.handlers) == before
