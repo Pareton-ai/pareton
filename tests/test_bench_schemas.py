@@ -126,6 +126,31 @@ def test_invalid_trace_non_numeric_schema_version():
         )
 
 
+def test_invalid_trace_duplicate_request_ids():
+    with pytest.raises(RequestValidationError, match="duplicate id"):
+        validate_workload_trace_dict(
+            {
+                "schema_version": 1,
+                "requests": [
+                    {
+                        "id": "r1",
+                        "arrival_offset_ms": 0,
+                        "prompt": "a",
+                        "max_tokens": 1,
+                        "sampling": {"temperature": 0.0, "top_p": 1.0},
+                    },
+                    {
+                        "id": "r1",
+                        "arrival_offset_ms": 1,
+                        "prompt": "b",
+                        "max_tokens": 1,
+                        "sampling": {"temperature": 0.0, "top_p": 1.0},
+                    },
+                ],
+            }
+        )
+
+
 def test_report_dict_validation_accepts_stub_shape():
     report = {
         "schema_version": 1,

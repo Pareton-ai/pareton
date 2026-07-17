@@ -242,6 +242,23 @@ def _validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
         )
     if not isinstance(d["requests"], list) or not d["requests"]:
         raise RequestValidationError("workload_trace.requests must be a non-empty list")
+    seen_ids: set[str] = set()
+    for i, req in enumerate(d["requests"]):
+        if not isinstance(req, dict):
+            raise RequestValidationError(
+                f"workload_trace.requests[{i}] must be an object"
+            )
+        rid = req.get("id")
+        if rid is None or str(rid).strip() == "":
+            raise RequestValidationError(
+                f"workload_trace.requests[{i}]: id must be a non-empty string"
+            )
+        rid_s = str(rid)
+        if rid_s in seen_ids:
+            raise RequestValidationError(
+                f"workload_trace.requests: duplicate id {rid_s!r}"
+            )
+        seen_ids.add(rid_s)
     return WorkloadTrace.from_dict(d)
 
 

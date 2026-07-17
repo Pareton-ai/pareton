@@ -115,6 +115,24 @@ def test_probe_logprob_capability_ok():
         probe_logprob_capability(eng.base_url)
 
 
+def test_post_completion_invalid_json_is_engine_error(monkeypatch: pytest.MonkeyPatch):
+    """HTTP 200 with non-JSON body must become EngineError (CLI exit 3), not crash."""
+    from io import BytesIO
+    from urllib.response import addinfourl
+
+    class _FakeHeaders(dict):
+        def get_content_charset(self, failobj=None):  # noqa: ANN001
+            return "utf-8"
+
+    def fake_urlopen(req, timeout=None):  # noqa: ANN001
+        fp = BytesIO(b"not-json{{{")
+        return addinfourl(fp, _FakeHeaders(), req.full_url, code=200)
+
+    monkeypatch.setattr("bench.correctness.urlopen", fake_urlopen)
+    with pytest.raises(EngineError, match="invalid JSON"):
+        post_completion("http://127.0.0.1:9", prompt="hi", max_tokens=1)
+
+
 def test_probe_raises_when_logprobs_missing(monkeypatch):
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as eng:
         original = post_completion

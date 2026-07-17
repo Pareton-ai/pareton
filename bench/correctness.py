@@ -108,7 +108,8 @@ def post_completion(
     )
     try:
         with urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
+            payload = json.loads(raw.decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise EngineError(f"completions HTTP {exc.code} from {url}: {detail}") from exc
@@ -116,6 +117,16 @@ def post_completion(
         raise EngineError(f"completions request failed for {url}: {exc}") from exc
     except TimeoutError as exc:
         raise EngineError(f"completions timed out for {url}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EngineError(
+            f"invalid JSON from completions endpoint {url}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise EngineError(
+            f"completions response from {url} must be a JSON object, "
+            f"got {type(payload).__name__}"
+        )
+    return payload
 
 
 def probe_logprob_capability(base_url: str, *, timeout: float = 30.0) -> None:
