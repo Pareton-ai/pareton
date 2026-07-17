@@ -289,7 +289,7 @@ def load_workload_trace(
 
 
 def validate_report_dict(d: dict[str, Any]) -> None:
-    """Lightweight structural check that a report dict matches the §4.4 skeleton."""
+    """Lightweight structural check that a report dict matches the expected skeleton."""
     _require_keys(
         d,
         [

@@ -1,8 +1,4 @@
-"""Dataclasses for bench_request / bench_report / workload_trace.
-
-Field names and shapes are transcribed from docs/pareton-bench-outsource-spec.md §4.
-Do not rename or "improve" fields without updating that spec.
-"""
+"""Dataclasses for bench_request / bench_report / workload_trace."""
 
 from __future__ import annotations
 
@@ -11,7 +7,7 @@ from typing import Any, Literal
 
 
 # ---------------------------------------------------------------------------
-# Workload trace (§4.3)
+# Workload trace
 # ---------------------------------------------------------------------------
 
 
@@ -85,7 +81,7 @@ class WorkloadTrace:
 
 
 # ---------------------------------------------------------------------------
-# bench_request.json (§4.2)
+# bench_request.json
 # ---------------------------------------------------------------------------
 
 BenchMode = Literal["all", "correctness", "perf_screen", "sla_bench"]
@@ -272,7 +268,7 @@ class BenchRequest:
 
 
 # ---------------------------------------------------------------------------
-# bench_report.json (§4.4)
+# bench_report.json
 # ---------------------------------------------------------------------------
 
 Verdict = Literal["pass", "fail_correctness", "fail_perf_screen", "fail_sla", "error"]
@@ -413,7 +409,7 @@ class BenchReport:
     correctness: CorrectnessReport | None = None
     perf_screen: PerfScreenReport | None = None
     sla_bench: SlaBenchReport | None = None
-    # Stub/skeleton note (not in outsource spec; omitted from to_dict when empty).
+    # Stub/skeleton note (omitted from to_dict when empty).
     stub_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
