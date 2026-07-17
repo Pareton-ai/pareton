@@ -208,19 +208,24 @@ def run_with_docker_engines(
     request_path: Path,
     layout: OutputLayout,
 ) -> tuple[CorrectnessReport, str, str]:
-    """Containerized engines via B3 lifecycle (baseline + candidate coexist)."""
+    """Containerized engines via B3 lifecycle (baseline + candidate coexist).
+
+    Spec §2.4: engines run on an ``--internal`` Docker network with no egress
+    and no published ports. The harness reaches them via container IP (Linux
+    GPU pods). Docker Desktop cannot route to bridge IPs — that is a local-dev
+    limitation; production never uses publish_port for Module A.
+    """
     run_id = new_run_id()
     logs_dir = layout.correctness_dir / "engine_logs"
     gpu_count = _effective_gpu_count(req.hardware.gpu_count)
-    # publish_port for host reachability (Docker Desktop + Linux CI).
-    with BenchNetwork(run_id=run_id, internal=False) as net:
+    with BenchNetwork(run_id=run_id, internal=True) as net:
         with (
             EngineContainer(
                 spec=req.engines.baseline,
                 network=net,
                 role="baseline",
                 gpu_count=gpu_count,
-                publish_port=True,
+                publish_port=False,
                 pull=_should_pull_image(req.engines.baseline.image),
                 logs_dir=logs_dir,
             ) as base,
@@ -229,7 +234,7 @@ def run_with_docker_engines(
                 network=net,
                 role="candidate",
                 gpu_count=gpu_count,
-                publish_port=True,
+                publish_port=False,
                 pull=_should_pull_image(req.engines.candidate.image),
                 logs_dir=logs_dir,
             ) as cand,
