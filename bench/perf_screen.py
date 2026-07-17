@@ -18,11 +18,21 @@ from pathlib import Path
 from bench.http import post_completion
 from bench.lifecycle import EngineError
 from bench.schemas import PerfScreenConfig, PerfScreenReport, TraceRequest
+from bench.validate import RequestValidationError
 
 logger = logging.getLogger(__name__)
 
 EVIDENCE_FILENAME = "perf_screen.jsonl"
 SUMMARY_FILENAME = "summary.json"
+
+
+def _require_text_prompt(req: TraceRequest) -> str:
+    if req.prompt is None or req.prompt == "":
+        raise RequestValidationError(
+            f"trace request {req.id!r}: Module B requires a text prompt "
+            f"(prompt_token_ids-only entries are not supported yet)"
+        )
+    return req.prompt
 
 
 def _run_engine(
@@ -60,10 +70,11 @@ def _run_engine(
             try:
                 resp = post_completion(
                     base_url,
-                    prompt=req.prompt or "",
+                    prompt=_require_text_prompt(req),
                     max_tokens=req.max_tokens,
                     temperature=req.sampling.temperature,
                     top_p=req.sampling.top_p,
+                    logprobs=None,
                     seed=0,
                     timeout=timeout_s,
                 )
@@ -133,11 +144,10 @@ def run_perf_screen(
     request_timeout_s: float = 120.0,
 ) -> PerfScreenReport:
     """Run Module B against two healthy base URLs (baseline then candidate)."""
-    subset = list(requests)[: cfg.num_requests]
     base = run_perf_screen_engine(
         baseline_url,
         role="baseline",
-        requests=subset,
+        requests=requests,
         cfg=cfg,
         evidence_dir=evidence_dir,
         request_timeout_s=request_timeout_s,
@@ -145,7 +155,7 @@ def run_perf_screen(
     return finish_perf_screen(
         candidate_url,
         baseline=base,
-        requests=subset,
+        requests=requests,
         cfg=cfg,
         evidence_dir=evidence_dir,
         request_timeout_s=request_timeout_s,
@@ -161,14 +171,21 @@ def run_perf_screen_engine(
     evidence_dir: Path,
     request_timeout_s: float = 120.0,
 ) -> dict:
-    """Run one engine's closed-loop screen; persist rows; return engine metrics."""
-    if not requests:
+    """Run one engine's closed-loop screen; persist rows; return engine metrics.
+
+    Always applies ``cfg.num_requests`` so mock and Docker paths share the same
+    deterministic subset (first N in arrival order).
+    """
+    subset = list(requests)[: cfg.num_requests]
+    if not subset:
         raise EngineError("perf_screen: no requests to run")
+    for req in subset:
+        _require_text_prompt(req)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     wall, tokens, tps, rows = _run_engine(
         base_url,
         role=role,
-        requests=requests,
+        requests=subset,
         concurrency=cfg.concurrency,
         timeout_s=request_timeout_s,
     )

@@ -103,6 +103,8 @@ def post_completion_stream(
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": True,
+        # OpenAI/vLLM omit usage on stream chunks unless asked.
+        "stream_options": {"include_usage": True},
     }
     if top_p is not None:
         body["top_p"] = top_p
@@ -144,30 +146,39 @@ def post_completion_stream(
             if data_str == "[DONE]":
                 saw_done = True
                 break
-            now = time.monotonic()
             try:
                 chunk = json.loads(data_str)
             except json.JSONDecodeError as exc:
                 raise EngineError(
                     f"malformed SSE chunk from {url}: {data_str[:120]!r}"
                 ) from exc
+            if not isinstance(chunk, dict):
+                raise EngineError(
+                    f"malformed SSE chunk from {url}: expected object, "
+                    f"got {type(chunk).__name__}"
+                )
+            usage = chunk.get("usage")
+            if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
+                completion_tokens = int(usage["completion_tokens"])
+            choices = chunk.get("choices")
+            # vLLM/OpenAI may emit a final usage-only chunk with choices=[].
+            if not choices:
+                continue
+            try:
+                choice = choices[0]
+                delta = str(choice.get("text", ""))
+                fr = choice.get("finish_reason")
+            except (IndexError, TypeError, AttributeError) as exc:
+                raise EngineError(f"malformed SSE chunk from {url}: {exc}") from exc
+            now = time.monotonic()
             if last_chunk is None:
                 ttft_s = now - send
             else:
                 itl_s.append(now - last_chunk)
             last_chunk = now
-            try:
-                choice = chunk["choices"][0]
-                delta = str(choice.get("text", ""))
-                fr = choice.get("finish_reason")
-            except (KeyError, IndexError, TypeError) as exc:
-                raise EngineError(f"malformed SSE chunk from {url}: {exc}") from exc
             text_parts.append(delta)
             if fr is not None:
                 finish_reason = str(fr)
-            usage = chunk.get("usage")
-            if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
-                completion_tokens = int(usage["completion_tokens"])
     except TimeoutError as exc:
         raise EngineError(f"completions stream timed out for {url}") from exc
     finally:
