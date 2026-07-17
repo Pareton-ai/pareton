@@ -324,6 +324,13 @@ def run_correctness(
                         f"{b.position}: baseline={b.text_offset} "
                         f"candidate={c.text_offset}"
                     )
+                # Same forced token is required before any logprob comparison.
+                if b.token != c.token:
+                    raise EngineError(
+                        f"forced token mismatch for {pid} at position "
+                        f"{b.position} (offset={b.text_offset}): "
+                        f"baseline={b.token!r} candidate={c.token!r}"
+                    )
                 diff = abs(b.logprob - c.logprob)
                 abs_diffs.append(diff)
                 mismatch = b.top1 != c.top1
