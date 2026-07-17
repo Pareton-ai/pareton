@@ -65,6 +65,27 @@ class EngineError(Exception):
     """Engine lifecycle failure (maps to CLI exit code 3 in B4 wiring)."""
 
 
+class HostEnvironmentError(Exception):
+    """Host/tooling unavailable (maps to CLI exit code 2): Docker missing/down."""
+
+
+_DAEMON_UNAVAILABLE_SNIPPETS = (
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "failed to connect to the docker api",
+    "permission denied while trying to connect to the docker daemon",
+)
+
+
+def raise_docker_failure(prefix: str, detail: str) -> None:
+    """Raise HostEnvironmentError for daemon-down; otherwise EngineError."""
+    text = (detail or "").strip()
+    lower = text.lower()
+    if any(s in lower for s in _DAEMON_UNAVAILABLE_SNIPPETS):
+        raise HostEnvironmentError(f"{prefix}: {text}")
+    raise EngineError(f"{prefix}: {text}")
+
+
 @dataclass
 class DockerResult:
     returncode: int
@@ -121,7 +142,7 @@ def default_docker_runner(
             f"{' '.join(_redact_cmd_for_log(cmd))}"
         ) from exc
     except FileNotFoundError as exc:
-        raise EngineError("docker CLI not found on PATH") from exc
+        raise HostEnvironmentError("docker CLI not found on PATH") from exc
     return DockerResult(
         returncode=proc.returncode,
         stdout=proc.stdout or "",
@@ -186,8 +207,9 @@ class BenchNetwork:
         cmd.append(self.name)
         result = self.runner(cmd, timeout=self.cmd_timeout_s)
         if result.returncode != 0:
-            raise EngineError(
-                f"docker network create failed: {result.stderr.strip() or result.stdout}"
+            raise_docker_failure(
+                "docker network create failed",
+                result.stderr.strip() or result.stdout,
             )
         self._created = True
         logger.info("created network %s (internal=%s)", self.name, self.internal)
@@ -207,7 +229,7 @@ class BenchNetwork:
                     self.name,
                     result.stderr.strip() or result.stdout,
                 )
-        except EngineError as err:
+        except (EngineError, HostEnvironmentError) as err:
             logger.warning("docker network rm %s error: %s", self.name, err)
         finally:
             self._created = False
@@ -460,7 +482,7 @@ class EngineContainer:
                             cid[:12],
                             rm.stderr.strip() or rm.stdout,
                         )
-                except EngineError as rm_err:
+                except (EngineError, HostEnvironmentError) as rm_err:
                     logger.warning("docker rm -f %s error: %s", cid[:12], rm_err)
         finally:
             self._container_id = None
@@ -485,9 +507,9 @@ class EngineContainer:
                 timeout=self.pull_timeout_s,
             )
             if pull_result.returncode != 0:
-                raise EngineError(
-                    f"docker pull failed for {self.spec.image!r}: "
-                    f"{pull_result.stderr.strip() or pull_result.stdout}"
+                raise_docker_failure(
+                    f"docker pull failed for {self.spec.image!r}",
+                    pull_result.stderr.strip() or pull_result.stdout,
                 )
 
         image_digest = resolve_image_digest(
@@ -542,9 +564,9 @@ class EngineContainer:
         try:
             run_result = self.runner(run_cmd, timeout=self.cmd_timeout_s)
             if run_result.returncode != 0:
-                raise EngineError(
-                    f"docker run failed: "
-                    f"{run_result.stderr.strip() or run_result.stdout}"
+                raise_docker_failure(
+                    "docker run failed",
+                    run_result.stderr.strip() or run_result.stdout,
                 )
             container_id = run_result.stdout.strip()
             if not container_id:
