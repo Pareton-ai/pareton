@@ -117,6 +117,18 @@ def test_perf_screen_disables_logprobs(tmp_path: Path, monkeypatch: pytest.Monke
     assert all(v is None for v in seen)
 
 
+def test_wall_bounds_keep_earliest_send_and_latest_done():
+    """Lock order must not replace an earlier send or a later done timestamp."""
+    from bench.perf_screen import _earliest, _latest
+
+    assert _earliest(None, 5.0) == 5.0
+    assert _earliest(5.0, 3.0) == 3.0
+    assert _earliest(3.0, 4.0) == 3.0
+    assert _latest(None, 5.0) == 5.0
+    assert _latest(5.0, 3.0) == 5.0
+    assert _latest(5.0, 7.0) == 7.0
+
+
 def test_rejects_token_ids_only(tmp_path: Path):
     reqs = [
         TraceRequest(
