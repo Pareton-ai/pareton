@@ -23,6 +23,7 @@ from bench.schemas import (
     TraceSampling,
 )
 from bench.mock_engine import MockEngine, MockEngineConfig
+from bench.validate import RequestValidationError
 
 
 # --- percentile helper -------------------------------------------------------
@@ -101,6 +102,35 @@ def test_engine_metrics_median_of_reps():
     )
     em = _engine_metrics_from_reps([rep1, rep2, rep3])
     assert em.ttft_ms.p50 == 20.0  # median of [10,20,30]
+
+
+def test_rejects_token_ids_only(tmp_path: Path):
+    trace = WorkloadTrace(
+        schema_version=1,
+        meta=TraceMeta(name="t"),
+        requests=[
+            TraceRequest(
+                id="r-ids",
+                arrival_offset_ms=0,
+                max_tokens=4,
+                sampling=TraceSampling(0.0, 1.0),
+                prompt_token_ids=[1, 2, 3],
+            ),
+        ],
+    )
+    cfg = SlaBenchConfig(
+        repetitions=1,
+        warmup_requests=0,
+        thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
+    )
+    with pytest.raises(RequestValidationError, match="text prompt"):
+        run_sla_bench(
+            "http://baseline",
+            "http://candidate",
+            trace=trace,
+            cfg=cfg,
+            evidence_dir=tmp_path,
+        )
 
 
 # --- recompute from requests.jsonl matches report ----------------------------

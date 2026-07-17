@@ -30,12 +30,22 @@ from bench.schemas import (
     TraceRequest,
     WorkloadTrace,
 )
+from bench.validate import RequestValidationError
 
 logger = logging.getLogger(__name__)
 
 REQUESTS_FILENAME = "requests.jsonl"
 WARMUP_DIRNAME = "warmup"
 REPRO_BAR_MAX_REL_RANGE = 0.10  # p99 TTFT relative range ceiling
+
+
+def _require_text_prompt(req: TraceRequest) -> str:
+    if req.prompt is None or req.prompt == "":
+        raise RequestValidationError(
+            f"trace request {req.id!r}: Module C requires a text prompt "
+            f"(prompt_token_ids-only entries are not supported yet)"
+        )
+    return req.prompt
 
 
 def percentile(samples: list[float], pct: float) -> float:
@@ -158,7 +168,7 @@ def _fire(
     try:
         res = post_completion_stream(
             base_url,
-            prompt=req.prompt or "",
+            prompt=_require_text_prompt(req),
             max_tokens=req.max_tokens,
             temperature=req.sampling.temperature,
             top_p=req.sampling.top_p,
@@ -335,6 +345,8 @@ def run_sla_engine(
     """Run one engine's warmup + measured reps; persist evidence; return rep metrics."""
     if not requests:
         raise EngineError("sla_bench: empty workload trace")
+    for req in requests:
+        _require_text_prompt(req)
     return _run_engine(
         base_url,
         role=role,

@@ -11,6 +11,7 @@ from bench.lifecycle import EngineError
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.perf_screen import run_perf_screen
 from bench.schemas import PerfScreenConfig, TraceRequest, TraceSampling
+from bench.validate import RequestValidationError
 
 
 def _req(i: int, max_tokens: int = 8) -> TraceRequest:
@@ -65,6 +66,76 @@ def test_subset_uses_first_num_requests(tmp_path: Path):
     ]
     ids = {r["request_id"] for r in rows}
     assert ids == {"r-1", "r-2"}
+
+
+def test_engine_path_applies_num_requests_subset(tmp_path: Path):
+    """Docker path calls run_perf_screen_engine directly; it must still subset."""
+    from bench.perf_screen import run_perf_screen_engine
+
+    reqs = [_req(1), _req(2), _req(3), _req(4)]
+    cfg = PerfScreenConfig(num_requests=2, concurrency=1, min_throughput_ratio=0.5)
+    with MockEngine(MockEngineConfig(model="b")) as eng:
+        metrics = run_perf_screen_engine(
+            eng.base_url,
+            role="baseline",
+            requests=reqs,
+            cfg=cfg,
+            evidence_dir=tmp_path,
+        )
+    assert metrics["num_requests"] == 2
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "baseline_rows.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert {r["request_id"] for r in rows} == {"r-1", "r-2"}
+
+
+def test_perf_screen_disables_logprobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import time
+
+    seen: list[object] = []
+
+    def capture_slow(url, **kwargs):
+        seen.append(kwargs.get("logprobs", "MISSING"))
+        time.sleep(0.002)
+        return {
+            "choices": [{"text": "x", "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    monkeypatch.setattr("bench.perf_screen.post_completion", capture_slow)
+    cfg = PerfScreenConfig(num_requests=1, concurrency=1, min_throughput_ratio=0.5)
+    run_perf_screen(
+        "http://baseline",
+        "http://candidate",
+        requests=[_req(1)],
+        cfg=cfg,
+        evidence_dir=tmp_path,
+    )
+    assert seen
+    assert all(v is None for v in seen)
+
+
+def test_rejects_token_ids_only(tmp_path: Path):
+    reqs = [
+        TraceRequest(
+            id="r-ids",
+            arrival_offset_ms=0,
+            max_tokens=4,
+            sampling=TraceSampling(temperature=0.0, top_p=1.0),
+            prompt_token_ids=[1, 2, 3],
+        )
+    ]
+    cfg = PerfScreenConfig(num_requests=1, concurrency=1, min_throughput_ratio=0.5)
+    with pytest.raises(RequestValidationError, match="text prompt"):
+        run_perf_screen(
+            "http://baseline",
+            "http://candidate",
+            requests=reqs,
+            cfg=cfg,
+            evidence_dir=tmp_path,
+        )
 
 
 def test_concurrent_throughput_uses_wall_not_latency_sum(tmp_path: Path):
