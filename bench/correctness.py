@@ -1,4 +1,4 @@
-"""Module A — greedy teacher-forced logprob correctness gate (spec §5).
+"""Module A — greedy teacher-forced logprob correctness gate.
 
 Baseline generates greedy continuations; both engines score the identical
 forced sequence via echo+logprobs; per-position logprobs are compared against
@@ -262,7 +262,7 @@ def extract_output_logprobs(
 
 
 def scoring_order(prompt_ids: list[str], task_id: str) -> list[str]:
-    """Deterministic shuffle of scoring order seeded by task_id (spec §5.3)."""
+    """Deterministic shuffle of scoring order seeded by task_id."""
     order = list(prompt_ids)
     rng = random.Random(task_id)
     rng.shuffle(order)
@@ -437,7 +437,7 @@ def finish_correctness_with_candidate(
     max_diff = max(abs_diffs)
     argmax_rate = argmax_mismatches / positions_compared
     thr = cfg.thresholds
-    # Spec §5.1: all three metrics must be strictly below their thresholds.
+    # All three metrics must be strictly below their thresholds.
     passed = (
         mean_diff < thr.mean_abs_logprob_diff
         and max_diff < thr.max_abs_logprob_diff

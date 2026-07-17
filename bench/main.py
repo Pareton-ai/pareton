@@ -1,6 +1,6 @@
 """CLI entrypoint: python -m bench --request ... --output-dir ...
 
-Exit codes (from outsource spec §4.1; CLI name overridden by roadmap):
+Exit codes:
   0 = harness completed (pass/fail is in the report)
   1 = bad request / schema validation failure
   2 = environment error
@@ -207,9 +207,9 @@ def run_with_docker_engines(
 ) -> tuple[CorrectnessReport, str, str]:
     """Containerized engines via B3 lifecycle, sequential baseline then candidate.
 
-    Spec §3 allows Module A coexistence, but two full-size vLLM loads on one GPU
-    commonly OOM. Generate+score on baseline, tear it down, then score candidate.
-    Engines use an ``--internal`` network with no published ports.
+    Module A could in principle run engines concurrently, but two full-size vLLM
+    loads on one GPU commonly OOM. Generate+score on baseline, tear it down, then
+    score candidate. Engines use an ``--internal`` network with no published ports.
     """
     run_id = new_run_id()
     logs_dir = layout.correctness_dir / "engine_logs"
