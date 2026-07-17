@@ -521,7 +521,7 @@ class EngineContainer:
             # Random host port — discover via `docker port` after start.
             run_cmd.extend(["-p", f"127.0.0.1::{self.port}"])
         if self.gpu_count > 0:
-            run_cmd.extend(["--gpus", "all"])
+            run_cmd.extend(["--gpus", str(self.gpu_count)])
         if self.weights_dir is not None:
             run_cmd.extend(["-v", f"{self.weights_dir.resolve()}:/model:ro"])
         if self._env_file is not None:
@@ -529,19 +529,20 @@ class EngineContainer:
         run_cmd.append(self.spec.image)
         run_cmd.extend(self.spec.serve_args)
 
-        run_result = self.runner(run_cmd, timeout=self.cmd_timeout_s)
-        if run_result.returncode != 0:
-            self._teardown()
-            raise EngineError(
-                f"docker run failed: {run_result.stderr.strip() or run_result.stdout}"
-            )
-        container_id = run_result.stdout.strip()
-        if not container_id:
-            self._teardown()
-            raise EngineError("docker run returned empty container id")
-        self._container_id = container_id
-
+        # From docker run onward, any failure — including KeyboardInterrupt —
+        # must tear down: __exit__ is NOT called when __enter__ raises.
         try:
+            run_result = self.runner(run_cmd, timeout=self.cmd_timeout_s)
+            if run_result.returncode != 0:
+                raise EngineError(
+                    f"docker run failed: "
+                    f"{run_result.stderr.strip() or run_result.stdout}"
+                )
+            container_id = run_result.stdout.strip()
+            if not container_id:
+                raise EngineError("docker run returned empty container id")
+            self._container_id = container_id
+
             if self.publish_port:
                 host_port = published_host_port(
                     container_id,
@@ -587,8 +588,7 @@ class EngineContainer:
                 raise EngineError(
                     f"{err}; container log tail:\n{tail[-4000:]}"
                 ) from err
-        except Exception:
-            # __exit__ is NOT called when __enter__ raises — tear down here.
+        except BaseException:
             self._teardown()
             raise
 
