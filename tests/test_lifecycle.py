@@ -471,6 +471,17 @@ def test_fail_fast_when_container_exits_during_health():
                 pass
 
 
+def test_inspect_failure_is_not_reported_as_engine_death():
+    """Non-zero docker inspect must raise about inspect, not 'engine died'."""
+    from bench.lifecycle import container_running
+
+    def fail_inspect(cmd, *, timeout, input_text=None):
+        return DockerResult(1, "", "Cannot connect to the Docker daemon")
+
+    with pytest.raises(EngineError, match="docker inspect Running failed"):
+        container_running("ciddeadbeef01", runner=fail_inspect, cmd_timeout_s=30)
+
+
 def test_pull_timeout_budget_is_generous():
     fake = FakeDocker()
     timeouts: list[float] = []

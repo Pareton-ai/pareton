@@ -311,12 +311,20 @@ def container_running(
     runner: DockerRunner,
     cmd_timeout_s: float,
 ) -> bool:
+    """Return True iff Docker reports State.Running.
+
+    Inspect/daemon failures raise ``EngineError`` — they must not be treated
+    as "container exited" (that hides the real Docker error in the health loop).
+    """
     result = runner(
         ["docker", "inspect", "--format", "{{.State.Running}}", container_id],
         timeout=cmd_timeout_s,
     )
     if result.returncode != 0:
-        return False
+        raise EngineError(
+            f"docker inspect Running failed for {container_id[:12]}: "
+            f"{result.stderr.strip() or result.stdout}"
+        )
     return result.stdout.strip().lower() == "true"
 
 
