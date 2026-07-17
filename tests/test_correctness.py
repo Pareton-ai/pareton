@@ -189,7 +189,7 @@ def test_post_completion_invalid_json_is_engine_error(monkeypatch: pytest.Monkey
         fp = BytesIO(b"not-json{{{")
         return addinfourl(fp, _FakeHeaders(), req.full_url, code=200)
 
-    monkeypatch.setattr("bench.correctness.urlopen", fake_urlopen)
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
     with pytest.raises(EngineError, match="invalid JSON"):
         post_completion("http://127.0.0.1:9", prompt="hi", max_tokens=1)
 

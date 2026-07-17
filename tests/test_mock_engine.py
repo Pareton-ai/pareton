@@ -81,6 +81,49 @@ def test_http_server_completions():
     assert resp["choices"][0]["logprobs"]["token_logprobs"][0] is None
 
 
+def test_stream_chunks_match_token_count_and_done():
+    from bench.http import post_completion_stream
+
+    with MockEngine(MockEngineConfig(model="s", token_latency_s=0.0)) as eng:
+        res = post_completion_stream(
+            eng.base_url, prompt="hi", max_tokens=5, temperature=0.0
+        )
+    assert res.completion_tokens == 5
+    assert res.finish_reason == "length"
+    # 5 chunks -> 4 inter-token gaps.
+    assert len(res.itl_s) == 4
+    assert res.ttft_s >= 0
+    assert res.e2e_s >= res.ttft_s
+    assert res.text != ""
+
+
+def test_stream_per_token_delay_observable():
+    from bench.http import post_completion_stream
+
+    with MockEngine(MockEngineConfig(model="s2", token_latency_s=0.02)) as eng:
+        res = post_completion_stream(
+            eng.base_url, prompt="hi", max_tokens=3, temperature=0.0
+        )
+    # First-chunk delay ~ token_latency; ITL gaps ~ token_latency.
+    assert res.ttft_s >= 0.015
+    assert all(g >= 0.015 for g in res.itl_s)
+
+
+def test_repeat_to_max_tokens():
+    cfg = MockEngineConfig(model="r")
+    resp = build_completion_response(
+        cfg=cfg,
+        prompt="hi",
+        max_tokens=6,
+        echo=False,
+        temperature=0.0,
+        logprobs_requested=None,
+    )
+    # greedy " OK" is 2 tokens; cycled to fill 6.
+    assert resp["usage"]["completion_tokens"] == 6
+    assert resp["choices"][0]["finish_reason"] == "length"
+
+
 def test_tampered_mode_alters_logprobs():
     clean_cfg = MockEngineConfig(
         tampered=False, logprob_base=-0.5, tamper_logprob_offset=1.25

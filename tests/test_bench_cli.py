@@ -25,17 +25,57 @@ def _write_request(tmp_path: Path, *, mode: str, **overrides) -> Path:
     return path
 
 
-def test_cli_stub_non_correctness_mode(tmp_path: Path):
-    """mode=perf_screen still stubs (Modules B/C not built)."""
+def test_cli_mock_engine_mode_perf_screen_pass(tmp_path: Path):
+    """mode=perf_screen runs Module B against the mock engines."""
     req = _write_request(tmp_path, mode="perf_screen")
     out = tmp_path / "out"
-    code = main(["--request", str(req), "--output-dir", str(out)])
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.01",
+            "--mock-candidate-token-latency-s",
+            "0.005",
+        ]
+    )
     assert code == EXIT_OK
     report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
     validate_report_dict(report)
-    assert report["verdict"] == "error"
-    assert "stub_note" in report
-    assert (out / "harness.log").is_file()
+    assert report["verdict"] == "pass"
+    assert report["perf_screen"]["verdict"] == "pass"
+    assert report["perf_screen"]["throughput_ratio"] >= 1.0
+    assert "correctness" not in report
+    assert (out / "evidence" / "perf_screen" / "perf_screen.jsonl").is_file()
+
+
+def test_cli_perf_only_fail_has_no_skipped_note(tmp_path: Path):
+    """mode=perf_screen fail must not claim sla_bench was skipped."""
+    req = _write_request(tmp_path, mode="perf_screen")
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.005",
+            "--mock-candidate-token-latency-s",
+            "0.02",
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    validate_report_dict(report)
+    assert report["verdict"] == "fail_perf_screen"
+    assert report["perf_screen"]["verdict"] == "fail_perf_screen"
+    assert "sla_bench" not in report
+    assert "skipped_note" not in report
 
 
 def test_cli_invalid_request_exit_1(tmp_path: Path):
@@ -70,7 +110,7 @@ def test_cli_mock_engine_mode_correctness_pass(tmp_path: Path):
     assert evidence.is_file()
 
 
-def test_cli_mock_engine_mode_all_pass_then_stub(tmp_path: Path):
+def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path):
     req = _write_request(tmp_path, mode="all")
     out = tmp_path / "out"
     code = main(
@@ -80,16 +120,28 @@ def test_cli_mock_engine_mode_all_pass_then_stub(tmp_path: Path):
             "--output-dir",
             str(out),
             "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.03",
+            "--mock-candidate-token-latency-s",
+            "0.015",
         ]
     )
     assert code == EXIT_OK
     report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
     validate_report_dict(report)
-    # Correctness passed but B/C not implemented → overall error + stub_note.
-    assert report["verdict"] == "error"
+    # A and B are deterministic; both must pass and produce reports.
     assert report["correctness"]["verdict"] == "pass"
-    assert "stub_note" in report
-    assert "Modules B/C" in report["stub_note"]
+    assert report["perf_screen"]["verdict"] == "pass"
+    # C ran and produced a complete report; its verdict depends on wall-clock
+    # TTFT reproducibility, which is genuinely noisy on a shared host, so we
+    # assert structure rather than an unconditional pass.
+    sla = report["sla_bench"]
+    assert sla["verdict"] in ("pass", "error")
+    assert sla["candidate"]["ttft_ms"]["p99"] > 0
+    assert sla["speedup"]["p99_ttft_ratio"] > 0
+    assert report["verdict"] in ("pass", "error")
+    assert "stub_note" not in report
+    assert "skipped_note" not in report
 
 
 def test_cli_mock_tampered_candidate_fails(tmp_path: Path):
@@ -131,11 +183,11 @@ def test_cli_bad_trace_sha_exits_before_engines(tmp_path: Path, monkeypatch):
     """Trace validation must fail before mock/Docker engines start."""
     called = {"n": 0}
 
-    def should_not_run(**_kwargs):
+    def should_not_run(self, *_args, **_kwargs):
         called["n"] += 1
         raise AssertionError("engines must not start after bad trace")
 
-    monkeypatch.setattr("bench.main.run_with_mock_engines", should_not_run)
+    monkeypatch.setattr("bench.main._EngineProvider.run_correctness", should_not_run)
     req = _write_request(tmp_path, mode="correctness")
     raw = json.loads(req.read_text(encoding="utf-8"))
     raw["workload_trace"]["sha256"] = "sha256:" + ("0" * 64)
@@ -159,10 +211,10 @@ def test_cli_host_environment_error_exit_2(tmp_path: Path, monkeypatch):
     """Docker unavailable must be exit 2, not engine exit 3."""
     from bench.lifecycle import HostEnvironmentError
 
-    def boom(**_kwargs):
+    def boom(self, *_args, **_kwargs):
         raise HostEnvironmentError("docker CLI not found on PATH")
 
-    monkeypatch.setattr("bench.main.run_with_docker_engines", boom)
+    monkeypatch.setattr("bench.main._EngineProvider.run_correctness", boom)
     req = _write_request(tmp_path, mode="correctness")
     out = tmp_path / "out"
     code = main(["--request", str(req), "--output-dir", str(out)])
@@ -174,8 +226,7 @@ def test_docker_engines_run_sequentially(tmp_path: Path, monkeypatch):
     """Baseline container must exit before candidate starts (avoid dual GPU load)."""
     from dataclasses import dataclass
 
-    from bench.main import run_with_docker_engines
-    from bench.output import OutputLayout
+    from bench.main import _EngineProvider
     from bench.validate import load_bench_request
 
     live = {"n": 0, "max": 0}
@@ -238,12 +289,12 @@ def test_docker_engines_run_sequentially(tmp_path: Path, monkeypatch):
 
     req_path = _write_request(tmp_path, mode="correctness")
     req, _ = load_bench_request(req_path)
-    layout = OutputLayout(tmp_path / "out")
-    layout.prepare()
-    run_with_docker_engines(
-        req=req,
-        layout=layout,
-        prompts=[PromptCase(id="p1", prompt="hi")],
+    provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
+    provider.run_correctness(
+        [PromptCase(id="p1", prompt="hi")],
+        req.correctness,
+        req.task_id,
+        tmp_path / "evidence" / "correctness",
     )
     assert live["max"] == 1
     assert live["n"] == 0
