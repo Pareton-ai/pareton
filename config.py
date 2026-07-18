@@ -67,6 +67,23 @@ BENCH_HF_CACHE_DIR: Path = Path(
     )
 ).expanduser()
 
+# GPU pod orchestration (WS-C)
+TARGON_API_KEY: str = os.environ.get("PARETON_TARGON_API_KEY", "")
+GPU_TTL_HOURS: float = float(os.environ.get("PARETON_GPU_TTL_HOURS", "2"))
+GPU_MAX_HOURLY_CENTS: int = int(os.environ.get("PARETON_GPU_MAX_HOURLY_CENTS", "1000"))
+GPU_STATE_DIR: Path = Path(
+    os.environ.get(
+        "PARETON_GPU_STATE_DIR",
+        str(Path.home() / ".cache" / "pareton" / "gpu"),
+    )
+).expanduser()
+GPU_VOLUME_GIB: int = int(os.environ.get("PARETON_GPU_VOLUME_GIB", "250"))
+GPU_STATIC_SSH: str = os.environ.get("PARETON_GPU_STATIC_SSH", "")
+GPU_SSH_KEY_PATH: str = os.environ.get("PARETON_GPU_SSH_KEY_PATH", "")
+GHCR_USER: str = os.environ.get(
+    "PARETON_GHCR_USER", os.environ.get("PARETON_GHCR_USERNAME", "")
+)
+
 API_ALLOWED_ORIGINS: list[str] = [
     o.strip()
     for o in os.environ.get("PARETON_ALLOWED_ORIGINS", "*").split(",")

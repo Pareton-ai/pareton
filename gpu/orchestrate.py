@@ -1,0 +1,332 @@
+"""Provision + bootstrap + remote bench + teardown."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import timedelta, timezone
+from pathlib import Path
+
+from bench.correctness import resolve_trace_path
+from bench.validate import RequestValidationError, load_bench_request
+
+from gpu.bootstrap import (
+    REMOTE_HF_CACHE,
+    REMOTE_REPO,
+    REMOTE_VENV,
+    bootstrap_pod,
+)
+from gpu.errors import DestroyError, GpuError, ProvisionError
+from gpu.keys import ensure_durable_keypair, read_public_key
+from gpu.providers import get_provider
+from gpu.registry import (
+    PodRegistry,
+    RegistryEntry,
+    encode_pod_name,
+    parse_pod_name,
+)
+from gpu.ssh import SshRunner, exec as ssh_exec, pull, push
+from gpu.types import Pod, PodSpec
+
+logger = logging.getLogger(__name__)
+
+REMOTE_ENV = "/root/.pareton-bench.env"
+REMOTE_OUT = f"{REMOTE_REPO}/out"
+REMOTE_REQUEST = f"{REMOTE_REPO}/bench_request.remote.json"
+REMOTE_TRACE_DIR = f"{REMOTE_REPO}/.pareton-traces"
+
+
+def _repo_root() -> Path:
+    try:
+        import config as _cfg
+
+        return Path(getattr(_cfg, "REPO_ROOT", Path(__file__).resolve().parents[1]))
+    except Exception:  # noqa: BLE001
+        return Path(__file__).resolve().parents[1]
+
+
+def _select_offer(provider, spec: PodSpec):
+    offers = provider.search(spec)
+    if not offers:
+        raise ProvisionError(
+            f"no offers from {provider.name} matching "
+            f"gpu_type={spec.gpu_type!r} count>={spec.gpu_count} "
+            f"max_hourly_cents={spec.max_hourly_cents}"
+        )
+    return offers[0]
+
+
+def _write_remote_env(
+    pod: Pod, *, runner: SshRunner | None, state_dir: Path | None
+) -> None:
+    lines: list[str] = [f"PARETON_BENCH_HF_CACHE_DIR={REMOTE_HF_CACHE}"]
+    hf = os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN")
+    if hf:
+        lines.append(f"HF_TOKEN={hf}")
+    ghcr_token = os.environ.get("PARETON_GHCR_TOKEN", "")
+    ghcr_user = (
+        os.environ.get("PARETON_GHCR_USER")
+        or os.environ.get("PARETON_GHCR_USERNAME")
+        or ""
+    )
+    if ghcr_token:
+        lines.append(f"PARETON_GHCR_TOKEN={ghcr_token}")
+        if ghcr_user:
+            lines.append(f"PARETON_GHCR_USER={ghcr_user}")
+    payload = "\n".join(lines) + "\n"
+    # Heredoc keeps secret values off the local process argv.
+    remote = (
+        f"umask 077; cat > {REMOTE_ENV} <<'PARETON_ENV'\n{payload}PARETON_ENV\n"
+        f"chmod 600 {REMOTE_ENV}"
+    )
+    ssh_exec(pod, remote, timeout_s=60.0, runner=runner, state_dir=state_dir)
+
+
+def _delete_remote_env(
+    pod: Pod, *, runner: SshRunner | None, state_dir: Path | None
+) -> None:
+    try:
+        ssh_exec(
+            pod,
+            f"rm -f {REMOTE_ENV}",
+            timeout_s=30.0,
+            runner=runner,
+            state_dir=state_dir,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to delete remote env file: %s", exc)
+
+
+def _entry_from_pod(pod: Pod, *, state: str = "active") -> RegistryEntry:
+    parsed = parse_pod_name(pod.name)
+    if parsed:
+        created, ttl, deadline = parsed
+    else:
+        created = pod.created_utc
+        ttl = pod.ttl_hours
+        deadline = created + timedelta(hours=ttl or 2.0)
+    return RegistryEntry(
+        provider=pod.provider,
+        pod_id=pod.pod_id,
+        name=pod.name,
+        deadline=deadline.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        hourly_price_cents=pod.hourly_price_cents,
+        volume_uid=str((pod.raw or {}).get("volume_uid", "")),
+        volume_name=str((pod.raw or {}).get("volume_name", "")),
+        state=state,
+        key_path=str(pod.key_path),
+        ssh_host=pod.ssh.host,
+        ssh_port=pod.ssh.port,
+        ssh_user=pod.ssh.user,
+        created_utc=created.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ttl_hours=float(ttl),
+        raw=pod.raw,
+    )
+
+
+def provision_pod(
+    spec: PodSpec,
+    *,
+    registry: PodRegistry | None = None,
+    provider=None,
+    state_dir: Path | None = None,
+) -> Pod:
+    registry = registry or PodRegistry(state_dir)
+    if provider is None:
+        name = spec.provider if spec.provider != "auto" else "targon"
+        provider = get_provider(name, state_dir=registry.state_dir)
+
+    if provider.name != "static_ssh" and not spec.force:
+        blocking = registry.has_blocking_managed()
+        if blocking is not None:
+            raise ProvisionError(
+                f"single-flight: registry already has {blocking.state} pod "
+                f"{blocking.name} ({blocking.provider}); pass --force to override"
+            )
+
+    ensure_durable_keypair(registry.state_dir)
+    pub = read_public_key(registry.state_dir)
+    offer = _select_offer(provider, spec)
+    pod_name = encode_pod_name(ttl_hours=spec.ttl_hours)
+    pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
+    pod.ttl_hours = spec.ttl_hours
+    if provider.name != "static_ssh":
+        registry.add(_entry_from_pod(pod, state="active"))
+    return pod
+
+
+def destroy_pod(
+    pod: Pod,
+    *,
+    registry: PodRegistry | None = None,
+    provider=None,
+    state_dir: Path | None = None,
+) -> None:
+    registry = registry or PodRegistry(state_dir)
+    if provider is None:
+        provider = get_provider(pod.provider, state_dir=registry.state_dir)
+    try:
+        provider.destroy(pod)
+    except DestroyError:
+        entry = _entry_from_pod(pod, state="destroy_failed")
+        if pod.provider != "static_ssh":
+            registry.update(entry)
+        raise
+    if pod.provider != "static_ssh":
+        registry.remove(pod.name)
+
+
+def run_bench_on_pod(
+    spec: PodSpec,
+    *,
+    request_path: Path,
+    output_dir: Path,
+    mock_engine: bool = False,
+    registry: PodRegistry | None = None,
+    provider=None,
+    runner: SshRunner | None = None,
+    state_dir: Path | None = None,
+    repo_root: Path | None = None,
+) -> int:
+    """Full provision -> bench -> tear down. Returns bench exit code."""
+    registry = registry or PodRegistry(state_dir)
+    repo_root = (repo_root or _repo_root()).resolve()
+    request_path = Path(request_path).resolve()
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preflight BEFORE rent.
+    try:
+        req, _raw = load_bench_request(request_path)
+        trace_path = resolve_trace_path(
+            req.workload_trace.path, request_path=request_path
+        )
+    except RequestValidationError as exc:
+        raise ProvisionError(f"bench request preflight failed: {exc}") from exc
+
+    pod: Pod | None = None
+    exit_code = 2
+    if provider is None:
+        pname = spec.provider if spec.provider != "auto" else "targon"
+        provider = get_provider(pname, state_dir=registry.state_dir)
+
+    try:
+        pod = provision_pod(
+            spec, registry=registry, provider=provider, state_dir=registry.state_dir
+        )
+        code_sha = bootstrap_pod(
+            pod,
+            repo_root=repo_root,
+            runner=runner,
+            state_dir=registry.state_dir,
+        )
+
+        # Prepare remote request (+ optional out-of-repo trace).
+        remote_req = json.loads(request_path.read_text(encoding="utf-8"))
+        try:
+            trace_path.relative_to(repo_root)
+            in_repo = True
+        except ValueError:
+            in_repo = False
+        if not in_repo:
+            ssh_exec(
+                pod,
+                f"mkdir -p {REMOTE_TRACE_DIR}",
+                timeout_s=60.0,
+                runner=runner,
+                state_dir=registry.state_dir,
+            )
+            remote_trace = f"{REMOTE_TRACE_DIR}/{trace_path.name}"
+            push(
+                pod,
+                trace_path,
+                remote_trace,
+                excludes=[],
+                runner=runner,
+                state_dir=registry.state_dir,
+            )
+            remote_req["workload_trace"]["path"] = remote_trace
+        else:
+            try:
+                rel = trace_path.relative_to(repo_root).as_posix()
+                remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
+            except ValueError:
+                pass
+
+        local_remote_req = output_dir / "bench_request.remote.json"
+        local_remote_req.write_text(
+            json.dumps(remote_req, indent=2) + "\n", encoding="utf-8"
+        )
+        push(
+            pod,
+            local_remote_req,
+            REMOTE_REQUEST,
+            excludes=[],
+            runner=runner,
+            state_dir=registry.state_dir,
+        )
+
+        _write_remote_env(pod, runner=runner, state_dir=registry.state_dir)
+
+        mock_flag = " --mock-engine" if mock_engine else ""
+        bench_cmd = (
+            f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
+            f"export PARETON_BENCH_CODE_SHA={code_sha} && "
+            f"mkdir -p {REMOTE_OUT} && "
+            f"{REMOTE_VENV}/bin/python -m bench "
+            f"--request {REMOTE_REQUEST} --output-dir {REMOTE_OUT}{mock_flag}"
+        )
+        result = ssh_exec(
+            pod,
+            bench_cmd,
+            timeout_s=86400.0,
+            runner=runner,
+            state_dir=registry.state_dir,
+            check=False,
+        )
+        if result.stdout:
+            print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+        if result.stderr:
+            print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
+
+        try:
+            pull(
+                pod,
+                f"{REMOTE_OUT}/",
+                output_dir,
+                runner=runner,
+                state_dir=registry.state_dir,
+            )
+        except GpuError as exc:
+            logger.warning("failed to pull bench output: %s", exc)
+
+        exit_code = int(result.exit_code)
+        return exit_code
+    finally:
+        if pod is not None:
+            _delete_remote_env(pod, runner=runner, state_dir=registry.state_dir)
+            try:
+                destroy_pod(
+                    pod,
+                    registry=registry,
+                    provider=provider,
+                    state_dir=registry.state_dir,
+                )
+            except DestroyError as exc:
+                logger.error(
+                    "DESTROY FAILED for pod=%s volume=%s provider=%s: %s. "
+                    "Destroy manually NOW in the provider dashboard "
+                    "(https://targon.com/rentals).",
+                    pod.name,
+                    (pod.raw or {}).get("volume_uid", ""),
+                    pod.provider,
+                    exc,
+                )
+                print(
+                    f"ERROR: destroy failed for {pod.name} "
+                    f"volume={(pod.raw or {}).get('volume_uid', '')} - "
+                    f"destroy manually NOW on the {pod.provider} dashboard",
+                    flush=True,
+                )
