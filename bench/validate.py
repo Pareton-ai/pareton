@@ -21,6 +21,8 @@ _UUID_RE = re.compile(
     re.IGNORECASE,
 )
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
+# HuggingFace org/name — blocks path traversal and cache-slug ambiguity.
+_HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class RequestValidationError(ValueError):
@@ -142,6 +144,11 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     if not _GIT_SHA_RE.match(str(model["hf_revision"])):
         raise RequestValidationError(
             f"model.hf_revision must be a git commit sha, got {model['hf_revision']!r}"
+        )
+    hf_repo = str(model["hf_repo"])
+    if ".." in hf_repo or not _HF_REPO_RE.match(hf_repo):
+        raise RequestValidationError(
+            f"model.hf_repo must be a HuggingFace org/name id, got {hf_repo!r}"
         )
 
     hardware = d["hardware"]
