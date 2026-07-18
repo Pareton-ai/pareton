@@ -62,7 +62,11 @@ def default_ssh_runner(
     timeout: float,
     input_text: str | None = None,
 ) -> SshResult:
-    logger.info("ssh/rsync: %s", " ".join(cmd))
+    # Never log full argv: ssh remote commands may embed secrets.
+    if cmd and cmd[0] == "ssh" and len(cmd) >= 2:
+        logger.info("ssh/rsync: ssh ... %s", cmd[-2])
+    elif cmd:
+        logger.info("ssh/rsync: %s ...", cmd[0])
     try:
         proc = subprocess.run(
             list(cmd),
