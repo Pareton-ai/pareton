@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from datetime import timedelta, timezone
 from pathlib import Path
 
@@ -85,12 +86,39 @@ def _write_remote_env(
         if ghcr_user:
             lines.append(f"PARETON_GHCR_USER={ghcr_user}")
     payload = "\n".join(lines) + "\n"
-    # Heredoc keeps secret values off the local process argv.
-    remote = (
-        f"umask 077; cat > {REMOTE_ENV} <<'PARETON_ENV'\n{payload}PARETON_ENV\n"
-        f"chmod 600 {REMOTE_ENV}"
-    )
-    ssh_exec(pod, remote, timeout_s=60.0, runner=runner, state_dir=state_dir)
+    # Push via rsync so tokens never appear in ssh remote argv / local logs.
+    fd, tmp_name = tempfile.mkstemp(prefix="pareton-bench-env-")
+    local = Path(tmp_name)
+    try:
+        os.write(fd, payload.encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        os.chmod(local, 0o600)
+        push(
+            pod,
+            local,
+            REMOTE_ENV,
+            excludes=[],
+            runner=runner,
+            state_dir=state_dir,
+        )
+        ssh_exec(
+            pod,
+            f"chmod 600 {REMOTE_ENV}",
+            timeout_s=30.0,
+            runner=runner,
+            state_dir=state_dir,
+        )
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            local.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _delete_remote_env(
@@ -268,6 +296,7 @@ def run_bench_on_pod(
     pod: Pod | None = None
     exit_code = 1
     destroy_failed = False
+    pending: BaseException | None = None
     if provider is None:
         pname = spec.provider if spec.provider != "auto" else "targon"
         provider = get_provider(pname, state_dir=registry.state_dir)
@@ -372,6 +401,8 @@ def run_bench_on_pod(
             logger.warning("failed to pull bench output: %s", exc)
 
         exit_code = int(result.exit_code)
+    except BaseException as exc:
+        pending = exc
     finally:
         if pod is not None:
             _delete_remote_env(pod, runner=runner, state_dir=registry.state_dir)
@@ -402,4 +433,6 @@ def run_bench_on_pod(
 
     if destroy_failed:
         return EXIT_DESTROY_FAILED
+    if pending is not None:
+        raise pending
     return exit_code

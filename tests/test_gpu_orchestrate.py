@@ -265,6 +265,70 @@ def test_pull_engine_images_called_when_not_mock(tmp_path: Path, monkeypatch):
     assert any("ghcr.io" in r for r in pull_calls[0]["refs"])
 
 
+def test_bootstrap_error_with_destroy_failure_returns_75(tmp_path: Path, monkeypatch):
+    """Destroy-failure exit must win even when the main try raised."""
+    from gpu.errors import GpuError
+    from gpu.orchestrate import EXIT_DESTROY_FAILED
+
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    provider.fail_destroy = True
+    monkeypatch.setattr(
+        "gpu.orchestrate.bootstrap_pod",
+        lambda *a, **k: (_ for _ in ()).throw(GpuError("bootstrap boom")),
+    )
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=tmp_path / "out",
+        mock_engine=True,
+        provider=provider,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == EXIT_DESTROY_FAILED
+    assert provider.destroy_calls
+
+
+def test_write_remote_env_does_not_put_secrets_in_ssh_argv(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import _write_remote_env
+    from gpu.types import Pod, SshTarget
+
+    ensure_durable_keypair(tmp_path / "st")
+    secret = "ghp_SECRET_TOKEN_VALUE_xyz"
+    monkeypatch.setenv("PARETON_GHCR_TOKEN", secret)
+    monkeypatch.setenv("PARETON_GHCR_USER", "u")
+    ssh_remotes: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        if cmd and cmd[0] == "ssh":
+            ssh_remotes.append(cmd[-1])
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    _write_remote_env(pod, runner=runner, state_dir=tmp_path / "st")
+    assert ssh_remotes
+    assert all(secret not in r for r in ssh_remotes)
+
+
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):
     ensure_durable_keypair(tmp_path / "st")
     provider = FakeProvider()
