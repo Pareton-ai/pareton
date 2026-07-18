@@ -61,6 +61,9 @@ from bench.validate import (
     sha256_bytes,
     validate_report_dict,
 )
+from bench.weights import stage_weights
+
+MOCK_WEIGHTS_SHA256 = "sha256:" + ("0" * 64)
 
 EXIT_OK = 0
 EXIT_BAD_REQUEST = 1
@@ -80,13 +83,14 @@ def build_inputs_fingerprint(
     req: BenchRequest,
     baseline_digest: str,
     candidate_digest: str,
+    model_weights_sha256: str,
 ) -> InputsFingerprint:
     return InputsFingerprint(
         baseline_image_digest=baseline_digest,
         candidate_image_digest=candidate_digest,
         model_repo=req.model.hf_repo,
         model_revision=req.model.hf_revision,
-        model_weights_sha256="sha256:" + ("0" * 64),  # WS-B5
+        model_weights_sha256=model_weights_sha256,
         trace_sha256=req.workload_trace.sha256,
         request_sha256=sha256_bytes(request_raw),
     )
@@ -149,6 +153,7 @@ class _EngineProvider:
         baseline_token_latency_s: float = 0.0,
         candidate_token_latency_s: float = 0.0,
         logs_dir: Path | None = None,
+        weights_dir: Path | None = None,
     ) -> None:
         self._req = req
         self._mock = mock
@@ -156,6 +161,7 @@ class _EngineProvider:
         self._base_latency = baseline_token_latency_s
         self._cand_latency = candidate_token_latency_s
         self._logs_dir = logs_dir or Path(".")
+        self.weights_dir = weights_dir
         self.baseline_digest = extract_image_digest(req.engines.baseline.image)
         self.candidate_digest = extract_image_digest(req.engines.candidate.image)
         self._mocks: tuple[MockEngine, MockEngine] | None = None
@@ -202,6 +208,7 @@ class _EngineProvider:
             network=net,
             role=role,
             gpu_count=_effective_gpu_count(self._req.hardware.gpu_count),
+            weights_dir=self.weights_dir,
             publish_port=False,
             pull=_should_pull_image(spec.image),
             logs_dir=self._logs_dir,
@@ -351,6 +358,7 @@ def build_bench_report(
     env,
     baseline_digest: str,
     candidate_digest: str,
+    model_weights_sha256: str,
     corr: CorrectnessReport | None,
     perf: PerfScreenReport | None,
     sla: SlaBenchReport | None,
@@ -369,6 +377,7 @@ def build_bench_report(
             req=req,
             baseline_digest=baseline_digest,
             candidate_digest=candidate_digest,
+            model_weights_sha256=model_weights_sha256,
         ),
         correctness=corr,
         perf_screen=perf,
@@ -464,6 +473,8 @@ def run_bench(
                 request_path=request_path,
             )
 
+        # Mock mode has no weights; docker mode stages before engines start.
+        model_weights_sha256 = MOCK_WEIGHTS_SHA256
         provider = _EngineProvider(
             req=req,
             mock=mock_engine,
@@ -471,9 +482,28 @@ def run_bench(
             baseline_token_latency_s=mock_baseline_token_latency_s,
             candidate_token_latency_s=mock_candidate_token_latency_s,
             logs_dir=layout.correctness_dir / "engine_logs",
+            weights_dir=None,
         )
 
         try:
+            if not mock_engine:
+                staged = stage_weights(req.model, token_env=req.hf_token_env)
+                provider.weights_dir = staged.path
+                model_weights_sha256 = staged.weights_sha256
+                layout.write_weights_manifest(
+                    staged.manifest, aggregate=staged.weights_sha256
+                )
+                layout.append_log(
+                    {
+                        "event": "weights_staged",
+                        "repo": req.model.hf_repo,
+                        "revision": req.model.hf_revision,
+                        "path": str(staged.path),
+                        "weights_sha256": staged.weights_sha256,
+                        "num_files": staged.num_files,
+                        "total_bytes": staged.total_bytes,
+                    }
+                )
             corr, perf, sla, skipped_note = run_all_modules(
                 req=req,
                 provider=provider,
@@ -498,6 +528,7 @@ def run_bench(
             env=env,
             baseline_digest=provider.baseline_digest,
             candidate_digest=provider.candidate_digest,
+            model_weights_sha256=model_weights_sha256,
             corr=corr,
             perf=perf,
             sla=sla,
