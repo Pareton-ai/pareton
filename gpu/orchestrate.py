@@ -42,8 +42,9 @@ REMOTE_OUT = f"{REMOTE_REPO}/out"
 REMOTE_REQUEST = f"{REMOTE_REPO}/bench_request.remote.json"
 REMOTE_TRACE_DIR = f"{REMOTE_REPO}/.pareton-traces"
 
-# Teardown failed after a successful bench (cost-safety signal for CLI/CI).
-EXIT_DESTROY_FAILED = 2
+# Teardown failed (pod/volume may still be billing). Distinct from CLI/preflight 2
+# and from typical bench failure codes so CI can alert without log scraping.
+EXIT_DESTROY_FAILED = 75
 
 
 def _repo_root() -> Path:
@@ -171,8 +172,31 @@ def provision_pod(
         pod_name = encode_pod_name(ttl_hours=spec.ttl_hours)
         pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
         pod.ttl_hours = spec.ttl_hours
-        if provider.name != "static_ssh":
+        if provider.name == "static_ssh":
+            return pod
+        try:
             registry.add(_entry_from_pod(pod, state="active"))
+        except Exception as exc:
+            # Cloud rent succeeded; must not leave a billable orphan without a handle.
+            try:
+                provider.destroy(pod)
+            except Exception as destroy_exc:  # noqa: BLE001
+                logger.error(
+                    "registry.add failed after rent AND destroy failed for "
+                    "pod=%s volume=%s: add=%s destroy=%s. Destroy manually NOW.",
+                    pod.name,
+                    (pod.raw or {}).get("volume_uid", ""),
+                    exc,
+                    destroy_exc,
+                )
+                raise ProvisionError(
+                    f"registry.add failed after rent ({exc}); destroy also failed "
+                    f"({destroy_exc}); manual cleanup required for {pod.name} "
+                    f"volume={(pod.raw or {}).get('volume_uid', '')}"
+                ) from destroy_exc
+            raise ProvisionError(
+                f"registry.add failed after rent; cloud resource destroyed: {exc}"
+            ) from exc
         return pod
 
     if provider.name == "static_ssh":
@@ -194,9 +218,15 @@ def destroy_pod(
     try:
         provider.destroy(pod)
     except DestroyError:
-        entry = _entry_from_pod(pod, state="destroy_failed")
         if pod.provider != "static_ssh":
-            registry.update(entry)
+            try:
+                registry.update(_entry_from_pod(pod, state="destroy_failed"))
+            except Exception as reg_exc:  # noqa: BLE001
+                logger.error(
+                    "registry update failed after destroy failure for %s: %s",
+                    pod.name,
+                    reg_exc,
+                )
         raise
     if pod.provider != "static_ssh":
         registry.remove(pod.name)
@@ -216,8 +246,8 @@ def run_bench_on_pod(
 ) -> int:
     """Full provision -> bench -> tear down.
 
-    Returns the bench exit code, or EXIT_DESTROY_FAILED (2) if bench succeeded
-    but teardown failed (pod/volume may still be billing).
+    Returns the bench exit code, or EXIT_DESTROY_FAILED (75) if teardown failed
+    (pod/volume may still be billing; takes precedence over the bench code).
     """
     registry = registry or PodRegistry(state_dir)
     repo_root = (repo_root or _repo_root()).resolve()
@@ -236,7 +266,7 @@ def run_bench_on_pod(
         raise ProvisionError(f"bench request preflight failed: {exc}") from exc
 
     pod: Pod | None = None
-    exit_code = 2
+    exit_code = 1
     destroy_failed = False
     if provider is None:
         pname = spec.provider if spec.provider != "auto" else "targon"
@@ -370,6 +400,6 @@ def run_bench_on_pod(
                     flush=True,
                 )
 
-    if destroy_failed and exit_code == 0:
+    if destroy_failed:
         return EXIT_DESTROY_FAILED
     return exit_code
