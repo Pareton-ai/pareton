@@ -164,10 +164,13 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_reap(args: argparse.Namespace) -> int:
     actions = reap(dry_run=args.dry_run)
+    failed = False
     for a in actions:
         flag = "DRY" if a.dry_run else ("OK" if a.destroyed else "FAIL")
+        if not a.dry_run and not a.destroyed:
+            failed = True
         print(f"{flag} {a.kind} {a.provider} {a.name} id={a.id} {a.detail}")
-    return 0
+    return 1 if failed else 0
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
