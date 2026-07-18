@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from gpu.errors import GpuError
+
 logger = logging.getLogger(__name__)
 
 NAME_PREFIX = "pareton-gpu-"
@@ -137,11 +139,16 @@ class PodRegistry:
                 shutil.copy2(self.path, bak)
             except OSError:
                 pass
-            logger.warning("corrupt registry %s (%s); starting empty", self.path, exc)
-            return []
+            # Fail closed: empty registry would drop single-flight and allow a
+            # second billable rent while the previous cloud workload may exist.
+            raise GpuError(
+                f"corrupt registry {self.path} (backed up to {bak.name}); "
+                f"repair or remove it before provisioning: {exc}"
+            ) from exc
         if not isinstance(data, list):
-            logger.warning("registry top-level not a list; starting empty")
-            return []
+            raise GpuError(
+                f"corrupt registry {self.path}: top-level JSON must be a list"
+            )
         return [x for x in data if isinstance(x, dict)]
 
     def _save(self, entries: list[dict[str, Any]]) -> None:

@@ -86,10 +86,50 @@ def test_registry_add_remove_corrupt(tmp_path: Path):
     reg.remove(entry.name)
     assert reg.get(entry.name) is None
 
-    # Corrupt file tolerated
+    # Corrupt file fails closed (do not drop single-flight guard)
+    from gpu.errors import GpuError
+
     reg.path.write_text("{not-json", encoding="utf-8")
-    assert reg.list() == []
+    with pytest.raises(GpuError, match="corrupt registry"):
+        reg.list()
     assert reg.path.with_suffix(".json.corrupt").is_file()
+
+
+def test_corrupt_registry_blocks_provision(tmp_path: Path):
+    from gpu.errors import GpuError
+    from gpu.keys import ensure_durable_keypair
+    from gpu.orchestrate import provision_pod
+    from gpu.types import Offer, PodSpec
+
+    ensure_durable_keypair(tmp_path / "st")
+    reg = PodRegistry(tmp_path / "st")
+    reg.path.write_text("{not-json", encoding="utf-8")
+
+    class FakeProvider:
+        name = "targon"
+
+        def search(self, spec):
+            return [
+                Offer(
+                    provider="targon",
+                    instance_id="r",
+                    description="x",
+                    hourly_price_cents=1,
+                    gpu_count=1,
+                    gpu_type="H200",
+                )
+            ]
+
+        def provision(self, offer, *, name, ssh_public_key):
+            raise AssertionError("must not rent when registry is corrupt")
+
+    with pytest.raises(GpuError, match="corrupt registry"):
+        provision_pod(
+            PodSpec(provider="targon", force=False),
+            registry=reg,
+            provider=FakeProvider(),
+            state_dir=tmp_path / "st",
+        )
 
 
 def test_single_flight_blocking(tmp_path: Path):
