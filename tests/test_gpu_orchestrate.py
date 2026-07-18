@@ -169,11 +169,34 @@ def test_orchestrate_destroy_failure_keeps_registry(tmp_path: Path, monkeypatch)
         state_dir=tmp_path / "st",
         repo_root=ROOT,
     )
-    assert code == 2  # EXIT_DESTROY_FAILED: bench ok but teardown failed
+    from gpu.orchestrate import EXIT_DESTROY_FAILED
+
+    assert code == EXIT_DESTROY_FAILED  # teardown failed; may still be billing
+    assert code != 2  # must stay distinct from CLI/preflight exit 2
     entries = reg.list()
     assert len(entries) == 1
     assert entries[0].state == "destroy_failed"
     assert entries[0].volume_uid
+
+
+def test_registry_add_failure_destroys_cloud_rent(tmp_path: Path):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    reg = PodRegistry(tmp_path / "st")
+
+    def boom_add(_entry):
+        raise OSError("disk full")
+
+    reg.add = boom_add  # type: ignore[method-assign]
+    with pytest.raises(ProvisionError, match="registry.add failed"):
+        provision_pod(
+            PodSpec(provider="targon", force=True),
+            registry=reg,
+            provider=provider,
+            state_dir=tmp_path / "st",
+        )
+    assert provider.destroy_calls
+    assert not provider.pods
 
 
 def test_preflight_rejects_wrong_trace_sha_before_provider(tmp_path: Path):
