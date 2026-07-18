@@ -134,23 +134,26 @@ def pull_engine_images(
     pod: Pod,
     image_refs: list[str],
     *,
+    env_file: str,
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
 ) -> None:
-    """docker login + pull using env already sourced on the remote (no token on argv)."""
+    """Source env_file, docker login (stdin), then pull. Token never on argv."""
     if not image_refs:
         return
-    # Login uses env vars already in the shell environment from the env file.
-    login = (
+    pulls = " && ".join(f"docker pull {img}" for img in image_refs)
+    # Single shell so login sees vars from the env file; password via stdin.
+    remote = (
+        f"set -a && . {env_file} && set +a && "
         'if [ -n "${PARETON_GHCR_TOKEN:-}" ]; then '
         'echo "$PARETON_GHCR_TOKEN" | docker login ghcr.io '
         '-u "${PARETON_GHCR_USER:-${PARETON_GHCR_USERNAME:-}}" --password-stdin; '
-        "fi"
+        "fi && "
+        f"{pulls}"
     )
-    pulls = " && ".join(f"docker pull {img}" for img in image_refs)
     ssh_exec(
         pod,
-        f"bash -lc {login!r} && {pulls}",
+        remote,
         timeout_s=3600.0,
         runner=runner,
         state_dir=state_dir,

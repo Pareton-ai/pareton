@@ -9,13 +9,18 @@ from datetime import timedelta, timezone
 from pathlib import Path
 
 from bench.correctness import resolve_trace_path
-from bench.validate import RequestValidationError, load_bench_request
+from bench.validate import (
+    RequestValidationError,
+    load_bench_request,
+    load_workload_trace,
+)
 
 from gpu.bootstrap import (
     REMOTE_HF_CACHE,
     REMOTE_REPO,
     REMOTE_VENV,
     bootstrap_pod,
+    pull_engine_images,
 )
 from gpu.errors import DestroyError, GpuError, ProvisionError
 from gpu.keys import ensure_durable_keypair, read_public_key
@@ -31,10 +36,14 @@ from gpu.types import Pod, PodSpec
 
 logger = logging.getLogger(__name__)
 
-REMOTE_ENV = "/root/.pareton-bench.env"
+# Under /opt/pareton so the (often non-root) Targon SSH user can write/source it.
+REMOTE_ENV = f"{REMOTE_REPO}/.pareton-bench.env"
 REMOTE_OUT = f"{REMOTE_REPO}/out"
 REMOTE_REQUEST = f"{REMOTE_REPO}/bench_request.remote.json"
 REMOTE_TRACE_DIR = f"{REMOTE_REPO}/.pareton-traces"
+
+# Teardown failed after a successful bench (cost-safety signal for CLI/CI).
+EXIT_DESTROY_FAILED = 2
 
 
 def _repo_root() -> Path:
@@ -126,6 +135,15 @@ def _entry_from_pod(pod: Pod, *, state: str = "active") -> RegistryEntry:
     )
 
 
+def _engine_image_refs(req) -> list[str]:
+    refs: list[str] = []
+    for eng in (req.engines.baseline, req.engines.candidate):
+        img = str(eng.image or "").strip()
+        if img and img not in refs:
+            refs.append(img)
+    return refs
+
+
 def provision_pod(
     spec: PodSpec,
     *,
@@ -138,23 +156,29 @@ def provision_pod(
         name = spec.provider if spec.provider != "auto" else "targon"
         provider = get_provider(name, state_dir=registry.state_dir)
 
-    if provider.name != "static_ssh" and not spec.force:
-        blocking = registry.has_blocking_managed()
-        if blocking is not None:
-            raise ProvisionError(
-                f"single-flight: registry already has {blocking.state} pod "
-                f"{blocking.name} ({blocking.provider}); pass --force to override"
-            )
-
     ensure_durable_keypair(registry.state_dir)
     pub = read_public_key(registry.state_dir)
-    offer = _select_offer(provider, spec)
-    pod_name = encode_pod_name(ttl_hours=spec.ttl_hours)
-    pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
-    pod.ttl_hours = spec.ttl_hours
-    if provider.name != "static_ssh":
-        registry.add(_entry_from_pod(pod, state="active"))
-    return pod
+
+    def _do_provision() -> Pod:
+        if provider.name != "static_ssh" and not spec.force:
+            blocking = registry.has_blocking_managed()
+            if blocking is not None:
+                raise ProvisionError(
+                    f"single-flight: registry already has {blocking.state} pod "
+                    f"{blocking.name} ({blocking.provider}); pass --force to override"
+                )
+        offer = _select_offer(provider, spec)
+        pod_name = encode_pod_name(ttl_hours=spec.ttl_hours)
+        pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
+        pod.ttl_hours = spec.ttl_hours
+        if provider.name != "static_ssh":
+            registry.add(_entry_from_pod(pod, state="active"))
+        return pod
+
+    if provider.name == "static_ssh":
+        return _do_provision()
+    with registry.provision_lock():
+        return _do_provision()
 
 
 def destroy_pod(
@@ -190,24 +214,30 @@ def run_bench_on_pod(
     state_dir: Path | None = None,
     repo_root: Path | None = None,
 ) -> int:
-    """Full provision -> bench -> tear down. Returns bench exit code."""
+    """Full provision -> bench -> tear down.
+
+    Returns the bench exit code, or EXIT_DESTROY_FAILED (2) if bench succeeded
+    but teardown failed (pod/volume may still be billing).
+    """
     registry = registry or PodRegistry(state_dir)
     repo_root = (repo_root or _repo_root()).resolve()
     request_path = Path(request_path).resolve()
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Preflight BEFORE rent.
+    # Preflight BEFORE rent (shape + existence + digest).
     try:
         req, _raw = load_bench_request(request_path)
         trace_path = resolve_trace_path(
             req.workload_trace.path, request_path=request_path
         )
+        load_workload_trace(trace_path, expected_sha256=req.workload_trace.sha256)
     except RequestValidationError as exc:
         raise ProvisionError(f"bench request preflight failed: {exc}") from exc
 
     pod: Pod | None = None
     exit_code = 2
+    destroy_failed = False
     if provider is None:
         pname = spec.provider if spec.provider != "auto" else "targon"
         provider = get_provider(pname, state_dir=registry.state_dir)
@@ -270,6 +300,15 @@ def run_bench_on_pod(
 
         _write_remote_env(pod, runner=runner, state_dir=registry.state_dir)
 
+        if not mock_engine:
+            pull_engine_images(
+                pod,
+                _engine_image_refs(req),
+                env_file=REMOTE_ENV,
+                runner=runner,
+                state_dir=registry.state_dir,
+            )
+
         mock_flag = " --mock-engine" if mock_engine else ""
         bench_cmd = (
             f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
@@ -303,7 +342,6 @@ def run_bench_on_pod(
             logger.warning("failed to pull bench output: %s", exc)
 
         exit_code = int(result.exit_code)
-        return exit_code
     finally:
         if pod is not None:
             _delete_remote_env(pod, runner=runner, state_dir=registry.state_dir)
@@ -315,6 +353,7 @@ def run_bench_on_pod(
                     state_dir=registry.state_dir,
                 )
             except DestroyError as exc:
+                destroy_failed = True
                 logger.error(
                     "DESTROY FAILED for pod=%s volume=%s provider=%s: %s. "
                     "Destroy manually NOW in the provider dashboard "
@@ -330,3 +369,7 @@ def run_bench_on_pod(
                     f"destroy manually NOW on the {pod.provider} dashboard",
                     flush=True,
                 )
+
+    if destroy_failed and exit_code == 0:
+        return EXIT_DESTROY_FAILED
+    return exit_code

@@ -169,11 +169,77 @@ def test_orchestrate_destroy_failure_keeps_registry(tmp_path: Path, monkeypatch)
         state_dir=tmp_path / "st",
         repo_root=ROOT,
     )
-    assert code == 0
+    assert code == 2  # EXIT_DESTROY_FAILED: bench ok but teardown failed
     entries = reg.list()
     assert len(entries) == 1
     assert entries[0].state == "destroy_failed"
     assert entries[0].volume_uid
+
+
+def test_preflight_rejects_wrong_trace_sha_before_provider(tmp_path: Path):
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req["workload_trace"]["sha256"] = "sha256:" + ("0" * 64)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+    provider = FakeProvider()
+    with pytest.raises(ProvisionError, match="preflight|sha256"):
+        run_bench_on_pod(
+            PodSpec(provider="targon", force=True),
+            request_path=req_path,
+            output_dir=tmp_path / "out",
+            mock_engine=True,
+            provider=provider,
+            state_dir=tmp_path / "st",
+        )
+    assert provider.provision_calls == 0
+
+
+def test_remote_env_path_under_repo():
+    from gpu.bootstrap import REMOTE_REPO
+    from gpu.orchestrate import REMOTE_ENV
+
+    assert REMOTE_ENV.startswith(REMOTE_REPO + "/")
+    assert not REMOTE_ENV.startswith("/root/")
+
+
+def test_pull_engine_images_called_when_not_mock(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    pull_calls: list[Any] = []
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+
+    def fake_pull(pod, refs, *, env_file, **kwargs):
+        pull_calls.append({"refs": list(refs), "env_file": env_file})
+
+    monkeypatch.setattr("gpu.orchestrate.pull_engine_images", fake_pull)
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, "ok\n", "")
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=tmp_path / "out",
+        mock_engine=False,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert len(pull_calls) == 1
+    assert pull_calls[0]["env_file"].endswith(".pareton-bench.env")
+    assert any("ghcr.io" in r for r in pull_calls[0]["refs"])
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):
