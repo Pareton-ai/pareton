@@ -60,6 +60,12 @@ BENCH_DOCKER_PULL_TIMEOUT_S: float = float(
 BENCH_DOCKER_CMD_TIMEOUT_S: float = float(
     os.environ.get("PARETON_BENCH_DOCKER_CMD_TIMEOUT_S", "120")
 )
+BENCH_HF_CACHE_DIR: Path = Path(
+    os.environ.get(
+        "PARETON_BENCH_HF_CACHE_DIR",
+        str(Path.home() / ".cache" / "pareton" / "hf"),
+    )
+).expanduser()
 
 API_ALLOWED_ORIGINS: list[str] = [
     o.strip()

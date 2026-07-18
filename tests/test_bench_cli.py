@@ -210,10 +210,27 @@ def test_cli_bad_trace_sha_exits_before_engines(tmp_path: Path, monkeypatch):
 def test_cli_host_environment_error_exit_2(tmp_path: Path, monkeypatch):
     """Docker unavailable must be exit 2, not engine exit 3."""
     from bench.lifecycle import HostEnvironmentError
+    from bench.weights import StagedWeights
 
     def boom(self, *_args, **_kwargs):
         raise HostEnvironmentError("docker CLI not found on PATH")
 
+    def fake_stage(model, *, token_env="HF_TOKEN", cache_dir=None):
+        root = tmp_path / "staged-weights"
+        root.mkdir(exist_ok=True)
+        return StagedWeights(
+            path=root,
+            weights_sha256="sha256:" + ("c" * 64),
+            num_files=1,
+            total_bytes=1,
+            manifest={
+                "repo": model.hf_repo,
+                "revision": model.hf_revision,
+                "files": [],
+            },
+        )
+
+    monkeypatch.setattr("bench.main.stage_weights", fake_stage)
     monkeypatch.setattr("bench.main._EngineProvider.run_correctness", boom)
     req = _write_request(tmp_path, mode="correctness")
     out = tmp_path / "out"
