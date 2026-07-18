@@ -120,6 +120,36 @@ def test_single_flight_blocking(tmp_path: Path):
     assert reg.has_blocking_managed().provider == "targon"
 
 
+def test_provision_lock_exclusive(tmp_path: Path):
+    import threading
+
+    reg = PodRegistry(tmp_path / "gpu-state")
+    held = threading.Event()
+    release = threading.Event()
+    entered_second = threading.Event()
+
+    def holder():
+        with reg.provision_lock():
+            held.set()
+            release.wait(timeout=5)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert held.wait(timeout=2)
+
+    def waiter():
+        with reg.provision_lock():
+            entered_second.set()
+
+    t2 = threading.Thread(target=waiter)
+    t2.start()
+    assert not entered_second.wait(timeout=0.3)
+    release.set()
+    t2.join(timeout=2)
+    t.join(timeout=2)
+    assert entered_second.is_set()
+
+
 def test_ssh_exec_argv_and_nonzero(tmp_path: Path):
     pod = _pod(tmp_path)
     calls: list[list[str]] = []

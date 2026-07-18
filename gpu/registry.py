@@ -8,10 +8,11 @@ import os
 import re
 import shutil
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -205,3 +206,17 @@ class PodRegistry:
             if e.state in ("active", "destroy_failed"):
                 return e
         return None
+
+    @contextmanager
+    def provision_lock(self) -> Iterator[None]:
+        """Exclusive flock spanning single-flight check + rent + registry add."""
+        import fcntl
+
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.state_dir / "provision.lock"
+        with lock_path.open("a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
