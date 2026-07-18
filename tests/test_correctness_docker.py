@@ -153,8 +153,28 @@ def _require_container_ip_reachable(mock_image_digest: str) -> None:
 
 
 def test_cli_correctness_via_lifecycle_baseline_vs_baseline(
-    mock_image_digest: str, tmp_path: Path
+    mock_image_digest: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """Docker lifecycle Module A self-check (no real HF download)."""
+    from bench.weights import StagedWeights
+
+    def fake_stage(model, *, token_env="HF_TOKEN", cache_dir=None):
+        # Mock engines do not load HF weights; avoid multi-GB staging here.
+        root = tmp_path / "staged-weights"
+        root.mkdir(exist_ok=True)
+        return StagedWeights(
+            path=root,
+            weights_sha256="sha256:" + ("d" * 64),
+            num_files=1,
+            total_bytes=1,
+            manifest={
+                "repo": model.hf_repo,
+                "revision": model.hf_revision,
+                "files": [],
+            },
+        )
+
+    monkeypatch.setattr("bench.main.stage_weights", fake_stage)
     _require_container_ip_reachable(mock_image_digest)
 
     req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
@@ -179,4 +199,7 @@ def test_cli_correctness_via_lifecycle_baseline_vs_baseline(
     validate_report_dict(report)
     assert report["verdict"] == "pass"
     assert report["correctness"]["verdict"] == "pass"
+    assert report["inputs_fingerprint"]["model_weights_sha256"] == (
+        "sha256:" + ("d" * 64)
+    )
     assert (out / "evidence" / "correctness" / "logprob_diffs.jsonl").is_file()

@@ -19,6 +19,7 @@ class OutputLayout:
     ├── harness.log
     └── evidence/
         ├── env/
+        ├── weights/
         ├── correctness/
         ├── perf_screen/
         └── sla_bench/
@@ -28,6 +29,7 @@ class OutputLayout:
         self.root = root.resolve()
         self.evidence = self.root / "evidence"
         self.env_dir = self.evidence / "env"
+        self.weights_dir = self.evidence / "weights"
         self.correctness_dir = self.evidence / "correctness"
         self.perf_screen_dir = self.evidence / "perf_screen"
         self.sla_bench_dir = self.evidence / "sla_bench"
@@ -38,11 +40,30 @@ class OutputLayout:
         self.root.mkdir(parents=True, exist_ok=True)
         for d in (
             self.env_dir,
+            self.weights_dir,
             self.correctness_dir,
             self.perf_screen_dir,
             self.sla_bench_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
+
+    def write_weights_manifest(
+        self, manifest: dict[str, Any], *, aggregate: str
+    ) -> Path:
+        """Write evidence/weights/weights_manifest.json (manifest + aggregate)."""
+        self.weights_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "repo": manifest.get("repo"),
+            "revision": manifest.get("revision"),
+            "files": manifest.get("files", []),
+            "aggregate": aggregate,
+        }
+        path = self.weights_dir / "weights_manifest.json"
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8",
+        )
+        return path
 
     def write_report(self, report: BenchReport) -> Path:
         data = report.to_dict()
