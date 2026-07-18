@@ -167,9 +167,10 @@ testing/
 
 .dependencies_installed
 
-# Editors
+# Editors / local agent tooling
 .vscode/
 .cursor/
+.kimi-code/
 *.code-workspace
 AGENTS.md
 docs/running_knowledge_base.md
