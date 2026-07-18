@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Pareton GPU TTL reap every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=pareton-gpu-reap.service
+
+[Install]
+WantedBy=timers.target
