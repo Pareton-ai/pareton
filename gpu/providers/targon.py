@@ -130,6 +130,14 @@ class TargonProvider:
         return self._req("DELETE", path, **kwargs)
 
     @staticmethod
+    def _require_dict(data: Any, *, ctx: str) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ProvisionError(
+                f"Targon {ctx}: expected JSON object, got {type(data).__name__}"
+            )
+        return data
+
+    @staticmethod
     def _key_fingerprint(pub_key_line: str) -> str:
         parts = pub_key_line.strip().split()
         return " ".join(parts[:2]) if len(parts) >= 2 else pub_key_line.strip()
@@ -226,7 +234,10 @@ class TargonProvider:
     ) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            state = self._get(f"/volumes/{volume_uid}/state")
+            state = self._require_dict(
+                self._get(f"/volumes/{volume_uid}/state"),
+                ctx=f"volume {volume_uid} state",
+            )
             status = str(state.get("status", "")).upper()
             if status in ("READY", "REGISTERED"):
                 return
@@ -256,7 +267,10 @@ class TargonProvider:
                 self._sleep(5)
                 continue
             break
-        state = self._get(f"/workloads/{workload_uid}/state")
+        state = self._require_dict(
+            self._get(f"/workloads/{workload_uid}/state"),
+            ctx=f"workload {workload_uid} state",
+        )
         status = str(state.get("status", "")).upper()
         if status in ("DEPLOYING", "PROVISIONING", "RUNNING"):
             logger.warning(
@@ -363,7 +377,10 @@ class TargonProvider:
     def _wait_ready(self, pod: Pod, timeout_s: int = READY_TIMEOUT_S) -> Pod:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            state = self._get(f"/workloads/{pod.pod_id}/state")
+            state = self._require_dict(
+                self._get(f"/workloads/{pod.pod_id}/state"),
+                ctx=f"workload {pod.pod_id} state",
+            )
             status = str(state.get("status", "")).upper()
             if status == "RUNNING":
                 pod.ssh = SshTarget(host=TARGON_SSH_HOST, port=22, user=pod.pod_id)
@@ -381,15 +398,27 @@ class TargonProvider:
     def destroy(self, pod: Pod) -> None:
         volume_uid = str((pod.raw or {}).get("volume_uid") or "")
         workload_err: Exception | None = None
+        volume_err: Exception | None = None
         try:
             self._teardown_workload(pod.pod_id)
         except DestroyError as exc:
             workload_err = exc
+        except Exception as exc:  # noqa: BLE001 — still attempt volume teardown
+            workload_err = DestroyError(str(exc))
         if volume_uid:
             try:
                 self._teardown_volume(volume_uid, raise_on_fail=True)
-            except DestroyError:
-                raise
+            except DestroyError as exc:
+                volume_err = exc
+            except Exception as exc:  # noqa: BLE001
+                volume_err = DestroyError(str(exc))
+        if workload_err is not None and volume_err is not None:
+            raise DestroyError(
+                f"workload teardown failed: {workload_err}; "
+                f"volume teardown also failed: {volume_err}"
+            ) from volume_err
+        if volume_err is not None:
+            raise volume_err
         if workload_err is not None:
             raise workload_err
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -141,10 +142,11 @@ def pull_engine_images(
     """Source env_file, docker login (stdin), then pull. Token never on argv."""
     if not image_refs:
         return
-    pulls = " && ".join(f"docker pull {img}" for img in image_refs)
+    pulls = " && ".join(f"docker pull {shlex.quote(img)}" for img in image_refs)
+    env_q = shlex.quote(env_file)
     # Single shell so login sees vars from the env file; password via stdin.
     remote = (
-        f"set -a && . {env_file} && set +a && "
+        f"set -a && . {env_q} && set +a && "
         'if [ -n "${PARETON_GHCR_TOKEN:-}" ]; then '
         'echo "$PARETON_GHCR_TOKEN" | docker login ghcr.io '
         '-u "${PARETON_GHCR_USER:-${PARETON_GHCR_USERNAME:-}}" --password-stdin; '

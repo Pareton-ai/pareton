@@ -392,6 +392,87 @@ def test_reap_expired_and_dry_run(tmp_path: Path):
     assert not provider.pods
 
 
+def test_reap_enriches_volume_uid_from_registry(tmp_path: Path):
+    """list_pods-style empty volume_uid must still tear down registry volume."""
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    created = datetime.now(timezone.utc) - timedelta(hours=5)
+    name = encode_pod_name(ttl_hours=1.0, created=created, uid8="aabbccdd")
+    provider.pods.append(
+        Pod(
+            provider="targon",
+            pod_id="wl-x",
+            name=name,
+            ssh=SshTarget(host="h", port=22, user="wl-x"),
+            key_path=Path("/tmp/k"),
+            hourly_price_cents=1,
+            created_utc=created,
+            ttl_hours=1.0,
+            raw={"volume_uid": ""},  # mirrors TargonProvider.list_pods
+        )
+    )
+    provider.volumes.append({"id": "vol-from-reg", "name": name})
+    reg = PodRegistry(tmp_path / "st")
+    reg.add(
+        RegistryEntry(
+            provider="targon",
+            pod_id="wl-x",
+            name=name,
+            deadline="2000-01-01T00:00:00Z",
+            hourly_price_cents=1,
+            volume_uid="vol-from-reg",
+            volume_name=name,
+            state="active",
+        )
+    )
+    actions = reap(
+        dry_run=False,
+        registry=reg,
+        state_dir=tmp_path / "st",
+        provider_factory=lambda name, **k: provider,
+    )
+    assert any(a.kind == "workload" and a.destroyed for a in actions)
+    assert not any(v.get("id") == "vol-from-reg" for v in provider.volumes)
+    assert reg.get(name) is None
+
+
+def test_pull_engine_images_quotes_refs(tmp_path: Path):
+    import shlex
+
+    from gpu.bootstrap import pull_engine_images
+
+    ensure_durable_keypair(tmp_path / "st")
+    remote_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        # ssh ... -- <remote command>
+        remote_cmds.append(cmd[-1] if cmd else "")
+        return SshResult(0, "", "")
+
+    evil = "ghcr.io/x/y;touch /tmp/pwned@sha256:" + ("a" * 64)
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    pull_engine_images(
+        pod,
+        [evil],
+        env_file="/opt/pareton/.pareton-bench.env",
+        runner=runner,
+        state_dir=tmp_path / "st",
+    )
+    assert remote_cmds
+    remote = remote_cmds[0]
+    assert f"docker pull {shlex.quote(evil)}" in remote
+    assert "docker pull ghcr.io/x/y;touch" not in remote
+
+
 def test_cli_help_and_missing_key(monkeypatch):
     from gpu.cli import main
 

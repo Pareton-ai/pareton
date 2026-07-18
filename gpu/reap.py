@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -79,6 +79,15 @@ def reap(
             )
             if dry_run:
                 continue
+            # list_pods often omits volume_uid; keep registry volume metadata for destroy.
+            entry = registry.get(pod.name)
+            if entry is not None and entry.volume_uid:
+                raw = dict(pod.raw or {})
+                if not raw.get("volume_uid"):
+                    raw["volume_uid"] = entry.volume_uid
+                    if entry.volume_name:
+                        raw["volume_name"] = entry.volume_name
+                    pod = replace(pod, raw=raw)
             try:
                 provider.destroy(pod)
                 actions[-1].destroyed = True

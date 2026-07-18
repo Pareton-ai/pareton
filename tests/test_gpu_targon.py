@@ -287,3 +287,56 @@ def test_destroy_volume_retry_then_error(state_dir: Path):
         # and a tiny loop — use raise_on_fail path with immediate non-retryable error
         tr2.volume_delete_codes = [400]
         p2._teardown_volume("vol-uid-1", raise_on_fail=True)
+
+
+def test_destroy_surfaces_both_workload_and_volume_errors(state_dir: Path):
+    def flaky(method, url, *, headers=None, json=None, params=None, timeout=30):
+        if method.upper() == "DELETE" and "/workloads/" in url:
+            return FakeResp(500, text="workload stuck")
+        if method.upper() == "POST" and url.endswith("/delete"):
+            return FakeResp(400, text="volume stuck")
+        return FakeResp(404, text="no")
+
+    p = TargonProvider("k", state_dir=state_dir, transport=flaky, sleep=lambda _s: None)
+    pod = Pod(
+        provider="targon",
+        pod_id="wl-uid-1",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=state_dir / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+        raw={"volume_uid": "vol-uid-1"},
+    )
+    with pytest.raises(DestroyError, match="workload teardown failed.*volume teardown"):
+        p.destroy(pod)
+
+
+def test_wait_ready_null_state_is_provision_error(state_dir: Path):
+    # Empty body → content b"" → _req returns None
+    class EmptyResp(FakeResp):
+        @property
+        def content(self) -> bytes:
+            return b""
+
+    def empty_body(method, url, *, headers=None, json=None, params=None, timeout=30):
+        if method.upper() == "GET" and url.endswith("/state"):
+            return EmptyResp(200)
+        return FakeResp(404, text="no")
+
+    p = TargonProvider(
+        "k", state_dir=state_dir, transport=empty_body, sleep=lambda _s: None
+    )
+    pod = Pod(
+        provider="targon",
+        pod_id="wl-uid-1",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=state_dir / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    with pytest.raises(ProvisionError, match="expected JSON object"):
+        p._wait_ready(pod, timeout_s=1)
