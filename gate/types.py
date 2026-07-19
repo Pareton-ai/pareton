@@ -13,6 +13,9 @@ class SubmissionState:
     APPLIED = "applied"
     SURFACE_OK = "surface_ok"
     BUILT = "built"
+    CORRECT = "correct"
+    SCREENED = "screened"
+    BENCHED = "benched"
     REJECTED = "rejected"
 
 

@@ -65,8 +65,8 @@ class OutputLayout:
         )
         return path
 
-    def write_report(self, report: BenchReport) -> Path:
-        data = report.to_dict()
+    def write_report(self, report: BenchReport | dict[str, Any]) -> Path:
+        data = report if isinstance(report, dict) else report.to_dict()
         self.report_path.write_text(
             json.dumps(data, indent=2, sort_keys=False) + "\n",
             encoding="utf-8",

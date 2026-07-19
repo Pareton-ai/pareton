@@ -9,6 +9,11 @@ import tempfile
 from pathlib import Path
 
 import config
+from builder.digest import (
+    digest_pinned_ref,
+    mock_digest_from_patch_hash,
+    resolve_image_repo_digest,
+)
 from builder.registry import engine_image_ref
 from gate.types import GateResult, SubmissionState
 
@@ -138,6 +143,7 @@ def build_engine_image(
                 image_ref=image_ref,
             )
 
+        image_tag = image_ref
         if push:
             _docker_login_ghcr()
             push_proc = subprocess.run(
@@ -152,10 +158,18 @@ def build_engine_image(
                     stderr=push_proc.stderr[-2000:],
                     image_ref=image_ref,
                 )
+            digest = resolve_image_repo_digest(image_ref)
+            if digest is None:
+                return GateResult.reject(
+                    "image_digest_unresolved",
+                    image_ref=image_ref,
+                )
+            image_ref = digest_pinned_ref(image_tag, digest)
 
         return GateResult.success(
             SubmissionState.BUILT,
             image_ref=image_ref,
+            image_tag=image_tag,
             build_log=str(log_path),
         )
     except subprocess.TimeoutExpired as exc:
@@ -176,7 +190,9 @@ def build_engine_image_local_mock(
     """
     root = work_root or config.WORK_DIR / "mock-builds"
     root.mkdir(parents=True, exist_ok=True)
-    image_ref = engine_image_ref(patch_hash)
+    image_tag = engine_image_ref(patch_hash)
+    digest = mock_digest_from_patch_hash(patch_hash)
+    image_ref = digest_pinned_ref(image_tag, digest)
     artifact = root / f"{patch_hash.replace(':', '_')}.built"
     artifact.write_bytes(patch_bytes)
     marker = root / f"{patch_hash.replace(':', '_')}.ref"
@@ -184,6 +200,7 @@ def build_engine_image_local_mock(
     return GateResult.success(
         SubmissionState.BUILT,
         image_ref=image_ref,
+        image_tag=image_tag,
         artifact=str(artifact),
         mock=True,
     )
