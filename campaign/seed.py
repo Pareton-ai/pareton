@@ -15,6 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
+from campaign.cross_env import DEFAULT_CROSS_ENV, validate_cross_env
 from campaign.manifest import build_manifest
 from campaign.models import CustomerSignoff, SLA
 from campaign.store import insert_campaign, insert_profile, list_campaigns
@@ -58,7 +59,9 @@ def build_seed_bench_spec(
     baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
     gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     serve_args: list[str] | None = None,
+    cross_env: dict | None = None,
 ) -> dict:
+    ce = DEFAULT_CROSS_ENV if cross_env is None else cross_env
     return {
         "model": {
             "hf_repo": model_repo,
@@ -72,6 +75,7 @@ def build_seed_bench_spec(
         "serve_args": list(serve_args) if serve_args else None,
         "correctness": None,
         "perf_screen": None,
+        "cross_env": validate_cross_env(ce),
     }
 
 

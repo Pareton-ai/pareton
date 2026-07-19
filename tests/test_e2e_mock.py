@@ -619,3 +619,194 @@ def test_e2e_sibling_job_isolation(tmp_path, monkeypatch):
             rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
     assert rows["gates"] == ("failed", "touch_gates")
     assert rows["bench"] == ("failed", "touch_bench")
+
+
+def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
+    """Multi-SKU floor reject: stage rows pass, event-sourced API verdict rejects."""
+    import json
+
+    import config
+    from campaign.store import (
+        claim_next_job,
+        derive_bench_verdict_from_events,
+        list_bench_reports,
+        list_bench_summaries,
+        list_events,
+    )
+    from worker.bench_job import process_bench_job
+    from bench.validate import sha256_bytes
+
+    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
+    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
+
+    repo, patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
+    sample_trace = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
+    )
+    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
+    now = datetime.now(timezone.utc)
+    campaign_id = uuid4()
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/xenv.diff"
+    bench = _bench_campaign_spec(sample_trace, trace_sha)
+    bench["cross_env"] = {
+        "aggregate": "min",
+        "min_speedup_each": 1.5,
+        "speedup_metric": "output_tokens_per_s_ratio",
+    }
+    profile_id = insert_profile("e2e-xenv", {"fixture": True})
+    manifest = build_manifest(
+        campaign_id=campaign_id,
+        profile_id=profile_id,
+        baseline_repo=str(repo),
+        baseline_commit=commit,
+        base_image_digest="sha256:" + ("d" * 64),
+        gpu_skus=["mock-a", "mock-b"],
+        workload_trace_sha256=trace_sha,
+        workload_trace_url=f"file://{sample_trace.resolve()}",
+        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
+        scoring_config_sha256=None,
+        scoring_config_url=None,
+        allowed_paths=["vllm/**"],
+        denied_paths=["tests/**"],
+        window_opens_at=now - timedelta(hours=1),
+        window_closes_at=now + timedelta(days=1),
+        status="open",
+        customer_signoff=CustomerSignoff(
+            approved_manifest_hash="pending",
+            approver="test",
+            timestamp=now,
+        ),
+        bench=bench,
+    )
+    manifest = build_manifest(
+        campaign_id=campaign_id,
+        profile_id=profile_id,
+        baseline_repo=str(repo),
+        baseline_commit=commit,
+        base_image_digest="sha256:" + ("d" * 64),
+        gpu_skus=["mock-a", "mock-b"],
+        workload_trace_sha256=trace_sha,
+        workload_trace_url=f"file://{sample_trace.resolve()}",
+        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
+        scoring_config_sha256=None,
+        scoring_config_url=None,
+        allowed_paths=["vllm/**"],
+        denied_paths=["tests/**"],
+        window_opens_at=now - timedelta(hours=1),
+        window_closes_at=now + timedelta(days=1),
+        status="open",
+        customer_signoff=CustomerSignoff(
+            approved_manifest_hash=manifest.manifest_hash,
+            approver="test",
+            timestamp=now,
+        ),
+        manifest_hash=manifest.manifest_hash,
+        bench=bench,
+    )
+    insert_campaign(manifest)
+    sid = insert_submission(
+        campaign_id=campaign_id,
+        patch_hash=patch_hash,
+        hotkey="5FakesHotkeyForE2ETesting000000000000000000099",
+        baseline_commit=commit,
+        retrieval_url=url,
+        commit_block=99,
+    )
+    grow = claim_next_job(kind="gates")
+    assert process_submission(
+        grow,
+        registered_hotkeys=[grow["hotkey"]],
+        fetcher=lambda _u: patch,
+        mock_build=True,
+        local_repo=repo,
+        work_root=tmp_path / "gate-work",
+    ).ok
+    brow = claim_next_job(kind="bench")
+
+    def run_fn(request_path, output_dir, **_k):
+        req = json.loads(Path(request_path).read_text(encoding="utf-8"))
+        sku = req["hardware"]["gpu_sku_expected"]
+        ratio = 1.0 if sku == "mock-a" else 2.0
+        report = {
+            "schema_version": 1,
+            "task_id": req["task_id"],
+            "verdict": "pass",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:01:00Z",
+            "environment": {
+                "gpu": [],
+                "driver_version": "x",
+                "cuda_version": "x",
+                "docker_version": "x",
+                "harness_version": "0",
+                "hostname_hash": "sha256:" + ("e" * 64),
+            },
+            "inputs_fingerprint": {
+                "baseline_image_digest": bench["baseline_engine_image_digest"],
+                "candidate_image_digest": brow["engine_image_ref"].split("@", 1)[-1]
+                if "@" in str(brow["engine_image_ref"])
+                else "sha256:" + ("b" * 64),
+                "model_repo": bench["model"]["hf_repo"],
+                "model_revision": bench["model"]["hf_revision"],
+                "model_weights_sha256": "sha256:" + ("0" * 64),
+                "trace_sha256": trace_sha,
+                "request_sha256": sha256_bytes(Path(request_path).read_bytes()),
+            },
+            "correctness": {
+                "verdict": "pass",
+                "num_prompts": 1,
+                "num_positions_compared": 1,
+                "mean_abs_logprob_diff": 0.0,
+                "max_abs_logprob_diff": 0.0,
+                "argmax_mismatch_rate": 0.0,
+                "evidence": "e",
+            },
+            "perf_screen": {
+                "verdict": "pass",
+                "baseline_output_tokens_per_s": 1.0,
+                "candidate_output_tokens_per_s": 1.0,
+                "throughput_ratio": 1.0,
+                "evidence": "e",
+            },
+            "sla_bench": {
+                "verdict": "pass",
+                "repetitions": 1,
+                "candidate": {},
+                "baseline": {},
+                "speedup": {
+                    "output_tokens_per_s_ratio": ratio,
+                    "requests_per_s_ratio": 1.0,
+                    "p99_ttft_ratio": 1.0,
+                    "p99_itl_ratio": 1.0,
+                    "p99_e2e_ratio": 1.0,
+                },
+                "cross_rep_variance": {},
+                "evidence": "e",
+            },
+        }
+        # candidate digest from built submission
+        sub = get_submission(patch_hash)
+        dig = str(sub["engine_image_ref"]).split("@", 1)[-1]
+        report["inputs_fingerprint"]["candidate_image_digest"] = dig
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "bench_report.json").write_text(
+            json.dumps(report, indent=2) + "\n", encoding="utf-8"
+        )
+        return 0
+
+    outcome = process_bench_job(
+        brow,
+        mock_bench=True,
+        work_root=tmp_path / "bench-work",
+        run_bench_fn=run_fn,
+    )
+    assert outcome == "ok"
+    reports = list_bench_reports(sid)
+    assert len(reports) == 6
+    assert all(r["verdict"] == "pass" for r in reports)
+    assert len({r["task_id"] for r in reports}) == 2
+    events = list_events(sid)
+    assert derive_bench_verdict_from_events(events) == "fail_cross_env_speedup"
+    assert list_bench_summaries(campaign_id).get(str(sid)) == "fail_cross_env_speedup"
