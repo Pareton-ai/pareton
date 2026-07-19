@@ -137,7 +137,13 @@ def _report(
             "repetitions": 1,
             "candidate": {},
             "baseline": {},
-            "speedup": {"output_tokens_per_s": 1.0},
+            "speedup": {
+                "output_tokens_per_s_ratio": 1.0,
+                "requests_per_s_ratio": 1.0,
+                "p99_ttft_ratio": 1.0,
+                "p99_itl_ratio": 1.0,
+                "p99_e2e_ratio": 1.0,
+            },
             "cross_rep_variance": {},
             "evidence": "e",
         }
@@ -646,3 +652,232 @@ def test_engine_error_writes_error_report(tmp_path, monkeypatch):
     validate_report_dict(report)
     assert report["verdict"] == "error"
     assert report["error_role"] == "candidate"
+
+
+def _multi_sku_harness(monkeypatch, tmp_path, *, skus, bench_extra=None):
+    """Shared finalize capture for multi-SKU process_bench_job tests."""
+    finalize_calls: list = []
+
+    def fake_finalize(**kwargs):
+        finalize_calls.append(kwargs)
+
+    monkeypatch.setattr("worker.bench_job.finalize_bench_job", fake_finalize)
+    monkeypatch.setattr(
+        "worker.bench_job.set_job_status",
+        lambda *_a, **_k: None,
+    )
+    bench = _bench_spec(**(bench_extra or {}))
+    row = _row(gpu_skus=list(skus), bench=bench)
+    return row, finalize_calls
+
+
+def _sku_run_fn(sku_reports: dict[str, dict[str, Any]], *, exit_codes=None):
+    """run_bench_fn that emits a prebuilt report per hardware.gpu_sku_expected."""
+
+    exits = exit_codes or {}
+
+    def run(request_path, output_dir, **_kwargs):
+        req = json.loads(Path(request_path).read_text(encoding="utf-8"))
+        sku = req["hardware"]["gpu_sku_expected"]
+        task_id = req["task_id"]
+        req_bytes = Path(request_path).read_bytes()
+        template = sku_reports[sku]
+        report = dict(template)
+        report["task_id"] = task_id
+        fp = dict(report.get("inputs_fingerprint") or {})
+        fp["request_sha256"] = sha256_bytes(req_bytes)
+        report["inputs_fingerprint"] = fp
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "bench_report.json").write_text(
+            json.dumps(report, indent=2) + "\n", encoding="utf-8"
+        )
+        return int(exits.get(sku, 0))
+
+    return run
+
+
+def test_multi_sku_both_pass_environments(monkeypatch, tmp_path):
+    row, finals = _multi_sku_harness(monkeypatch, tmp_path, skus=["mock-a", "mock-b"])
+    # Build templates after a throwaway request so fingerprints match digests.
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path / "t",
+    )
+    req = build_bench_request_dict(
+        row, task_id=FIXED_TASK, trace_path=str(trace.resolve()), gpu_sku="mock-a"
+    )
+    req_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
+    template = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="pass")
+    outcome = process_bench_job(
+        row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=_sku_run_fn({"mock-a": template, "mock-b": template}),
+    )
+    assert outcome == "ok"
+    assert len(finals) == 1
+    rows = finals[0]["report_rows"]
+    assert len(rows) == 6
+    assert {r["gpu_sku"] for r in rows} == {"mock-a", "mock-b"}
+    assert len({r["task_id"] for r in rows}) == 2
+    states = [s for s, _ in finals[0]["events"]]
+    assert states == ["correct", "screened", "benched"]
+    detail = finals[0]["events"][-1][1]
+    assert "environments" in detail
+    assert len(detail["environments"]) == 2
+
+
+def test_multi_sku_fail_sla_persists_both(monkeypatch, tmp_path):
+    row, finals = _multi_sku_harness(monkeypatch, tmp_path, skus=["mock-a", "mock-b"])
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path / "t",
+    )
+    req = build_bench_request_dict(
+        row, task_id=FIXED_TASK, trace_path=str(trace.resolve()), gpu_sku="mock-a"
+    )
+    req_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
+    pass_r = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="pass")
+    fail_r = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="fail_sla")
+    outcome = process_bench_job(
+        row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=_sku_run_fn({"mock-a": pass_r, "mock-b": fail_r}),
+    )
+    assert outcome == "ok"
+    assert len(finals[0]["report_rows"]) == 6
+    assert [s for s, _ in finals[0]["events"]] == [
+        "correct",
+        "screened",
+        "rejected",
+    ]
+    assert finals[0]["events"][-1][1]["reason"] == "fail_sla"
+
+
+def test_multi_sku_speedup_floor_reject(monkeypatch, tmp_path):
+    from campaign.store import derive_bench_verdict_from_events
+
+    row, finals = _multi_sku_harness(
+        monkeypatch,
+        tmp_path,
+        skus=["mock-a", "mock-b"],
+        bench_extra={
+            "cross_env": {
+                "aggregate": "min",
+                "min_speedup_each": 1.5,
+                "speedup_metric": "output_tokens_per_s_ratio",
+            }
+        },
+    )
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path / "t",
+    )
+    req = build_bench_request_dict(
+        row, task_id=FIXED_TASK, trace_path=str(trace.resolve()), gpu_sku="mock-a"
+    )
+    req_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
+    slow = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="pass")
+    slow["sla_bench"]["speedup"]["output_tokens_per_s_ratio"] = 1.0
+    fast = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="pass")
+    fast["sla_bench"]["speedup"]["output_tokens_per_s_ratio"] = 2.0
+    outcome = process_bench_job(
+        row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=_sku_run_fn({"mock-a": slow, "mock-b": fast}),
+    )
+    assert outcome == "ok"
+    assert all(r["verdict"] == "pass" for r in finals[0]["report_rows"])
+    events = [{"state": s, "detail": d} for s, d in finals[0]["events"]]
+    assert derive_bench_verdict_from_events(events) == "fail_cross_env_speedup"
+    assert events[-1]["detail"]["reason"] == "fail_cross_env_speedup"
+
+
+def test_multi_sku_no_cross_env_skips_floor(monkeypatch, tmp_path):
+    row, finals = _multi_sku_harness(monkeypatch, tmp_path, skus=["mock-a", "mock-b"])
+    assert "cross_env" not in row["bench"]
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path / "t",
+    )
+    req = build_bench_request_dict(
+        row, task_id=FIXED_TASK, trace_path=str(trace.resolve()), gpu_sku="mock-a"
+    )
+    req_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
+    slow = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="pass")
+    slow["sla_bench"]["speedup"]["output_tokens_per_s_ratio"] = 0.1
+    outcome = process_bench_job(
+        row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=_sku_run_fn({"mock-a": slow, "mock-b": slow}),
+    )
+    assert outcome == "ok"
+    assert [s for s, _ in finals[0]["events"]] == ["correct", "screened", "benched"]
+
+
+def test_multi_sku_infra_zero_rows(monkeypatch, tmp_path):
+    row, finals = _multi_sku_harness(monkeypatch, tmp_path, skus=["mock-a", "mock-b"])
+    fails: list[str] = []
+    monkeypatch.setattr(
+        "worker.bench_job.set_job_status",
+        lambda *_a, **k: fails.append(k.get("last_error") or ""),
+    )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("pod down")
+
+    # First SKU would succeed path via inject is harder; raise from run_bench.
+    outcome = process_bench_job(
+        row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=boom,
+    )
+    assert outcome.startswith("bench_unexpected") or outcome == "bench_gpu_exception"
+    # boom from mock path is uncaught Exception -> bench_unexpected
+    assert finals == []
+    assert fails
+
+
+def test_multi_sku_exit75_stops_no_events(monkeypatch, tmp_path):
+    row, finals = _multi_sku_harness(monkeypatch, tmp_path, skus=["mock-a", "mock-b"])
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path / "t",
+    )
+    req = build_bench_request_dict(
+        row, task_id=FIXED_TASK, trace_path=str(trace.resolve()), gpu_sku="mock-a"
+    )
+    req_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
+    template = _report(task_id=FIXED_TASK, request_bytes=req_bytes, verdict="pass")
+    calls: list[str] = []
+
+    def tracking_run(request_path, output_dir, **kwargs):
+        req_o = json.loads(Path(request_path).read_text(encoding="utf-8"))
+        calls.append(req_o["hardware"]["gpu_sku_expected"])
+        return _sku_run_fn(
+            {"mock-a": template, "mock-b": template},
+            exit_codes={"mock-a": 75, "mock-b": 0},
+        )(request_path, output_dir, **kwargs)
+
+    outcome = process_bench_job(
+        row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=tracking_run,
+    )
+    assert outcome == "bench_destroy_failed"
+    assert calls == ["mock-a"]  # SKU 2 never attempted
+    assert len(finals) == 1
+    assert finals[0]["events"] == []
+    assert finals[0]["job_status"] == "failed"
+    assert {r["gpu_sku"] for r in finals[0]["report_rows"]} == {"mock-a"}

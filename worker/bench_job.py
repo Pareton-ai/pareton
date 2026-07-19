@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import tarfile
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -21,12 +23,21 @@ from bench.validate import (
     validate_bench_request_dict,
     validate_report_dict,
 )
+from campaign.cross_env import SPEEDUP_METRIC_KEYS, validate_cross_env
 from campaign.store import finalize_bench_job, set_job_status
 from gate.types import SubmissionState
 
 logger = logging.getLogger(__name__)
 
 REASON_CANDIDATE_NOT_PINNED = "candidate_image_not_digest_pinned"
+
+# Worst-verdict precedence (lower index wins).
+_VERDICT_RANK = {
+    "fail_correctness": 0,
+    "fail_perf_screen": 1,
+    "fail_sla": 2,
+    "pass": 3,
+}
 
 
 class BenchInfraError(Exception):
@@ -101,6 +112,7 @@ def build_bench_request_dict(
     *,
     task_id: str | None = None,
     trace_path: str,
+    gpu_sku: str | None = None,
     fetcher: Callable[[str], bytes] | None = None,
 ) -> dict[str, Any]:
     """Operator-pinned bench_request from campaign + submission (image only from miner)."""
@@ -123,7 +135,7 @@ def build_bench_request_dict(
     gpu_skus = _parse_json_field(row.get("gpu_skus")) or []
     if not gpu_skus:
         raise BenchInfraError("gpu_skus_empty")
-    gpu_sku = str(gpu_skus[0])
+    sku = str(gpu_sku) if gpu_sku is not None else str(gpu_skus[0])
     gpu_count = int(bench.get("gpu_count") or 1)
 
     max_model_len = int(model["max_model_len"])
@@ -205,7 +217,7 @@ def build_bench_request_dict(
         },
         "hardware": {
             "gpu_count": gpu_count,
-            "gpu_sku_expected": gpu_sku,
+            "gpu_sku_expected": sku,
         },
         "engines": {
             "baseline": {
@@ -283,6 +295,7 @@ def _module_rows(
             continue
         rows.append(
             {
+                "task_id": task_id,
                 "stage": stage,
                 "verdict": str(sub.get("verdict") or report.get("verdict") or "error"),
                 "report": sub,
@@ -294,6 +307,7 @@ def _module_rows(
     if not rows and report.get("verdict") == "error":
         rows.append(
             {
+                "task_id": task_id,
                 "stage": "correctness",
                 "verdict": "error",
                 "report": report,
@@ -369,6 +383,15 @@ def _events_for_verdict(
             (SubmissionState.SCREENED, dict(base)),
             (SubmissionState.REJECTED, {**base, "reason": "fail_sla"}),
         ]
+    if verdict == "fail_cross_env_speedup":
+        return [
+            (SubmissionState.CORRECT, dict(base)),
+            (SubmissionState.SCREENED, dict(base)),
+            (
+                SubmissionState.REJECTED,
+                {**base, "reason": "fail_cross_env_speedup"},
+            ),
+        ]
     if verdict == "error":
         if error_role == "candidate":
             return [
@@ -399,6 +422,153 @@ def _fail_job(row: dict[str, Any], code: str) -> str:
     return code
 
 
+def parse_cross_env(bench: dict[str, Any]) -> dict[str, Any] | None:
+    """Return normalized cross_env or None when absent (no speedup floor)."""
+    raw = bench.get("cross_env")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise BenchInfraError("cross_env_invalid", "must be an object")
+    try:
+        return validate_cross_env(raw)
+    except ValueError as exc:
+        raise BenchInfraError("cross_env_invalid", str(exc)) from exc
+
+
+def sku_speedup_value(report: dict[str, Any], metric: str) -> float | None:
+    """Scalar from sla_bench.speedup[metric]; None if missing/NaN/non-numeric."""
+    if metric not in SPEEDUP_METRIC_KEYS:
+        return None
+    speedup = (report.get("sla_bench") or {}).get("speedup")
+    if not isinstance(speedup, dict) or metric not in speedup:
+        return None
+    try:
+        val = float(speedup[metric])
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val):
+        return None
+    return val
+
+
+def worst_verdict(verdicts: list[str]) -> str:
+    """Return worst harness verdict by fail_correctness > fail_perf_screen > fail_sla > pass."""
+    best_rank = _VERDICT_RANK["pass"]
+    winner = "pass"
+    for v in verdicts:
+        rank = _VERDICT_RANK.get(v)
+        if rank is None:
+            continue
+        if rank < best_rank:
+            best_rank = rank
+            winner = v
+    return winner
+
+
+def aggregate_sku_outcomes(
+    results: list[SkuRunResult],
+    *,
+    cross_env: dict[str, Any] | None,
+) -> tuple[str, str | None]:
+    """Aggregate per-SKU outcomes -> (verdict, error_role).
+
+    Candidate engine errors map to verdict ``error`` with role candidate.
+    Baseline/absent error_role raises BenchInfraError (infra).
+    When all harness verdicts pass and cross_env is set, apply speedup floor.
+    """
+    error_roles = [r.error_role for r in results if r.verdict == "error"]
+    if error_roles:
+        if any(role == "candidate" for role in error_roles):
+            return "error", "candidate"
+        raise BenchInfraError(
+            "bench_engine_baseline_or_unknown",
+            next((r for r in error_roles if r), "absent") or "absent",
+        )
+
+    harness = [r.verdict for r in results if r.verdict != "error"]
+    agg = worst_verdict(harness) if harness else "pass"
+    if agg != "pass" or cross_env is None:
+        return agg, None
+
+    metric = str(cross_env["speedup_metric"])
+    floor = float(cross_env["min_speedup_each"])
+    for r in results:
+        val = sku_speedup_value(r.report, metric)
+        # Missing, NaN, or zero-baseline ratio (0.0) counts as below floor.
+        if val is None or val < floor:
+            return "fail_cross_env_speedup", None
+    return "pass", None
+
+
+@dataclass
+class SkuRunResult:
+    gpu_sku: str
+    task_id: str
+    exit_code: int
+    report: dict[str, Any]
+    report_sha256: str
+    evidence_s3_url: str | None = None
+    evidence_sha256: str | None = None
+    evidence_size: int | None = None
+    provider: str | None = None
+    pod_name: str | None = None
+    verdict: str = "error"
+    error_role: str | None = None
+    rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _env_entry(r: SkuRunResult) -> dict[str, Any]:
+    return {
+        "gpu_sku": r.gpu_sku,
+        "task_id": r.task_id,
+        "verdict": r.verdict,
+        "speedup": (r.report.get("sla_bench") or {}).get("speedup"),
+        "report_sha256": r.report_sha256,
+        "evidence_s3_url": r.evidence_s3_url,
+        "evidence_sha256": r.evidence_sha256,
+        "evidence_size": r.evidence_size,
+    }
+
+
+def _event_base_for_results(
+    results: list[SkuRunResult],
+    *,
+    mock: bool,
+    cross_env: dict[str, Any] | None,
+) -> dict[str, Any]:
+    multi = len(results) > 1
+    if not multi:
+        r = results[0]
+        return _event_detail_base(
+            task_id=r.task_id,
+            report_sha256=r.report_sha256,
+            evidence_s3_url=r.evidence_s3_url,
+            evidence_sha256=r.evidence_sha256,
+            evidence_size=r.evidence_size,
+            mock=mock,
+            inputs_fingerprint=dict(r.report.get("inputs_fingerprint") or {}),
+            provider=r.provider,
+            pod_name=r.pod_name,
+            speedup=(r.report.get("sla_bench") or {}).get("speedup"),
+        )
+
+    detail: dict[str, Any] = {
+        "environments": [_env_entry(r) for r in results],
+        "mock": mock,
+    }
+    providers = {r.provider for r in results if r.provider}
+    if len(providers) == 1:
+        detail["provider"] = next(iter(providers))
+    if cross_env is not None:
+        metric = str(cross_env["speedup_metric"])
+        values = [sku_speedup_value(r.report, metric) for r in results]
+        present = [v for v in values if v is not None]
+        if present:
+            detail["effective_speedup"] = min(present)
+            detail["speedup_metric"] = metric
+    return detail
+
+
 def process_bench_job(
     row: dict[str, Any],
     *,
@@ -414,20 +584,19 @@ def process_bench_job(
     injected_exit: int | None = None,
     injected_report: dict[str, Any] | None = None,
 ) -> str:
-    """Run one bench job. Returns 'ok' or last_error code."""
+    """Run one bench job across all gpu_skus. Returns 'ok' or last_error code."""
     submission_id = str(row["id"])
     job_id = int(row["job_id"])
     root = Path(
         work_root or (config.WORK_DIR / f"bench-{submission_id}-{uuid4().hex[:8]}")
     )
     root.mkdir(parents=True, exist_ok=True)
-    output_dir = root / "out"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         bench = _parse_json_field(row.get("bench"))
         if not isinstance(bench, dict):
             raise BenchInfraError("campaign_bench_missing")
+        cross_env = parse_cross_env(bench)
 
         trace_path = materialize_trace(
             url=str(row["workload_trace_url"]),
@@ -435,174 +604,108 @@ def process_bench_job(
             dest_dir=root / "trace",
             fetcher=trace_fetcher,
         )
-        task_id = str(uuid4())
-        req = build_bench_request_dict(
-            row,
-            task_id=task_id,
-            trace_path=str(trace_path.resolve()),
-        )
-        request_path = root / "bench_request.json"
-        request_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
-        request_path.write_bytes(request_bytes)
+        gpu_skus = [str(s) for s in (_parse_json_field(row.get("gpu_skus")) or [])]
+        if not gpu_skus:
+            raise BenchInfraError("gpu_skus_empty")
 
-        gpu_skus = _parse_json_field(row.get("gpu_skus")) or ["unknown"]
-        gpu_sku = "mock" if mock_bench else str(gpu_skus[0])
-        provider = None
-        pod_name = None
-        exit_code: int
+        # injected_* stays single-SKU (first entry) for existing unit tests.
+        skus_to_run = gpu_skus[:1] if injected_exit is not None else gpu_skus
+        results: list[SkuRunResult] = []
 
-        if injected_exit is not None:
-            exit_code = injected_exit
-            if injected_report is not None:
-                # Tests inject outcomes; only request_sha256 is path-dependent on
-                # materialize location. Other bind fields stay as injected.
-                patched = dict(injected_report)
-                fp = dict(patched.get("inputs_fingerprint") or {})
-                fp["request_sha256"] = sha256_bytes(request_bytes)
-                patched["inputs_fingerprint"] = fp
-                (output_dir / "bench_report.json").write_text(
-                    json.dumps(patched, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                (output_dir / "bench_request.remote.json").write_bytes(request_bytes)
-        elif mock_bench:
-            from bench.main import run_bench
-
-            fn = run_bench_fn or run_bench
-            exit_code = fn(
-                request_path,
-                output_dir,
-                mock_engine=True,
+        for sku in skus_to_run:
+            result = _run_one_sku(
+                row,
+                bench=bench,
+                gpu_sku=sku,
+                trace_path=trace_path,
+                root=root,
+                mock_bench=mock_bench,
                 mock_tampered_candidate=mock_tampered_candidate,
                 mock_baseline_token_latency_s=mock_baseline_token_latency_s,
                 mock_candidate_token_latency_s=mock_candidate_token_latency_s,
+                run_bench_fn=run_bench_fn,
+                run_pod_fn=run_pod_fn,
+                upload_evidence_fn=upload_evidence_fn,
+                injected_exit=injected_exit,
+                injected_report=injected_report,
             )
-        else:
-            from gpu.orchestrate import EXIT_DESTROY_FAILED, run_bench_on_pod
-            from gpu.types import PodSpec
+            results.append(result)
 
-            spec = PodSpec(
-                provider=config.GPU_PROVIDER,
-                gpu_count=int(bench.get("gpu_count") or 1),
-                gpu_type=str(gpu_skus[0]),
-                ttl_hours=config.GPU_TTL_HOURS,
-                max_hourly_cents=config.GPU_MAX_HOURLY_CENTS,
-            )
-            fn = run_pod_fn or run_bench_on_pod
-            try:
-                exit_code = fn(
-                    spec,
-                    request_path=request_path,
-                    output_dir=output_dir,
+            if result.exit_code == 75:
+                logger.error(
+                    "ALERT bench_destroy_failed submission=%s task_id=%s sku=%s "
+                    "(pod/volume may still be billing); partial rows persisted, "
+                    "no verdict events",
+                    submission_id,
+                    result.task_id,
+                    sku,
                 )
-            except Exception as exc:
-                logger.exception("gpu orchestrate failed")
-                raise BenchInfraError(
-                    "bench_gpu_exception", type(exc).__name__
-                ) from exc
-            provider = spec.provider
-            pod_name = None
-            # EXIT_DESTROY_FAILED handled below with report binding
-            _ = EXIT_DESTROY_FAILED
+                all_rows: list[dict[str, Any]] = []
+                for r in results:
+                    all_rows.extend(r.rows)
+                # Multi-SKU: forensics rows only, no events. Single-SKU WS-D
+                # kept complete-run events when destroy fails after a bound report.
+                if len(gpu_skus) == 1:
+                    base = _event_base_for_results(
+                        results, mock=mock_bench, cross_env=cross_env
+                    )
+                    if result.verdict == "error":
+                        events = _events_for_verdict(
+                            "error", base=base, error_role=result.error_role
+                        )
+                    else:
+                        events = _events_for_verdict(result.verdict, base=base)
+                else:
+                    events = []
+                finalize_bench_job(
+                    submission_id=submission_id,
+                    job_id=job_id,
+                    task_id=results[0].task_id,
+                    report_rows=all_rows,
+                    events=events,
+                    job_status="failed",
+                    last_error="bench_destroy_failed",
+                )
+                return "bench_destroy_failed"
 
-        report_path = output_dir / "bench_report.json"
-        destroy_failed = exit_code == 75
-
-        if exit_code in (1, 2) and not report_path.is_file():
-            raise BenchInfraError(
-                "bench_exit_bad_request" if exit_code == 1 else "bench_exit_env"
+        # Aggregate verdict across completed SKUs.
+        try:
+            agg_verdict, error_role = aggregate_sku_outcomes(
+                results, cross_env=cross_env
             )
+        except BenchInfraError:
+            raise
 
-        if not report_path.is_file():
-            if destroy_failed:
-                raise BenchInfraError("bench_destroy_failed")
-            if exit_code == 3:
-                raise BenchInfraError("bench_engine_no_report")
-            raise BenchInfraError(f"bench_exit_{exit_code}")
+        base = _event_base_for_results(results, mock=mock_bench, cross_env=cross_env)
+        if agg_verdict == "pass" and cross_env is not None:
+            metric = str(cross_env["speedup_metric"])
+            values = [
+                v
+                for v in (sku_speedup_value(r.report, metric) for r in results)
+                if v is not None
+            ]
+            if values:
+                base["effective_speedup"] = min(values)
+                base["speedup_metric"] = metric
 
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        if mock_bench:
-            executed_bytes = request_bytes
+        if agg_verdict == "error":
+            events = _events_for_verdict("error", base=base, error_role=error_role)
         else:
-            remote_req = output_dir / "bench_request.remote.json"
-            if not remote_req.is_file():
-                raise BenchInfraError("bench_remote_request_missing")
-            executed_bytes = remote_req.read_bytes()
+            events = _events_for_verdict(agg_verdict, base=base)
 
-        bind_report_to_run(
-            report,
-            request_task_id=task_id,
-            executed_request_bytes=executed_bytes,
-            baseline_digest=str(bench["baseline_engine_image_digest"]),
-            candidate_digest=str(row["engine_image_ref"]),
-            trace_sha256=str(row["workload_trace_sha256"]),
-        )
-
-        report_raw = report_path.read_bytes()
-        report_sha = sha256_bytes(report_raw)
-        evidence_url = None
-        evidence_sha = None
-        evidence_size = None
-        if not mock_bench:
-            from storage.s3 import upload_evidence_bundle
-
-            up = upload_evidence_fn or upload_evidence_bundle
-            evidence_url, evidence_sha, evidence_size = up(
-                submission_id, task_id, output_dir
-            )
-
-        base = _event_detail_base(
-            task_id=task_id,
-            report_sha256=report_sha,
-            evidence_s3_url=evidence_url,
-            evidence_sha256=evidence_sha,
-            evidence_size=evidence_size,
-            mock=mock_bench,
-            inputs_fingerprint=dict(report.get("inputs_fingerprint") or {}),
-            provider=provider,
-            pod_name=pod_name,
-            speedup=(report.get("sla_bench") or {}).get("speedup"),
-        )
-        verdict = str(report.get("verdict") or "error")
-        error_role = report.get("error_role")
-        if isinstance(error_role, str):
-            error_role_s: str | None = error_role
-        else:
-            error_role_s = None
-
-        if exit_code == 3 or verdict == "error":
-            events = _events_for_verdict("error", base=base, error_role=error_role_s)
-        elif exit_code in (0, 75):
-            events = _events_for_verdict(verdict, base=base)
-        else:
-            raise BenchInfraError(f"bench_exit_{exit_code}")
-
-        rows = _module_rows(
-            report,
-            task_id=task_id,
-            gpu_sku=gpu_sku,
-            evidence_s3_url=evidence_url,
-            mock=mock_bench,
-        )
-        job_status = "failed" if destroy_failed else "done"
-        last_error = "bench_destroy_failed" if destroy_failed else None
-        if destroy_failed:
-            logger.error(
-                "ALERT bench_destroy_failed submission=%s task_id=%s "
-                "(pod/volume may still be billing); report persisted",
-                submission_id,
-                task_id,
-            )
+        all_rows = []
+        for r in results:
+            all_rows.extend(r.rows)
         finalize_bench_job(
             submission_id=submission_id,
             job_id=job_id,
-            task_id=task_id,
-            report_rows=rows,
+            task_id=results[0].task_id,
+            report_rows=all_rows,
             events=events,
-            job_status=job_status,
-            last_error=last_error,
+            job_status="done",
+            last_error=None,
         )
-        return last_error or "ok"
+        return "ok"
 
     except BenchInfraError as exc:
         logger.warning("bench infra fail submission=%s: %s", submission_id, exc)
@@ -610,6 +713,173 @@ def process_bench_job(
     except Exception as exc:
         logger.exception("bench unexpected failure")
         return _fail_job(row, f"bench_unexpected:{type(exc).__name__}")
+
+
+def _run_one_sku(
+    row: dict[str, Any],
+    *,
+    bench: dict[str, Any],
+    gpu_sku: str,
+    trace_path: Path,
+    root: Path,
+    mock_bench: bool,
+    mock_tampered_candidate: bool,
+    mock_baseline_token_latency_s: float,
+    mock_candidate_token_latency_s: float,
+    run_bench_fn: Callable[..., int] | None,
+    run_pod_fn: Callable[..., int] | None,
+    upload_evidence_fn: Callable[..., tuple[str, str, int]] | None,
+    injected_exit: int | None,
+    injected_report: dict[str, Any] | None,
+) -> SkuRunResult:
+    """Provision/bench/bind one SKU. Raises BenchInfraError on infra failure."""
+    submission_id = str(row["id"])
+    task_id = str(uuid4())
+    sku_dir = root / f"sku-{gpu_sku.replace('/', '_')}"
+    output_dir = sku_dir / "out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    req = build_bench_request_dict(
+        row,
+        task_id=task_id,
+        trace_path=str(trace_path.resolve()),
+        gpu_sku=gpu_sku,
+    )
+    request_path = sku_dir / "bench_request.json"
+    request_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")
+    request_path.write_bytes(request_bytes)
+
+    provider: str | None = None
+    pod_name: str | None = None
+    exit_code: int
+
+    if injected_exit is not None:
+        exit_code = injected_exit
+        if injected_report is not None:
+            patched = dict(injected_report)
+            # Preserve injected task_id (bind-mismatch tests); default to request.
+            if not patched.get("task_id"):
+                patched["task_id"] = task_id
+            fp = dict(patched.get("inputs_fingerprint") or {})
+            fp["request_sha256"] = sha256_bytes(request_bytes)
+            patched["inputs_fingerprint"] = fp
+            (output_dir / "bench_report.json").write_text(
+                json.dumps(patched, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            (output_dir / "bench_request.remote.json").write_bytes(request_bytes)
+    elif mock_bench:
+        from bench.main import run_bench
+
+        fn = run_bench_fn or run_bench
+        exit_code = fn(
+            request_path,
+            output_dir,
+            mock_engine=True,
+            mock_tampered_candidate=mock_tampered_candidate,
+            mock_baseline_token_latency_s=mock_baseline_token_latency_s,
+            mock_candidate_token_latency_s=mock_candidate_token_latency_s,
+        )
+    else:
+        from gpu.orchestrate import run_bench_on_pod
+        from gpu.types import PodSpec
+
+        spec = PodSpec(
+            provider=config.GPU_PROVIDER,
+            gpu_count=int(bench.get("gpu_count") or 1),
+            gpu_type=gpu_sku,
+            ttl_hours=config.GPU_TTL_HOURS,
+            max_hourly_cents=config.GPU_MAX_HOURLY_CENTS,
+        )
+        fn = run_pod_fn or run_bench_on_pod
+        try:
+            exit_code = fn(
+                spec,
+                request_path=request_path,
+                output_dir=output_dir,
+            )
+        except Exception as exc:
+            logger.exception("gpu orchestrate failed sku=%s", gpu_sku)
+            raise BenchInfraError("bench_gpu_exception", type(exc).__name__) from exc
+        provider = spec.provider
+
+    report_path = output_dir / "bench_report.json"
+    destroy_failed = exit_code == 75
+
+    if exit_code in (1, 2) and not report_path.is_file():
+        raise BenchInfraError(
+            "bench_exit_bad_request" if exit_code == 1 else "bench_exit_env"
+        )
+
+    if not report_path.is_file():
+        if destroy_failed:
+            raise BenchInfraError("bench_destroy_failed")
+        if exit_code == 3:
+            raise BenchInfraError("bench_engine_no_report")
+        raise BenchInfraError(f"bench_exit_{exit_code}")
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if mock_bench or injected_exit is not None:
+        executed_bytes = request_bytes
+    else:
+        remote_req = output_dir / "bench_request.remote.json"
+        if not remote_req.is_file():
+            raise BenchInfraError("bench_remote_request_missing")
+        executed_bytes = remote_req.read_bytes()
+
+    bind_report_to_run(
+        report,
+        request_task_id=task_id,
+        executed_request_bytes=executed_bytes,
+        baseline_digest=str(bench["baseline_engine_image_digest"]),
+        candidate_digest=str(row["engine_image_ref"]),
+        trace_sha256=str(row["workload_trace_sha256"]),
+    )
+
+    if exit_code not in (0, 3, 75):
+        raise BenchInfraError(f"bench_exit_{exit_code}")
+
+    report_raw = report_path.read_bytes()
+    report_sha = sha256_bytes(report_raw)
+    evidence_url = None
+    evidence_sha = None
+    evidence_size = None
+    if not mock_bench and injected_exit is None:
+        from storage.s3 import upload_evidence_bundle
+
+        up = upload_evidence_fn or upload_evidence_bundle
+        evidence_url, evidence_sha, evidence_size = up(
+            submission_id, task_id, output_dir
+        )
+
+    verdict = str(report.get("verdict") or "error")
+    error_role = report.get("error_role")
+    error_role_s = error_role if isinstance(error_role, str) else None
+    if exit_code == 3:
+        verdict = "error"
+
+    rows = _module_rows(
+        report,
+        task_id=task_id,
+        gpu_sku=gpu_sku,
+        evidence_s3_url=evidence_url,
+        mock=mock_bench,
+    )
+    return SkuRunResult(
+        gpu_sku=gpu_sku,
+        task_id=task_id,
+        exit_code=exit_code,
+        report=report,
+        report_sha256=report_sha,
+        evidence_s3_url=evidence_url,
+        evidence_sha256=evidence_sha,
+        evidence_size=evidence_size,
+        provider=provider,
+        pod_name=pod_name,
+        verdict=verdict,
+        error_role=error_role_s,
+        rows=rows,
+    )
 
 
 def tar_gz_directory(src_dir: Path, dest_archive: Path) -> tuple[str, int]:
