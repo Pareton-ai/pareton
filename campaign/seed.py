@@ -32,6 +32,14 @@ DEFAULT_BASELINE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 # replace with the real digest before opening a campaign with real builds.
 DEFAULT_BASE_IMAGE_DIGEST = "sha256:" + ("b" * 64)
 
+DEFAULT_BENCH_MODEL_REPO = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_BENCH_MODEL_REVISION = "bb46c15ee4bb56c5b63245ef50fd7637234d6f75"
+DEFAULT_BENCH_DTYPE = "bfloat16"
+DEFAULT_BENCH_MAX_MODEL_LEN = 8192
+# Placeholder until WS-A2b publishes the real baseline engine image.
+DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST = "sha256:" + ("c" * 64)
+DEFAULT_BENCH_GPU_COUNT = 1
+
 
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -41,12 +49,45 @@ def _sha256_file(path: Path) -> str:
     return f"sha256:{h.hexdigest()}"
 
 
+def build_seed_bench_spec(
+    *,
+    model_repo: str = DEFAULT_BENCH_MODEL_REPO,
+    model_revision: str = DEFAULT_BENCH_MODEL_REVISION,
+    dtype: str = DEFAULT_BENCH_DTYPE,
+    max_model_len: int = DEFAULT_BENCH_MAX_MODEL_LEN,
+    baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
+    gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
+    serve_args: list[str] | None = None,
+) -> dict:
+    return {
+        "model": {
+            "hf_repo": model_repo,
+            "hf_revision": model_revision,
+            "dtype": dtype,
+            "quantization": None,
+            "max_model_len": max_model_len,
+        },
+        "baseline_engine_image_digest": baseline_engine_image_digest,
+        "gpu_count": gpu_count,
+        "serve_args": list(serve_args) if serve_args else None,
+        "correctness": None,
+        "perf_screen": None,
+    }
+
+
 def seed_synthetic_campaign(
     *,
     baseline_repo: str = DEFAULT_BASELINE_REPO,
     baseline_commit: str = DEFAULT_BASELINE_COMMIT,
     base_image_digest: str = DEFAULT_BASE_IMAGE_DIGEST,
     force: bool = False,
+    bench_model_repo: str = DEFAULT_BENCH_MODEL_REPO,
+    bench_model_revision: str = DEFAULT_BENCH_MODEL_REVISION,
+    bench_dtype: str = DEFAULT_BENCH_DTYPE,
+    bench_max_model_len: int = DEFAULT_BENCH_MAX_MODEL_LEN,
+    baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
+    bench_gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
+    bench_serve_args: list[str] | None = None,
 ) -> str:
     existing = list_campaigns(status="open")
     if existing and not force:
@@ -79,6 +120,15 @@ def seed_synthetic_campaign(
     now = datetime.now(timezone.utc)
     opens = now - timedelta(minutes=1)
     closes = now + timedelta(days=90)
+    bench = build_seed_bench_spec(
+        model_repo=bench_model_repo,
+        model_revision=bench_model_revision,
+        dtype=bench_dtype,
+        max_model_len=bench_max_model_len,
+        baseline_engine_image_digest=baseline_engine_image_digest,
+        gpu_count=bench_gpu_count,
+        serve_args=bench_serve_args,
+    )
 
     fields_manifest = build_manifest(
         campaign_id=campaign_id,
@@ -102,6 +152,7 @@ def seed_synthetic_campaign(
         window_closes_at=closes,
         status="open",
         customer_signoff=None,
+        bench=bench,
     )
 
     signoff = CustomerSignoff(
@@ -132,6 +183,7 @@ def seed_synthetic_campaign(
         status="open",
         customer_signoff=signoff,
         manifest_hash=fields_manifest.manifest_hash,
+        bench=bench,
     )
 
     inserted = insert_campaign(manifest)
@@ -145,6 +197,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--baseline-repo", default=DEFAULT_BASELINE_REPO)
     p.add_argument("--baseline-commit", default=DEFAULT_BASELINE_COMMIT)
     p.add_argument("--base-image-digest", default=DEFAULT_BASE_IMAGE_DIGEST)
+    p.add_argument("--bench-model-repo", default=DEFAULT_BENCH_MODEL_REPO)
+    p.add_argument("--bench-model-revision", default=DEFAULT_BENCH_MODEL_REVISION)
+    p.add_argument("--bench-dtype", default=DEFAULT_BENCH_DTYPE)
+    p.add_argument(
+        "--bench-max-model-len", type=int, default=DEFAULT_BENCH_MAX_MODEL_LEN
+    )
+    p.add_argument(
+        "--baseline-engine-image-digest",
+        default=DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
+    )
+    p.add_argument("--bench-gpu-count", type=int, default=DEFAULT_BENCH_GPU_COUNT)
+    p.add_argument(
+        "--bench-serve-args",
+        action="append",
+        default=None,
+        help="Extra serve arg (repeatable); prepended after --model /model pins",
+    )
     p.add_argument(
         "--force",
         action="store_true",
@@ -157,6 +226,13 @@ def main(argv: list[str] | None = None) -> int:
             baseline_commit=args.baseline_commit,
             base_image_digest=args.base_image_digest,
             force=args.force,
+            bench_model_repo=args.bench_model_repo,
+            bench_model_revision=args.bench_model_revision,
+            bench_dtype=args.bench_dtype,
+            bench_max_model_len=args.bench_max_model_len,
+            baseline_engine_image_digest=args.baseline_engine_image_digest,
+            bench_gpu_count=args.bench_gpu_count,
+            bench_serve_args=args.bench_serve_args,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

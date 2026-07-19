@@ -9,6 +9,7 @@ import tempfile
 from datetime import timedelta, timezone
 from pathlib import Path
 
+import config
 from bench.correctness import resolve_trace_path
 from bench.validate import (
     RequestValidationError,
@@ -379,7 +380,7 @@ def run_bench_on_pod(
         result = ssh_exec(
             pod,
             bench_cmd,
-            timeout_s=86400.0,
+            timeout_s=float(config.BENCH_TIMEOUT_S),
             runner=runner,
             state_dir=registry.state_dir,
             check=False,

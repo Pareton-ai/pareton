@@ -1,7 +1,8 @@
-"""Single-process Stage 0 worker: optional chain scan + gate pipeline.
+"""Single-process Stage 0 worker: optional chain scan + gate + bench pipeline.
 
 Usage:
     PARETON_DATABASE_URL=... python -m worker.main --mock-build
+    PARETON_ALLOW_MOCK_BENCH=1 PARETON_DATABASE_URL=... python -m worker.main --mock-bench
     PARETON_DATABASE_URL=... python -m worker.main --once
     PARETON_DATABASE_URL=... python -m worker.main --scan-chain
 """
@@ -10,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 import time
 
 import config
 from campaign.store import claim_next_job
+from worker.bench_job import process_bench_job
 from worker.pipeline import process_submission
 
 logger = logging.getLogger(__name__)
@@ -42,25 +45,46 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
-def run_once(*, mock_build: bool, registered_hotkeys: list[str] | None) -> bool:
-    row = claim_next_job()
+def run_once(
+    *,
+    mock_build: bool,
+    mock_bench: bool,
+    mock_tampered_candidate: bool,
+    registered_hotkeys: list[str] | None,
+) -> bool:
+    row = claim_next_job(kind="gates")
+    if row is not None:
+        keys = registered_hotkeys if registered_hotkeys is not None else [row["hotkey"]]
+        logger.info(
+            "processing gates job submission %s patch=%s", row["id"], row["patch_hash"]
+        )
+        result = process_submission(row, registered_hotkeys=keys, mock_build=mock_build)
+        logger.info(
+            "submission %s -> ok=%s state=%s reason=%s",
+            row["id"],
+            result.ok,
+            result.state,
+            result.reason,
+        )
+        return True
+
+    row = claim_next_job(kind="bench")
     if row is None:
         return False
-    keys = registered_hotkeys if registered_hotkeys is not None else [row["hotkey"]]
-    logger.info("processing submission %s patch=%s", row["id"], row["patch_hash"])
-    result = process_submission(row, registered_hotkeys=keys, mock_build=mock_build)
     logger.info(
-        "submission %s -> ok=%s state=%s reason=%s",
-        row["id"],
-        result.ok,
-        result.state,
-        result.reason,
+        "processing bench job submission %s patch=%s", row["id"], row["patch_hash"]
     )
+    outcome = process_bench_job(
+        row,
+        mock_bench=mock_bench,
+        mock_tampered_candidate=mock_tampered_candidate,
+    )
+    logger.info("submission %s bench -> %s", row["id"], outcome)
     return True
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Pareton Stage 0 gate worker")
+    p = argparse.ArgumentParser(description="Pareton Stage 0 gate + bench worker")
     p.add_argument(
         "--once", action="store_true", help="Process at most one job and exit"
     )
@@ -68,6 +92,16 @@ def main(argv: list[str] | None = None) -> int:
         "--mock-build",
         action="store_true",
         help="Skip Docker/GHCR; write local mock build artifact",
+    )
+    p.add_argument(
+        "--mock-bench",
+        action="store_true",
+        help="Run bench in-process with mock engines (requires PARETON_ALLOW_MOCK_BENCH=1)",
+    )
+    p.add_argument(
+        "--mock-tampered-candidate",
+        action="store_true",
+        help="With --mock-bench, offset candidate logprobs (adversarial fail)",
     )
     p.add_argument(
         "--registered-hotkey",
@@ -84,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
     _configure_logging(args.verbose)
+
+    if args.mock_bench and not config.ALLOW_MOCK_BENCH:
+        print(
+            "error: --mock-bench requires PARETON_ALLOW_MOCK_BENCH=1 "
+            "(mock bench is non-authoritative)",
+            file=sys.stderr,
+        )
+        return 2
 
     subtensor = None
     registered_hotkeys = args.registered_hotkey
@@ -106,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
                 logger.exception("chain scan failed; will retry next cycle")
         return run_once(
             mock_build=args.mock_build,
+            mock_bench=args.mock_bench,
+            mock_tampered_candidate=args.mock_tampered_candidate,
             registered_hotkeys=registered_hotkeys,
         )
 

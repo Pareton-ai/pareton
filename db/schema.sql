@@ -1,5 +1,5 @@
--- Pareton Stage 0 schema (Neon Postgres).
--- Source of truth for campaigns, submissions, and the provenance gate audit log.
+-- Pareton Stage 0 + WS-D schema (Neon Postgres).
+-- Source of truth for campaigns, submissions, provenance events, and bench jobs.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   customer_signoff JSONB,
   status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft', 'open', 'closed')),
+  bench JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)
@@ -72,16 +73,36 @@ CREATE INDEX IF NOT EXISTS submission_events_submission_id_idx
 CREATE TABLE IF NOT EXISTS submission_jobs (
   id BIGSERIAL PRIMARY KEY,
   submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'gates'
+    CHECK (kind IN ('gates', 'bench')),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'running', 'done', 'failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (submission_id)
+  UNIQUE (submission_id, kind)
 );
 
 CREATE INDEX IF NOT EXISTS submission_jobs_status_idx ON submission_jobs (status, created_at);
+
+CREATE TABLE IF NOT EXISTS bench_reports (
+  id BIGSERIAL PRIMARY KEY,
+  submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL,
+  stage TEXT NOT NULL
+    CHECK (stage IN ('correctness', 'perf_screen', 'sla_bench')),
+  verdict TEXT NOT NULL,
+  report JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_s3_url TEXT,
+  gpu_sku TEXT,
+  mock BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (submission_id, stage)
+);
+
+CREATE INDEX IF NOT EXISTS bench_reports_submission_id_idx
+  ON bench_reports (submission_id);
 
 CREATE TABLE IF NOT EXISTS watcher_meta (
   id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),

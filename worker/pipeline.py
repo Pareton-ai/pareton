@@ -11,6 +11,7 @@ import config
 from builder.hermetic import build_engine_image, build_engine_image_local_mock
 from campaign.store import (
     append_event,
+    enqueue_bench_job,
     get_campaign,
     set_engine_image,
     set_job_status,
@@ -40,11 +41,12 @@ def process_submission(
     patch_hash = row["patch_hash"]
     retrieval_url = row["retrieval_url"]
     baseline_commit = row["baseline_commit"]
+    job_id = row.get("job_id")
 
     campaign = get_campaign(campaign_id)
     if campaign is None:
         result = GateResult.reject("campaign_missing", campaign_id=campaign_id)
-        _fail(submission_id, result)
+        _fail(submission_id, result, job_id=job_id)
         return result
 
     # a. Identity (fail-fast; success has no dedicated state in the machine)
@@ -56,7 +58,7 @@ def process_submission(
         now=datetime.now(timezone.utc),
     )
     if not id_res.ok:
-        _fail(submission_id, id_res)
+        _fail(submission_id, id_res, job_id=job_id)
         return id_res
 
     # b. Integrity → fetched → verified
@@ -68,7 +70,7 @@ def process_submission(
         integrity_kwargs["fetcher"] = fetcher
     int_res = check_integrity(**integrity_kwargs)
     if not int_res.ok:
-        _fail(submission_id, int_res)
+        _fail(submission_id, int_res, job_id=job_id)
         return int_res
     patch_bytes: bytes = int_res.evidence["patch_bytes"]
     append_event(
@@ -96,7 +98,7 @@ def process_submission(
             work_root=work_root,
         )
     if not apply_res.ok:
-        _fail(submission_id, apply_res)
+        _fail(submission_id, apply_res, job_id=job_id)
         return apply_res
     append_event(submission_id, SubmissionState.APPLIED, detail={"ok": True})
 
@@ -107,7 +109,7 @@ def process_submission(
         denied_paths=list(campaign.denied_paths),
     )
     if not surface_res.ok:
-        _fail(submission_id, surface_res)
+        _fail(submission_id, surface_res, job_id=job_id)
         return surface_res
     append_event(
         submission_id,
@@ -133,24 +135,49 @@ def process_submission(
             push=True,
         )
     if not build_res.ok:
-        _fail(submission_id, build_res)
+        _fail(submission_id, build_res, job_id=job_id)
         return build_res
 
     image_ref = str(build_res.evidence.get("image_ref") or "")
+    image_tag = build_res.evidence.get("image_tag")
     set_engine_image(submission_id, image_ref)
     append_event(
         submission_id,
         SubmissionState.BUILT,
-        detail={"image_ref": image_ref, "mock": bool(build_res.evidence.get("mock"))},
+        detail={
+            "image_ref": image_ref,
+            "image_tag": image_tag,
+            "mock": bool(build_res.evidence.get("mock")),
+        },
     )
-    set_job_status(submission_id, "done")
+    set_job_status(
+        submission_id,
+        "done",
+        kind="gates",
+        job_id=int(job_id) if job_id is not None else None,
+    )
+    if campaign.bench is not None:
+        enqueued = enqueue_bench_job(submission_id)
+        if enqueued:
+            logger.info("enqueued bench job for submission %s", submission_id)
     return build_res
 
 
-def _fail(submission_id: str, result: GateResult) -> None:
+def _fail(
+    submission_id: str,
+    result: GateResult,
+    *,
+    job_id: Any = None,
+) -> None:
     append_event(
         submission_id,
         SubmissionState.REJECTED,
         detail={"reason": result.reason, **result.evidence},
     )
-    set_job_status(submission_id, "failed", last_error=result.reason)
+    set_job_status(
+        submission_id,
+        "failed",
+        kind="gates",
+        job_id=int(job_id) if job_id is not None else None,
+        last_error=result.reason,
+    )

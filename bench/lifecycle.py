@@ -64,6 +64,10 @@ def _defaults_from_config() -> tuple[float, float, int, float, float]:
 class EngineError(Exception):
     """Engine lifecycle failure (maps to CLI exit code 3 in B4 wiring)."""
 
+    def __init__(self, message: str = "", *, error_role: str | None = None) -> None:
+        super().__init__(message)
+        self.error_role = error_role
+
 
 class HostEnvironmentError(Exception):
     """Host/tooling unavailable (maps to CLI exit code 2): Docker missing/down."""
