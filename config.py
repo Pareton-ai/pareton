@@ -84,6 +84,40 @@ GHCR_USER: str = os.environ.get(
     "PARETON_GHCR_USER", os.environ.get("PARETON_GHCR_USERNAME", "")
 )
 
+# WS-D bench worker (pre-B7 calibration placeholders — not production thresholds)
+TRACE_MAX_BYTES: int = int(
+    os.environ.get("PARETON_TRACE_MAX_BYTES", str(100 * 1024 * 1024))
+)
+BENCH_TIMEOUT_S: float = float(os.environ.get("PARETON_BENCH_TIMEOUT_S", "10800"))
+ALLOW_MOCK_BENCH: bool = os.environ.get("PARETON_ALLOW_MOCK_BENCH", "") == "1"
+BENCH_CORRECTNESS_NUM_PROMPTS: int = int(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_NUM_PROMPTS", "8")
+)
+BENCH_CORRECTNESS_MAX_NEW_TOKENS: int = int(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_NEW_TOKENS", "32")
+)
+BENCH_CORRECTNESS_MEAN_ABS_LOGPROB_DIFF: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MEAN_ABS_LOGPROB_DIFF", "0.005")
+)
+BENCH_CORRECTNESS_MAX_ABS_LOGPROB_DIFF: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_ABS_LOGPROB_DIFF", "0.05")
+)
+BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE", "0.001")
+)
+BENCH_PERF_NUM_REQUESTS: int = int(
+    os.environ.get("PARETON_BENCH_PERF_NUM_REQUESTS", "8")
+)
+BENCH_PERF_CONCURRENCY: int = int(os.environ.get("PARETON_BENCH_PERF_CONCURRENCY", "2"))
+BENCH_PERF_MIN_THROUGHPUT_RATIO: float = float(
+    os.environ.get("PARETON_BENCH_PERF_MIN_THROUGHPUT_RATIO", "1.0")
+)
+BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
+BENCH_SLA_WARMUP_REQUESTS: int = int(
+    os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
+)
+GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "targon")
+
 API_ALLOWED_ORIGINS: list[str] = [
     o.strip()
     for o in os.environ.get("PARETON_ALLOWED_ORIGINS", "*").split(",")

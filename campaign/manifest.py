@@ -40,10 +40,14 @@ def freeze_manifest_fields(
     denied_paths: list[str],
     window_opens_at: datetime,
     window_closes_at: datetime,
+    bench: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return the pin set used for manifest_hash (excludes status/signoff)."""
+    """Return the pin set used for manifest_hash (excludes status/signoff).
+
+    Include ``bench`` only when not None so pre-WS-D campaign hashes stay valid.
+    """
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
-    return {
+    out: dict[str, Any] = {
         "campaign_id": str(campaign_id) if campaign_id else None,
         "profile_id": str(profile_id) if profile_id else None,
         "baseline_repo": baseline_repo,
@@ -64,6 +68,9 @@ def freeze_manifest_fields(
             "closes_at": window_closes_at.isoformat(),
         },
     }
+    if bench is not None:
+        out["bench"] = bench
+    return out
 
 
 def compute_manifest_hash(fields: dict[str, Any]) -> str:
@@ -93,6 +100,7 @@ def build_manifest(
     status: str = "draft",
     customer_signoff: CustomerSignoff | None = None,
     manifest_hash: str | None = None,
+    bench: dict[str, Any] | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
         campaign_id=campaign_id,
@@ -110,6 +118,7 @@ def build_manifest(
         denied_paths=denied_paths,
         window_opens_at=window_opens_at,
         window_closes_at=window_closes_at,
+        bench=bench,
     )
     mh = manifest_hash or compute_manifest_hash(fields)
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
@@ -134,4 +143,5 @@ def build_manifest(
         manifest_hash=mh,
         customer_signoff=customer_signoff,
         status=status,
+        bench=bench,
     )

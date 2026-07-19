@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import tarfile
+import tempfile
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 import urllib.error
@@ -143,3 +147,46 @@ def fetch_patch_bytes(url: str) -> bytes:
             last_err = exc
             logger.warning("patch fetch attempt %d failed: %s", attempt, exc)
     raise RuntimeError(f"patch fetch failed after retries: {last_err}")
+
+
+def evidence_object_key(submission_id: str, task_id: str) -> str:
+    prefix = config.S3_PREFIX.strip("/")
+    return f"{prefix}/evidence/{submission_id}/{task_id}.tar.gz"
+
+
+def upload_evidence_bundle(
+    submission_id: str,
+    task_id: str,
+    output_dir: Path,
+) -> tuple[str, str, int]:
+    """Tar.gz the bench output dir and put_object (private, not public-read).
+
+    Returns (s3_url, sha256, size_bytes).
+    """
+    output_dir = Path(output_dir)
+    required = [
+        output_dir / "bench_report.json",
+        output_dir / "bench_request.remote.json",
+    ]
+    for path in required:
+        if not path.is_file():
+            raise RuntimeError(f"evidence bundle missing required file: {path.name}")
+    if not (output_dir / "evidence").is_dir():
+        raise RuntimeError("evidence bundle missing evidence/ directory")
+
+    with tempfile.TemporaryDirectory(prefix="pareton-evidence-") as tmp:
+        archive = Path(tmp) / f"{task_id}.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(output_dir, arcname=".")
+        data = archive.read_bytes()
+        digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
+        key = evidence_object_key(submission_id, task_id)
+        client = _client()
+        client.put_object(
+            Bucket=config.S3_BUCKET,
+            Key=key,
+            Body=data,
+            ContentType="application/gzip",
+        )
+        url = f"s3://{config.S3_BUCKET}/{key}"
+        return url, digest, len(data)
