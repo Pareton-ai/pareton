@@ -533,17 +533,49 @@ def list_bench_reports(submission_id: UUID | str) -> list[dict[str, Any]]:
     return out
 
 
+BENCH_REJECT_REASONS = frozenset(
+    {
+        "fail_correctness",
+        "fail_perf_screen",
+        "fail_sla",
+        "fail_engine_candidate",
+        "fail_cross_env_speedup",
+    }
+)
+
+
+def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None:
+    """Terminal bench verdict from submission_events (WS-E event-sourced).
+
+    ``benched`` -> ``pass``; bench ``rejected`` -> its reason; only
+    ``correct``/``screened`` (or no bench events) -> ``None`` (in progress).
+    """
+    terminal: str | None = None
+    for e in events:
+        state = str(e.get("state") or "")
+        detail = e.get("detail") or {}
+        if not isinstance(detail, dict):
+            detail = {}
+        if state == "benched":
+            terminal = "pass"
+        elif state == "rejected":
+            reason = detail.get("reason")
+            if reason in BENCH_REJECT_REASONS:
+                terminal = str(reason)
+    return terminal
+
+
 def list_bench_summaries(campaign_id: UUID | str) -> dict[str, str | None]:
-    """Map submission_id -> derived bench_verdict for campaign list API."""
+    """Map submission_id -> event-sourced bench_verdict for campaign list API."""
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT s.id AS submission_id, br.stage, br.verdict
+                SELECT s.id AS submission_id, e.state, e.detail, e.created_at
                 FROM submissions s
-                LEFT JOIN bench_reports br ON br.submission_id = s.id
+                LEFT JOIN submission_events e ON e.submission_id = s.id
                 WHERE s.campaign_id = %s
-                ORDER BY s.id, br.created_at ASC
+                ORDER BY s.id, e.created_at ASC NULLS LAST
                 """,
                 (str(campaign_id),),
             )
@@ -552,13 +584,17 @@ def list_bench_summaries(campaign_id: UUID | str) -> dict[str, str | None]:
     for r in rows:
         sid = str(r["submission_id"])
         by_sub.setdefault(sid, [])
-        if r.get("stage") is not None:
-            by_sub[sid].append({"stage": r["stage"], "verdict": r["verdict"]})
-    return {sid: derive_bench_verdict(reps) for sid, reps in by_sub.items()}
+        if r.get("state") is None:
+            continue
+        detail = r.get("detail")
+        if isinstance(detail, str):
+            detail = json.loads(detail)
+        by_sub[sid].append({"state": r["state"], "detail": detail or {}})
+    return {sid: derive_bench_verdict_from_events(evts) for sid, evts in by_sub.items()}
 
 
 def derive_bench_verdict(reports: list[dict[str, Any]]) -> str | None:
-    """pass iff all present stage verdicts pass and sla_bench exists; else first fail."""
+    """Legacy report-collapse helper (pre-WS-E). Prefer event-sourced API."""
     if not reports:
         return None
     stage_order = ("correctness", "perf_screen", "sla_bench")
@@ -584,7 +620,11 @@ def finalize_bench_job(
     job_status: str,
     last_error: str | None = None,
 ) -> None:
-    """One transaction: insert bench_reports + append events + set job status."""
+    """One transaction: insert bench_reports + append events + set job status.
+
+    Each report row may carry its own ``task_id`` (WS-E per-SKU); otherwise the
+    top-level ``task_id`` is used (single-SKU / legacy callers).
+    """
     from psycopg2 import errors as pg_errors
 
     with db_connection() as conn:
@@ -600,18 +640,18 @@ def finalize_bench_job(
                         """,
                         (
                             str(submission_id),
-                            task_id,
+                            str(row.get("task_id") or task_id),
                             row["stage"],
                             row["verdict"],
                             Json(row["report"]),
                             row.get("evidence_s3_url"),
-                            row.get("gpu_sku"),
+                            row.get("gpu_sku") or "unknown",
                             bool(row.get("mock", False)),
                         ),
                     )
             except pg_errors.UniqueViolation as exc:
                 raise RuntimeError(
-                    "bench_reports unique (submission_id, stage) conflict; "
+                    "bench_reports unique (submission_id, stage, gpu_sku) conflict; "
                     "delete stale rows before requeue"
                 ) from exc
             for state, detail in events:
