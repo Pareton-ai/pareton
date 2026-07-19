@@ -1,5 +1,8 @@
--- Pareton Stage 0 + WS-D schema (Neon Postgres).
+-- Pareton schema (Neon Postgres): Stage 0 + bench (WS-D/WS-E).
 -- Source of truth for campaigns, submissions, provenance events, and bench jobs.
+-- Single canonical schema file: no migration files while the project is pre-launch.
+-- Apply wholesale to a fresh database: psql "$PARETON_DATABASE_URL" -f db/schema.sql
+-- Schema changes pre-launch: edit this file and apply the delta by hand.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
