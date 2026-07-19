@@ -301,6 +301,61 @@ def enqueue_bench_job(submission_id: UUID | str) -> bool:
             return cur.fetchone() is not None
 
 
+def complete_gates_job(
+    submission_id: UUID | str,
+    *,
+    job_id: int | None = None,
+    enqueue_bench: bool = False,
+) -> bool:
+    """Mark gates job done and optionally enqueue bench in one transaction.
+
+    Avoids the crash window where gates is ``done`` but no bench row exists.
+    Returns whether a new bench job row was inserted.
+    """
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            if job_id is not None:
+                cur.execute(
+                    """
+                    UPDATE submission_jobs
+                    SET status = 'done', last_error = NULL, updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (job_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE submission_jobs
+                    SET status = 'done', last_error = NULL, updated_at = now()
+                    WHERE submission_id = %s AND kind = 'gates'
+                    """,
+                    (str(submission_id),),
+                )
+            if not enqueue_bench:
+                return False
+            cur.execute(
+                """
+                SELECT 1 FROM submission_events
+                WHERE submission_id = %s AND state IN ('rejected', 'benched')
+                LIMIT 1
+                """,
+                (str(submission_id),),
+            )
+            if cur.fetchone() is not None:
+                return False
+            cur.execute(
+                """
+                INSERT INTO submission_jobs (submission_id, kind, status)
+                VALUES (%s, 'bench', 'pending')
+                ON CONFLICT (submission_id, kind) DO NOTHING
+                RETURNING id
+                """,
+                (str(submission_id),),
+            )
+            return cur.fetchone() is not None
+
+
 def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
     """Atomically claim the oldest pending job of ``kind``."""
     with db_connection() as conn:
