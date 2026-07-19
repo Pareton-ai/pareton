@@ -95,10 +95,10 @@ CREATE TABLE IF NOT EXISTS bench_reports (
   verdict TEXT NOT NULL,
   report JSONB NOT NULL DEFAULT '{}'::jsonb,
   evidence_s3_url TEXT,
-  gpu_sku TEXT,
+  gpu_sku TEXT NOT NULL DEFAULT 'unknown',
   mock BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (submission_id, stage)
+  UNIQUE (submission_id, stage, gpu_sku)
 );
 
 CREATE INDEX IF NOT EXISTS bench_reports_submission_id_idx

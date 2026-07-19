@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 import config
 from campaign.store import (
-    derive_bench_verdict,
+    derive_bench_verdict_from_events,
     get_campaign,
     get_submission,
     list_bench_reports,
@@ -134,7 +134,7 @@ def submission_detail(patch_hash: str):
             }
             for r in reports
         ],
-        "bench_verdict": derive_bench_verdict(reports),
+        "bench_verdict": derive_bench_verdict_from_events(events),
     }
 
 
