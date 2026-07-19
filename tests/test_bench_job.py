@@ -532,6 +532,62 @@ def test_enqueue_terminal_guard(monkeypatch):
     assert store.enqueue_bench_job("00000000-0000-0000-0000-000000000000") is False
 
 
+def test_complete_gates_job_one_transaction(monkeypatch):
+    """Gates done + bench enqueue must share one connection/commit (no crash window)."""
+    import contextlib
+
+    from campaign import store
+
+    sqls: list[str] = []
+
+    class _Cur:
+        def execute(self, sql, args=None):
+            sqls.append(" ".join(sql.split()))
+
+        def fetchone(self):
+            # terminal check: no row; insert: return id
+            if sqls and "INSERT INTO submission_jobs" in sqls[-1]:
+                return (1,)
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    @contextlib.contextmanager
+    def fake_db():
+        yield _Conn()
+
+    monkeypatch.setattr(store, "db_connection", fake_db)
+    assert (
+        store.complete_gates_job(
+            "00000000-0000-0000-0000-000000000001",
+            job_id=9,
+            enqueue_bench=True,
+        )
+        is True
+    )
+    assert any("status = 'done'" in s for s in sqls)
+    assert any("INSERT INTO submission_jobs" in s for s in sqls)
+    assert len(sqls) >= 3  # update + terminal check + insert
+
+
+def test_pipeline_uses_atomic_complete_gates():
+    import inspect
+
+    from worker import pipeline
+
+    src = inspect.getsource(pipeline.process_submission)
+    assert "complete_gates_job" in src
+    assert "enqueue_bench_job(" not in src
+
+
 def test_manifest_bench_pin_compat():
     now = datetime.now(timezone.utc)
     kwargs = dict(

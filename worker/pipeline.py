@@ -11,7 +11,7 @@ import config
 from builder.hermetic import build_engine_image, build_engine_image_local_mock
 from campaign.store import (
     append_event,
-    enqueue_bench_job,
+    complete_gates_job,
     get_campaign,
     set_engine_image,
     set_job_status,
@@ -150,16 +150,13 @@ def process_submission(
             "mock": bool(build_res.evidence.get("mock")),
         },
     )
-    set_job_status(
+    enqueued = complete_gates_job(
         submission_id,
-        "done",
-        kind="gates",
         job_id=int(job_id) if job_id is not None else None,
+        enqueue_bench=campaign.bench is not None,
     )
-    if campaign.bench is not None:
-        enqueued = enqueue_bench_job(submission_id)
-        if enqueued:
-            logger.info("enqueued bench job for submission %s", submission_id)
+    if enqueued:
+        logger.info("enqueued bench job for submission %s", submission_id)
     return build_res
 
 
