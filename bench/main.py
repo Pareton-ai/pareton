@@ -135,6 +135,50 @@ def _write_validated_report(layout: OutputLayout, report: BenchReport) -> int:
     return EXIT_OK
 
 
+def _write_engine_error_report(
+    *,
+    layout: OutputLayout,
+    req: BenchRequest,
+    request_raw: bytes,
+    env,
+    started_at: str,
+    exc: EngineError,
+    model_weights_sha256: str,
+) -> None:
+    """Minimal schema-valid verdict=error report with optional error_role."""
+    role = getattr(exc, "error_role", None)
+    report: dict = {
+        "schema_version": 1,
+        "task_id": req.task_id,
+        "verdict": "error",
+        "started_at": started_at,
+        "finished_at": _utc_now_iso(),
+        "environment": env.to_dict(),
+        "inputs_fingerprint": {
+            "baseline_image_digest": extract_image_digest(req.engines.baseline.image),
+            "candidate_image_digest": extract_image_digest(req.engines.candidate.image),
+            "model_repo": req.model.hf_repo,
+            "model_revision": req.model.hf_revision,
+            "model_weights_sha256": model_weights_sha256,
+            "trace_sha256": req.workload_trace.sha256,
+            "request_sha256": sha256_bytes(request_raw),
+        },
+        "error": str(exc),
+    }
+    if role in ("baseline", "candidate"):
+        report["error_role"] = role
+    validate_report_dict(report)
+    layout.write_report(report)
+    layout.append_log(
+        {
+            "event": "engine_error",
+            "error_role": role,
+            "report": str(layout.report_path),
+        }
+    )
+    print(f"wrote {layout.report_path}")
+
+
 class _EngineProvider:
     """Supplies healthy engine base URLs for each module run.
 
@@ -214,6 +258,12 @@ class _EngineProvider:
             logs_dir=self._logs_dir,
         )
 
+    @staticmethod
+    def _reraise_with_role(role: str, exc: EngineError) -> None:
+        if getattr(exc, "error_role", None) is None:
+            raise EngineError(str(exc), error_role=role) from exc
+        raise exc
+
     def run_correctness(
         self, prompts: list[PromptCase], cfg, task_id: str, evidence_dir: Path
     ) -> CorrectnessReport:
@@ -228,17 +278,24 @@ class _EngineProvider:
                 evidence_dir=evidence_dir,
             )
         with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            with self._docker_phase(net, "baseline") as base:
-                phase = collect_baseline_correctness(
-                    base.base_url, prompts=prompts, cfg=cfg, task_id=task_id
-                )
-                self.baseline_digest = base.image_digest
-            with self._docker_phase(net, "candidate") as cand:
-                report = finish_correctness_with_candidate(
-                    cand.base_url, phase, cfg=cfg, evidence_dir=evidence_dir
-                )
-                self.candidate_digest = cand.image_digest
-                return report
+            try:
+                with self._docker_phase(net, "baseline") as base:
+                    phase = collect_baseline_correctness(
+                        base.base_url, prompts=prompts, cfg=cfg, task_id=task_id
+                    )
+                    self.baseline_digest = base.image_digest
+            except EngineError as exc:
+                self._reraise_with_role("baseline", exc)
+            try:
+                with self._docker_phase(net, "candidate") as cand:
+                    report = finish_correctness_with_candidate(
+                        cand.base_url, phase, cfg=cfg, evidence_dir=evidence_dir
+                    )
+                    self.candidate_digest = cand.image_digest
+                    return report
+            except EngineError as exc:
+                self._reraise_with_role("candidate", exc)
+        raise AssertionError("unreachable")
 
     def run_perf_screen(self, requests, cfg, evidence_dir: Path) -> PerfScreenReport:
         if self._mock:
@@ -251,22 +308,29 @@ class _EngineProvider:
                 evidence_dir=evidence_dir,
             )
         with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            with self._docker_phase(net, "baseline") as base:
-                base_metrics = run_perf_screen_engine(
-                    base.base_url,
-                    role="baseline",
-                    requests=requests,
-                    cfg=cfg,
-                    evidence_dir=evidence_dir,
-                )
-            with self._docker_phase(net, "candidate") as cand:
-                return finish_perf_screen(
-                    cand.base_url,
-                    baseline=base_metrics,
-                    requests=requests,
-                    cfg=cfg,
-                    evidence_dir=evidence_dir,
-                )
+            try:
+                with self._docker_phase(net, "baseline") as base:
+                    base_metrics = run_perf_screen_engine(
+                        base.base_url,
+                        role="baseline",
+                        requests=requests,
+                        cfg=cfg,
+                        evidence_dir=evidence_dir,
+                    )
+            except EngineError as exc:
+                self._reraise_with_role("baseline", exc)
+            try:
+                with self._docker_phase(net, "candidate") as cand:
+                    return finish_perf_screen(
+                        cand.base_url,
+                        baseline=base_metrics,
+                        requests=requests,
+                        cfg=cfg,
+                        evidence_dir=evidence_dir,
+                    )
+            except EngineError as exc:
+                self._reraise_with_role("candidate", exc)
+        raise AssertionError("unreachable")
 
     def run_sla_bench(self, trace, cfg, evidence_dir: Path) -> SlaBenchReport:
         if self._mock:
@@ -280,22 +344,29 @@ class _EngineProvider:
             )
         requests = list(trace.requests)
         with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            with self._docker_phase(net, "baseline") as base:
-                base_reps = run_sla_engine(
-                    base.base_url,
-                    role="baseline",
-                    requests=requests,
-                    cfg=cfg,
-                    evidence_dir=evidence_dir,
-                )
-            with self._docker_phase(net, "candidate") as cand:
-                return finish_sla_bench(
-                    cand.base_url,
-                    baseline_reps=base_reps,
-                    requests=requests,
-                    cfg=cfg,
-                    evidence_dir=evidence_dir,
-                )
+            try:
+                with self._docker_phase(net, "baseline") as base:
+                    base_reps = run_sla_engine(
+                        base.base_url,
+                        role="baseline",
+                        requests=requests,
+                        cfg=cfg,
+                        evidence_dir=evidence_dir,
+                    )
+            except EngineError as exc:
+                self._reraise_with_role("baseline", exc)
+            try:
+                with self._docker_phase(net, "candidate") as cand:
+                    return finish_sla_bench(
+                        cand.base_url,
+                        baseline_reps=base_reps,
+                        requests=requests,
+                        cfg=cfg,
+                        evidence_dir=evidence_dir,
+                    )
+            except EngineError as exc:
+                self._reraise_with_role("candidate", exc)
+        raise AssertionError("unreachable")
 
 
 def run_all_modules(
@@ -518,6 +589,18 @@ def run_bench(
         except EngineError as exc:
             logger.error("engine failure: %s", exc)
             print(f"error: engine failure: {exc}", file=sys.stderr)
+            try:
+                _write_engine_error_report(
+                    layout=layout,
+                    req=req,
+                    request_raw=raw,
+                    env=env,
+                    started_at=started_at,
+                    exc=exc,
+                    model_weights_sha256=model_weights_sha256,
+                )
+            except Exception as write_exc:
+                logger.error("failed to write engine error report: %s", write_exc)
             return EXIT_ENGINE
         finally:
             provider.shutdown()

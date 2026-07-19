@@ -9,8 +9,11 @@ from pydantic import BaseModel, Field
 
 import config
 from campaign.store import (
+    derive_bench_verdict,
     get_campaign,
     get_submission,
+    list_bench_reports,
+    list_bench_summaries,
     list_campaigns,
     list_events,
     list_submissions,
@@ -78,6 +81,7 @@ def campaign_submissions(campaign_id: str):
     if c is None:
         raise HTTPException(status_code=404, detail="campaign not found")
     rows = list_submissions(campaign_id)
+    summaries = list_bench_summaries(campaign_id)
     return {
         "campaign_id": campaign_id,
         "submissions": [
@@ -86,6 +90,7 @@ def campaign_submissions(campaign_id: str):
                     k: (str(v) if k in ("id", "campaign_id") else v)
                     for k, v in r.items()
                 },
+                "bench_verdict": summaries.get(str(r["id"])),
             }
             for r in rows
         ],
@@ -98,6 +103,7 @@ def submission_detail(patch_hash: str):
     if row is None:
         raise HTTPException(status_code=404, detail="submission not found")
     events = list_events(row["id"])
+    reports = list_bench_reports(row["id"])
     return {
         "submission": {
             **{k: (str(v) if k in ("id", "campaign_id") else v) for k, v in row.items()}
@@ -113,6 +119,22 @@ def submission_detail(patch_hash: str):
             }
             for e in events
         ],
+        "bench_reports": [
+            {
+                "task_id": r["task_id"],
+                "stage": r["stage"],
+                "verdict": r["verdict"],
+                "report": r.get("report") or {},
+                "evidence_s3_url": r.get("evidence_s3_url"),
+                "gpu_sku": r.get("gpu_sku"),
+                "mock": bool(r.get("mock")),
+                "created_at": r["created_at"].isoformat()
+                if hasattr(r["created_at"], "isoformat")
+                else str(r["created_at"]),
+            }
+            for r in reports
+        ],
+        "bench_verdict": derive_bench_verdict(reports),
     }
 
 

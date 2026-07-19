@@ -90,6 +90,7 @@ class CampaignManifest:
     manifest_hash: str
     customer_signoff: CustomerSignoff | None
     status: str  # draft | open | closed
+    bench: dict[str, Any] | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -115,4 +116,5 @@ class CampaignManifest:
                 self.customer_signoff.to_dict() if self.customer_signoff else None
             ),
             "status": self.status,
+            "bench": self.bench,
         }
