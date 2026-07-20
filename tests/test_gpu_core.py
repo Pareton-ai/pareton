@@ -57,7 +57,18 @@ def test_naming_roundtrip_and_deadline():
 def test_naming_ignores_malformed_and_foreign():
     assert parse_pod_name("cacheon-eval") is None
     assert parse_pod_name("pareton-gpu-bad") is None
+    assert parse_pod_name("pg-20260718-120000-1h-abcd1234") is None
+    assert parse_pod_name("pt-bad") is None
     assert is_expired("not-ours") is None
+
+
+def test_naming_fits_targon_32_char_limit():
+    created = datetime(2026, 7, 18, 15, 30, 45, tzinfo=timezone.utc)
+    for ttl in (1.0, 0.05, 12.5, 100.0):
+        name = encode_pod_name(ttl_hours=ttl, created=created, uid8="deadbeef")
+        assert len(name) <= 32
+        assert name.startswith(NAME_PREFIX)
+        assert parse_pod_name(name) is not None
 
 
 def test_is_expired_with_injectable_clock():
@@ -72,7 +83,7 @@ def test_registry_add_remove_corrupt(tmp_path: Path):
     entry = RegistryEntry(
         provider="targon",
         pod_id="p1",
-        name="pareton-gpu-20260718-120000-2h-abcd1234",
+        name="pt-20260718120000-2h-abcd1234",
         deadline="2026-07-18T14:00:00Z",
         hourly_price_cents=200,
         volume_uid="v1",
@@ -139,7 +150,7 @@ def test_single_flight_blocking(tmp_path: Path):
         RegistryEntry(
             provider="targon",
             pod_id="p1",
-            name="pareton-gpu-20260718-120000-2h-abcd1234",
+            name="pt-20260718120000-2h-abcd1234",
             deadline="2026-07-18T14:00:00Z",
             hourly_price_cents=1,
             state="active",

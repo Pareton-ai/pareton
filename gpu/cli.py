@@ -32,7 +32,9 @@ def _defaults_from_config() -> tuple[float, int]:
 def _add_provision_flags(p: argparse.ArgumentParser) -> None:
     ttl, max_cents = _defaults_from_config()
     p.add_argument(
-        "--provider", default="auto", choices=["auto", "targon", "static_ssh"]
+        "--provider",
+        default="auto",
+        choices=["auto", "targon", "shadeform", "static_ssh"],
     )
     p.add_argument("--gpu-type", default=None)
     p.add_argument("--gpu-count", type=int, default=1)
@@ -42,6 +44,14 @@ def _add_provision_flags(p: argparse.ArgumentParser) -> None:
         "--force",
         action="store_true",
         help="Bypass single-flight (allow rent while another managed pod exists)",
+    )
+    p.add_argument(
+        "--manual",
+        action="store_true",
+        help=(
+            "Print dashboard rent instructions and poll until a workload with the "
+            "encoded name is RUNNING (Targon workaround when API provision hangs)"
+        ),
     )
 
 
@@ -53,6 +63,7 @@ def _spec_from_args(args: argparse.Namespace) -> PodSpec:
         ttl_hours=args.ttl_hours,
         provider=args.provider,
         force=bool(getattr(args, "force", False)),
+        manual=bool(getattr(args, "manual", False)),
     )
 
 
@@ -132,7 +143,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "volume_uid": e.volume_uid,
             }
         )
-    for pname in ("targon",):
+    for pname in ("targon", "shadeform"):
         try:
             provider = get_provider(pname, state_dir=registry.state_dir)
         except Exception as exc:  # noqa: BLE001
@@ -243,6 +254,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "exec":
