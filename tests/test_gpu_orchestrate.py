@@ -641,6 +641,8 @@ def test_bootstrap_script_verify_first_no_token():
     script = bootstrap_script()
     assert "command -v docker" in script
     assert "nvidia-smi" in script
+    assert "import ensurepip" in script
+    assert "python${PYVER}-venv" in script or "python${PYVER}-venv" in script
     assert "ghp_" not in script
     assert "PARETON_GHCR_TOKEN" not in script
     # verify-before-install: docker check appears before get.docker.com
