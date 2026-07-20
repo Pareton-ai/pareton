@@ -31,7 +31,7 @@ def _configured_cloud_providers(
 ) -> list[Any]:
     factory = factory or get_provider
     out = []
-    for name in ("targon",):
+    for name in ("targon", "shadeform"):
         try:
             out.append(factory(name, state_dir=state_dir))
         except Exception as exc:  # noqa: BLE001 — missing key is fine
@@ -47,7 +47,7 @@ def reap(
     provider_factory: Callable[..., Any] | None = None,
     clock=None,
 ) -> list[ReapAction]:
-    """Destroy expired pareton-gpu workloads/volumes; retry destroy_failed."""
+    """Destroy expired pt-* workloads/volumes; retry destroy_failed."""
     registry = registry or PodRegistry(state_dir)
     actions: list[ReapAction] = []
     providers = _configured_cloud_providers(

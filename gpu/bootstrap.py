@@ -40,7 +40,7 @@ def bootstrap_script(*, with_nvidia_toolkit_install: bool = True) -> str:
     toolkit = ""
     if with_nvidia_toolkit_install:
         toolkit = r"""
-if ! docker info 2>/dev/null | grep -qi nvidia; then
+if ! $SUDO docker info 2>/dev/null | grep -qi nvidia; then
   echo "nvidia container runtime missing; installing nvidia-container-toolkit"
   distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | $SUDO gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
@@ -62,6 +62,12 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 command -v docker >/dev/null 2>&1 || {{ echo "docker still missing after install"; exit 1; }}
 
+# Non-root (e.g. Shadeform): allow docker without a re-login.
+if [ "$(id -u)" -ne 0 ]; then
+  $SUDO usermod -aG docker "$(id -un)" 2>/dev/null || true
+  $SUDO chmod 666 /var/run/docker.sock 2>/dev/null || true
+fi
+
 # GPU driver required (do not attempt install).
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "nvidia-smi not found; install NVIDIA drivers on the host before bench"
@@ -71,7 +77,7 @@ nvidia-smi >/dev/null
 
 # NVIDIA container runtime: install only when absent.
 {toolkit}
-docker info 2>/dev/null | grep -qi nvidia || echo "warning: nvidia runtime still not listed in docker info"
+$SUDO docker info 2>/dev/null | grep -qi nvidia || echo "warning: nvidia runtime still not listed in docker info"
 
 # Python venv tooling.
 if ! python3 -c "import venv" 2>/dev/null; then
@@ -81,6 +87,13 @@ fi
 $SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE}
 $SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} || true
 """
+
+
+def remote_docker(pod: Pod) -> str:
+    """Docker argv prefix; Shadeform (and other non-root) need sudo."""
+    if (pod.ssh.user or "").strip() in ("", "root"):
+        return "docker"
+    return "sudo -E docker"
 
 
 def bootstrap_pod(
@@ -142,13 +155,14 @@ def pull_engine_images(
     """Source env_file, docker login (stdin), then pull. Token never on argv."""
     if not image_refs:
         return
-    pulls = " && ".join(f"docker pull {shlex.quote(img)}" for img in image_refs)
+    docker = remote_docker(pod)
+    pulls = " && ".join(f"{docker} pull {shlex.quote(img)}" for img in image_refs)
     env_q = shlex.quote(env_file)
     # Single shell so login sees vars from the env file; password via stdin.
     remote = (
         f"set -a && . {env_q} && set +a && "
         'if [ -n "${PARETON_GHCR_TOKEN:-}" ]; then '
-        'echo "$PARETON_GHCR_TOKEN" | docker login ghcr.io '
+        f'echo "$PARETON_GHCR_TOKEN" | {docker} login ghcr.io '
         '-u "${PARETON_GHCR_USER:-${PARETON_GHCR_USERNAME:-}}" --password-stdin; '
         "fi && "
         f"{pulls}"

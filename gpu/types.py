@@ -16,6 +16,7 @@ class PodSpec:
     ttl_hours: float = 2.0
     provider: str = "auto"
     force: bool = False
+    manual: bool = False
 
 
 @dataclass
