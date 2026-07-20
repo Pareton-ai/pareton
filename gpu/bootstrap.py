@@ -79,10 +79,18 @@ nvidia-smi >/dev/null
 {toolkit}
 $SUDO docker info 2>/dev/null | grep -qi nvidia || echo "warning: nvidia runtime still not listed in docker info"
 
-# Python venv tooling.
-if ! python3 -c "import venv" 2>/dev/null; then
-  $SUDO apt-get update -y && $SUDO apt-get install -y python3-venv python3-pip
+# Python venv tooling: ``import venv`` can succeed without ensurepip on
+# Debian/Ubuntu; probe ensurepip and install the matching pythonX.Y-venv.
+if ! python3 -c "import ensurepip" 2>/dev/null; then
+  $SUDO apt-get update -y
+  PYVER="$(python3 -c 'import sys; print("%d.%d" % (sys.version_info.major, sys.version_info.minor))')"
+  $SUDO apt-get install -y "python${{PYVER}}-venv" python3-pip \
+    || $SUDO apt-get install -y python3-venv python3-pip
 fi
+python3 -c "import ensurepip" || {{
+  echo "ensurepip still missing after apt install; cannot create venv"
+  exit 1
+}}
 
 $SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE}
 $SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} || true
@@ -134,6 +142,7 @@ def bootstrap_pod(
     ssh_exec(
         pod,
         (
+            f"rm -rf {REMOTE_VENV} && "
             f"python3 -m venv {REMOTE_VENV} && "
             f"{REMOTE_VENV}/bin/pip install -q -r {REMOTE_REPO}/requirements.txt"
         ),

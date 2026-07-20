@@ -175,9 +175,10 @@ def test_search_filters(state_dir: Path):
         },
         {
             "cloud": "aws",
-            "shade_instance_type": "h100_8x",
+            "shade_instance_type": "h100_8x_cheap",
             "deployment_type": "vm",
-            "hourly_price": 2000,
+            # Cheaper than 1x but wrong count — must not be selected.
+            "hourly_price": 100,
             "configuration": {"gpu_type": "H100", "num_gpus": 8, "os_options": []},
             "availability": [{"available": True, "region": "us-east-1"}],
         },
@@ -195,6 +196,16 @@ def test_search_filters(state_dir: Path):
     assert len(offers) == 1
     assert offers[0].instance_id == "aws:us-east-1:h100_1x"
     assert offers[0].hourly_price_cents == 250
+    assert offers[0].gpu_count == 1
+
+
+def test_mount_script_refuses_mkfs():
+    from gpu.providers.shadeform import _mount_workspace_script
+
+    script = _mount_workspace_script(volume_gib=250)
+    assert "mkfs.ext4" not in script
+    assert "refusing raw mkfs" in script
+    assert "bind-mounted" in script
 
 
 def test_provision_wait_mount_and_abort(state_dir: Path, monkeypatch):

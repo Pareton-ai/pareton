@@ -119,17 +119,6 @@ is_system_mount() {{
   return 1
 }}
 
-disk_has_partitions() {{
-  lsblk -rpno NAME,TYPE "$1" 2>/dev/null | awk -v d="$1" '$1 != d && $2=="part" {{ exit 0 }} END {{ exit 1 }}'
-}}
-
-uses_system_storage() {{
-  lsblk -rpno NAME,MOUNTPOINT "$1" 2>/dev/null | awk '
-    $2=="/" || $2=="/boot" || $2=="/boot/efi" {{ exit 0 }}
-    END {{ exit 1 }}
-  '
-}}
-
 bind_to_workspace() {{
   local src="$1"
   if ! mountpoint -q "$src" 2>/dev/null; then
@@ -141,21 +130,8 @@ bind_to_workspace() {{
   df -h /workspace
 }}
 
-mount_blockdev() {{
-  local dev="$1"
-  if disk_has_partitions "$dev"; then
-    echo "skip whole disk with partitions: $dev"
-    return 1
-  fi
-  if ! sudo blkid "$dev" >/dev/null 2>&1; then
-    sudo mkfs.ext4 -F "$dev"
-  fi
-  sudo mount "$dev" /workspace
-  sudo chmod 1777 /workspace
-  echo "OK: mounted $dev on /workspace"
-  df -h /workspace
-}}
-
+# Prefer Shadeform auto-mount (or any large non-system mount). Never mkfs —
+# formatting an unlabeled blockdev can wipe the wrong disk.
 best_mp=""
 best_mp_kb=0
 while read -r mp size_kb; do
@@ -176,37 +152,8 @@ if [ -n "$best_mp" ]; then
   exit 0
 fi
 
-best_dev=""
-best_dev_kb=0
-while read -r name type size mount; do
-  if [ "$type" != "disk" ] && [ "$type" != "part" ]; then
-    continue
-  fi
-  if [ -n "${{mount:-}}" ]; then
-    continue
-  fi
-  if uses_system_storage "$name"; then
-    continue
-  fi
-  if [ "$type" = "disk" ] && disk_has_partitions "$name"; then
-    continue
-  fi
-  size_kb=$((size / 1024))
-  if [ "$size_kb" -lt "$MIN_KB" ]; then
-    continue
-  fi
-  if [ "$size_kb" -gt "$best_dev_kb" ]; then
-    best_dev_kb=$size_kb
-    best_dev="$name"
-  fi
-done < <(lsblk -b -rpno NAME,TYPE,SIZE,MOUNTPOINT)
-
-if [ -n "$best_dev" ]; then
-  mount_blockdev "$best_dev"
-  exit 0
-fi
-
-echo "ERROR: no mountable storage >= ${{MIN_KB}}KB for /workspace"
+echo "ERROR: /workspace not ready and no mountable volume >= ${{MIN_KB}}KB"
+echo "Shadeform volume_mount.auto should attach storage; refusing raw mkfs."
 lsblk
 df -h
 exit 1
@@ -319,7 +266,8 @@ class ShadeformProvider:
             cfg = item.get("configuration") or {}
             gpu_type = _normalize_gpu_type(str(cfg.get("gpu_type", "")))
             gpu_count = int(cfg.get("num_gpus", 0) or 0)
-            if gpu_count < want:
+            # Shadeform SKUs are discrete; require exact count (not >=).
+            if gpu_count != want:
                 continue
             if spec.gpu_type and gpu_type.upper() != spec.gpu_type.upper():
                 continue
