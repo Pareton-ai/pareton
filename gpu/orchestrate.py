@@ -199,7 +199,17 @@ def provision_pod(
                 )
         offer = _select_offer(provider, spec)
         pod_name = encode_pod_name(ttl_hours=spec.ttl_hours)
-        pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
+        if spec.manual:
+            if provider.name == "static_ssh":
+                raise ProvisionError("--manual is not supported for static_ssh")
+            provision_fn = getattr(provider, "provision_manual", None)
+            if provision_fn is None:
+                raise ProvisionError(
+                    f"provider {provider.name!r} does not support --manual"
+                )
+            pod = provision_fn(offer, name=pod_name, ssh_public_key=pub)
+        else:
+            pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
         pod.ttl_hours = spec.ttl_hours
         if provider.name == "static_ssh":
             return pod

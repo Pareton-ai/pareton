@@ -18,10 +18,13 @@ from gpu.errors import GpuError
 
 logger = logging.getLogger(__name__)
 
-NAME_PREFIX = "pareton-gpu-"
+# Targon workload/volume names are capped at 32 chars.
+# Format: pt-<yyyymmddHHMMSS>-<ttl>h-<uuid8> (avoid "pg-" — reads as postgres).
+NAME_PREFIX = "pt-"
+TARGON_NAME_MAX_LEN = 32
 _NAME_RE = re.compile(
-    r"^pareton-gpu-"
-    r"(?P<stamp>\d{8}-\d{6})-"
+    r"^pt-"
+    r"(?P<stamp>\d{14})-"
     r"(?P<ttl>[0-9]+(?:\.[0-9]+)?)h-"
     r"(?P<uid>[0-9a-f]{8})$"
 )
@@ -60,17 +63,24 @@ def encode_pod_name(
     created: datetime | None = None,
     uid8: str | None = None,
 ) -> str:
-    """Build pareton-gpu-<yyyymmdd-hhmmss>-<ttl_hours>h-<uuid8> (UTC)."""
+    """Build pt-<yyyymmddHHMMSS>-<ttl_hours>h-<uuid8> (UTC), <= 32 chars."""
     created = created or _utc_now()
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)
     else:
         created = created.astimezone(timezone.utc)
-    stamp = created.strftime("%Y%m%d-%H%M%S")
+    # Compact stamp (no dash) so fractional TTLs like 0.05h fit Targon's 32 limit.
+    stamp = created.strftime("%Y%m%d%H%M%S")
     uid = (uid8 or uuid.uuid4().hex[:8]).lower()
     # Trim trailing .0 for integer hours in the name.
     ttl_s = f"{ttl_hours:g}"
-    return f"{NAME_PREFIX}{stamp}-{ttl_s}h-{uid}"
+    name = f"{NAME_PREFIX}{stamp}-{ttl_s}h-{uid}"
+    if len(name) > TARGON_NAME_MAX_LEN:
+        raise GpuError(
+            f"pod name {name!r} is {len(name)} chars; Targon max is "
+            f"{TARGON_NAME_MAX_LEN} (shorten ttl_hours precision)"
+        )
+    return name
 
 
 def parse_pod_name(
@@ -80,7 +90,7 @@ def parse_pod_name(
     m = _NAME_RE.match(name.strip())
     if not m:
         return None
-    created = datetime.strptime(m.group("stamp"), "%Y%m%d-%H%M%S").replace(
+    created = datetime.strptime(m.group("stamp"), "%Y%m%d%H%M%S").replace(
         tzinfo=timezone.utc
     )
     ttl_hours = float(m.group("ttl"))

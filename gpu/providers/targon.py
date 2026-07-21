@@ -20,10 +20,14 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://api.targon.com/tha/v2"
 TARGON_SSH_HOST = "ssh.deployments.targon.com"
 TARGON_DASHBOARD = "https://targon.com/rentals"
+WORKLOAD_IMAGE = "ghcr.io/manifold-inc/ubuntu-systemd-docker:v3"
+SSH_KEY_NAME = "pareton-gpu"
 VOLUME_RESOURCE_NAME = "storage-rentals"
 VOLUME_MOUNT_PATH = "/workspace"
 VOLUME_READY_TIMEOUT_S = 300
 READY_TIMEOUT_S = 600
+MANUAL_POLL_S = 30
+MANUAL_TIMEOUT_S = 3600
 HTTP_TIMEOUT_S = 30.0
 
 Transport = Callable[..., Any]
@@ -155,7 +159,7 @@ class TargonProvider:
                 return self._ssh_key_uid
         resp = self._post(
             "/ssh-keys",
-            json={"name": "pareton-gpu", "ssh_key": ssh_public_key},
+            json={"name": SSH_KEY_NAME, "ssh_key": ssh_public_key},
         )
         self._ssh_key_uid = resp["uid"]
         logger.info("Registered SSH key with Targon: %s", self._ssh_key_uid)
@@ -232,13 +236,29 @@ class TargonProvider:
     def _wait_volume_ready(
         self, volume_uid: str, timeout_s: int = VOLUME_READY_TIMEOUT_S
     ) -> None:
-        deadline = time.monotonic() + timeout_s
+        started = time.monotonic()
+        deadline = started + timeout_s
+        last_log = started - 60.0  # log on first poll
+        last_status = ""
         while time.monotonic() < deadline:
             state = self._require_dict(
                 self._get(f"/volumes/{volume_uid}/state"),
                 ctx=f"volume {volume_uid} state",
             )
             status = str(state.get("status", "")).upper()
+            last_status = status
+            msg = str(state.get("message") or "")
+            now = time.monotonic()
+            if now - last_log >= 60.0:
+                logger.info(
+                    "Targon volume %s status=%s elapsed=%ds remaining=%ds%s",
+                    volume_uid,
+                    status or "?",
+                    int(now - started),
+                    max(0, int(deadline - now)),
+                    f" message={msg!r}" if msg else "",
+                )
+                last_log = now
             if status in ("READY", "REGISTERED"):
                 return
             if status in ("FAILED", "ERROR", "DELETING"):
@@ -247,7 +267,10 @@ class TargonProvider:
                     f"{state.get('message', '')}"
                 )
             self._sleep(5)
-        raise ProvisionError(f"Targon volume {volume_uid} not ready after {timeout_s}s")
+        raise ProvisionError(
+            f"Targon volume {volume_uid} not ready after {timeout_s}s "
+            f"(last status={last_status or '?'})"
+        )
 
     def _deploy_workload(self, workload_uid: str) -> None:
         url = f"{API_BASE}/workloads/{workload_uid}/deploy"
@@ -332,6 +355,149 @@ class TargonProvider:
             )
         logger.error("Timed out deleting Targon volume %s", volume_uid)
 
+    def _print_manual_instructions(
+        self,
+        *,
+        name: str,
+        offer: Offer,
+        ssh_public_key: str,
+        timeout_s: int,
+    ) -> None:
+        size_gib = _volume_gib()
+        lines = [
+            "",
+            "=== MANUAL Targon spin-up ===",
+            "API auto-provision is stuck often; create the rental in the dashboard.",
+            f"Dashboard: {TARGON_DASHBOARD}",
+            "",
+            "Use these EXACT values:",
+            f"  workload name:  {name}",
+            f"  volume name:    {name}  (same string; TTL is encoded in the name)",
+            f"  image:          {WORKLOAD_IMAGE}",
+            f"  resource:       {offer.instance_id}  ({offer.gpu_type} x{offer.gpu_count},"
+            f" ~{offer.hourly_price_cents}¢/h)",
+            f"  volume size:    {size_gib} GiB  (resource={VOLUME_RESOURCE_NAME})",
+            f"  volume mount:   {VOLUME_MOUNT_PATH}",
+            f"  SSH key:        select registered key named '{SSH_KEY_NAME}'",
+            f"  SSH pubkey:     {ssh_public_key}",
+            "",
+            "Steps:",
+            f"  1. Create a volume named {name!r} ({size_gib} GiB).",
+            f"  2. Create a RENTAL workload named {name!r} with image above,",
+            f"     resource {offer.instance_id!r}, SSH key '{SSH_KEY_NAME}',",
+            f"     and attach that volume at {VOLUME_MOUNT_PATH}.",
+            "  3. Leave this process running; it polls every "
+            f"{MANUAL_POLL_S}s for up to {timeout_s // 60} min.",
+            "  4. Ctrl-C aborts the wait (delete the rental/volume yourself if created).",
+            "=== waiting for RUNNING ===",
+            "",
+        ]
+        text = "\n".join(lines)
+        print(text, flush=True)
+        logger.info("manual spin-up instructions printed for name=%s", name)
+
+    def _find_named_workload(self, name: str) -> Pod | None:
+        for pod in self.list_pods():
+            if pod.name == name:
+                return pod
+        return None
+
+    def _volume_uid_for_name(self, name: str) -> str:
+        for vol in self.list_volumes():
+            if str(vol.get("name") or "") == name:
+                return str(vol.get("id") or "")
+        return ""
+
+    def provision_manual(
+        self,
+        offer: Offer,
+        *,
+        name: str,
+        ssh_public_key: str,
+        timeout_s: int = MANUAL_TIMEOUT_S,
+        poll_s: int = MANUAL_POLL_S,
+    ) -> Pod:
+        """Human creates the rental in the dashboard; we poll until RUNNING."""
+        self._ensure_ssh_key(ssh_public_key)
+        self._print_manual_instructions(
+            name=name,
+            offer=offer,
+            ssh_public_key=ssh_public_key,
+            timeout_s=timeout_s,
+        )
+        started = time.monotonic()
+        deadline = started + timeout_s
+        last_status = ""
+        while time.monotonic() < deadline:
+            found = self._find_named_workload(name)
+            if found is not None:
+                state = self._require_dict(
+                    self._get(f"/workloads/{found.pod_id}/state"),
+                    ctx=f"workload {found.pod_id} state",
+                )
+                status = str(state.get("status", "")).upper()
+                last_status = status
+                msg = str(state.get("message") or "")
+                elapsed = int(time.monotonic() - started)
+                remaining = max(0, int(deadline - time.monotonic()))
+                logger.info(
+                    "manual wait name=%s uid=%s status=%s elapsed=%ds remaining=%ds%s",
+                    name,
+                    found.pod_id,
+                    status or "?",
+                    elapsed,
+                    remaining,
+                    f" message={msg!r}" if msg else "",
+                )
+                if status == "RUNNING":
+                    volume_uid = self._volume_uid_for_name(name)
+                    if not volume_uid:
+                        logger.warning(
+                            "workload %s is RUNNING but no volume named %r yet; "
+                            "continuing (destroy may need manual volume cleanup)",
+                            found.pod_id,
+                            name,
+                        )
+                    found.key_path = self._key_path
+                    found.hourly_price_cents = offer.hourly_price_cents
+                    found.ssh = SshTarget(
+                        host=TARGON_SSH_HOST, port=22, user=found.pod_id
+                    )
+                    found.raw = {
+                        **(found.raw or {}),
+                        "volume_uid": volume_uid,
+                        "volume_name": name,
+                        "resource_name": offer.instance_id,
+                        "dashboard": f"{TARGON_DASHBOARD}/{found.pod_id}",
+                        "manual": True,
+                    }
+                    logger.info(
+                        "manual spin-up ready: name=%s uid=%s volume=%s",
+                        name,
+                        found.pod_id,
+                        volume_uid or "(none)",
+                    )
+                    return found
+                if status in ("FAILED", "ERROR", "TERMINATED"):
+                    raise ProvisionError(
+                        f"manual Targon workload {found.pod_id} ({name}) entered "
+                        f"{status}: {state.get('message', '')}"
+                    )
+            else:
+                elapsed = int(time.monotonic() - started)
+                remaining = max(0, int(deadline - time.monotonic()))
+                logger.info(
+                    "manual wait name=%s not found yet elapsed=%ds remaining=%ds",
+                    name,
+                    elapsed,
+                    remaining,
+                )
+            self._sleep(poll_s)
+        raise ProvisionError(
+            f"manual Targon workload name={name!r} not RUNNING after {timeout_s}s "
+            f"(last status={last_status or 'not-found'})"
+        )
+
     def provision(self, offer: Offer, *, name: str, ssh_public_key: str) -> Pod:
         ssh_key_uid = self._ensure_ssh_key(ssh_public_key)
         volume_name = name  # same TTL pattern
@@ -341,7 +507,7 @@ class TargonProvider:
             self._wait_volume_ready(volume_uid)
             body: dict[str, Any] = {
                 "name": name,
-                "image": "ghcr.io/manifold-inc/ubuntu-systemd-docker:v3",
+                "image": WORKLOAD_IMAGE,
                 "resource_name": offer.instance_id,
                 "type": "RENTAL",
                 "ports": [{"port": 22, "protocol": "TCP", "routing": "DIRECT"}],
@@ -375,13 +541,29 @@ class TargonProvider:
             raise
 
     def _wait_ready(self, pod: Pod, timeout_s: int = READY_TIMEOUT_S) -> Pod:
-        deadline = time.monotonic() + timeout_s
+        started = time.monotonic()
+        deadline = started + timeout_s
+        last_log = started - 60.0  # log on first poll
+        last_status = ""
         while time.monotonic() < deadline:
             state = self._require_dict(
                 self._get(f"/workloads/{pod.pod_id}/state"),
                 ctx=f"workload {pod.pod_id} state",
             )
             status = str(state.get("status", "")).upper()
+            last_status = status
+            msg = str(state.get("message") or "")
+            now = time.monotonic()
+            if now - last_log >= 60.0:
+                logger.info(
+                    "Targon workload %s status=%s elapsed=%ds remaining=%ds%s",
+                    pod.pod_id,
+                    status or "?",
+                    int(now - started),
+                    max(0, int(deadline - now)),
+                    f" message={msg!r}" if msg else "",
+                )
+                last_log = now
             if status == "RUNNING":
                 pod.ssh = SshTarget(host=TARGON_SSH_HOST, port=22, user=pod.pod_id)
                 return pod
@@ -392,7 +574,8 @@ class TargonProvider:
                 )
             self._sleep(5)
         raise ProvisionError(
-            f"Targon workload {pod.pod_id} not ready after {timeout_s}s"
+            f"Targon workload {pod.pod_id} not ready after {timeout_s}s "
+            f"(last status={last_status or '?'})"
         )
 
     def destroy(self, pod: Pod) -> None:
