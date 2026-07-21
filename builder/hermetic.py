@@ -19,16 +19,51 @@ from gate.types import GateResult, SubmissionState
 
 logger = logging.getLogger(__name__)
 
+_VLLM_API_SERVER_ENTRYPOINT = (
+    'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]'
+)
 
-_DOCKERFILE = """\
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
-WORKDIR /src
-COPY baseline/ /src/
-COPY submission.diff /tmp/submission.diff
-RUN git apply --whitespace=nowarn /tmp/submission.diff \\
-    && (pip install --no-deps -e . || python -m pip install --no-deps -e . || true)
-"""
+
+def _patch_is_empty(patch_bytes: bytes) -> bool:
+    return not patch_bytes.strip()
+
+
+def dockerfile_for_patch(
+    *,
+    allow_empty_patch: bool = False,
+    patch_bytes: bytes | None = None,
+) -> str:
+    """Generate the hermetic engine Dockerfile text (unit-testable, no Docker).
+
+    When ``allow_empty_patch`` is True and ``patch_bytes`` is empty/whitespace,
+    skip ``git apply``. Miner builds must leave ``allow_empty_patch`` False.
+    """
+    empty = patch_bytes is not None and _patch_is_empty(patch_bytes)
+    skip_apply = bool(allow_empty_patch and empty)
+
+    lines = [
+        "ARG BASE_IMAGE",
+        "FROM ${BASE_IMAGE}",
+        "WORKDIR /src",
+        "COPY baseline/ /src/",
+        "COPY submission.diff /tmp/submission.diff",
+    ]
+    if skip_apply:
+        run_steps = [
+            "pip install --no-deps --no-build-isolation -e .",
+            "rm -rf /src/.git",
+        ]
+    else:
+        run_steps = [
+            "git apply --whitespace=nowarn /tmp/submission.diff",
+            "pip install --no-deps --no-build-isolation -e .",
+            "rm -rf /src/.git",
+        ]
+    # Single RUN so apply failure / install failure fail the build.
+    lines.append("RUN " + " \\\n    && ".join(run_steps))
+    lines.append(_VLLM_API_SERVER_ENTRYPOINT)
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _docker_login_ghcr() -> None:
@@ -60,8 +95,17 @@ def build_engine_image(
     patch_hash: str,
     work_root: Path | None = None,
     push: bool = True,
+    allow_empty_patch: bool = False,
+    image_ref_override: str | None = None,
 ) -> GateResult:
-    """Build and optionally push an engine image tagged by patch_hash."""
+    """Build and optionally push an engine image tagged by patch_hash.
+
+    ``allow_empty_patch`` is ops-only (A2b baseline engine). Miner gate surface
+    still rejects empty patches before this runs.
+    """
+    if _patch_is_empty(patch_bytes) and not allow_empty_patch:
+        return GateResult.reject("empty_patch_not_allowed")
+
     root = work_root or Path(tempfile.mkdtemp(prefix="pareton-build-"))
     root.mkdir(parents=True, exist_ok=True)
     ctx = root / "docker-context"
@@ -70,9 +114,14 @@ def build_engine_image(
     ctx.mkdir(parents=True)
     repo_dir = ctx / "baseline"
     (ctx / "submission.diff").write_bytes(patch_bytes)
-    (ctx / "Dockerfile").write_text(_DOCKERFILE)
+    (ctx / "Dockerfile").write_text(
+        dockerfile_for_patch(
+            allow_empty_patch=allow_empty_patch,
+            patch_bytes=patch_bytes,
+        )
+    )
 
-    image_ref = engine_image_ref(patch_hash)
+    image_ref = image_ref_override or engine_image_ref(patch_hash)
     log_path = root / "build.log"
 
     try:
@@ -116,7 +165,6 @@ def build_engine_image(
                 stderr=checkout.stderr[-2000:],
             )
 
-        # Ensure .git is present for apply; strip .git from image context after apply in Dockerfile
         build_cmd = [
             "docker",
             "build",

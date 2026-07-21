@@ -38,12 +38,18 @@ PATCH_FETCH_RETRIES: int = int(os.environ.get("PARETON_PATCH_FETCH_RETRIES", "3"
 # Builder / registry (GitHub org: Pareton-ai; GHCR namespaces are lowercase)
 GHCR_OWNER: str = os.environ.get("PARETON_GHCR_OWNER", "pareton-ai")
 GHCR_IMAGE: str = os.environ.get("PARETON_GHCR_IMAGE", "pareton-engine")
+GHCR_BASELINE_IMAGE: str = os.environ.get(
+    "PARETON_GHCR_BASELINE_IMAGE", "pareton-baseline"
+)
 GHCR_TOKEN: str = os.environ.get("PARETON_GHCR_TOKEN", "")
 GHCR_USERNAME: str = os.environ.get("PARETON_GHCR_USERNAME", "")
+# Mutable tag fallback for local/dev only. Production builds use campaign
+# base_image_digest via builder.registry.baseline_build_image_ref.
 BASE_IMAGE: str = os.environ.get(
     "PARETON_BASE_IMAGE", "ghcr.io/pareton-ai/pareton-baseline:v0"
 )
-BUILD_TIMEOUT_S: int = int(os.environ.get("PARETON_BUILD_TIMEOUT_S", "1800"))
+# Hermetic vLLM builds are long; GHA A2b may need the higher end.
+BUILD_TIMEOUT_S: int = int(os.environ.get("PARETON_BUILD_TIMEOUT_S", "7200"))
 WORK_DIR: Path = Path(
     os.environ.get("PARETON_WORK_DIR", str(REPO_ROOT / ".pareton-work"))
 ).resolve()
