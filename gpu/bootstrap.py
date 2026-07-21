@@ -62,12 +62,6 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 command -v docker >/dev/null 2>&1 || {{ echo "docker still missing after install"; exit 1; }}
 
-# Non-root (e.g. Shadeform): allow docker without a re-login.
-if [ "$(id -u)" -ne 0 ]; then
-  $SUDO usermod -aG docker "$(id -un)" 2>/dev/null || true
-  $SUDO chmod 666 /var/run/docker.sock 2>/dev/null || true
-fi
-
 # GPU driver required (do not attempt install).
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "nvidia-smi not found; install NVIDIA drivers on the host before bench"
@@ -78,6 +72,14 @@ nvidia-smi >/dev/null
 # NVIDIA container runtime: install only when absent.
 {toolkit}
 $SUDO docker info 2>/dev/null | grep -qi nvidia || echo "warning: nvidia runtime still not listed in docker info"
+
+# Non-root (e.g. Shadeform): allow bare docker for bench/lifecycle.
+# Must run AFTER any docker restart (toolkit install) so chmod hits the
+# final socket; usermod alone is best-effort and may not apply mid-session.
+if [ "$(id -u)" -ne 0 ]; then
+  $SUDO usermod -aG docker "$(id -un)" 2>/dev/null || true
+  $SUDO chmod 666 /var/run/docker.sock 2>/dev/null || true
+fi
 
 # Python venv tooling: ``import venv`` can succeed without ensurepip on
 # Debian/Ubuntu; probe ensurepip and install the matching pythonX.Y-venv.

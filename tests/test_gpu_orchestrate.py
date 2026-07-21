@@ -647,3 +647,7 @@ def test_bootstrap_script_verify_first_no_token():
     assert "PARETON_GHCR_TOKEN" not in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
+    # sock ACL after toolkit restart so chmod hits the final socket
+    assert script.index("systemctl restart docker") < script.index(
+        "chmod 666 /var/run/docker.sock"
+    )
