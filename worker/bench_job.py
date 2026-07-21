@@ -23,6 +23,7 @@ from bench.validate import (
     validate_bench_request_dict,
     validate_report_dict,
 )
+from builder.registry import baseline_engine_image_ref
 from campaign.cross_env import SPEEDUP_METRIC_KEYS, validate_cross_env
 from campaign.store import finalize_bench_job, set_job_status
 from gate.types import SubmissionState
@@ -128,9 +129,13 @@ def build_bench_request_dict(
     if not is_digest_pinned_image(str(candidate)):
         raise BenchInfraError(REASON_CANDIDATE_NOT_PINNED, str(candidate))
 
-    baseline = bench.get("baseline_engine_image_digest")
-    if not baseline or not is_digest_pinned_image(str(baseline)):
-        raise BenchInfraError("baseline_image_not_digest_pinned", str(baseline))
+    baseline_raw = bench.get("baseline_engine_image_digest")
+    if not baseline_raw or not is_digest_pinned_image(str(baseline_raw)):
+        raise BenchInfraError("baseline_image_not_digest_pinned", str(baseline_raw))
+    try:
+        baseline = baseline_engine_image_ref(str(baseline_raw))
+    except ValueError as exc:
+        raise BenchInfraError("baseline_image_not_digest_pinned", str(exc)) from exc
 
     gpu_skus = _parse_json_field(row.get("gpu_skus")) or []
     if not gpu_skus:
@@ -139,14 +144,20 @@ def build_bench_request_dict(
     gpu_count = int(bench.get("gpu_count") or 1)
 
     max_model_len = int(model["max_model_len"])
+    dtype = str(model.get("dtype") or "bfloat16")
     extra_serve = list(bench.get("serve_args") or [])
     serve_args = [
         "--model",
         "/model",
         "--max-model-len",
         str(max_model_len),
-        *[str(x) for x in extra_serve],
+        "--dtype",
+        dtype,
     ]
+    quantization = model.get("quantization")
+    if quantization is not None and str(quantization).strip() != "":
+        serve_args.extend(["--quantization", str(quantization)])
+    serve_args.extend(str(x) for x in extra_serve)
 
     corr_cfg = dict(bench.get("correctness") or {})
     thresholds = dict(corr_cfg.get("thresholds") or {})
@@ -211,7 +222,7 @@ def build_bench_request_dict(
         "model": {
             "hf_repo": str(model["hf_repo"]),
             "hf_revision": str(model["hf_revision"]),
-            "dtype": str(model.get("dtype") or "bfloat16"),
+            "dtype": dtype,
             "quantization": model.get("quantization"),
             "max_model_len": max_model_len,
         },

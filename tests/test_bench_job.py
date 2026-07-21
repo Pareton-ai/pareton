@@ -31,6 +31,8 @@ from worker.bench_job import (
     process_bench_job,
 )
 
+pytestmark = pytest.mark.unit
+
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_TRACE = ROOT / "fixtures" / "bench" / "sample_trace.json"
 TRACE_SHA = "sha256:43953c2732b7216909f2b661b28cdee67232def6521aeb58035a7cf9d92aca9d"
@@ -299,13 +301,21 @@ def test_build_request_valid_and_sla_from_manifest(tmp_path: Path):
         req["engines"]["baseline"]["serve_args"]
         == req["engines"]["candidate"]["serve_args"]
     )
-    assert req["engines"]["baseline"]["serve_args"][:4] == [
+    assert req["engines"]["baseline"]["serve_args"][:6] == [
         "--model",
         "/model",
         "--max-model-len",
         "8192",
+        "--dtype",
+        "bfloat16",
     ]
     assert "--enable-prefix-caching" in req["engines"]["baseline"]["serve_args"]
+    assert req["engines"]["baseline"]["image"] == (
+        f"ghcr.io/pareton-ai/pareton-engine@{BASE_DIGEST}"
+    )
+    assert req["engines"]["candidate"]["image"] == (
+        f"ghcr.io/pareton-ai/pareton-engine@{CAND_DIGEST}"
+    )
     assert req["engines"]["baseline"]["env"] == {}
     assert req["engines"]["candidate"]["env"] == {}
 
@@ -592,6 +602,32 @@ def test_pipeline_uses_atomic_complete_gates():
     src = inspect.getsource(pipeline.process_submission)
     assert "complete_gates_job" in src
     assert "enqueue_bench_job(" not in src
+    assert "baseline_build_image_ref" in src
+    assert "config.BASE_IMAGE" not in src
+
+
+def test_build_request_wires_quantization(tmp_path: Path):
+    row = _row(
+        bench=_bench_spec(
+            model={
+                "hf_repo": "Qwen/Qwen2.5-7B-Instruct",
+                "hf_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+                "dtype": "float16",
+                "quantization": "awq",
+                "max_model_len": 4096,
+            }
+        )
+    )
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path,
+    )
+    req = build_bench_request_dict(row, task_id=str(uuid4()), trace_path=str(trace))
+    args = req["engines"]["baseline"]["serve_args"]
+    assert args[args.index("--dtype") + 1] == "float16"
+    assert args[args.index("--quantization") + 1] == "awq"
+    assert args[args.index("--max-model-len") + 1] == "4096"
 
 
 def test_manifest_bench_pin_compat():

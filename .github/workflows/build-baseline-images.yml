@@ -1,0 +1,106 @@
+# Build + push Pareton A2 build-base and A2b baseline engine images.
+# Manual only — digests are recorded after a successful run (follow-up PR).
+#
+# A2:  ghcr.io/pareton-ai/pareton-baseline:v0
+# A2b: ghcr.io/pareton-ai/pareton-engine:baseline (hermetic empty-patch dogfood)
+
+name: Build baseline images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  ENGINE_TAG: ghcr.io/pareton-ai/pareton-engine:baseline
+  VLLM_REPO: https://github.com/vllm-project/vllm.git
+  VLLM_COMMIT: ee0da84ab9e04ac7610e28580af62c365e898389
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install repo deps (builder CLI)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push A2 build-base
+        id: baseline
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/baseline/Dockerfile
+          push: true
+          tags: ghcr.io/pareton-ai/pareton-baseline:v0
+          platforms: linux/amd64
+          provenance: false
+
+      - name: Resolve A2 digest
+        id: baseline_digest
+        run: |
+          digest="${{ steps.baseline.outputs.digest }}"
+          if [ -z "$digest" ]; then
+            docker pull ghcr.io/pareton-ai/pareton-baseline:v0
+            digest="$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/pareton-ai/pareton-baseline:v0 | awk -F@ '{print $2}')"
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "## A2 build-base"
+            echo ""
+            echo "\`ghcr.io/pareton-ai/pareton-baseline@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build A2b baseline engine (empty patch, digest-pinned base)
+        env:
+          PARETON_GHCR_USERNAME: ${{ github.actor }}
+          PARETON_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PARETON_BUILD_TIMEOUT_S: "14400"
+        run: |
+          BASE_REF="ghcr.io/pareton-ai/pareton-baseline@${{ steps.baseline_digest.outputs.digest }}"
+          echo "Building engine FROM $BASE_REF"
+          docker pull "$BASE_REF"
+          python -m builder \
+            --baseline-repo "$VLLM_REPO" \
+            --baseline-commit "$VLLM_COMMIT" \
+            --base-image "$BASE_REF" \
+            --image-ref "$ENGINE_TAG" \
+            --empty-patch \
+            --push
+
+      - name: Resolve A2b digest + non-GPU smoke
+        run: |
+          docker pull "$ENGINE_TAG"
+          ENGINE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$ENGINE_TAG")"
+          {
+            echo "## A2b baseline engine"
+            echo ""
+            echo "\`$ENGINE_DIGEST\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          ENTRY="$(docker image inspect "$ENGINE_TAG" --format '{{json .Config.Entrypoint}}')"
+          echo "Entrypoint: $ENTRY" >> "$GITHUB_STEP_SUMMARY"
+          echo "$ENTRY" | grep -q 'vllm.entrypoints.openai.api_server'
+
+          docker run --rm --entrypoint python "$ENGINE_TAG" -c "import vllm; print('vllm import ok')"
+          docker run --rm "$ENGINE_TAG" --help | head -n 40
