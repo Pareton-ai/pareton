@@ -187,3 +187,6 @@ state/
 state-mainnet/
 
 .DS_Store
+
+# Local bench / GPU run artifacts (reports, evidence, harness logs)
+out/

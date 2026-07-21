@@ -62,6 +62,11 @@ class FakeProvider:
         self.volumes.append({"id": f"vol-{self.provision_calls}", "name": name})
         return pod
 
+    def provision_manual(
+        self, offer: Offer, *, name: str, ssh_public_key: str, **_kwargs
+    ) -> Pod:
+        return self.provision(offer, name=name, ssh_public_key=ssh_public_key)
+
     def destroy(self, pod: Pod) -> None:
         self.destroy_calls.append(pod.name)
         if self.fail_destroy:
@@ -438,7 +443,28 @@ def test_single_flight_and_force(tmp_path: Path):
         provider=provider,
         state_dir=tmp_path / "st",
     )
-    assert pod.name.startswith("pareton-gpu-")
+    assert pod.name.startswith("pt-")
+
+
+def test_manual_provision_path(tmp_path: Path):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    calls: list[str] = []
+    orig = provider.provision_manual
+
+    def tracked(offer, *, name, ssh_public_key, **kwargs):
+        calls.append(name)
+        return orig(offer, name=name, ssh_public_key=ssh_public_key, **kwargs)
+
+    provider.provision_manual = tracked  # type: ignore[method-assign]
+    pod = provision_pod(
+        PodSpec(provider="targon", force=True, manual=True, ttl_hours=1.0),
+        provider=provider,
+        state_dir=tmp_path / "st",
+    )
+    assert calls and calls[0] == pod.name
+    assert provider.provision_calls == 1
+    assert PodRegistry(tmp_path / "st").get(pod.name) is not None
 
 
 def test_reap_expired_and_dry_run(tmp_path: Path):
@@ -556,8 +582,36 @@ def test_pull_engine_images_quotes_refs(tmp_path: Path):
     )
     assert remote_cmds
     remote = remote_cmds[0]
-    assert f"docker pull {shlex.quote(evil)}" in remote
+    # Non-root SSH user → sudo -E docker (Shadeform-compatible).
+    assert f"sudo -E docker pull {shlex.quote(evil)}" in remote
     assert "docker pull ghcr.io/x/y;touch" not in remote
+
+
+def test_remote_docker_root_vs_nonroot():
+    from gpu.bootstrap import remote_docker
+
+    root = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="root"),
+        key_path=Path("/tmp/k"),
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    user = Pod(
+        provider="shadeform",
+        pod_id="inst",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="shadeform"),
+        key_path=Path("/tmp/k"),
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    assert remote_docker(root) == "docker"
+    assert remote_docker(user) == "sudo -E docker"
 
 
 def test_cli_help_and_missing_key(monkeypatch):
@@ -587,7 +641,13 @@ def test_bootstrap_script_verify_first_no_token():
     script = bootstrap_script()
     assert "command -v docker" in script
     assert "nvidia-smi" in script
+    assert "import ensurepip" in script
+    assert "python${PYVER}-venv" in script or "python${PYVER}-venv" in script
     assert "ghp_" not in script
     assert "PARETON_GHCR_TOKEN" not in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
+    # sock ACL after toolkit restart so chmod hits the final socket
+    assert script.index("systemctl restart docker") < script.index(
+        "chmod 666 /var/run/docker.sock"
+    )

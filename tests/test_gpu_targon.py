@@ -47,6 +47,8 @@ class FakeTransport:
         self.workload_states: list[str] = ["RUNNING"]
         self.volume_delete_codes: list[int] = [200]
         self.deleted: list[str] = []
+        self.workload_items: list[dict[str, Any]] | None = None
+        self.volume_items: list[dict[str, Any]] | None = None
 
     def route(self, method: str, path_suffix: str, handler) -> None:
         self.routes[(method.upper(), path_suffix)] = handler
@@ -107,6 +109,8 @@ class FakeTransport:
             return FakeResp(code, text=f"HTTP {code}")
 
         if method == "GET" and path == "/workloads":
+            if self.workload_items is not None:
+                return FakeResp(200, _json={"items": list(self.workload_items)})
             return FakeResp(
                 200,
                 _json={
@@ -117,6 +121,8 @@ class FakeTransport:
             )
 
         if method == "GET" and path == "/volumes":
+            if self.volume_items is not None:
+                return FakeResp(200, _json={"items": list(self.volume_items)})
             return FakeResp(
                 200,
                 _json={
@@ -340,3 +346,75 @@ def test_wait_ready_null_state_is_provision_error(state_dir: Path):
     )
     with pytest.raises(ProvisionError, match="expected JSON object"):
         p._wait_ready(pod, timeout_s=1)
+
+
+def test_provision_manual_polls_until_running(state_dir: Path, capsys):
+    tr = FakeTransport()
+    tr.workload_items = []
+    tr.volume_items = []
+    name = encode_pod_name(
+        ttl_hours=1.0,
+        created=datetime(2026, 7, 20, 12, 0, 0, tzinfo=timezone.utc),
+        uid8="abcd1234",
+    )
+    sleeps: list[float] = []
+
+    def sleep(s: float) -> None:
+        sleeps.append(s)
+        if len(sleeps) == 1:
+            tr.workload_items = [
+                {"uid": "wl-manual-1", "name": name, "status": "PROVISIONING"}
+            ]
+            tr.workload_states = ["PROVISIONING"]
+        elif len(sleeps) == 2:
+            tr.workload_items = [
+                {"uid": "wl-manual-1", "name": name, "status": "RUNNING"}
+            ]
+            tr.volume_items = [{"uid": "vol-manual-1", "name": name}]
+            tr.workload_states = ["RUNNING"]
+
+    p = TargonProvider("k", state_dir=state_dir, transport=tr, sleep=sleep)
+    pub = (state_dir / "keys" / "pareton-gpu-ed25519.pub").read_text().strip()
+    offer = Offer(
+        provider="targon",
+        instance_id="h200-small",
+        description="H200",
+        hourly_price_cents=200,
+        gpu_count=1,
+        gpu_type="H200",
+    )
+    pod = p.provision_manual(
+        offer, name=name, ssh_public_key=pub, timeout_s=120, poll_s=30
+    )
+    out = capsys.readouterr().out
+    assert "MANUAL Targon spin-up" in out
+    assert name in out
+    assert "pareton-gpu" in out
+    assert pod.pod_id == "wl-manual-1"
+    assert pod.raw.get("volume_uid") == "vol-manual-1"
+    assert pod.raw.get("manual") is True
+    assert sleeps == [30, 30]
+
+
+def test_provision_manual_timeout(state_dir: Path):
+    tr = FakeTransport()
+    tr.workload_items = []
+    tr.volume_items = []
+    p = TargonProvider("k", state_dir=state_dir, transport=tr, sleep=lambda _s: None)
+    pub = (state_dir / "keys" / "pareton-gpu-ed25519.pub").read_text().strip()
+    offer = Offer(
+        provider="targon",
+        instance_id="h200-small",
+        description="H200",
+        hourly_price_cents=200,
+        gpu_count=1,
+        gpu_type="H200",
+    )
+    with pytest.raises(ProvisionError, match="not RUNNING"):
+        p.provision_manual(
+            offer,
+            name="pt-20260720120000-1h-abcd1234",
+            ssh_public_key=pub,
+            timeout_s=0,
+            poll_s=30,
+        )
