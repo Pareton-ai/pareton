@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-import config
 from builder.hermetic import build_engine_image, build_engine_image_local_mock
+from builder.registry import baseline_build_image_ref
 from campaign.store import (
     append_event,
     complete_gates_job,
@@ -125,10 +125,20 @@ def process_submission(
             work_root=work_root,
         )
     else:
+        try:
+            base_image = baseline_build_image_ref(campaign.base_image_digest)
+        except ValueError as exc:
+            result = GateResult.reject(
+                "base_image_digest_invalid",
+                error=str(exc),
+                base_image_digest=campaign.base_image_digest,
+            )
+            _fail(submission_id, result, job_id=job_id)
+            return result
         build_res = build_engine_image(
             baseline_repo=row["baseline_repo"],
             baseline_commit=campaign.baseline_commit,
-            base_image=config.BASE_IMAGE,
+            base_image=base_image,
             patch_bytes=patch_bytes,
             patch_hash=patch_hash,
             work_root=work_root,
