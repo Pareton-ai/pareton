@@ -165,10 +165,12 @@ def build_engine_image(
                 stderr=checkout.stderr[-2000:],
             )
 
+        # Miner builds stay --network=none. A2b empty-patch needs network so
+        # cmake FetchContent can populate /src/.deps (vLLM pin ee0da84).
         build_cmd = [
             "docker",
             "build",
-            "--network=none",
+            *([] if allow_empty_patch else ["--network=none"]),
             "--build-arg",
             f"BASE_IMAGE={base_image}",
             "-t",
