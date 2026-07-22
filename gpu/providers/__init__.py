@@ -24,9 +24,24 @@ def _env_or_config(env_name: str, config_attr: str) -> str:
         return ""
 
 
+def resolve_provider_name(name: str | None = None) -> str:
+    """Map CLI/worker provider names; ``auto`` → ``PARETON_GPU_PROVIDER`` (default lium)."""
+    n = (name or "auto").strip().lower() or "auto"
+    if n != "auto":
+        return n
+    configured = (
+        _env_or_config("PARETON_GPU_PROVIDER", "GPU_PROVIDER") or "lium"
+    ).strip()
+    configured = configured.lower() or "lium"
+    if configured == "auto":
+        # Avoid recursion / footgun if someone sets PARETON_GPU_PROVIDER=auto.
+        return "lium"
+    return configured
+
+
 def get_provider(name: str, **kwargs) -> Provider:
-    n = (name or "auto").strip().lower()
-    if n in ("auto", "targon"):
+    n = resolve_provider_name(name)
+    if n == "targon":
         key = _env_or_config("PARETON_TARGON_API_KEY", "TARGON_API_KEY")
         if not key:
             raise ProvisionError(
@@ -54,13 +69,15 @@ def get_provider(name: str, **kwargs) -> Provider:
         target = kwargs.get("target")
         return StaticSshProvider(target=target) if target else StaticSshProvider()
     raise ProvisionError(
-        f"unknown GPU provider {name!r}; supported: targon, shadeform, lium, static_ssh"
+        f"unknown GPU provider {name!r} (resolved {n!r}); "
+        "supported: auto, targon, shadeform, lium, static_ssh"
     )
 
 
 __all__ = [
     "Provider",
     "get_provider",
+    "resolve_provider_name",
     "TargonProvider",
     "ShadeformProvider",
     "LiumProvider",

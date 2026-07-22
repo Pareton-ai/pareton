@@ -124,7 +124,7 @@ BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS",
 BENCH_SLA_WARMUP_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
 )
-GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "targon")
+GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 
 API_ALLOWED_ORIGINS: list[str] = [
     o.strip()
