@@ -41,9 +41,13 @@ def dockerfile_for_patch(
     empty = patch_bytes is not None and _patch_is_empty(patch_bytes)
     skip_apply = bool(allow_empty_patch and empty)
 
+    # Cap CUDA/nvcc parallelism — cicc alone can use 6–12GB; -j=N OOMs 32GB boxes.
     lines = [
         "ARG BASE_IMAGE",
         "FROM ${BASE_IMAGE}",
+        "ENV MAX_JOBS=1",
+        "ENV CMAKE_BUILD_PARALLEL_LEVEL=1",
+        "ENV NVCC_THREADS=1",
         "WORKDIR /src",
         "COPY baseline/ /src/",
         "COPY submission.diff /tmp/submission.diff",
