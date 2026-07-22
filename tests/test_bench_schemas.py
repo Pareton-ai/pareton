@@ -20,6 +20,9 @@ from bench.validate import (
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_REQUEST = ROOT / "fixtures" / "bench" / "sample_request.json"
 SAMPLE_TRACE = ROOT / "fixtures" / "bench" / "sample_trace.json"
+SYNTHETIC_TRACE = (
+    ROOT / "fixtures" / "campaigns" / "synthetic_v0" / "workload_trace.json"
+)
 
 
 def test_sample_request_round_trip():
@@ -50,6 +53,21 @@ def test_sample_trace_valid_and_sha_matches_request():
     digest = sha256_file(SAMPLE_TRACE)
     req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     assert req["workload_trace"]["sha256"] == digest
+
+
+def test_synthetic_v0_trace_validates():
+    raw = json.loads(SYNTHETIC_TRACE.read_text(encoding="utf-8"))
+    assert all("messages" not in r for r in raw["requests"])
+    trace = validate_workload_trace_dict(raw)
+    assert trace.schema_version == 1
+    assert len(trace.requests) == 2
+    assert [r.id for r in trace.requests] == ["syn-001", "syn-002"]
+    assert [r.arrival_offset_ms for r in trace.requests] == [0, 100]
+    for r in trace.requests:
+        assert r.prompt and r.prompt.strip()
+        assert r.max_tokens == 128
+        assert r.sampling.temperature == 0.0
+        assert r.sampling.top_p == 1.0
 
 
 def test_invalid_request_missing_field():
