@@ -23,6 +23,9 @@ def test_dockerfile_nonempty_has_apply_and_entrypoint():
     assert "|| true" not in text
     assert "rm -rf /src/.git" in text
     assert 'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]' in text
+    assert "ENV MAX_JOBS=1" in text
+    assert "ENV CMAKE_BUILD_PARALLEL_LEVEL=1" in text
+    assert "ENV NVCC_THREADS=1" in text
 
 
 @pytest.mark.unit
@@ -32,6 +35,7 @@ def test_dockerfile_empty_allowed_skips_apply():
     assert "pip install --no-deps --no-build-isolation -e ." in text
     assert "|| true" not in text
     assert 'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]' in text
+    assert "ENV MAX_JOBS=1" in text
 
 
 @pytest.mark.unit
