@@ -57,8 +57,7 @@ with_docker_group() {
 echo "==> clone / update repo at $REPO_DIR"
 if [[ -d "$REPO_DIR/.git" ]]; then
   git -C "$REPO_DIR" fetch --depth 1 origin main
-  git -C "$REPO_DIR" checkout main
-  git -C "$REPO_DIR" pull --ff-only origin main || true
+  git -C "$REPO_DIR" checkout -B main origin/main
 else
   git clone "$GIT_URL" "$REPO_DIR"
 fi
