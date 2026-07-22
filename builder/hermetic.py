@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
 
 import config
@@ -22,6 +24,11 @@ logger = logging.getLogger(__name__)
 _VLLM_API_SERVER_ENTRYPOINT = (
     'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]'
 )
+
+
+def _progress(msg: str) -> None:
+    """Human-visible step line for ops / tmux (stderr; never secrets)."""
+    print(f"pareton-builder: {msg}", file=sys.stderr, flush=True)
 
 
 def _patch_is_empty(patch_bytes: bytes) -> bool:
@@ -90,6 +97,50 @@ def _docker_login_ghcr() -> None:
     )
 
 
+def _run_logged(
+    cmd: list[str],
+    *,
+    log_path: Path,
+    timeout: float,
+    cwd: Path | None = None,
+) -> int:
+    """Run cmd, tee stdout/stderr to log_path and stderr, enforce timeout."""
+    with log_path.open("a", encoding="utf-8") as logf:
+        logf.write(f"+ {' '.join(cmd)}\n")
+        logf.flush()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+
+        def _tee() -> None:
+            for line in proc.stdout:
+                logf.write(line)
+                logf.flush()
+                sys.stderr.write(line)
+                sys.stderr.flush()
+
+        reader = threading.Thread(target=_tee, name="pareton-build-tee", daemon=True)
+        reader.start()
+        try:
+            return int(proc.wait(timeout=timeout))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                pass
+            reader.join(timeout=5)
+            raise
+        finally:
+            reader.join(timeout=30)
+
+
 def build_engine_image(
     *,
     baseline_repo: str,
@@ -127,8 +178,13 @@ def build_engine_image(
 
     image_ref = image_ref_override or engine_image_ref(patch_hash)
     log_path = root / "build.log"
+    log_path.write_text("", encoding="utf-8")
+    _progress(f"work_root={root}")
+    _progress(f"build_log={log_path}")
+    _progress(f"image_ref={image_ref} base_image={base_image}")
 
     try:
+        _progress("step 1/5 clone baseline repo")
         clone = subprocess.run(
             ["git", "clone", baseline_repo, str(repo_dir)],
             capture_output=True,
@@ -140,6 +196,7 @@ def build_engine_image(
                 "baseline_clone_failed",
                 stderr=clone.stderr[-2000:],
             )
+        _progress(f"step 2/5 checkout {baseline_commit}")
         checkout = subprocess.run(
             ["git", "checkout", "--force", baseline_commit],
             cwd=repo_dir,
@@ -174,6 +231,7 @@ def build_engine_image(
         build_cmd = [
             "docker",
             "build",
+            "--progress=plain",
             *([] if allow_empty_patch else ["--network=none"]),
             "--build-arg",
             f"BASE_IMAGE={base_image}",
@@ -181,15 +239,12 @@ def build_engine_image(
             image_ref,
             str(ctx),
         ]
-        with log_path.open("w", encoding="utf-8") as logf:
-            proc = subprocess.run(
-                build_cmd,
-                stdout=logf,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=config.BUILD_TIMEOUT_S,
-            )
-        if proc.returncode != 0:
+        _progress(
+            f"step 3/5 docker build (timeout={config.BUILD_TIMEOUT_S}s); "
+            f"tail -f {log_path}"
+        )
+        rc = _run_logged(build_cmd, log_path=log_path, timeout=config.BUILD_TIMEOUT_S)
+        if rc != 0:
             tail = log_path.read_text(encoding="utf-8")[-4000:]
             return GateResult.reject(
                 "hermetic_build_failed",
@@ -199,19 +254,21 @@ def build_engine_image(
 
         image_tag = image_ref
         if push:
+            _progress("step 4/5 docker login + push")
             _docker_login_ghcr()
-            push_proc = subprocess.run(
+            push_rc = _run_logged(
                 ["docker", "push", image_ref],
-                capture_output=True,
-                text=True,
+                log_path=log_path,
                 timeout=600,
             )
-            if push_proc.returncode != 0:
+            if push_rc != 0:
+                tail = log_path.read_text(encoding="utf-8")[-2000:]
                 return GateResult.reject(
                     "registry_push_failed",
-                    stderr=push_proc.stderr[-2000:],
+                    stderr=tail,
                     image_ref=image_ref,
                 )
+            _progress("step 5/5 resolve RepoDigest")
             digest = resolve_image_repo_digest(image_ref)
             if digest is None:
                 return GateResult.reject(
@@ -219,6 +276,9 @@ def build_engine_image(
                     image_ref=image_ref,
                 )
             image_ref = digest_pinned_ref(image_tag, digest)
+            _progress(f"done image_ref={image_ref}")
+        else:
+            _progress(f"done (no push) image_tag={image_tag}")
 
         return GateResult.success(
             SubmissionState.BUILT,
@@ -227,8 +287,10 @@ def build_engine_image(
             build_log=str(log_path),
         )
     except subprocess.TimeoutExpired as exc:
+        _progress(f"FAIL build_timeout after {config.BUILD_TIMEOUT_S}s; see {log_path}")
         return GateResult.reject("build_timeout", error=str(exc))
     except Exception as exc:
+        _progress(f"FAIL build_error: {type(exc).__name__}")
         return GateResult.reject("build_error", error=str(exc))
 
 
