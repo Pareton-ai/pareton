@@ -11,6 +11,7 @@ import pytest
 from gpu.errors import DestroyError, ProvisionError
 from gpu.providers.lium import (
     LiumProvider,
+    _gpu_type_matches,
     _normalize_gpu_type,
     _parse_ssh_target,
 )
@@ -148,6 +149,30 @@ def provider(state_dir: Path, client: FakeClient) -> LiumProvider:
 def test_normalize_gpu_type():
     assert _normalize_gpu_type("NVIDIA-H200") == "H200"
     assert _normalize_gpu_type("H100") == "H100"
+
+
+def test_gpu_type_matches_token_bound():
+    assert _gpu_type_matches("H200", "H200")
+    assert _gpu_type_matches("H200 NVL", "H200")
+    assert _gpu_type_matches("H200-SXM", "H200")
+    assert not _gpu_type_matches("H1000", "H100")
+    assert not _gpu_type_matches("A100", "H100")
+
+
+def test_search_rejects_substring_gpu_false_positive(
+    provider: LiumProvider, client: FakeClient
+):
+    client.executors = [
+        FakeExecutor("e-h1000", "fake", "H1000", 1, 1.0, True),
+        FakeExecutor("e-h100", "real", "H100", 1, 2.0, True),
+        FakeExecutor("e-nvl", "nvl", "H200 NVL", 1, 3.0, True),
+    ]
+    assert [o.instance_id for o in provider.search(PodSpec(gpu_type="H100"))] == [
+        "e-h100"
+    ]
+    assert [o.instance_id for o in provider.search(PodSpec(gpu_type="H200"))] == [
+        "e-nvl"
+    ]
 
 
 def test_parse_ssh_target():

@@ -9,6 +9,7 @@ for offline tests.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,6 +60,18 @@ def _normalize_gpu_type(raw: str) -> str:
         if t.upper().startswith(prefix.upper()):
             return t[len(prefix) :]
     return t
+
+
+def _gpu_type_matches(have: str, want: str) -> bool:
+    """Exact or whole-token match (H200 vs 'H200 NVL'); not bare substring (H100 vs H1000)."""
+    h = (have or "").upper().strip()
+    w = (want or "").upper().strip()
+    if not w:
+        return True
+    if h == w:
+        return True
+    tokens = [t for t in re.split(r"[^A-Z0-9]+", h) if t]
+    return w in tokens
 
 
 def _key_body(pub_key: str) -> str:
@@ -148,10 +161,8 @@ class LiumProvider:
             if gpu_count != want:
                 continue
             gpu_type = _normalize_gpu_type(str(_attr(ex, "gpu_type", "") or ""))
-            if spec.gpu_type and gpu_type.upper() != spec.gpu_type.upper():
-                # Also allow substring match (e.g. "H200 NVL" vs "H200").
-                if spec.gpu_type.upper() not in gpu_type.upper():
-                    continue
+            if spec.gpu_type and not _gpu_type_matches(gpu_type, spec.gpu_type):
+                continue
             price_cents = int(round(float(_attr(ex, "price_per_hour", 0) or 0) * 100))
             if price_cents > spec.max_hourly_cents:
                 continue
@@ -345,5 +356,6 @@ __all__ = [
     "LIUM_DASHBOARD",
     "SSH_KEY_NAME",
     "_normalize_gpu_type",
+    "_gpu_type_matches",
     "_parse_ssh_target",
 ]
