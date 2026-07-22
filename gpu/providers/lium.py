@@ -161,7 +161,9 @@ class LiumProvider:
             if gpu_count != want:
                 continue
             gpu_type = _normalize_gpu_type(str(_attr(ex, "gpu_type", "") or ""))
-            if spec.gpu_type and not _gpu_type_matches(gpu_type, spec.gpu_type):
+            if spec.gpu_type and not _gpu_type_matches(
+                gpu_type, _normalize_gpu_type(spec.gpu_type)
+            ):
                 continue
             price_cents = int(round(float(_attr(ex, "price_per_hour", 0) or 0) * 100))
             if price_cents > spec.max_hourly_cents:

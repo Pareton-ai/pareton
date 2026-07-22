@@ -159,6 +159,18 @@ def test_gpu_type_matches_token_bound():
     assert not _gpu_type_matches("A100", "H100")
 
 
+def test_search_normalizes_vendor_prefix_on_want(
+    provider: LiumProvider, client: FakeClient
+):
+    client.executors = [
+        FakeExecutor("e1", "node", "NVIDIA-H100", 1, 2.0, True),
+        FakeExecutor("e2", "other", "H1000", 1, 1.0, True),
+    ]
+    offers = provider.search(PodSpec(gpu_type="NVIDIA-H100", max_hourly_cents=1000))
+    assert [o.instance_id for o in offers] == ["e1"]
+    assert offers[0].gpu_type == "H100"
+
+
 def test_search_rejects_substring_gpu_false_positive(
     provider: LiumProvider, client: FakeClient
 ):
