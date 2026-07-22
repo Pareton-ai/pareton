@@ -35,6 +35,7 @@ def _add_provision_flags(p: argparse.ArgumentParser) -> None:
         "--provider",
         default="auto",
         choices=["auto", "targon", "shadeform", "lium", "static_ssh"],
+        help="auto → PARETON_GPU_PROVIDER (default lium)",
     )
     p.add_argument("--gpu-type", default=None)
     p.add_argument("--gpu-count", type=int, default=1)

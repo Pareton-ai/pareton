@@ -310,9 +310,41 @@ def test_get_provider_lium(monkeypatch, state_dir: Path, client: FakeClient):
     assert p.name == "lium"
 
 
+def test_resolve_provider_auto_respects_env(monkeypatch):
+    monkeypatch.setenv("PARETON_GPU_PROVIDER", "targon")
+    from gpu.providers import resolve_provider_name
+
+    assert resolve_provider_name("auto") == "targon"
+    assert resolve_provider_name("lium") == "lium"
+
+
+def test_get_provider_auto_uses_lium_not_targon(
+    monkeypatch, state_dir: Path, client: FakeClient
+):
+    monkeypatch.delenv("PARETON_TARGON_API_KEY", raising=False)
+    monkeypatch.setenv("PARETON_LIUM_API_KEY", "secret")
+    monkeypatch.delenv("PARETON_GPU_PROVIDER", raising=False)
+    monkeypatch.setattr(
+        "gpu.providers._env_or_config",
+        lambda env, attr: (
+            "secret"
+            if env == "PARETON_LIUM_API_KEY"
+            else ("lium" if env == "PARETON_GPU_PROVIDER" else "")
+        ),
+    )
+    from gpu.providers import get_provider
+
+    p = get_provider("auto", state_dir=state_dir, client=client)
+    assert p.name == "lium"
+
+
 def test_get_provider_lium_requires_key(monkeypatch):
     monkeypatch.delenv("PARETON_LIUM_API_KEY", raising=False)
     monkeypatch.delenv("LIUM_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "gpu.providers._env_or_config",
+        lambda env, attr: "",
+    )
     from gpu.providers import get_provider
 
     with pytest.raises(ProvisionError, match="PARETON_LIUM_API_KEY"):
