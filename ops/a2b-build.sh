@@ -44,11 +44,13 @@ if ! groups | grep -qw docker; then
   sudo usermod -aG docker "$USER" || true
 fi
 
-run_docker() {
+# Fresh VPS: usermod does not update this shell's groups. Wrap any docker
+# socket use (including python -m builder → docker build/push).
+with_docker_group() {
   if docker info >/dev/null 2>&1; then
-    docker "$@"
+    "$@"
   else
-    sg docker -c "docker $(printf '%q ' "$@")"
+    sg docker -c "$(printf '%q ' "$@")"
   fi
 }
 
@@ -91,14 +93,14 @@ pip install -U pip
 pip install -r requirements.txt
 
 echo "==> docker login ghcr.io"
-echo "$PARETON_GHCR_TOKEN" | run_docker login ghcr.io -u "$PARETON_GHCR_USERNAME" --password-stdin
+echo "$PARETON_GHCR_TOKEN" | with_docker_group docker login ghcr.io -u "$PARETON_GHCR_USERNAME" --password-stdin
 
 echo "==> pull A2 base $BASE"
-run_docker pull "$BASE"
+with_docker_group docker pull "$BASE"
 
 echo "==> A2b build (timeout=${PARETON_BUILD_TIMEOUT_S}s). Walk away."
 echo "    progress: ls -lt /tmp/pareton-build-*/build.log | head -1"
-python -m builder \
+with_docker_group python -m builder \
   --baseline-repo "$VLLM_REPO" \
   --baseline-commit "$VLLM_COMMIT" \
   --base-image "$BASE" \
