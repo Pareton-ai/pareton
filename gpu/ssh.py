@@ -37,6 +37,9 @@ class SshResult:
 
 SshRunner = Callable[..., SshResult]
 
+# Cloud GPU providers recycle ip:port; accept-new rejects a *changed* key.
+_HOST_KEY_CHANGED = "REMOTE HOST IDENTIFICATION HAS CHANGED"
+
 
 def ssh_base_opts(pod: Pod, *, state_dir: Path | None = None) -> list[str]:
     known = _state_dir(state_dir) / "known_hosts"
@@ -54,6 +57,56 @@ def ssh_base_opts(pod: Pod, *, state_dir: Path | None = None) -> list[str]:
         "-o",
         f"UserKnownHostsFile={known}",
     ]
+
+
+def _host_key_spec(pod: Pod) -> str:
+    """OpenSSH known_hosts / ssh-keygen -R host token for this pod."""
+    if int(pod.ssh.port) == 22:
+        return pod.ssh.host
+    return f"[{pod.ssh.host}]:{pod.ssh.port}"
+
+
+def _is_host_key_changed(stderr: str) -> bool:
+    return _HOST_KEY_CHANGED in (stderr or "")
+
+
+def forget_host_key(pod: Pod, *, state_dir: Path | None = None) -> None:
+    """Drop this pod's host key from Pareton's known_hosts only (not ~/.ssh)."""
+    known = _state_dir(state_dir) / "known_hosts"
+    if not known.is_file():
+        return
+    spec = _host_key_spec(pod)
+    try:
+        subprocess.run(
+            ["ssh-keygen", "-R", spec, "-f", str(known)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ssh-keygen -R %s failed: %s", spec, exc)
+
+
+def _run_with_hostkey_retry(
+    runner: SshRunner,
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    pod: Pod,
+    state_dir: Path | None,
+) -> SshResult:
+    result = runner(argv, timeout=timeout)
+    if result.returncode == 0 or not _is_host_key_changed(result.stderr):
+        return result
+    logger.warning(
+        "SSH host key changed for %s:%s (recycled cloud IP?); "
+        "forgetting Pareton known_hosts entry and retrying once",
+        pod.ssh.host,
+        pod.ssh.port,
+    )
+    forget_host_key(pod, state_dir=state_dir)
+    return runner(argv, timeout=timeout)
 
 
 def default_ssh_runner(
@@ -104,7 +157,9 @@ def exec(
         f"{pod.ssh.user}@{pod.ssh.host}",
         remote,
     ]
-    result = runner(argv, timeout=timeout_s)
+    result = _run_with_hostkey_retry(
+        runner, argv, timeout=timeout_s, pod=pod, state_dir=state_dir
+    )
     out = ExecResult(
         exit_code=result.returncode,
         stdout=result.stdout,
@@ -147,7 +202,9 @@ def push(
             f"{pod.ssh.user}@{pod.ssh.host}:{remote_path}",
         ]
     )
-    result = runner(argv, timeout=timeout_s)
+    result = _run_with_hostkey_retry(
+        runner, argv, timeout=timeout_s, pod=pod, state_dir=state_dir
+    )
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip()[-800:]
         raise GpuError(f"rsync push failed: {tail}")
@@ -173,7 +230,9 @@ def pull(
         f"{pod.ssh.user}@{pod.ssh.host}:{remote_path}",
         str(local) + "/",
     ]
-    result = runner(argv, timeout=timeout_s)
+    result = _run_with_hostkey_retry(
+        runner, argv, timeout=timeout_s, pod=pod, state_dir=state_dir
+    )
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip()[-800:]
         raise GpuError(f"rsync pull failed: {tail}")
