@@ -183,8 +183,7 @@ def provision_pod(
 ) -> Pod:
     registry = registry or PodRegistry(state_dir)
     if provider is None:
-        name = spec.provider if spec.provider != "auto" else "targon"
-        provider = get_provider(name, state_dir=registry.state_dir)
+        provider = get_provider(spec.provider, state_dir=registry.state_dir)
 
     ensure_durable_keypair(registry.state_dir)
     pub = read_public_key(registry.state_dir)
@@ -309,8 +308,7 @@ def run_bench_on_pod(
     destroy_failed = False
     pending: BaseException | None = None
     if provider is None:
-        pname = spec.provider if spec.provider != "auto" else "targon"
-        provider = get_provider(pname, state_dir=registry.state_dir)
+        provider = get_provider(spec.provider, state_dir=registry.state_dir)
 
     try:
         pod = provision_pod(
