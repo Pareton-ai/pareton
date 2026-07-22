@@ -69,7 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     if not result.ok:
         print(f"FAIL {result.reason}: {result.evidence}", file=sys.stderr)
         return 1
-    print(result.evidence.get("image_ref") or result.evidence.get("image_tag"))
+    image = result.evidence.get("image_ref") or result.evidence.get("image_tag")
+    log = result.evidence.get("build_log")
+    if log:
+        print(f"build_log={log}", file=sys.stderr)
+    print(image)
     return 0
 
 

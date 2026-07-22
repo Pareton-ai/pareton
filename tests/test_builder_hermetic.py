@@ -51,6 +51,22 @@ def test_dockerfile_whitespace_empty_with_allow_skips_apply():
 
 
 @pytest.mark.unit
+def test_run_logged_tees_and_returns_code(tmp_path, capsys):
+    from builder.hermetic import _run_logged
+
+    log_path = tmp_path / "build.log"
+    rc = _run_logged(
+        ["python3", "-c", "print('hello-build')"],
+        log_path=log_path,
+        timeout=30,
+    )
+    assert rc == 0
+    assert "hello-build" in log_path.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert "hello-build" in err
+
+
+@pytest.mark.unit
 def test_build_rejects_empty_patch_without_allow(tmp_path):
     result = build_engine_image(
         baseline_repo="https://example.com/vllm.git",
