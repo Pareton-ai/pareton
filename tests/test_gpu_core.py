@@ -16,7 +16,13 @@ from gpu.registry import (
     is_expired,
     parse_pod_name,
 )
-from gpu.ssh import REPO_RSYNC_EXCLUDES, SshResult, exec as ssh_exec, push
+from gpu.ssh import (
+    REPO_RSYNC_EXCLUDES,
+    SshResult,
+    _host_key_spec,
+    exec as ssh_exec,
+    push,
+)
 from gpu.types import Pod, SshTarget
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,6 +222,56 @@ def test_ssh_exec_argv_and_nonzero(tmp_path: Path):
     assert "BatchMode=yes" in argv
     assert str(pod.key_path) in argv
     assert any("UserKnownHostsFile=" in a for a in argv)
+
+
+def test_host_key_spec_bracketed_nondefault_port(tmp_path: Path):
+    pod = _pod(tmp_path)
+    pod.ssh = SshTarget(host="91.224.44.222", port=20200, user="root")
+    assert _host_key_spec(pod) == "[91.224.44.222]:20200"
+    pod.ssh = SshTarget(host="91.224.44.222", port=22, user="root")
+    assert _host_key_spec(pod) == "91.224.44.222"
+
+
+def test_ssh_exec_retries_once_on_host_key_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    pod = _pod(tmp_path)
+    pod.ssh = SshTarget(host="91.224.44.222", port=20200, user="root")
+    calls: list[list[str]] = []
+    forgot: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        calls.append(list(cmd))
+        if len(calls) == 1:
+            return SshResult(
+                255,
+                "",
+                "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+                "Host key verification failed.\n",
+            )
+        return SshResult(0, "ok", "")
+
+    def fake_forget(p, *, state_dir=None):
+        forgot.append(_host_key_spec(p))
+
+    monkeypatch.setattr("gpu.ssh.forget_host_key", fake_forget)
+    out = ssh_exec(pod, "true", runner=runner, state_dir=tmp_path / "st")
+    assert out.exit_code == 0
+    assert len(calls) == 2
+    assert forgot == ["[91.224.44.222]:20200"]
+
+
+def test_ssh_exec_does_not_retry_other_failures(tmp_path: Path):
+    pod = _pod(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        calls.append(list(cmd))
+        return SshResult(255, "", "Connection refused")
+
+    with pytest.raises(GpuError, match="Connection refused"):
+        ssh_exec(pod, "true", runner=runner, state_dir=tmp_path / "st")
+    assert len(calls) == 1
 
 
 def test_rsync_excludes_env(tmp_path: Path):
