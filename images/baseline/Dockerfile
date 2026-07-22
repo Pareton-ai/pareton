@@ -3,6 +3,9 @@
 # run with --network=none and `pip install --no-deps --no-build-isolation -e .`.
 # Aligned to vLLM pin ee0da84 (v0.24.0): CUDA 13.0.2, torch 2.11.0, Python 3.12.
 # Pin and publish; put the resulting digest into the campaign manifest.
+#
+# Keep layers lean for GitHub-hosted runners (~disk-limited): install torch
+# alone, drop optional audio/vision wheels and fastapi[standard] extras.
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
@@ -10,8 +13,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
-    UV_SYSTEM_PYTHON=1
+    PIP_NO_CACHE_DIR=1
 
 # Python 3.12 (deadsnakes) + build toolchain + Rust (setuptools-rust).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -37,17 +39,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable \
+        | sh -s -- -y --default-toolchain stable --profile minimal \
     && . "$HOME/.cargo/env" \
-    && rustc --version
+    && rustc --version \
+    && rm -rf /tmp/* /var/tmp/*
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Build-system requires from vLLM pyproject.toml at ee0da84 + CUDA torch wheels.
-# Runtime deps are a practical subset so `import vllm` / api_server can start once
-# the hermetic step does `pip install --no-deps --no-build-isolation -e .`.
+# Build-system requires from vLLM pyproject.toml at ee0da84 (except torch).
 RUN pip install --upgrade pip \
-    && pip install \
+    && pip install --no-cache-dir \
         "cmake>=3.26.1" \
         ninja \
         "packaging>=24.2" \
@@ -56,13 +57,21 @@ RUN pip install --upgrade pip \
         "setuptools-rust>=1.9.0" \
         wheel \
         jinja2 \
-        "torch==2.11.0" \
-        "torchaudio==2.11.0" \
-        "torchvision==0.26.0" \
+    && rm -rf /tmp/* /root/.cache/pip
+
+# Torch alone (pulls CUDA 13 wheels). Separate layer so rebuilds of lighter
+# deps do not re-download ~2GB of NVIDIA packages.
+RUN pip install --no-cache-dir "torch==2.11.0" \
+    && rm -rf /tmp/* /root/.cache/pip
+
+# Minimal runtime deps so `import vllm` / api_server can start after hermetic
+# `pip install --no-deps --no-build-isolation -e .`. No torchaudio/torchvision
+# (not build-system requires; saves GHA disk).
+RUN pip install --no-cache-dir \
         numpy \
         "typing_extensions>=4.10" \
         "pydantic>=2.12.0" \
-        "fastapi[standard]>=0.133.0,<0.137.0" \
+        "fastapi>=0.133.0,<0.137.0" \
         "uvicorn[standard]" \
         sentencepiece \
         "protobuf>=5.29.6" \
@@ -82,7 +91,8 @@ RUN pip install --upgrade pip \
         requests \
         tqdm \
         msgspec \
-        "pyzmq>=25.0.0"
+        "pyzmq>=25.0.0" \
+    && rm -rf /tmp/* /root/.cache/pip
 
 WORKDIR /opt/pareton
 LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
