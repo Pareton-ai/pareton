@@ -76,6 +76,7 @@ BENCH_HF_CACHE_DIR: Path = Path(
 # GPU pod orchestration (WS-C)
 TARGON_API_KEY: str = os.environ.get("PARETON_TARGON_API_KEY", "")
 SHADEFORM_API_KEY: str = os.environ.get("PARETON_SHADEFORM_API_KEY", "")
+LIUM_API_KEY: str = os.environ.get("PARETON_LIUM_API_KEY", "")
 GPU_TTL_HOURS: float = float(os.environ.get("PARETON_GPU_TTL_HOURS", "2"))
 GPU_MAX_HOURLY_CENTS: int = int(os.environ.get("PARETON_GPU_MAX_HOURLY_CENTS", "1000"))
 GPU_STATE_DIR: Path = Path(

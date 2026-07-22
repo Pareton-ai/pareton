@@ -34,7 +34,7 @@ def _add_provision_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--provider",
         default="auto",
-        choices=["auto", "targon", "shadeform", "static_ssh"],
+        choices=["auto", "targon", "shadeform", "lium", "static_ssh"],
     )
     p.add_argument("--gpu-type", default=None)
     p.add_argument("--gpu-count", type=int, default=1)
@@ -143,7 +143,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "volume_uid": e.volume_uid,
             }
         )
-    for pname in ("targon", "shadeform"):
+    for pname in ("targon", "shadeform", "lium"):
         try:
             provider = get_provider(pname, state_dir=registry.state_dir)
         except Exception as exc:  # noqa: BLE001

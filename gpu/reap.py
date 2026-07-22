@@ -31,7 +31,7 @@ def _configured_cloud_providers(
 ) -> list[Any]:
     factory = factory or get_provider
     out = []
-    for name in ("targon", "shadeform"):
+    for name in ("targon", "shadeform", "lium"):
         try:
             out.append(factory(name, state_dir=state_dir))
         except Exception as exc:  # noqa: BLE001 — missing key is fine
