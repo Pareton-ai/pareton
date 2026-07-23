@@ -2,24 +2,46 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
 from campaign.store import (
     derive_bench_verdict_from_events,
     get_campaign,
+    get_public_stats,
     get_submission,
     list_bench_reports,
     list_bench_summaries,
     list_campaigns,
     list_events,
+    list_latest_states,
     list_submissions,
 )
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from storage.s3 import create_presigned_patch_upload
+
+V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
+
+
+class CacheControlMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        path = request.url.path
+        if path == "/health":
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        if (
+            request.method == "GET"
+            and path.startswith("/v1/")
+            and response.status_code == 200
+        ):
+            response.headers["Cache-Control"] = V1_CACHE_CONTROL
+        return response
+
 
 app = FastAPI(
     title="Pareton API",
@@ -29,6 +51,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app.add_middleware(CacheControlMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.API_ALLOWED_ORIGINS,
@@ -76,25 +99,41 @@ def campaign_detail(campaign_id: str):
 
 
 @app.get("/v1/campaigns/{campaign_id}/submissions")
-def campaign_submissions(campaign_id: str):
+def campaign_submissions(
+    campaign_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
     c = get_campaign(campaign_id)
     if c is None:
         raise HTTPException(status_code=404, detail="campaign not found")
-    rows = list_submissions(campaign_id)
-    summaries = list_bench_summaries(campaign_id)
+    page = list_submissions(campaign_id, limit=limit, offset=offset)
+    rows = page["items"]
+    ids = [r["id"] for r in rows]
+    summaries = list_bench_summaries(campaign_id, submission_ids=ids)
+    states = list_latest_states(ids)
     return {
         "campaign_id": campaign_id,
+        "total": page["total"],
+        "limit": limit,
+        "offset": offset,
         "submissions": [
             {
                 **{
                     k: (str(v) if k in ("id", "campaign_id") else v)
                     for k, v in r.items()
                 },
+                "latest_state": states.get(str(r["id"])),
                 "bench_verdict": summaries.get(str(r["id"])),
             }
             for r in rows
         ],
     }
+
+
+@app.get("/v1/stats")
+def stats():
+    return get_public_stats()
 
 
 @app.get("/v1/submissions/{patch_hash}")
