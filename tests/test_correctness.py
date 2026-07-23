@@ -173,7 +173,30 @@ def test_empty_baseline_continuation_is_engine_error(
 
 def test_probe_logprob_capability_ok():
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as eng:
-        probe_logprob_capability(eng.base_url)
+        resp = probe_logprob_capability(eng.base_url)
+        assert "choices" in resp
+
+
+def test_run_correctness_writes_response_shape(tmp_path: Path):
+    from bench.correctness import SHAPE_EVIDENCE_FILENAME
+
+    prompts = [PromptCase(id="a", prompt="Hello "), PromptCase(id="b", prompt="Hi ")]
+    evidence = tmp_path / "correctness"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base:
+        with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand:
+            run_correctness(
+                base.base_url,
+                cand.base_url,
+                prompts=prompts,
+                cfg=_cfg(),
+                task_id="t",
+                evidence_dir=evidence,
+            )
+    shape_path = evidence / SHAPE_EVIDENCE_FILENAME
+    assert shape_path.is_file()
+    payload = json.loads(shape_path.read_text(encoding="utf-8"))
+    assert "fingerprint" in payload
+    assert "choices" in payload["fingerprint"]
 
 
 def test_post_completion_invalid_json_is_engine_error(monkeypatch: pytest.MonkeyPatch):

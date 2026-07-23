@@ -5,8 +5,9 @@ test TTFT/ITL deterministically. Tampered mode deliberately offsets logprobs
 so Module A can verify cheating is caught.
 
 The checked-in fixture at fixtures/bench/vllm_completion_response_shape.json
-documents the expected response shape; re-validate against a real vLLM server
-in WS-B7.
+documents the expected response shape. B7 captures a real fingerprint under
+evidence/correctness/completion_response_shape.json; bench.calibrate analyze
+diffs it against the fixture.
 """
 
 from __future__ import annotations
