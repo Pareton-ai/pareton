@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 _VLLM_API_SERVER_ENTRYPOINT = (
     'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]'
 )
+_CACHE_ID_SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
 def _progress(msg: str) -> None:
@@ -35,43 +39,83 @@ def _patch_is_empty(patch_bytes: bytes) -> bool:
     return not patch_bytes.strip()
 
 
+def _ccache_mount_id(baseline_commit: str) -> str:
+    cleaned = _CACHE_ID_SAFE.sub("-", (baseline_commit or "unknown").strip())[:64]
+    return f"pareton-ccache-{cleaned or 'unknown'}"
+
+
 def dockerfile_for_patch(
     *,
     allow_empty_patch: bool = False,
     patch_bytes: bytes | None = None,
+    baseline_commit: str = "unknown",
+    max_jobs: int | None = None,
+    torch_cuda_arch_list: str | None = None,
 ) -> str:
     """Generate the hermetic engine Dockerfile text (unit-testable, no Docker).
 
     When ``allow_empty_patch`` is True and ``patch_bytes`` is empty/whitespace,
     skip ``git apply``. Miner builds must leave ``allow_empty_patch`` False.
+
+    Parallelism uses ARG (build-time) so job count is not a permanent image ENV
+    fingerprint; ARG values are visible to RUN. NVCC_THREADS stays 1 (ENV).
     """
+    jobs = int(config.BUILD_MAX_JOBS if max_jobs is None else max_jobs)
+    if jobs < 1:
+        raise ValueError(f"BUILD_MAX_JOBS must be >= 1, got {jobs}")
+    arch = (
+        config.TORCH_CUDA_ARCH_LIST
+        if torch_cuda_arch_list is None
+        else str(torch_cuda_arch_list).strip()
+    )
+
     empty = patch_bytes is not None and _patch_is_empty(patch_bytes)
     skip_apply = bool(allow_empty_patch and empty)
 
-    # Cap CUDA/nvcc parallelism — cicc alone can use 6–12GB; -j=N OOMs 32GB boxes.
+    # Cap CUDA/nvcc: cicc alone can use 6–12GB; NVCC_THREADS stays 1.
     lines = [
         "ARG BASE_IMAGE",
         "FROM ${BASE_IMAGE}",
-        "ENV MAX_JOBS=1",
-        "ENV CMAKE_BUILD_PARALLEL_LEVEL=1",
+        f"ARG MAX_JOBS={jobs}",
+        f"ARG CMAKE_BUILD_PARALLEL_LEVEL={jobs}",
         "ENV NVCC_THREADS=1",
-        "WORKDIR /src",
-        "COPY baseline/ /src/",
-        "COPY submission.diff /tmp/submission.diff",
+        "ENV CCACHE_DIR=/root/.ccache",
     ]
+    if arch:
+        lines.append(f"ENV TORCH_CUDA_ARCH_LIST={json.dumps(arch)}")
+    lines.extend(
+        [
+            "WORKDIR /src",
+            "COPY baseline/ /src/",
+            "COPY submission.diff /tmp/submission.diff",
+        ]
+    )
+
+    setup_ccache = (
+        "if command -v ccache >/dev/null 2>&1; then "
+        "export CMAKE_C_COMPILER_LAUNCHER=ccache "
+        "CMAKE_CXX_COMPILER_LAUNCHER=ccache "
+        "CMAKE_CUDA_COMPILER_LAUNCHER=ccache; "
+        'else echo "pareton-builder: ccache missing; continuing without"; fi'
+    )
     if skip_apply:
-        run_steps = [
+        body_steps = [
             "pip install --no-deps --no-build-isolation -e .",
             "rm -rf /src/.git",
         ]
     else:
-        run_steps = [
+        body_steps = [
             "git apply --whitespace=nowarn /tmp/submission.diff",
             "pip install --no-deps --no-build-isolation -e .",
             "rm -rf /src/.git",
         ]
-    # Single RUN so apply failure / install failure fail the build.
-    lines.append("RUN " + " \\\n    && ".join(run_steps))
+    run_parts = [setup_ccache, *body_steps]
+    cache_id = _ccache_mount_id(baseline_commit)
+    # No # syntax= line — BuildKit builtin frontend supports RUN --mount.
+    lines.append(
+        f"RUN --mount=type=cache,id={cache_id},target=/root/.ccache,sharing=locked "
+        + " \\\n    && ".join(run_parts)
+    )
     lines.append(_VLLM_API_SERVER_ENTRYPOINT)
     lines.append("")
     return "\n".join(lines)
@@ -103,6 +147,7 @@ def _run_logged(
     log_path: Path,
     timeout: float,
     cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> int:
     """Run cmd, tee stdout/stderr to log_path and stderr, enforce timeout."""
     with log_path.open("a", encoding="utf-8") as logf:
@@ -115,6 +160,7 @@ def _run_logged(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
         )
         assert proc.stdout is not None
 
@@ -169,12 +215,15 @@ def build_engine_image(
     ctx.mkdir(parents=True)
     repo_dir = ctx / "baseline"
     (ctx / "submission.diff").write_bytes(patch_bytes)
-    (ctx / "Dockerfile").write_text(
-        dockerfile_for_patch(
+    try:
+        dockerfile = dockerfile_for_patch(
             allow_empty_patch=allow_empty_patch,
             patch_bytes=patch_bytes,
+            baseline_commit=baseline_commit,
         )
-    )
+    except ValueError as exc:
+        return GateResult.reject("build_config_invalid", error=str(exc))
+    (ctx / "Dockerfile").write_text(dockerfile)
 
     image_ref = image_ref_override or engine_image_ref(patch_hash)
     log_path = root / "build.log"
@@ -182,6 +231,10 @@ def build_engine_image(
     _progress(f"work_root={root}")
     _progress(f"build_log={log_path}")
     _progress(f"image_ref={image_ref} base_image={base_image}")
+    _progress(
+        f"build_max_jobs={config.BUILD_MAX_JOBS} "
+        f"torch_cuda_arch_list={config.TORCH_CUDA_ARCH_LIST or '(default)'}"
+    )
 
     try:
         _progress("step 1/5 clone baseline repo")
@@ -235,6 +288,10 @@ def build_engine_image(
             *([] if allow_empty_patch else ["--network=none"]),
             "--build-arg",
             f"BASE_IMAGE={base_image}",
+            "--build-arg",
+            f"MAX_JOBS={config.BUILD_MAX_JOBS}",
+            "--build-arg",
+            f"CMAKE_BUILD_PARALLEL_LEVEL={config.BUILD_MAX_JOBS}",
             "-t",
             image_ref,
             str(ctx),
@@ -243,7 +300,13 @@ def build_engine_image(
             f"step 3/5 docker build (timeout={config.BUILD_TIMEOUT_S}s); "
             f"tail -f {log_path}"
         )
-        rc = _run_logged(build_cmd, log_path=log_path, timeout=config.BUILD_TIMEOUT_S)
+        build_env = {**os.environ, "DOCKER_BUILDKIT": "1"}
+        rc = _run_logged(
+            build_cmd,
+            log_path=log_path,
+            timeout=config.BUILD_TIMEOUT_S,
+            env=build_env,
+        )
         if rc != 0:
             tail = log_path.read_text(encoding="utf-8")[-4000:]
             return GateResult.reject(
@@ -287,6 +350,12 @@ def build_engine_image(
             build_log=str(log_path),
         )
     except subprocess.TimeoutExpired as exc:
+        fail_line = f"FAIL build_timeout after {config.BUILD_TIMEOUT_S}s\n"
+        try:
+            with log_path.open("a", encoding="utf-8") as logf:
+                logf.write(fail_line)
+        except OSError:
+            pass
         _progress(f"FAIL build_timeout after {config.BUILD_TIMEOUT_S}s; see {log_path}")
         return GateResult.reject("build_timeout", error=str(exc))
     except Exception as exc:
