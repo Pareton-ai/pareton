@@ -438,21 +438,77 @@ def get_submission(patch_hash: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def list_submissions(campaign_id: UUID | str) -> list[dict[str, Any]]:
+KNOWN_CAMPAIGN_STATUSES: tuple[str, ...] = ("draft", "open", "closed")
+KNOWN_SUBMISSION_STATES: tuple[str, ...] = (
+    "committed",
+    "fetched",
+    "verified",
+    "applied",
+    "surface_ok",
+    "built",
+    "correct",
+    "screened",
+    "benched",
+    "rejected",
+)
+
+
+def list_submissions(
+    campaign_id: UUID | str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Paginated submissions for a campaign.
+
+    Ordered by ``committed_at DESC, id DESC``. Returns
+    ``{"total": int, "items": [row, ...]}``.
+    """
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM submissions WHERE campaign_id = %s",
+                (str(campaign_id),),
+            )
+            total = int(cur.fetchone()["n"])
             cur.execute(
                 """
                 SELECT id, campaign_id, patch_hash, hotkey, baseline_commit,
                        retrieval_url, commit_block, committed_at, engine_image_ref
                 FROM submissions
                 WHERE campaign_id = %s
-                ORDER BY committed_at DESC
+                ORDER BY committed_at DESC, id DESC
+                LIMIT %s OFFSET %s
                 """,
-                (str(campaign_id),),
+                (str(campaign_id), int(limit), int(offset)),
             )
             rows = cur.fetchall()
-    return [dict(r) for r in rows]
+    return {"total": total, "items": [dict(r) for r in rows]}
+
+
+def list_latest_states(
+    submission_ids: list[UUID | str],
+) -> dict[str, str | None]:
+    """Map submission_id -> latest event state (created_at DESC, id DESC)."""
+    if not submission_ids:
+        return {}
+    ids = [str(s) for s in submission_ids]
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (submission_id) submission_id, state
+                FROM submission_events
+                WHERE submission_id = ANY(%s::uuid[])
+                ORDER BY submission_id, created_at DESC, id DESC
+                """,
+                (ids,),
+            )
+            rows = cur.fetchall()
+    out: dict[str, str | None] = {sid: None for sid in ids}
+    for r in rows:
+        out[str(r["submission_id"])] = str(r["state"])
+    return out
 
 
 def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
@@ -565,20 +621,42 @@ def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None
     return terminal
 
 
-def list_bench_summaries(campaign_id: UUID | str) -> dict[str, str | None]:
-    """Map submission_id -> event-sourced bench_verdict for campaign list API."""
+def list_bench_summaries(
+    campaign_id: UUID | str,
+    submission_ids: list[UUID | str] | None = None,
+) -> dict[str, str | None]:
+    """Map submission_id -> event-sourced bench_verdict for campaign list API.
+
+    When ``submission_ids`` is set, only those rows are loaded (page-scoped).
+    """
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT s.id AS submission_id, e.state, e.detail, e.created_at
-                FROM submissions s
-                LEFT JOIN submission_events e ON e.submission_id = s.id
-                WHERE s.campaign_id = %s
-                ORDER BY s.id, e.created_at ASC NULLS LAST
-                """,
-                (str(campaign_id),),
-            )
+            if submission_ids is not None:
+                ids = [str(s) for s in submission_ids]
+                if not ids:
+                    return {}
+                cur.execute(
+                    """
+                    SELECT s.id AS submission_id, e.state, e.detail, e.created_at
+                    FROM submissions s
+                    LEFT JOIN submission_events e ON e.submission_id = s.id
+                    WHERE s.campaign_id = %s
+                      AND s.id = ANY(%s::uuid[])
+                    ORDER BY s.id, e.created_at ASC NULLS LAST
+                    """,
+                    (str(campaign_id), ids),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT s.id AS submission_id, e.state, e.detail, e.created_at
+                    FROM submissions s
+                    LEFT JOIN submission_events e ON e.submission_id = s.id
+                    WHERE s.campaign_id = %s
+                    ORDER BY s.id, e.created_at ASC NULLS LAST
+                    """,
+                    (str(campaign_id),),
+                )
             rows = cur.fetchall()
     by_sub: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
@@ -591,6 +669,55 @@ def list_bench_summaries(campaign_id: UUID | str) -> dict[str, str | None]:
             detail = json.loads(detail)
         by_sub[sid].append({"state": r["state"], "detail": detail or {}})
     return {sid: derive_bench_verdict_from_events(evts) for sid, evts in by_sub.items()}
+
+
+def get_public_stats() -> dict[str, Any]:
+    """Campaign status counts + submission counts by latest event state."""
+    by_status = {s: 0 for s in KNOWN_CAMPAIGN_STATUSES}
+    by_latest_state = {s: 0 for s in KNOWN_SUBMISSION_STATES}
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT status, COUNT(*) AS n
+                FROM campaigns
+                GROUP BY status
+                """
+            )
+            for r in cur.fetchall():
+                status = str(r["status"])
+                if status in by_status:
+                    by_status[status] = int(r["n"])
+            cur.execute("SELECT COUNT(*) AS n FROM campaigns")
+            campaigns_total = int(cur.fetchone()["n"])
+            cur.execute("SELECT COUNT(*) AS n FROM submissions")
+            submissions_total = int(cur.fetchone()["n"])
+            cur.execute(
+                """
+                SELECT latest.state AS latest_state, COUNT(*) AS n
+                FROM submissions s
+                LEFT JOIN LATERAL (
+                    SELECT state
+                    FROM submission_events e
+                    WHERE e.submission_id = s.id
+                    ORDER BY e.created_at DESC, e.id DESC
+                    LIMIT 1
+                ) latest ON true
+                WHERE latest.state IS NOT NULL
+                GROUP BY latest.state
+                """
+            )
+            for r in cur.fetchall():
+                state = str(r["latest_state"])
+                if state in by_latest_state:
+                    by_latest_state[state] = int(r["n"])
+    return {
+        "campaigns": {"total": campaigns_total, "by_status": by_status},
+        "submissions": {
+            "total": submissions_total,
+            "by_latest_state": by_latest_state,
+        },
+    }
 
 
 def derive_bench_verdict(reports: list[dict[str, Any]]) -> str | None:
