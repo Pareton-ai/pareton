@@ -276,6 +276,7 @@ def run_bench_on_pod(
     request_path: Path,
     output_dir: Path,
     mock_engine: bool = False,
+    repetitions: int = 1,
     registry: PodRegistry | None = None,
     provider=None,
     runner: SshRunner | None = None,
@@ -284,9 +285,15 @@ def run_bench_on_pod(
 ) -> int:
     """Full provision -> bench -> tear down.
 
+    When repetitions > 1, runs the remote harness sequentially into distinct
+    run-001..run-NNN directories after a single provision/bootstrap/image pull.
+
     Returns the bench exit code, or EXIT_DESTROY_FAILED (75) if teardown failed
     (pod/volume may still be billing; takes precedence over the bench code).
     """
+    if repetitions < 1:
+        raise ProvisionError(f"repetitions must be >= 1, got {repetitions}")
+
     registry = registry or PodRegistry(state_dir)
     repo_root = (repo_root or _repo_root()).resolve()
     request_path = Path(request_path).resolve()
@@ -378,38 +385,50 @@ def run_bench_on_pod(
             )
 
         mock_flag = " --mock-engine" if mock_engine else ""
-        bench_cmd = (
-            f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
-            f"export PARETON_BENCH_CODE_SHA={code_sha} && "
-            f"mkdir -p {REMOTE_OUT} && "
-            f"{REMOTE_VENV}/bin/python -m bench "
-            f"--request {REMOTE_REQUEST} --output-dir {REMOTE_OUT}{mock_flag}"
-        )
-        result = ssh_exec(
-            pod,
-            bench_cmd,
-            timeout_s=float(config.BENCH_TIMEOUT_S),
-            runner=runner,
-            state_dir=registry.state_dir,
-            check=False,
-        )
-        if result.stdout:
-            print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-        if result.stderr:
-            print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
+        for i in range(1, repetitions + 1):
+            if repetitions == 1:
+                remote_out = REMOTE_OUT
+                local_out = output_dir
+            else:
+                run_name = f"run-{i:03d}"
+                remote_out = f"{REMOTE_OUT}/{run_name}"
+                local_out = output_dir / run_name
+                local_out.mkdir(parents=True, exist_ok=True)
 
-        try:
-            pull(
+            bench_cmd = (
+                f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
+                f"export PARETON_BENCH_CODE_SHA={code_sha} && "
+                f"mkdir -p {remote_out} && "
+                f"{REMOTE_VENV}/bin/python -m bench "
+                f"--request {REMOTE_REQUEST} --output-dir {remote_out}{mock_flag}"
+            )
+            result = ssh_exec(
                 pod,
-                f"{REMOTE_OUT}/",
-                output_dir,
+                bench_cmd,
+                timeout_s=float(config.BENCH_TIMEOUT_S),
                 runner=runner,
                 state_dir=registry.state_dir,
+                check=False,
             )
-        except GpuError as exc:
-            logger.warning("failed to pull bench output: %s", exc)
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.stderr:
+                print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
 
-        exit_code = int(result.exit_code)
+            try:
+                pull(
+                    pod,
+                    f"{remote_out}/",
+                    local_out,
+                    runner=runner,
+                    state_dir=registry.state_dir,
+                )
+            except GpuError as exc:
+                logger.warning("failed to pull bench output: %s", exc)
+
+            exit_code = int(result.exit_code)
+            if exit_code != 0:
+                break
     except BaseException as exc:
         pending = exc
     finally:

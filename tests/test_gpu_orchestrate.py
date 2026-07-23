@@ -651,3 +651,148 @@ def test_bootstrap_script_verify_first_no_token():
     assert script.index("systemctl restart docker") < script.index(
         "chmod 666 /var/run/docker.sock"
     )
+
+
+def test_orchestrate_repetitions_one_pod_five_runs(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    bench_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        joined = " ".join(cmd)
+        if "python -m bench" in joined:
+            bench_cmds.append(joined)
+            return SshResult(0, "ok\n", "")
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "deadbeef")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+    out = tmp_path / "out"
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True, ttl_hours=1),
+        request_path=req_path,
+        output_dir=out,
+        mock_engine=True,
+        repetitions=5,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == 0
+    assert provider.provision_calls == 1
+    assert len(provider.destroy_calls) == 1
+    assert len(bench_cmds) == 5
+    for i, cmd in enumerate(bench_cmds, start=1):
+        assert f"/opt/pareton/out/run-{i:03d}" in cmd
+        assert (out / f"run-{i:03d}").is_dir()
+    assert (out / "bench_request.remote.json").is_file()
+
+
+def test_orchestrate_repetitions_fail_fast_still_destroys(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    n_bench = 0
+
+    def runner(cmd, *, timeout, input_text=None):
+        nonlocal n_bench
+        joined = " ".join(cmd)
+        if "python -m bench" in joined:
+            n_bench += 1
+            if n_bench == 2:
+                return SshResult(3, "fail\n", "")
+            return SshResult(0, "ok\n", "")
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=tmp_path / "out",
+        mock_engine=True,
+        repetitions=5,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == 3
+    assert n_bench == 2
+    assert provider.destroy_calls
+
+
+def test_orchestrate_repetitions_default_one_flat_layout(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    bench_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        joined = " ".join(cmd)
+        if "python -m bench" in joined:
+            bench_cmds.append(joined)
+            return SshResult(0, "ok\n", "")
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+    out = tmp_path / "out"
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=out,
+        mock_engine=True,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == 0
+    assert len(bench_cmds) == 1
+    assert "/opt/pareton/out/run-" not in bench_cmds[0]
+    assert "--output-dir /opt/pareton/out" in bench_cmds[0]
+    assert not (out / "run-001").exists()
+
+
+def test_orchestrate_repetitions_invalid(tmp_path: Path):
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+    with pytest.raises(ProvisionError, match="repetitions"):
+        run_bench_on_pod(
+            PodSpec(provider="targon", force=True),
+            request_path=req_path,
+            output_dir=tmp_path / "out",
+            mock_engine=True,
+            repetitions=0,
+            provider=FakeProvider(),
+            state_dir=tmp_path / "st",
+        )

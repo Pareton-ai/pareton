@@ -192,6 +192,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
             request_path=Path(args.request),
             output_dir=Path(args.output_dir),
             mock_engine=bool(args.mock_engine),
+            repetitions=int(args.repetitions),
         )
     except (ProvisionError, GpuError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -243,6 +244,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.add_argument("--request", required=True, type=Path)
     p_bench.add_argument("--output-dir", required=True, type=Path)
     p_bench.add_argument("--mock-engine", action="store_true")
+    p_bench.add_argument(
+        "--repetitions",
+        type=int,
+        default=1,
+        help="Harness runs on one pod (default 1); writes run-001.. when >1",
+    )
     p_bench.set_defaults(func=cmd_bench)
 
     p_exec = sub.add_parser("exec", help="Run a command on a registry pod")
