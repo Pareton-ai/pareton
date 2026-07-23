@@ -33,7 +33,7 @@ from gpu.registry import (
     encode_pod_name,
     parse_pod_name,
 )
-from gpu.ssh import SshRunner, exec as ssh_exec, pull, push
+from gpu.ssh import REPO_RSYNC_EXCLUDES, SshRunner, exec as ssh_exec, pull, push
 from gpu.types import Pod, PodSpec
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,31 @@ REMOTE_TRACE_DIR = f"{REMOTE_REPO}/.pareton-traces"
 # Teardown failed (pod/volume may still be billing). Distinct from CLI/preflight 2
 # and from typical bench failure codes so CI can alert without log scraping.
 EXIT_DESTROY_FAILED = 75
+
+
+def _path_excluded_from_repo_rsync(rel: Path) -> bool:
+    """True if rel (under repo root) would not be shipped by bootstrap rsync."""
+    parts = rel.parts
+    name = parts[-1] if parts else ""
+    for pattern in REPO_RSYNC_EXCLUDES:
+        if pattern.endswith("/"):
+            top = pattern.rstrip("/")
+            if parts and parts[0] == top:
+                return True
+        elif pattern.startswith("*") and name and Path(name).match(pattern):
+            return True
+        elif pattern in parts or (parts and parts[0] == pattern):
+            return True
+    return False
+
+
+def _trace_needs_explicit_push(trace_path: Path, repo_root: Path) -> bool:
+    """Push when outside the repo or under an rsync-excluded prefix (e.g. out/)."""
+    try:
+        rel = trace_path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return True
+    return _path_excluded_from_repo_rsync(rel)
 
 
 def _repo_root() -> Path:
@@ -328,14 +353,9 @@ def run_bench_on_pod(
             state_dir=registry.state_dir,
         )
 
-        # Prepare remote request (+ optional out-of-repo trace).
+        # Prepare remote request (+ push trace when bootstrap rsync would omit it).
         remote_req = json.loads(request_path.read_text(encoding="utf-8"))
-        try:
-            trace_path.relative_to(repo_root)
-            in_repo = True
-        except ValueError:
-            in_repo = False
-        if not in_repo:
+        if _trace_needs_explicit_push(trace_path, repo_root):
             ssh_exec(
                 pod,
                 f"mkdir -p {REMOTE_TRACE_DIR}",
@@ -354,11 +374,8 @@ def run_bench_on_pod(
             )
             remote_req["workload_trace"]["path"] = remote_trace
         else:
-            try:
-                rel = trace_path.relative_to(repo_root).as_posix()
-                remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
-            except ValueError:
-                pass
+            rel = trace_path.resolve().relative_to(repo_root.resolve()).as_posix()
+            remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
 
         local_remote_req = output_dir / "bench_request.remote.json"
         local_remote_req.write_text(

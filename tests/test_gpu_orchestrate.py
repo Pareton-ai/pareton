@@ -416,6 +416,58 @@ def test_trace_outside_repo_rewritten(tmp_path: Path, monkeypatch):
     assert remote_req_holder["workload_trace"]["path"].endswith("external_trace.json")
 
 
+def test_orchestrate_pushes_trace_under_excluded_out(tmp_path: Path, monkeypatch):
+    """B7 prepare writes traces under out/; bootstrap rsync excludes out/."""
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    pushed: list[str] = []
+    remote_req_holder: dict[str, Any] = {}
+
+    def capturing_push(pod, local, remote, **kwargs):
+        pushed.append(str(remote))
+        p = Path(local)
+        if p.name.endswith(".json") and "bench_request" in p.name:
+            remote_req_holder.update(json.loads(p.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", capturing_push)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "gpu.orchestrate.ssh_exec",
+        lambda *a, **k: type("R", (), {"exit_code": 0, "stdout": "", "stderr": ""})(),
+    )
+
+    fake_repo = tmp_path / "repo"
+    out_b7 = fake_repo / "out" / "b7" / "run"
+    out_b7.mkdir(parents=True)
+    from bench.validate import sha256_file
+
+    ext_trace = out_b7 / "workload_trace.json"
+    ext_trace.write_bytes(SAMPLE_TRACE.read_bytes())
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(ext_trace.resolve())
+    req["workload_trace"]["sha256"] = sha256_file(ext_trace)
+    req_path = out_b7 / "bench_request.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=tmp_path / "gpu-out",
+        mock_engine=True,
+        provider=provider,
+        state_dir=tmp_path / "st",
+        repo_root=fake_repo,
+    )
+    assert any(".pareton-traces/workload_trace.json" in p for p in pushed)
+    assert remote_req_holder["workload_trace"]["path"].endswith(
+        ".pareton-traces/workload_trace.json"
+    )
+    assert "/out/" not in remote_req_holder["workload_trace"]["path"]
+
+
 def test_single_flight_and_force(tmp_path: Path):
     ensure_durable_keypair(tmp_path / "st")
     reg = PodRegistry(tmp_path / "st")
