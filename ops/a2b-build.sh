@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Overnight A2b: hermetic empty-patch → ghcr.io/pareton-ai/pareton-engine:baseline
 #
-# Usage (on a ≥32GB amd64 box):
+# Usage (on a ≥32GB amd64 box — this recipe targets 4 vCPU / 32 GB):
+#   # one-time: 64G swapfile (absorbs cicc peaks)
+#   sudo fallocate -l 64G /swapfile && sudo chmod 600 /swapfile \
+#     && sudo mkswap /swapfile && sudo swapon /swapfile
 #   export PARETON_GHCR_USERNAME='your-github-user'
 #   export PARETON_GHCR_TOKEN='ghp_…'   # write:packages
+#   # Real-box defaults (arch pin does most of the speedup; keep jobs modest):
+#   export PARETON_BUILD_MAX_JOBS=2          # ≤ vCPUs and ≤ RAM/3GB on bigger hosts
+#   export PARETON_TORCH_CUDA_ARCH_LIST=9.0  # match bench SKU
 #   # optional if repo is private:
 #   export PARETON_GIT_URL='https://x-access-token:${PARETON_GHCR_TOKEN}@github.com/Pareton-ai/pareton.git'
 #   curl -fsSL https://raw.githubusercontent.com/Pareton-ai/pareton/main/ops/a2b-build.sh -o a2b-build.sh
@@ -13,6 +19,7 @@
 #
 # Detach: Ctrl-b d. Reattach: tmux attach -t a2b
 # Logs: /tmp/pareton-build-*/build.log
+# Do NOT set MAX_JOBS=16 on 32GB — cicc peaks 6–12GB/job and will OOM.
 set -euo pipefail
 
 REPO_DIR="${PARETON_REPO_DIR:-$HOME/pareton}"
@@ -21,8 +28,10 @@ BASE="${BASE:-ghcr.io/pareton-ai/pareton-baseline@sha256:72b601e4314fa3c5e522e81
 ENGINE_REF="${ENGINE_REF:-ghcr.io/pareton-ai/pareton-engine:baseline}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 VLLM_COMMIT="${VLLM_COMMIT:-ee0da84ab9e04ac7610e28580af62c365e898389}"
-# 32GB + MAX_JOBS=1 often needs 4–8h; default CLI timeout is 7200s.
+# 32GB + modest jobs often needs several hours; default CLI timeout is 7200s.
 export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-28800}"
+export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-2}"
+export PARETON_TORCH_CUDA_ARCH_LIST="${PARETON_TORCH_CUDA_ARCH_LIST:-9.0}"
 
 need_env() {
   local name="$1"
@@ -35,9 +44,9 @@ need_env() {
 need_env PARETON_GHCR_USERNAME
 need_env PARETON_GHCR_TOKEN
 
-echo "==> apt packages"
+echo "==> apt packages (docker.io + docker-buildx for BuildKit)"
 sudo apt-get update
-sudo apt-get install -y docker.io git python3-venv python3-pip
+sudo apt-get install -y docker.io docker-buildx git python3-venv python3-pip
 
 if ! groups | grep -qw docker; then
   echo "==> adding $USER to docker group (active for this script via sg)"
@@ -63,27 +72,6 @@ else
 fi
 cd "$REPO_DIR"
 
-echo "==> ensure MAX_JOBS=1 in hermetic Dockerfile (noop if already on main)"
-python3 - <<'PY'
-from pathlib import Path
-
-p = Path("builder/hermetic.py")
-t = p.read_text()
-if "ENV MAX_JOBS=" in t:
-    print("MAX_JOBS already present")
-    raise SystemExit(0)
-needle = '        "FROM ${BASE_IMAGE}",\n        "WORKDIR /src",'
-insert = """        "FROM ${BASE_IMAGE}",
-        "ENV MAX_JOBS=1",
-        "ENV CMAKE_BUILD_PARALLEL_LEVEL=1",
-        "ENV NVCC_THREADS=1",
-        "WORKDIR /src","""
-if needle not in t:
-    raise SystemExit("FAIL: unexpected hermetic.py shape; patch manually")
-p.write_text(t.replace(needle, insert, 1))
-print("ok" if "ENV MAX_JOBS=" in p.read_text() else "FAIL")
-PY
-
 echo "==> venv + deps"
 python3 -m venv .venv
 # shellcheck disable=SC1091
@@ -97,7 +85,9 @@ echo "$PARETON_GHCR_TOKEN" | with_docker_group docker login ghcr.io -u "$PARETON
 echo "==> pull A2 base $BASE"
 with_docker_group docker pull "$BASE"
 
-echo "==> A2b build (timeout=${PARETON_BUILD_TIMEOUT_S}s). Walk away."
+echo "==> A2b build (timeout=${PARETON_BUILD_TIMEOUT_S}s" \
+  "max_jobs=${PARETON_BUILD_MAX_JOBS}" \
+  "cuda_arch=${PARETON_TORCH_CUDA_ARCH_LIST}). Walk away."
 echo "    progress: ls -lt /tmp/pareton-build-*/build.log | head -1"
 with_docker_group python -m builder \
   --baseline-repo "$VLLM_REPO" \

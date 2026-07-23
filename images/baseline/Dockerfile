@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ninja-build \
         cmake \
+        ccache \
         pkg-config \
         libssl-dev \
     && add-apt-repository -y ppa:deadsnakes/ppa \
