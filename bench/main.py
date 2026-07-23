@@ -281,7 +281,11 @@ class _EngineProvider:
             try:
                 with self._docker_phase(net, "baseline") as base:
                     phase = collect_baseline_correctness(
-                        base.base_url, prompts=prompts, cfg=cfg, task_id=task_id
+                        base.base_url,
+                        prompts=prompts,
+                        cfg=cfg,
+                        task_id=task_id,
+                        evidence_dir=evidence_dir,
                     )
                     self.baseline_digest = base.image_digest
             except EngineError as exc:

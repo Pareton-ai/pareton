@@ -33,7 +33,7 @@ from gpu.registry import (
     encode_pod_name,
     parse_pod_name,
 )
-from gpu.ssh import SshRunner, exec as ssh_exec, pull, push
+from gpu.ssh import REPO_RSYNC_EXCLUDES, SshRunner, exec as ssh_exec, pull, push
 from gpu.types import Pod, PodSpec
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,31 @@ REMOTE_TRACE_DIR = f"{REMOTE_REPO}/.pareton-traces"
 # Teardown failed (pod/volume may still be billing). Distinct from CLI/preflight 2
 # and from typical bench failure codes so CI can alert without log scraping.
 EXIT_DESTROY_FAILED = 75
+
+
+def _path_excluded_from_repo_rsync(rel: Path) -> bool:
+    """True if rel (under repo root) would not be shipped by bootstrap rsync."""
+    parts = rel.parts
+    name = parts[-1] if parts else ""
+    for pattern in REPO_RSYNC_EXCLUDES:
+        if pattern.endswith("/"):
+            top = pattern.rstrip("/")
+            if parts and parts[0] == top:
+                return True
+        elif pattern.startswith("*") and name and Path(name).match(pattern):
+            return True
+        elif pattern in parts or (parts and parts[0] == pattern):
+            return True
+    return False
+
+
+def _trace_needs_explicit_push(trace_path: Path, repo_root: Path) -> bool:
+    """Push when outside the repo or under an rsync-excluded prefix (e.g. out/)."""
+    try:
+        rel = trace_path.resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        return True
+    return _path_excluded_from_repo_rsync(rel)
 
 
 def _repo_root() -> Path:
@@ -276,6 +301,7 @@ def run_bench_on_pod(
     request_path: Path,
     output_dir: Path,
     mock_engine: bool = False,
+    repetitions: int = 1,
     registry: PodRegistry | None = None,
     provider=None,
     runner: SshRunner | None = None,
@@ -284,9 +310,15 @@ def run_bench_on_pod(
 ) -> int:
     """Full provision -> bench -> tear down.
 
+    When repetitions > 1, runs the remote harness sequentially into distinct
+    run-001..run-NNN directories after a single provision/bootstrap/image pull.
+
     Returns the bench exit code, or EXIT_DESTROY_FAILED (75) if teardown failed
     (pod/volume may still be billing; takes precedence over the bench code).
     """
+    if repetitions < 1:
+        raise ProvisionError(f"repetitions must be >= 1, got {repetitions}")
+
     registry = registry or PodRegistry(state_dir)
     repo_root = (repo_root or _repo_root()).resolve()
     request_path = Path(request_path).resolve()
@@ -321,14 +353,9 @@ def run_bench_on_pod(
             state_dir=registry.state_dir,
         )
 
-        # Prepare remote request (+ optional out-of-repo trace).
+        # Prepare remote request (+ push trace when bootstrap rsync would omit it).
         remote_req = json.loads(request_path.read_text(encoding="utf-8"))
-        try:
-            trace_path.relative_to(repo_root)
-            in_repo = True
-        except ValueError:
-            in_repo = False
-        if not in_repo:
+        if _trace_needs_explicit_push(trace_path, repo_root):
             ssh_exec(
                 pod,
                 f"mkdir -p {REMOTE_TRACE_DIR}",
@@ -347,11 +374,8 @@ def run_bench_on_pod(
             )
             remote_req["workload_trace"]["path"] = remote_trace
         else:
-            try:
-                rel = trace_path.relative_to(repo_root).as_posix()
-                remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
-            except ValueError:
-                pass
+            rel = trace_path.resolve().relative_to(repo_root.resolve()).as_posix()
+            remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
 
         local_remote_req = output_dir / "bench_request.remote.json"
         local_remote_req.write_text(
@@ -378,38 +402,50 @@ def run_bench_on_pod(
             )
 
         mock_flag = " --mock-engine" if mock_engine else ""
-        bench_cmd = (
-            f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
-            f"export PARETON_BENCH_CODE_SHA={code_sha} && "
-            f"mkdir -p {REMOTE_OUT} && "
-            f"{REMOTE_VENV}/bin/python -m bench "
-            f"--request {REMOTE_REQUEST} --output-dir {REMOTE_OUT}{mock_flag}"
-        )
-        result = ssh_exec(
-            pod,
-            bench_cmd,
-            timeout_s=float(config.BENCH_TIMEOUT_S),
-            runner=runner,
-            state_dir=registry.state_dir,
-            check=False,
-        )
-        if result.stdout:
-            print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
-        if result.stderr:
-            print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
+        for i in range(1, repetitions + 1):
+            if repetitions == 1:
+                remote_out = REMOTE_OUT
+                local_out = output_dir
+            else:
+                run_name = f"run-{i:03d}"
+                remote_out = f"{REMOTE_OUT}/{run_name}"
+                local_out = output_dir / run_name
+                local_out.mkdir(parents=True, exist_ok=True)
 
-        try:
-            pull(
+            bench_cmd = (
+                f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
+                f"export PARETON_BENCH_CODE_SHA={code_sha} && "
+                f"mkdir -p {remote_out} && "
+                f"{REMOTE_VENV}/bin/python -m bench "
+                f"--request {REMOTE_REQUEST} --output-dir {remote_out}{mock_flag}"
+            )
+            result = ssh_exec(
                 pod,
-                f"{REMOTE_OUT}/",
-                output_dir,
+                bench_cmd,
+                timeout_s=float(config.BENCH_TIMEOUT_S),
                 runner=runner,
                 state_dir=registry.state_dir,
+                check=False,
             )
-        except GpuError as exc:
-            logger.warning("failed to pull bench output: %s", exc)
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.stderr:
+                print(result.stderr, end="" if result.stderr.endswith("\n") else "\n")
 
-        exit_code = int(result.exit_code)
+            try:
+                pull(
+                    pod,
+                    f"{remote_out}/",
+                    local_out,
+                    runner=runner,
+                    state_dir=registry.state_dir,
+                )
+            except GpuError as exc:
+                logger.warning("failed to pull bench output: %s", exc)
+
+            exit_code = int(result.exit_code)
+            if exit_code != 0:
+                break
     except BaseException as exc:
         pending = exc
     finally:

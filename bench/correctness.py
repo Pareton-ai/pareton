@@ -16,12 +16,14 @@ from typing import Any
 
 from bench.http import post_completion
 from bench.lifecycle import EngineError
+from bench.mock_engine import response_shape_fingerprint
 from bench.schemas import CorrectnessConfig, CorrectnessReport, TraceRequest
 from bench.validate import RequestValidationError, load_workload_trace
 
 logger = logging.getLogger(__name__)
 
 EVIDENCE_FILENAME = "logprob_diffs.jsonl"
+SHAPE_EVIDENCE_FILENAME = "completion_response_shape.json"
 
 
 @dataclass(frozen=True)
@@ -93,8 +95,8 @@ def _prompt_case_from_trace_request(req: TraceRequest) -> PromptCase:
     return PromptCase(id=req.id, prompt=req.prompt)
 
 
-def probe_logprob_capability(base_url: str, *, timeout: float = 30.0) -> None:
-    """Require echo+logprobs support; raise EngineError naming the gap."""
+def probe_logprob_capability(base_url: str, *, timeout: float = 30.0) -> dict[str, Any]:
+    """Require echo+logprobs support; return the probe response for shape capture."""
     resp = post_completion(
         base_url,
         prompt="probe",
@@ -123,6 +125,20 @@ def probe_logprob_capability(base_url: str, *, timeout: float = 30.0) -> None:
                 f"engine at {base_url} missing logprob capability: "
                 f"logprobs.{key} absent"
             )
+    return resp
+
+
+def write_completion_response_shape(evidence_dir: Path, resp: dict[str, Any]) -> Path:
+    """Persist structural fingerprint of a real /v1/completions response."""
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = evidence_dir / SHAPE_EVIDENCE_FILENAME
+    payload = {
+        "fingerprint": response_shape_fingerprint(resp),
+    }
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return path
 
 
 def _top1_token(top: dict[str, float] | None) -> str | None:
@@ -230,12 +246,15 @@ def collect_baseline_correctness(
     cfg: CorrectnessConfig,
     task_id: str,
     request_timeout_s: float = 60.0,
+    evidence_dir: Path | None = None,
 ) -> BaselineCorrectnessPhase:
     """Generate forced continuations and score them on the baseline engine."""
     if not prompts:
         raise RequestValidationError("correctness: no prompts to evaluate")
 
-    probe_logprob_capability(baseline_url, timeout=request_timeout_s)
+    probe_resp = probe_logprob_capability(baseline_url, timeout=request_timeout_s)
+    if evidence_dir is not None:
+        write_completion_response_shape(evidence_dir, probe_resp)
 
     forced: dict[str, str] = {}
     for case in prompts:
@@ -427,6 +446,7 @@ def run_correctness(
         cfg=cfg,
         task_id=task_id,
         request_timeout_s=request_timeout_s,
+        evidence_dir=evidence_dir,
     )
     return finish_correctness_with_candidate(
         candidate_url,
