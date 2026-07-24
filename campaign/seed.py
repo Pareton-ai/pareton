@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,8 @@ DEFAULT_BENCH_MAX_MODEL_LEN = 8192
 DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST = "sha256:" + ("c" * 64)
 DEFAULT_BENCH_GPU_COUNT = 1
 
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
 
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -48,6 +51,34 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return f"sha256:{h.hexdigest()}"
+
+
+def _is_placeholder_digest(digest: str) -> bool:
+    lowered = digest.lower()
+    return lowered in {
+        DEFAULT_BASE_IMAGE_DIGEST.lower(),
+        DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST.lower(),
+    }
+
+
+def _normalize_trace_url(url: str) -> str:
+    cleaned = url.strip()
+    if not cleaned:
+        raise ValueError("workload_trace_url is empty")
+    if cleaned.startswith("https://") or cleaned.startswith("file://"):
+        return cleaned
+    raise ValueError(
+        f"workload_trace_url must start with file:// or https:// (got {cleaned!r})"
+    )
+
+
+def _require_sha256(value: str) -> str:
+    cleaned = value.strip().lower()
+    if not _SHA256_RE.fullmatch(cleaned):
+        raise ValueError(
+            f"workload_trace_sha256 must be sha256:<64 hex> (got {value!r})"
+        )
+    return cleaned
 
 
 def build_seed_bench_spec(
@@ -92,19 +123,46 @@ def seed_synthetic_campaign(
     baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
     bench_gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     bench_serve_args: list[str] | None = None,
+    workload_trace_url: str | None = None,
+    workload_trace_sha256: str | None = None,
+    allow_placeholders: bool = False,
 ) -> str:
-    existing = list_campaigns(status="open")
-    if existing and not force:
-        cid = existing[0].campaign_id
-        print(f"open campaign already exists: {cid}")
-        return str(cid)
+    if not allow_placeholders and (
+        _is_placeholder_digest(base_image_digest)
+        or _is_placeholder_digest(baseline_engine_image_digest)
+    ):
+        raise ValueError(
+            "placeholder digests refused; pass real --base-image-digest and "
+            "--baseline-engine-image-digest, or --allow-placeholders"
+        )
+
+    if workload_trace_url is None:
+        trace_url = f"file://{FIXTURE_TRACE.resolve()}"
+    else:
+        trace_url = _normalize_trace_url(workload_trace_url)
 
     if not FIXTURE_TRACE.is_file():
         raise FileNotFoundError(f"missing fixture trace: {FIXTURE_TRACE}")
 
     trace_sha = _sha256_file(FIXTURE_TRACE)
-    # Content-addressed URL placeholder until uploaded to S3 in ops.
-    trace_url = f"file://{FIXTURE_TRACE.resolve()}"
+    if workload_trace_sha256 is not None:
+        expected = _require_sha256(workload_trace_sha256)
+        if expected != trace_sha.lower():
+            raise ValueError(
+                "workload_trace_sha256 does not match local fixture "
+                f"(expected {trace_sha}, got {workload_trace_sha256})"
+            )
+    elif trace_url.startswith("https://"):
+        raise ValueError(
+            "https workload_trace_url requires --workload-trace-sha256 "
+            "matching the local fixture"
+        )
+
+    existing = list_campaigns(status="open")
+    if existing and not force:
+        cid = existing[0].campaign_id
+        print(f"open campaign already exists: {cid}")
+        return str(cid)
 
     profile_id = insert_profile(
         name="pareton-synthetic-v0",
@@ -223,6 +281,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Insert even if an open campaign already exists",
     )
+    p.add_argument(
+        "--workload-trace-url",
+        default=None,
+        help="file:// or https:// URL stored in the campaign (default: local fixture)",
+    )
+    p.add_argument(
+        "--workload-trace-sha256",
+        default=None,
+        help="Must match local fixture hash; required when URL is https://",
+    )
+    p.add_argument(
+        "--allow-placeholders",
+        action="store_true",
+        help="Allow default placeholder base/engine digests (dev only)",
+    )
     args = p.parse_args(argv)
     try:
         seed_synthetic_campaign(
@@ -237,6 +310,9 @@ def main(argv: list[str] | None = None) -> int:
             baseline_engine_image_digest=args.baseline_engine_image_digest,
             bench_gpu_count=args.bench_gpu_count,
             bench_serve_args=args.bench_serve_args,
+            workload_trace_url=args.workload_trace_url,
+            workload_trace_sha256=args.workload_trace_sha256,
+            allow_placeholders=args.allow_placeholders,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
