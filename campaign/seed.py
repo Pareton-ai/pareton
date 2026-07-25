@@ -18,7 +18,7 @@ from uuid import uuid4
 import config
 from campaign.cross_env import DEFAULT_CROSS_ENV, validate_cross_env
 from campaign.manifest import build_manifest
-from campaign.models import CustomerSignoff, SLA
+from campaign.models import CustomerSignoff, SLA, validate_priority_metric
 from campaign.store import insert_campaign, insert_profile, list_campaigns
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,8 +41,24 @@ DEFAULT_BENCH_MAX_MODEL_LEN = 8192
 # Placeholder until WS-A2b publishes the real baseline engine image.
 DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST = "sha256:" + ("c" * 64)
 DEFAULT_BENCH_GPU_COUNT = 1
+# Partner-facing framing; at pinned gpu_count this is the same lever as throughput.
+DEFAULT_PRIORITY_METRIC = "gpu_hours"
+DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
+# Seed bench floors for the 10% partner bar (do not parse success_threshold text).
+# gpu_hours at pinned gpu_count ⇒ throughput ratio 1/0.9; throughput ⇒ 1.10.
+_SEED_MIN_SPEEDUP_BY_METRIC: dict[str, float] = {
+    "throughput": 1.10,
+    "gpu_hours": 1.0 / 0.9,
+}
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _seed_min_speedup_each(priority_metric: str) -> float:
+    """Return seed floor for a normalized priority_metric (lowercase)."""
+    return _SEED_MIN_SPEEDUP_BY_METRIC.get(
+        priority_metric, float(DEFAULT_CROSS_ENV["min_speedup_each"])
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -126,7 +142,12 @@ def seed_synthetic_campaign(
     workload_trace_url: str | None = None,
     workload_trace_sha256: str | None = None,
     allow_placeholders: bool = False,
+    priority_metric: str = DEFAULT_PRIORITY_METRIC,
+    success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
 ) -> str:
+    # Normalize before floor lookup / profile insert (build_manifest also validates).
+    priority_metric = validate_priority_metric(priority_metric)
+
     if not allow_placeholders and (
         _is_placeholder_digest(base_image_digest)
         or _is_placeholder_digest(baseline_engine_image_digest)
@@ -172,8 +193,8 @@ def seed_synthetic_campaign(
             "serving_stack": "vLLM",
             "tensor_parallel": 8,
             "hardware": ["H200-SXM-141GB"],
-            "priority_metric": "throughput",
-            "success_threshold": ">=10% GPU-hour reduction at SLA",
+            "priority_metric": priority_metric,
+            "success_threshold": success_threshold,
             "fixture": True,
         },
     )
@@ -190,6 +211,10 @@ def seed_synthetic_campaign(
         baseline_engine_image_digest=baseline_engine_image_digest,
         gpu_count=bench_gpu_count,
         serve_args=bench_serve_args,
+        cross_env={
+            **DEFAULT_CROSS_ENV,
+            "min_speedup_each": _seed_min_speedup_each(priority_metric),
+        },
     )
 
     fields_manifest = build_manifest(
@@ -212,6 +237,8 @@ def seed_synthetic_campaign(
         denied_paths=list(config.DEFAULT_DENIED_PATHS),
         window_opens_at=opens,
         window_closes_at=closes,
+        priority_metric=priority_metric,
+        success_threshold=success_threshold,
         status="open",
         customer_signoff=None,
         bench=bench,
@@ -242,6 +269,8 @@ def seed_synthetic_campaign(
         denied_paths=list(config.DEFAULT_DENIED_PATHS),
         window_opens_at=opens,
         window_closes_at=closes,
+        priority_metric=priority_metric,
+        success_threshold=success_threshold,
         status="open",
         customer_signoff=signoff,
         manifest_hash=fields_manifest.manifest_hash,
@@ -296,6 +325,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow default placeholder base/engine digests (dev only)",
     )
+    p.add_argument(
+        "--priority-metric",
+        default=DEFAULT_PRIORITY_METRIC,
+        help="What the campaign optimizes for (throughput, gpu_hours, latency, "
+        "utilization, cost_per_request)",
+    )
+    p.add_argument(
+        "--success-threshold",
+        default=DEFAULT_SUCCESS_THRESHOLD,
+        help="Human-readable win condition for the pilot",
+    )
     args = p.parse_args(argv)
     try:
         seed_synthetic_campaign(
@@ -313,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             workload_trace_url=args.workload_trace_url,
             workload_trace_sha256=args.workload_trace_sha256,
             allow_placeholders=args.allow_placeholders,
+            priority_metric=args.priority_metric,
+            success_threshold=args.success_threshold,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

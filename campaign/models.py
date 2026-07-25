@@ -8,6 +8,28 @@ from typing import Any
 from uuid import UUID
 
 
+# Priority metrics a campaign can optimize for (BD memo vocabulary).
+PRIORITY_METRICS = frozenset(
+    {
+        "throughput",
+        "gpu_hours",
+        "latency",
+        "utilization",
+        "cost_per_request",
+    }
+)
+
+
+def validate_priority_metric(value: str) -> str:
+    """Validate campaigns.priority_metric; return the normalized value."""
+    cleaned = str(value).strip().lower()
+    if cleaned not in PRIORITY_METRICS:
+        raise ValueError(
+            f"priority_metric must be one of {sorted(PRIORITY_METRICS)}, got {value!r}"
+        )
+    return cleaned
+
+
 @dataclass
 class SLA:
     p99_ttft_ms: float | None = None
@@ -90,6 +112,8 @@ class CampaignManifest:
     manifest_hash: str
     customer_signoff: CustomerSignoff | None
     status: str  # draft | open | closed
+    priority_metric: str  # one of PRIORITY_METRICS
+    success_threshold: str  # human-readable win condition for the pilot
     bench: dict[str, Any] | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -116,5 +140,7 @@ class CampaignManifest:
                 self.customer_signoff.to_dict() if self.customer_signoff else None
             ),
             "status": self.status,
+            "priority_metric": self.priority_metric,
+            "success_threshold": self.success_threshold,
             "bench": self.bench,
         }

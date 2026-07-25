@@ -28,10 +28,15 @@ def _fixture_sha() -> str:
 
 
 def _patch_store(monkeypatch: pytest.MonkeyPatch) -> dict:
-    captured: dict = {"manifest": None, "inserts": 0}
+    captured: dict = {"manifest": None, "inserts": 0, "profile_data": None}
 
     monkeypatch.setattr(seed, "list_campaigns", lambda status="open": [])
-    monkeypatch.setattr(seed, "insert_profile", lambda **kwargs: uuid4())
+
+    def _insert_profile(**kwargs):
+        captured["profile_data"] = kwargs.get("data")
+        return uuid4()
+
+    monkeypatch.setattr(seed, "insert_profile", _insert_profile)
 
     def _insert(manifest):
         captured["manifest"] = manifest
@@ -155,3 +160,45 @@ def test_main_https_flags_wired(monkeypatch: pytest.MonkeyPatch):
     )
     assert rc == 0
     assert captured["manifest"].workload_trace_url == HTTPS_TRACE
+
+
+def test_seed_threshold_matches_bench_floor(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True)
+    m = captured["manifest"]
+    assert m.bench["cross_env"]["min_speedup_each"] == pytest.approx(1.0 / 0.9)
+    assert m.priority_metric == "gpu_hours"
+    assert "10%" in m.success_threshold
+
+
+@pytest.mark.parametrize(
+    "metric,floor",
+    [
+        ("gpu_hours", 1.0 / 0.9),
+        ("throughput", 1.10),
+        ("latency", 1.0),
+        ("GPU_Hours", 1.0 / 0.9),
+    ],
+)
+def test_seed_bench_floor_follows_priority_metric(
+    monkeypatch: pytest.MonkeyPatch, metric: str, floor: float
+):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True, priority_metric=metric)
+    assert captured["manifest"].priority_metric == metric.strip().lower()
+    assert captured["manifest"].bench["cross_env"]["min_speedup_each"] == pytest.approx(
+        floor
+    )
+
+
+def test_seed_profile_uses_cli_metrics(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        allow_placeholders=True,
+        priority_metric="latency",
+        success_threshold=">=5% p99 ITL at SLA",
+    )
+    assert captured["profile_data"]["priority_metric"] == "latency"
+    assert captured["profile_data"]["success_threshold"] == ">=5% p99 ITL at SLA"
+    assert captured["manifest"].priority_metric == "latency"
+    assert captured["manifest"].success_threshold == ">=5% p99 ITL at SLA"
