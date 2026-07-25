@@ -41,8 +41,11 @@ DEFAULT_BENCH_MAX_MODEL_LEN = 8192
 # Placeholder until WS-A2b publishes the real baseline engine image.
 DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST = "sha256:" + ("c" * 64)
 DEFAULT_BENCH_GPU_COUNT = 1
-DEFAULT_PRIORITY_METRIC = "throughput"
+# Partner-facing framing; at pinned gpu_count this is the same lever as throughput.
+DEFAULT_PRIORITY_METRIC = "gpu_hours"
 DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
+# 10% GPU-hour reduction at fixed gpu_count ⇒ throughput ratio 1/0.9.
+DEFAULT_MIN_SPEEDUP_EACH = 1.0 / 0.9
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -176,8 +179,8 @@ def seed_synthetic_campaign(
             "serving_stack": "vLLM",
             "tensor_parallel": 8,
             "hardware": ["H200-SXM-141GB"],
-            "priority_metric": "throughput",
-            "success_threshold": ">=10% GPU-hour reduction at SLA",
+            "priority_metric": priority_metric,
+            "success_threshold": success_threshold,
             "fixture": True,
         },
     )
@@ -194,6 +197,10 @@ def seed_synthetic_campaign(
         baseline_engine_image_digest=baseline_engine_image_digest,
         gpu_count=bench_gpu_count,
         serve_args=bench_serve_args,
+        cross_env={
+            **DEFAULT_CROSS_ENV,
+            "min_speedup_each": DEFAULT_MIN_SPEEDUP_EACH,
+        },
     )
 
     fields_manifest = build_manifest(
