@@ -36,6 +36,8 @@ def _campaign(**overrides):
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
     )
     kwargs.update(overrides)

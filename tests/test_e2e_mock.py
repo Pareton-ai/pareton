@@ -108,6 +108,8 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash="pending",
@@ -132,6 +134,8 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash=manifest.manifest_hash,
@@ -282,6 +286,8 @@ def _insert_open_campaign(
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash="pending",
@@ -306,6 +312,8 @@ def _insert_open_campaign(
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash=manifest.manifest_hash,
@@ -672,6 +680,8 @@ def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash="pending",
@@ -696,6 +706,8 @@ def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         window_opens_at=now - timedelta(hours=1),
         window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash=manifest.manifest_hash,

@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
   denied_paths JSONB NOT NULL DEFAULT '[]'::jsonb,
   window_opens_at TIMESTAMPTZ NOT NULL,
   window_closes_at TIMESTAMPTZ NOT NULL,
+  priority_metric TEXT NOT NULL
+    CHECK (priority_metric IN ('throughput', 'gpu_hours', 'latency',
+                               'utilization', 'cost_per_request')),
+  success_threshold TEXT NOT NULL,
   manifest_hash TEXT NOT NULL,
   customer_signoff JSONB,
   status TEXT NOT NULL DEFAULT 'draft'
