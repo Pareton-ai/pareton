@@ -44,6 +44,8 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         window_opens_at=_parse_ts(row["window_opens_at"]),
         window_closes_at=_parse_ts(row["window_closes_at"]),
         status=row["status"],
+        priority_metric=row["priority_metric"],
+        success_threshold=row["success_threshold"],
         customer_signoff=CustomerSignoff.from_dict(row.get("customer_signoff")),
         manifest_hash=row["manifest_hash"],
         bench=bench if isinstance(bench, dict) else None,
@@ -77,13 +79,15 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   gpu_skus, workload_trace_sha256, workload_trace_url, sla,
                   scoring_config_sha256, scoring_config_url,
                   allowed_paths, denied_paths, window_opens_at, window_closes_at,
-                  manifest_hash, customer_signoff, status, bench
+                  manifest_hash, customer_signoff, status, bench,
+                  priority_metric, success_threshold
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s,
                   %s, %s, %s, %s,
-                  %s, %s, %s, %s
+                  %s, %s, %s, %s,
+                  %s, %s
                 )
                 RETURNING id
                 """,
@@ -107,6 +111,8 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                     signoff,
                     manifest.status,
                     Json(manifest.bench) if manifest.bench is not None else None,
+                    manifest.priority_metric,
+                    manifest.success_threshold,
                 ),
             )
             return cur.fetchone()[0]

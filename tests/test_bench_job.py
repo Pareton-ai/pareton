@@ -648,6 +648,8 @@ def test_manifest_bench_pin_compat():
         denied_paths=["tests/**"],
         window_opens_at=now,
         window_closes_at=now,
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
     )
     fields_no = freeze_manifest_fields(**kwargs)
     assert "bench" not in fields_no

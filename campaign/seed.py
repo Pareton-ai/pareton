@@ -41,6 +41,8 @@ DEFAULT_BENCH_MAX_MODEL_LEN = 8192
 # Placeholder until WS-A2b publishes the real baseline engine image.
 DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST = "sha256:" + ("c" * 64)
 DEFAULT_BENCH_GPU_COUNT = 1
+DEFAULT_PRIORITY_METRIC = "throughput"
+DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -126,6 +128,8 @@ def seed_synthetic_campaign(
     workload_trace_url: str | None = None,
     workload_trace_sha256: str | None = None,
     allow_placeholders: bool = False,
+    priority_metric: str = DEFAULT_PRIORITY_METRIC,
+    success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
 ) -> str:
     if not allow_placeholders and (
         _is_placeholder_digest(base_image_digest)
@@ -212,6 +216,8 @@ def seed_synthetic_campaign(
         denied_paths=list(config.DEFAULT_DENIED_PATHS),
         window_opens_at=opens,
         window_closes_at=closes,
+        priority_metric=priority_metric,
+        success_threshold=success_threshold,
         status="open",
         customer_signoff=None,
         bench=bench,
@@ -242,6 +248,8 @@ def seed_synthetic_campaign(
         denied_paths=list(config.DEFAULT_DENIED_PATHS),
         window_opens_at=opens,
         window_closes_at=closes,
+        priority_metric=priority_metric,
+        success_threshold=success_threshold,
         status="open",
         customer_signoff=signoff,
         manifest_hash=fields_manifest.manifest_hash,
@@ -296,6 +304,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow default placeholder base/engine digests (dev only)",
     )
+    p.add_argument(
+        "--priority-metric",
+        default=DEFAULT_PRIORITY_METRIC,
+        help="What the campaign optimizes for (throughput, gpu_hours, latency, "
+        "utilization, cost_per_request)",
+    )
+    p.add_argument(
+        "--success-threshold",
+        default=DEFAULT_SUCCESS_THRESHOLD,
+        help="Human-readable win condition for the pilot",
+    )
     args = p.parse_args(argv)
     try:
         seed_synthetic_campaign(
@@ -313,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
             workload_trace_url=args.workload_trace_url,
             workload_trace_sha256=args.workload_trace_sha256,
             allow_placeholders=args.allow_placeholders,
+            priority_metric=args.priority_metric,
+            success_threshold=args.success_threshold,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

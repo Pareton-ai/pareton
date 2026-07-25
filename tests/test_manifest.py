@@ -39,6 +39,8 @@ def test_manifest_hash_stable():
         denied_paths=["tests/**"],
         window_opens_at=opens,
         window_closes_at=closes,
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
     )
     h1 = compute_manifest_hash(fields)
     h2 = compute_manifest_hash(fields)
@@ -64,5 +66,66 @@ def test_build_manifest_normalizes_commit_case():
         denied_paths=[],
         window_opens_at=datetime.now(timezone.utc),
         window_closes_at=datetime.now(timezone.utc),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
     )
     assert m.baseline_commit == "a" * 40
+
+
+def _manifest_kwargs(**overrides):
+    now = datetime.now(timezone.utc)
+    kwargs = dict(
+        campaign_id=uuid4(),
+        profile_id=uuid4(),
+        baseline_repo="https://github.com/vllm-project/vllm.git",
+        baseline_commit="a" * 40,
+        base_image_digest="sha256:" + "b" * 64,
+        gpu_skus=["H200"],
+        workload_trace_sha256="sha256:" + "c" * 64,
+        workload_trace_url="https://example.com/t",
+        sla=SLA(),
+        scoring_config_sha256=None,
+        scoring_config_url=None,
+        allowed_paths=["vllm/**"],
+        denied_paths=["tests/**"],
+        window_opens_at=now,
+        window_closes_at=now,
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_priority_metric_rejects_unknown_value():
+    with pytest.raises(ValueError, match="priority_metric must be one of"):
+        build_manifest(**_manifest_kwargs(priority_metric="tokens_per_watt"))
+
+
+def test_priority_metric_normalizes_case():
+    m = build_manifest(**_manifest_kwargs(priority_metric="GPU_Hours"))
+    assert m.priority_metric == "gpu_hours"
+
+
+def test_priority_metric_changes_manifest_hash():
+    a = build_manifest(**_manifest_kwargs(priority_metric="throughput"))
+    b = build_manifest(
+        **_manifest_kwargs(
+            campaign_id=a.campaign_id,
+            profile_id=a.profile_id,
+            priority_metric="gpu_hours",
+        )
+    )
+    assert a.manifest_hash != b.manifest_hash
+
+
+def test_success_threshold_changes_manifest_hash():
+    a = build_manifest(**_manifest_kwargs(success_threshold=">=10% at SLA"))
+    b = build_manifest(
+        **_manifest_kwargs(
+            campaign_id=a.campaign_id,
+            profile_id=a.profile_id,
+            success_threshold=">=20% at SLA",
+        )
+    )
+    assert a.manifest_hash != b.manifest_hash

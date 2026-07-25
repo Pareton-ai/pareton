@@ -8,7 +8,12 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from .models import CampaignManifest, CustomerSignoff, SLA
+from .models import (
+    CampaignManifest,
+    CustomerSignoff,
+    SLA,
+    validate_priority_metric,
+)
 
 
 def _canon(value: Any) -> Any:
@@ -40,6 +45,8 @@ def freeze_manifest_fields(
     denied_paths: list[str],
     window_opens_at: datetime,
     window_closes_at: datetime,
+    priority_metric: str,
+    success_threshold: str,
     bench: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
@@ -67,6 +74,8 @@ def freeze_manifest_fields(
             "opens_at": window_opens_at.isoformat(),
             "closes_at": window_closes_at.isoformat(),
         },
+        "priority_metric": validate_priority_metric(priority_metric),
+        "success_threshold": success_threshold,
     }
     if bench is not None:
         out["bench"] = bench
@@ -97,6 +106,8 @@ def build_manifest(
     denied_paths: list[str],
     window_opens_at: datetime,
     window_closes_at: datetime,
+    priority_metric: str,
+    success_threshold: str,
     status: str = "draft",
     customer_signoff: CustomerSignoff | None = None,
     manifest_hash: str | None = None,
@@ -118,6 +129,8 @@ def build_manifest(
         denied_paths=denied_paths,
         window_opens_at=window_opens_at,
         window_closes_at=window_closes_at,
+        priority_metric=priority_metric,
+        success_threshold=success_threshold,
         bench=bench,
     )
     mh = manifest_hash or compute_manifest_hash(fields)
@@ -143,5 +156,7 @@ def build_manifest(
         manifest_hash=mh,
         customer_signoff=customer_signoff,
         status=status,
+        priority_metric=validate_priority_metric(priority_metric),
+        success_threshold=success_threshold,
         bench=bench,
     )
