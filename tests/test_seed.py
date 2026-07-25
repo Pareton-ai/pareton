@@ -177,6 +177,7 @@ def test_seed_threshold_matches_bench_floor(monkeypatch: pytest.MonkeyPatch):
         ("gpu_hours", 1.0 / 0.9),
         ("throughput", 1.10),
         ("latency", 1.0),
+        ("GPU_Hours", 1.0 / 0.9),
     ],
 )
 def test_seed_bench_floor_follows_priority_metric(
@@ -184,6 +185,7 @@ def test_seed_bench_floor_follows_priority_metric(
 ):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(allow_placeholders=True, priority_metric=metric)
+    assert captured["manifest"].priority_metric == metric.strip().lower()
     assert captured["manifest"].bench["cross_env"]["min_speedup_each"] == pytest.approx(
         floor
     )

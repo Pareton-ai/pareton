@@ -18,7 +18,7 @@ from uuid import uuid4
 import config
 from campaign.cross_env import DEFAULT_CROSS_ENV, validate_cross_env
 from campaign.manifest import build_manifest
-from campaign.models import CustomerSignoff, SLA
+from campaign.models import CustomerSignoff, SLA, validate_priority_metric
 from campaign.store import insert_campaign, insert_profile, list_campaigns
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +55,7 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def _seed_min_speedup_each(priority_metric: str) -> float:
+    """Return seed floor for a normalized priority_metric (lowercase)."""
     return _SEED_MIN_SPEEDUP_BY_METRIC.get(
         priority_metric, float(DEFAULT_CROSS_ENV["min_speedup_each"])
     )
@@ -144,6 +145,9 @@ def seed_synthetic_campaign(
     priority_metric: str = DEFAULT_PRIORITY_METRIC,
     success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
 ) -> str:
+    # Normalize before floor lookup / profile insert (build_manifest also validates).
+    priority_metric = validate_priority_metric(priority_metric)
+
     if not allow_placeholders and (
         _is_placeholder_digest(base_image_digest)
         or _is_placeholder_digest(baseline_engine_image_digest)
