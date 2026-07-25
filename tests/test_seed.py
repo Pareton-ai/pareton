@@ -171,6 +171,24 @@ def test_seed_threshold_matches_bench_floor(monkeypatch: pytest.MonkeyPatch):
     assert "10%" in m.success_threshold
 
 
+@pytest.mark.parametrize(
+    "metric,floor",
+    [
+        ("gpu_hours", 1.0 / 0.9),
+        ("throughput", 1.10),
+        ("latency", 1.0),
+    ],
+)
+def test_seed_bench_floor_follows_priority_metric(
+    monkeypatch: pytest.MonkeyPatch, metric: str, floor: float
+):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True, priority_metric=metric)
+    assert captured["manifest"].bench["cross_env"]["min_speedup_each"] == pytest.approx(
+        floor
+    )
+
+
 def test_seed_profile_uses_cli_metrics(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(

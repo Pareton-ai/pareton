@@ -44,10 +44,20 @@ DEFAULT_BENCH_GPU_COUNT = 1
 # Partner-facing framing; at pinned gpu_count this is the same lever as throughput.
 DEFAULT_PRIORITY_METRIC = "gpu_hours"
 DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
-# 10% GPU-hour reduction at fixed gpu_count ⇒ throughput ratio 1/0.9.
-DEFAULT_MIN_SPEEDUP_EACH = 1.0 / 0.9
+# Seed bench floors for the 10% partner bar (do not parse success_threshold text).
+# gpu_hours at pinned gpu_count ⇒ throughput ratio 1/0.9; throughput ⇒ 1.10.
+_SEED_MIN_SPEEDUP_BY_METRIC: dict[str, float] = {
+    "throughput": 1.10,
+    "gpu_hours": 1.0 / 0.9,
+}
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _seed_min_speedup_each(priority_metric: str) -> float:
+    return _SEED_MIN_SPEEDUP_BY_METRIC.get(
+        priority_metric, float(DEFAULT_CROSS_ENV["min_speedup_each"])
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -199,7 +209,7 @@ def seed_synthetic_campaign(
         serve_args=bench_serve_args,
         cross_env={
             **DEFAULT_CROSS_ENV,
-            "min_speedup_each": DEFAULT_MIN_SPEEDUP_EACH,
+            "min_speedup_each": _seed_min_speedup_each(priority_metric),
         },
     )
 
