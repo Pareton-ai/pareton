@@ -61,8 +61,18 @@ class CalibrationError(Exception):
     """Operator/input error for calibrate CLI (exit 2)."""
 
 
-def _b7_bench_spec(*, baseline_engine_image_digest: str) -> dict[str, Any]:
+def _b7_bench_spec(
+    *,
+    baseline_engine_image_digest: str,
+    trace_request_count: int,
+) -> dict[str, Any]:
     """Minimal campaign.bench dict for calibration (no campaign.seed import)."""
+    if trace_request_count < 1:
+        raise CalibrationError("workload trace has no requests")
+    # A3a synthetic_v0 has 2 prompts; clamp config defaults (often 8) to the trace.
+    num_prompts = min(int(config.BENCH_CORRECTNESS_NUM_PROMPTS), trace_request_count)
+    num_requests = min(int(config.BENCH_PERF_NUM_REQUESTS), trace_request_count)
+    concurrency = min(int(config.BENCH_PERF_CONCURRENCY), num_requests)
     return {
         "model": {
             "hf_repo": B7_MODEL_REPO,
@@ -75,7 +85,7 @@ def _b7_bench_spec(*, baseline_engine_image_digest: str) -> dict[str, Any]:
         "gpu_count": 1,
         "serve_args": None,
         "correctness": {
-            "num_prompts": int(config.BENCH_CORRECTNESS_NUM_PROMPTS),
+            "num_prompts": num_prompts,
             "max_new_tokens": int(config.BENCH_CORRECTNESS_MAX_NEW_TOKENS),
             "thresholds": {
                 "mean_abs_logprob_diff": _CALIB_CORR_MEAN,
@@ -84,8 +94,8 @@ def _b7_bench_spec(*, baseline_engine_image_digest: str) -> dict[str, Any]:
             },
         },
         "perf_screen": {
-            "num_requests": int(config.BENCH_PERF_NUM_REQUESTS),
-            "concurrency": int(config.BENCH_PERF_CONCURRENCY),
+            "num_requests": num_requests,
+            "concurrency": concurrency,
             "min_throughput_ratio": _CALIB_PERF_RATIO,
         },
     }
@@ -117,7 +127,16 @@ def prepare_calibration_request(
     except BenchInfraError as exc:
         raise CalibrationError(str(exc)) from exc
 
-    bench = _b7_bench_spec(baseline_engine_image_digest=digest)
+    try:
+        trace_doc = json.loads(trace_path.read_text(encoding="utf-8"))
+        trace_n = len(trace_doc.get("requests") or [])
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise CalibrationError(f"unreadable workload trace: {exc}") from exc
+
+    bench = _b7_bench_spec(
+        baseline_engine_image_digest=digest,
+        trace_request_count=trace_n,
+    )
 
     row: dict[str, Any] = {
         "engine_image_ref": engine_ref,
