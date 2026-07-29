@@ -138,6 +138,9 @@ def test_prepare_pins_model_and_equal_engines(tmp_path: Path):
     assert req["engines"]["candidate"]["image"] == expect
     assert req["correctness"]["thresholds"]["mean_abs_logprob_diff"] == 1e9
     assert req["perf_screen"]["min_throughput_ratio"] == 0.0
+    # A3a / synthetic_v0 has 2 requests; prepare must clamp config defaults (8).
+    assert req["correctness"]["num_prompts"] == 2
+    assert req["perf_screen"]["num_requests"] == 2
     assert (out / "bench_request.json").is_file()
     assert (out / "workload_trace.json").is_file()
 
