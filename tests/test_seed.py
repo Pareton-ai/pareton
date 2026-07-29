@@ -202,3 +202,79 @@ def test_seed_profile_uses_cli_metrics(monkeypatch: pytest.MonkeyPatch):
     assert captured["profile_data"]["success_threshold"] == ">=5% p99 ITL at SLA"
     assert captured["manifest"].priority_metric == "latency"
     assert captured["manifest"].success_threshold == ">=5% p99 ITL at SLA"
+
+
+def test_seed_defaults_to_draft_single_hopper_sku(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True)
+    m = captured["manifest"]
+    assert m.status == "draft"
+    assert m.gpu_skus == ["H200-SXM-141GB"]
+    assert captured["profile_data"]["hardware"] == ["H200-SXM-141GB"]
+
+
+def test_seed_gpu_skus_and_status_override(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        allow_placeholders=True,
+        gpu_skus=["H200-SXM-141GB", "B200"],
+        status="open",
+    )
+    m = captured["manifest"]
+    assert m.status == "open"
+    assert m.gpu_skus == ["H200-SXM-141GB", "B200"]
+    assert captured["profile_data"]["hardware"] == ["H200-SXM-141GB", "B200"]
+
+
+def test_seed_rejects_empty_gpu_skus(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="gpu_skus must contain"):
+        seed_synthetic_campaign(allow_placeholders=True, gpu_skus=["  ", ""])
+    assert captured["inserts"] == 0
+
+
+def test_seed_rejects_invalid_status(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="status must be one of"):
+        seed_synthetic_campaign(allow_placeholders=True, status="live")
+    assert captured["inserts"] == 0
+
+
+def test_draft_seed_ignores_existing_open(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+
+    class _Existing:
+        campaign_id = "already-open"
+
+    monkeypatch.setattr(seed, "list_campaigns", lambda status="open": [_Existing()])
+    seed_synthetic_campaign(allow_placeholders=True, status="draft")
+    assert captured["inserts"] == 1
+    assert captured["manifest"].status == "draft"
+
+
+def test_open_seed_short_circuits_without_force(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+
+    class _Existing:
+        campaign_id = "already-open"
+
+    monkeypatch.setattr(seed, "list_campaigns", lambda status="open": [_Existing()])
+    cid = seed_synthetic_campaign(allow_placeholders=True, status="open")
+    assert cid == "already-open"
+    assert captured["inserts"] == 0
+
+
+def test_main_gpu_skus_status_wired(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    rc = main(
+        [
+            "--allow-placeholders",
+            "--gpu-skus",
+            "H200-SXM-141GB",
+            "--status",
+            "draft",
+        ]
+    )
+    assert rc == 0
+    assert captured["manifest"].status == "draft"
+    assert captured["manifest"].gpu_skus == ["H200-SXM-141GB"]
