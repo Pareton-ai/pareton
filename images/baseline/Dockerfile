@@ -92,6 +92,7 @@ RUN pip install --no-cache-dir \
         requests \
         tqdm \
         msgspec \
+        cbor2 \
         "pyzmq>=25.0.0" \
     && rm -rf /tmp/* /root/.cache/pip
 
