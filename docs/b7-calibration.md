@@ -18,7 +18,8 @@ only `python -m gpu bench` rents a GPU.
 
 ```bash
 DIGEST="sha256:<A2B_REPODIGEST_HEX>"
-GPU_SKU="<sku matching Lium offer, e.g. RTX_4090>"
+# Engine image is CUDA arch 9.0 (Hopper only). Non-Hopper SKUs fail at engine start.
+GPU_SKU="<Lium H100/H200 offer name, e.g. H200>"
 RUN="out/b7/$(date -u +%Y%m%dT%H%M%SZ)"
 ```
 
@@ -50,8 +51,12 @@ python -m gpu bench \
   --gpu-count 1 \
   --request "$RUN/bench_request.json" \
   --output-dir "$RUN/runs" \
-  --repetitions 5
+  --repetitions 5 \
+  --ttl-hours 8
 ```
+
+Default pod TTL is 2h; five `mode=all` reps need more. Pass `--ttl-hours 8` so
+reap cannot destroy the pod mid-run.
 
 Expect `$RUN/runs/run-001` … `run-005` each with `bench_report.json` and evidence.
 Exit `75` means destroy failed: destroy the pod manually on the provider dashboard,
