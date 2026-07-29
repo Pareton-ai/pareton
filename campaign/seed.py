@@ -41,6 +41,10 @@ DEFAULT_BENCH_MAX_MODEL_LEN = 8192
 # Placeholder until WS-A2b publishes the real baseline engine image.
 DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST = "sha256:" + ("c" * 64)
 DEFAULT_BENCH_GPU_COUNT = 1
+# First live campaign: single Hopper SKU (engine is arch 9.0). Flip to open later.
+DEFAULT_GPU_SKUS: list[str] = ["H200-SXM-141GB"]
+DEFAULT_STATUS = "draft"
+KNOWN_SEED_STATUSES = frozenset({"draft", "open", "closed"})
 # Partner-facing framing; at pinned gpu_count this is the same lever as throughput.
 DEFAULT_PRIORITY_METRIC = "gpu_hours"
 DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
@@ -97,6 +101,22 @@ def _require_sha256(value: str) -> str:
     return cleaned
 
 
+def _normalize_gpu_skus(gpu_skus: list[str]) -> list[str]:
+    cleaned = [s.strip() for s in gpu_skus if s and s.strip()]
+    if not cleaned:
+        raise ValueError("gpu_skus must contain at least one non-empty SKU")
+    return cleaned
+
+
+def _normalize_status(status: str) -> str:
+    cleaned = status.strip().lower()
+    if cleaned not in KNOWN_SEED_STATUSES:
+        raise ValueError(
+            f"status must be one of {sorted(KNOWN_SEED_STATUSES)} (got {status!r})"
+        )
+    return cleaned
+
+
 def build_seed_bench_spec(
     *,
     model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -144,9 +164,15 @@ def seed_synthetic_campaign(
     allow_placeholders: bool = False,
     priority_metric: str = DEFAULT_PRIORITY_METRIC,
     success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
+    gpu_skus: list[str] | None = None,
+    status: str = DEFAULT_STATUS,
 ) -> str:
     # Normalize before floor lookup / profile insert (build_manifest also validates).
     priority_metric = validate_priority_metric(priority_metric)
+    status = _normalize_status(status)
+    skus = _normalize_gpu_skus(
+        list(DEFAULT_GPU_SKUS) if gpu_skus is None else list(gpu_skus)
+    )
 
     if not allow_placeholders and (
         _is_placeholder_digest(base_image_digest)
@@ -179,11 +205,12 @@ def seed_synthetic_campaign(
             "matching the local fixture"
         )
 
-    existing = list_campaigns(status="open")
-    if existing and not force:
-        cid = existing[0].campaign_id
-        print(f"open campaign already exists: {cid}")
-        return str(cid)
+    if status == "open":
+        existing = list_campaigns(status="open")
+        if existing and not force:
+            cid = existing[0].campaign_id
+            print(f"open campaign already exists: {cid}")
+            return str(cid)
 
     profile_id = insert_profile(
         name="pareton-synthetic-v0",
@@ -192,7 +219,7 @@ def seed_synthetic_campaign(
             "quantization": "FP8",
             "serving_stack": "vLLM",
             "tensor_parallel": 8,
-            "hardware": ["H200-SXM-141GB"],
+            "hardware": list(skus),
             "priority_metric": priority_metric,
             "success_threshold": success_threshold,
             "fixture": True,
@@ -223,7 +250,7 @@ def seed_synthetic_campaign(
         baseline_repo=baseline_repo,
         baseline_commit=baseline_commit,
         base_image_digest=base_image_digest,
-        gpu_skus=["H200-SXM-141GB", "B200"],
+        gpu_skus=skus,
         workload_trace_sha256=trace_sha,
         workload_trace_url=trace_url,
         sla=SLA(
@@ -239,7 +266,7 @@ def seed_synthetic_campaign(
         window_closes_at=closes,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
-        status="open",
+        status=status,
         customer_signoff=None,
         bench=bench,
     )
@@ -255,7 +282,7 @@ def seed_synthetic_campaign(
         baseline_repo=baseline_repo,
         baseline_commit=baseline_commit,
         base_image_digest=base_image_digest,
-        gpu_skus=["H200-SXM-141GB", "B200"],
+        gpu_skus=skus,
         workload_trace_sha256=trace_sha,
         workload_trace_url=trace_url,
         sla=SLA(
@@ -271,7 +298,7 @@ def seed_synthetic_campaign(
         window_closes_at=closes,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
-        status="open",
+        status=status,
         customer_signoff=signoff,
         manifest_hash=fields_manifest.manifest_hash,
         bench=bench,
@@ -308,7 +335,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Insert even if an open campaign already exists",
+        help="Insert even if an open campaign already exists (only applies with --status open)",
+    )
+    p.add_argument(
+        "--gpu-skus",
+        action="append",
+        default=None,
+        help=(
+            "GPU SKU for the campaign (repeatable). Default: single "
+            f"{DEFAULT_GPU_SKUS[0]} (first live campaign should stay single-SKU)"
+        ),
+    )
+    p.add_argument(
+        "--status",
+        default=DEFAULT_STATUS,
+        choices=sorted(KNOWN_SEED_STATUSES),
+        help="Campaign status (default: draft; open only after fee/caps + launch ops)",
     )
     p.add_argument(
         "--workload-trace-url",
@@ -355,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
             allow_placeholders=args.allow_placeholders,
             priority_metric=args.priority_metric,
             success_threshold=args.success_threshold,
+            gpu_skus=args.gpu_skus,
+            status=args.status,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
