@@ -26,7 +26,7 @@ def test_dockerfile_nonempty_has_apply_and_entrypoint():
     assert "git apply --whitespace=nowarn /tmp/submission.diff" in text
     assert "pip install --no-deps --no-build-isolation -e ." in text
     assert "|| true" not in text
-    assert "rm -rf /src/.git" in text
+    assert "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip" in text
     assert 'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]' in text
     assert "ARG MAX_JOBS=1" in text
     assert "ARG CMAKE_BUILD_PARALLEL_LEVEL=1" in text

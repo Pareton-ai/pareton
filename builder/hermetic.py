@@ -101,13 +101,15 @@ def dockerfile_for_patch(
     if skip_apply:
         body_steps = [
             "pip install --no-deps --no-build-isolation -e .",
-            "rm -rf /src/.git",
+            # Drop compile debris so export does not unpack multi-GB rust/CUDA
+            # intermediates (VPS ENOSPC on unpack after a successful wheel build).
+            "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip",
         ]
     else:
         body_steps = [
             "git apply --whitespace=nowarn /tmp/submission.diff",
             "pip install --no-deps --no-build-isolation -e .",
-            "rm -rf /src/.git",
+            "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip",
         ]
     run_parts = [setup_ccache, *body_steps]
     cache_id = _ccache_mount_id(baseline_commit)
