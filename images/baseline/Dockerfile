@@ -94,6 +94,10 @@ RUN pip install --no-cache-dir \
         msgspec \
         cbor2 \
         "openai-harmony>=0.0.3" \
+        # Pip cryptography/cffi so mcp does not import broken apt cryptography
+        # (/usr/lib/... missing _cffi_backend).
+        cffi \
+        cryptography \
         mcp \
         "pyzmq>=25.0.0" \
     && rm -rf /tmp/* /root/.cache/pip
