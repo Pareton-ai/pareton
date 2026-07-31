@@ -93,6 +93,8 @@ RUN pip install --no-cache-dir \
         tqdm \
         msgspec \
         cbor2 \
+        "openai-harmony>=0.0.3" \
+        mcp \
         "pyzmq>=25.0.0" \
     && rm -rf /tmp/* /root/.cache/pip
 
