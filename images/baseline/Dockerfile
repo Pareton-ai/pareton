@@ -65,37 +65,11 @@ RUN pip install --upgrade pip \
 RUN pip install --no-cache-dir "torch==2.11.0" \
     && rm -rf /tmp/* /root/.cache/pip
 
-# Minimal runtime deps so `import vllm` / api_server can start after hermetic
-# `pip install --no-deps --no-build-isolation -e .`. No torchaudio/torchvision
-# (not build-system requires; saves GHA disk).
-RUN pip install --no-cache-dir \
-        numpy \
-        "typing_extensions>=4.10" \
-        "pydantic>=2.12.0" \
-        "fastapi>=0.133.0,<0.137.0" \
-        "uvicorn[standard]" \
-        sentencepiece \
-        "protobuf>=5.29.6" \
-        "transformers>=5.5.3" \
-        "tokenizers>=0.21.1" \
-        "safetensors>=0.6.2" \
-        "aiohttp>=3.13.3" \
-        "openai>=2.0.0" \
-        "prometheus_client>=0.18.0" \
-        pillow \
-        "tiktoken>=0.6.0" \
-        "filelock>=3.16.1" \
-        pyyaml \
-        einops \
-        regex \
-        psutil \
-        requests \
-        tqdm \
-        msgspec \
-        cbor2 \
-        "openai-harmony>=0.0.3" \
-        mcp \
-        "pyzmq>=25.0.0" \
+# Runtime deps for hermetic `pip install --no-deps --no-build-isolation -e .`.
+# Must cover vLLM api_server import graph (common.txt at the pinned commit).
+# Ad-hoc one-package patches caused multi-hour A2b rebuilds per missing module.
+COPY images/baseline/requirements-runtime.txt /tmp/requirements-runtime.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-runtime.txt \
     && rm -rf /tmp/* /root/.cache/pip
 
 WORKDIR /opt/pareton
