@@ -65,3 +65,10 @@ opentelemetry-semantic-conventions-ai >= 0.4.1
 # Pareton extras (not in vLLM common.txt; needed for hermetic / clean imports)
 cffi  # backend for pip cryptography; avoids broken apt cryptography/_cffi_backend
 cryptography  # force pip wheel over apt cryptography under /usr/lib/...
+
+# From vLLM ee0da84 requirements/cuda.txt (Hopper engine start).
+# Sampler probes FlashInferBackend at import time; missing package kills EngineCore.
+# Pin: https://github.com/vllm-project/vllm/blob/ee0da84ab9e04ac7610e28580af62c365e898389/requirements/cuda.txt
+flashinfer-python==0.6.12
+flashinfer-cubin==0.6.12
+apache-tvm-ffi==0.1.9

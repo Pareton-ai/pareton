@@ -66,7 +66,7 @@ RUN pip install --no-cache-dir "torch==2.11.0" \
     && rm -rf /tmp/* /root/.cache/pip
 
 # Runtime deps for hermetic `pip install --no-deps --no-build-isolation -e .`.
-# Must cover vLLM api_server import graph (common.txt at the pinned commit).
+# Must cover vLLM api_server + EngineCore start (common.txt + cuda FlashInfer).
 # Ad-hoc one-package patches caused multi-hour A2b rebuilds per missing module.
 COPY images/baseline/requirements-runtime.txt /tmp/requirements-runtime.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-runtime.txt \
