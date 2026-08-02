@@ -4,8 +4,9 @@
 # Aligned to vLLM pin ee0da84 (v0.24.0): CUDA 13.0.2, torch 2.11.0, Python 3.12.
 # Pin and publish; put the resulting digest into the campaign manifest.
 #
-# Keep layers lean for GitHub-hosted runners (~disk-limited): install torch
-# alone, drop optional audio/vision wheels and fastapi[standard] extras.
+# Torch is its own layer so dep-only rebuilds skip the ~2GB NVIDIA download.
+# Runtime wheels must cover vLLM cuda.txt (not a lean subset): hermetic engines
+# use `pip install --no-deps` and EngineCore imports gated paths at startup.
 
 ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
@@ -66,8 +67,7 @@ RUN pip install --no-cache-dir "torch==2.11.0" \
     && rm -rf /tmp/* /root/.cache/pip
 
 # Runtime deps for hermetic `pip install --no-deps --no-build-isolation -e .`.
-# Must cover vLLM api_server + EngineCore start (common.txt + cuda FlashInfer).
-# Ad-hoc one-package patches caused multi-hour A2b rebuilds per missing module.
+# Must cover vLLM api_server + EngineCore start (common.txt + full cuda.txt).
 COPY images/baseline/requirements-runtime.txt /tmp/requirements-runtime.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-runtime.txt \
     && rm -rf /tmp/* /root/.cache/pip

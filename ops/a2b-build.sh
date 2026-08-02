@@ -7,6 +7,9 @@
 #     && sudo mkswap /swapfile && sudo swapon /swapfile
 #   export PARETON_GHCR_USERNAME='your-github-user'
 #   export PARETON_GHCR_TOKEN='ghp_…'   # write:packages
+#   # Rebuild A2 first whenever requirements-runtime.txt changes, then:
+#   export BASE="$(docker inspect --format='{{index .RepoDigests 0}}' \
+#     ghcr.io/pareton-ai/pareton-baseline:v0)"
 #   # Real-box defaults (arch pin does most of the speedup; keep jobs modest):
 #   export PARETON_BUILD_MAX_JOBS=2          # ≤ vCPUs and ≤ RAM/3GB on bigger hosts
 #   export PARETON_TORCH_CUDA_ARCH_LIST=9.0  # match bench SKU
@@ -24,7 +27,8 @@ set -euo pipefail
 
 REPO_DIR="${PARETON_REPO_DIR:-$HOME/pareton}"
 GIT_URL="${PARETON_GIT_URL:-https://github.com/Pareton-ai/pareton.git}"
-BASE="${BASE:-ghcr.io/pareton-ai/pareton-baseline@sha256:72b601e4314fa3c5e522e814305fad3a10f06eb174a5785e2729e655cb490986}"
+# No hardcoded A2 digest: a stale default rebuilds engines FROM pre-cuda.txt
+# images after runtime dep fixes land on main.
 ENGINE_REF="${ENGINE_REF:-ghcr.io/pareton-ai/pareton-engine:baseline}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 VLLM_COMMIT="${VLLM_COMMIT:-ee0da84ab9e04ac7610e28580af62c365e898389}"
@@ -43,6 +47,13 @@ need_env() {
 
 need_env PARETON_GHCR_USERNAME
 need_env PARETON_GHCR_TOKEN
+need_env BASE
+
+if [[ "$BASE" != *@sha256:* ]]; then
+  echo "error: BASE must be a RepoDigest (...@sha256:...), got: $BASE" >&2
+  echo "  export BASE=\$(docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/pareton-ai/pareton-baseline:v0)" >&2
+  exit 1
+fi
 
 echo "==> apt packages (docker.io + docker-buildx for BuildKit)"
 sudo apt-get update
@@ -85,6 +96,10 @@ echo "$PARETON_GHCR_TOKEN" | with_docker_group docker login ghcr.io -u "$PARETON
 echo "==> pull A2 base $BASE"
 with_docker_group docker pull "$BASE"
 
+echo "==> A2 smoke (cuda runtime names used by EngineCore start)"
+with_docker_group docker run --rm --entrypoint python "$BASE" -c \
+  "import flashinfer, torchvision, torchaudio, numba; print('a2-ok', flashinfer.__version__, torchvision.__version__)"
+
 echo "==> A2b build (timeout=${PARETON_BUILD_TIMEOUT_S}s" \
   "max_jobs=${PARETON_BUILD_MAX_JOBS}" \
   "cuda_arch=${PARETON_TORCH_CUDA_ARCH_LIST}). Walk away."
@@ -96,6 +111,10 @@ with_docker_group python -m builder \
   --image-ref "$ENGINE_REF" \
   --empty-patch \
   --push
+
+echo "==> engine smoke (CPU; does not replace Hopper B7-lite)"
+with_docker_group docker run --rm --entrypoint python "$ENGINE_REF" -c \
+  "import flashinfer, torchvision, torchaudio, vllm.entrypoints.openai.api_server; print('engine-ok')"
 
 echo "==> done. Capture digest:"
 echo "    docker pull $ENGINE_REF"
