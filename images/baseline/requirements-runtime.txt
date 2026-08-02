@@ -66,10 +66,21 @@ opentelemetry-semantic-conventions-ai >= 0.4.1
 cffi  # backend for pip cryptography; avoids broken apt cryptography/_cffi_backend
 cryptography  # force pip wheel over apt cryptography under /usr/lib/...
 
-# From vLLM ee0da84 requirements/cuda.txt (Hopper EngineCore start).
-# Sampler probes FlashInfer; kernel_warmup imports MiniMax path → torchvision.
+# Full vLLM ee0da84 requirements/cuda.txt minus torch (Dockerfile layer) and
+# minus -r common.txt (vendored above). Do not drip-feed packages from here —
+# EngineCore imports gated model paths at startup (FlashInfer sampler, MiniMax
+# warmup → torchvision) even for dense Qwen serves.
 # Pin: https://github.com/vllm-project/vllm/blob/ee0da84ab9e04ac7610e28580af62c365e898389/requirements/cuda.txt
+numba == 0.65.0
+torchaudio==2.11.0
+torchvision==0.26.0
 flashinfer-python==0.6.12
 flashinfer-cubin==0.6.12
 apache-tvm-ffi==0.1.9
-torchvision==0.26.0
+tilelang==0.1.9
+nvidia-cudnn-frontend>=1.19.1
+fastsafetensors >= 0.3.2
+nvidia-cutlass-dsl[cu13]==4.5.2
+quack-kernels>=0.3.3
+tokenspeed-mla==0.1.2
+humming-kernels[cu13]==0.1.6
