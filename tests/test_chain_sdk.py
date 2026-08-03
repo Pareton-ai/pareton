@@ -35,6 +35,16 @@ def test_sdk_submit_surface():
         assert hasattr(bt.Subtensor, name)
 
 
+def test_miner_uses_unwrapped_metagraph():
+    """Registration check needs a bare Metagraph. chain.rpc's same-named
+    helper returns (meta, block, hash); importing that one crashes
+    by_hotkey on every non-dry-run commit."""
+    import chain.commitment as cc
+    import miner.commit_patch as cp
+
+    assert cp.fetch_metagraph is cc.fetch_metagraph
+
+
 def test_commitment_entries_mapping():
     class Plaintext:
         uid = 3

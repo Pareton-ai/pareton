@@ -29,8 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from chain.commitment import encode_patch_commitment  # noqa: E402
-from chain.rpc import fetch_metagraph  # noqa: E402
+from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
 
 
 def _sha256_file(path: Path) -> str:
