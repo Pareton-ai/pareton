@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  unit-tests:
+  offline-tests:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     strategy:
@@ -31,5 +31,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run unit tests
-        run: pytest -v -m unit
+      - name: Run offline tests
+        # `-m unit` ran only 94/347; bench/ and gpu/ tests were silently
+        # excluded. Everything except docker-marked runs without GPU/network.
+        run: pytest -q -m "not docker"
