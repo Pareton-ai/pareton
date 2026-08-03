@@ -401,7 +401,7 @@ def analyze_reports(
     repro_s = suggest_threshold(
         repro_obs,
         safety_factor=safety_factor,
-        floor=0.10,  # current REPRO_BAR_MAX_REL_RANGE
+        floor=0.335,  # current REPRO_BAR_MAX_REL_RANGE (B7 2026-08-03)
     )
 
     shape_status: dict[str, Any] = {"checked": False, "match": None, "diffs": []}
