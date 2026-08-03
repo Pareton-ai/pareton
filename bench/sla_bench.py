@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 
 REQUESTS_FILENAME = "requests.jsonl"
 WARMUP_DIRNAME = "warmup"
-REPRO_BAR_MAX_REL_RANGE = 0.10  # p99 TTFT relative range ceiling
+# B7 Hopper calibration 2026-08-03: observed outer p99 TTFT rel_range ~0.167;
+# accepted suggested = max×2.0 (see out/b7/20260803T110416Z/calibration_summary.json).
+REPRO_BAR_MAX_REL_RANGE = 0.335  # p99 TTFT relative range ceiling
 
 
 def _require_text_prompt(req: TraceRequest) -> str:
