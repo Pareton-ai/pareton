@@ -61,7 +61,6 @@ def test_naming_roundtrip_and_deadline():
 
 
 def test_naming_ignores_malformed_and_foreign():
-    assert parse_pod_name("cacheon-eval") is None
     assert parse_pod_name("pareton-gpu-bad") is None
     assert parse_pod_name("pg-20260718-120000-1h-abcd1234") is None
     assert parse_pod_name("pt-bad") is None

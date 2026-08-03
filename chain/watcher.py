@@ -9,9 +9,8 @@ from campaign.store import get_campaign, insert_submission
 from chain.commitment import (
     PatchCommitment,
     build_patch_commitments,
-    fetch_metagraph,
-    fetch_revealed_commitments,
 )
+from chain.rpc import fetch_chain_view
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +61,16 @@ def scan_chain(
     subtensor: Any,
     netuid: int,
     *,
+    network: str = "finney",
     ingest: Callable[[PatchCommitment], str | None] = ingest_commitment,
 ) -> tuple[list[str], list[str]]:
     """Fetch revealed commitments and enqueue new submissions.
 
     Returns (new submission ids, registered hotkeys from the metagraph).
     """
-    meta = fetch_metagraph(subtensor, netuid)
-    revealed = fetch_revealed_commitments(subtensor, netuid)
+    meta, revealed, _block, _block_hash = fetch_chain_view(
+        subtensor, netuid, network=network
+    )
     commitments = build_patch_commitments(meta, revealed)
     created: list[str] = []
     for com in commitments.values():
