@@ -96,7 +96,8 @@ GHCR_USER: str = os.environ.get(
     "PARETON_GHCR_USER", os.environ.get("PARETON_GHCR_USERNAME", "")
 )
 
-# WS-D bench worker (pre-B7 calibration placeholders — not production thresholds)
+# WS-D bench worker. Correctness thresholds are B7-calibrated (2026-08-03, below);
+# the rest remain provisional until a realistic-trace re-calibration.
 TRACE_MAX_BYTES: int = int(
     os.environ.get("PARETON_TRACE_MAX_BYTES", str(100 * 1024 * 1024))
 )
@@ -122,8 +123,12 @@ BENCH_PERF_NUM_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_PERF_NUM_REQUESTS", "8")
 )
 BENCH_PERF_CONCURRENCY: int = int(os.environ.get("PARETON_BENCH_PERF_CONCURRENCY", "2"))
+# Screen-only smoke gate: single unrepeated measurement, so identical engines
+# routinely land under 1.0 (B7 baseline-vs-baseline ratios: 0.970, 0.992, 0.999,
+# 0.995, 1.089). The real speedup gate is cross_env.min_speedup_each on
+# sla_bench.speedup (median-of-3). 0.95 keeps the screen from false-rejecting.
 BENCH_PERF_MIN_THROUGHPUT_RATIO: float = float(
-    os.environ.get("PARETON_BENCH_PERF_MIN_THROUGHPUT_RATIO", "1.0")
+    os.environ.get("PARETON_BENCH_PERF_MIN_THROUGHPUT_RATIO", "0.95")
 )
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 BENCH_SLA_WARMUP_REQUESTS: int = int(
