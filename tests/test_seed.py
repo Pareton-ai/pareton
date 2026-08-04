@@ -278,3 +278,18 @@ def test_main_gpu_skus_status_wired(monkeypatch: pytest.MonkeyPatch):
     assert rc == 0
     assert captured["manifest"].status == "draft"
     assert captured["manifest"].gpu_skus == ["H200-SXM-141GB"]
+
+
+def test_no_bench_seed_omits_bench(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True, no_bench=True)
+    m = captured["manifest"]
+    assert m.bench is None
+    assert m.to_public_dict()["bench"] is None
+
+
+def test_main_no_bench_wired(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    rc = main(["--allow-placeholders", "--no-bench"])
+    assert rc == 0
+    assert captured["manifest"].bench is None
