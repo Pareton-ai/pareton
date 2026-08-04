@@ -602,8 +602,11 @@ def test_pipeline_uses_atomic_complete_gates():
     src = inspect.getsource(pipeline.process_submission)
     assert "complete_gates_job" in src
     assert "enqueue_bench_job(" not in src
-    assert "baseline_build_image_ref" in src
+    assert "_build_base_image(campaign)" in src
     assert "config.BASE_IMAGE" not in src
+    helper_src = inspect.getsource(pipeline._build_base_image)
+    assert "baseline_engine_image_ref" in helper_src
+    assert "baseline_build_image_ref" in helper_src
 
 
 def test_build_request_wires_quantization(tmp_path: Path):

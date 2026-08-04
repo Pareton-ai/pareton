@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from builder.hermetic import build_engine_image, build_engine_image_local_mock
-from builder.registry import baseline_build_image_ref
+from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
 from campaign.store import (
     append_event,
     complete_gates_job,
@@ -23,6 +23,24 @@ from gate.surface import check_surface
 from gate.types import GateResult, SubmissionState
 
 logger = logging.getLogger(__name__)
+
+
+def _build_base_image(campaign: Any) -> str:
+    """Resolve the image a miner build starts FROM.
+
+    Prefer the campaign's pinned baseline engine image: only it carries
+    /src/.deps (cmake FetchContent stamps), which --network=none builds need.
+    A bare base image fails at cmake configure (cutlass clone has no network).
+    """
+    bench = getattr(campaign, "bench", None) or {}
+    engine_digest = bench.get("baseline_engine_image_digest")
+    if engine_digest:
+        return baseline_engine_image_ref(engine_digest)
+    logger.warning(
+        "campaign %s: no baseline engine pin; falling back to bare base image",
+        getattr(campaign, "campaign_id", "?"),
+    )
+    return baseline_build_image_ref(campaign.base_image_digest)
 
 
 def process_submission(
@@ -126,7 +144,7 @@ def process_submission(
         )
     else:
         try:
-            base_image = baseline_build_image_ref(campaign.base_image_digest)
+            base_image = _build_base_image(campaign)
         except ValueError as exc:
             result = GateResult.reject(
                 "base_image_digest_invalid",
