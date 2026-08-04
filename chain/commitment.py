@@ -143,18 +143,21 @@ def fetch_revealed_commitments(
     subtensor: Any,
     netuid: int,
     *,
+    network: str = "finney",
     attempts: int = 3,
     delay_s: float = 30.0,
 ) -> dict[str, list[tuple[int, str]]]:
     """Fetch revealed commitments from the subnet."""
     from chain.rpc import fetch_revealed_commitments as _fetch
 
-    return _fetch(subtensor, netuid, attempts=attempts, delay_s=delay_s)
+    return _fetch(
+        subtensor, netuid, network=network, attempts=attempts, delay_s=delay_s
+    )
 
 
-def fetch_metagraph(subtensor: Any, netuid: int) -> Any:
+def fetch_metagraph(subtensor: Any, netuid: int, *, network: str = "finney") -> Any:
     """Fetch metagraph only (drops block/hash from the RPC tuple)."""
     from chain.rpc import fetch_metagraph as _fetch
 
-    metagraph, _block, _block_hash = _fetch(subtensor, netuid)
+    metagraph, _block, _block_hash = _fetch(subtensor, netuid, network=network)
     return metagraph

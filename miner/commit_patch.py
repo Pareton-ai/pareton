@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from chain.commitment import encode_patch_commitment  # noqa: E402
+from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
 
 
 def _sha256_file(path: Path) -> str:
@@ -88,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     patch_hash = _sha256_file(args.patch)
 
     import bittensor as bt
+    from bittensor import timelock
 
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
     hotkey = wallet.hotkey.ss58_address
@@ -136,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     subtensor = bt.Subtensor(network=args.network)
-    if not subtensor.is_hotkey_registered(netuid=args.netuid, hotkey_ss58=hotkey):
+    meta = fetch_metagraph(subtensor, args.netuid, network=args.network)
+    if meta.by_hotkey(hotkey) is None:
         print(
             f"error: hotkey {hotkey} not registered on netuid {args.netuid}",
             file=sys.stderr,
@@ -144,14 +146,34 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        subtensor.set_reveal_commitment(
-            wallet=wallet,
+        sealed = timelock.encrypt(payload, reveal_in=12)  # ~1 block to reveal
+        call = bt.calls.Commitments.set_commitment(
             netuid=args.netuid,
-            data=payload,
-            blocks_until_reveal=1,
+            info={
+                "fields": [
+                    [
+                        {
+                            "TimelockEncrypted": {
+                                "encrypted": sealed.ciphertext,
+                                "reveal_round": sealed.reveal_round,
+                            }
+                        }
+                    ]
+                ]
+            },
         )
+        result = bt.Subtensor(
+            network=args.network, policy=bt.Policy(allow_raw_calls=True)
+        ).submit_call(call, wallet, signer="hotkey")
     except Exception as exc:
         print(f"error: commitment failed: {exc}", file=sys.stderr)
+        return 1
+    if not getattr(result, "success", False):
+        print(
+            f"error: commitment rejected on-chain: "
+            f"{getattr(result, 'message', None) or getattr(result, 'error', result)}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"committed patch_hash={patch_hash} on netuid {args.netuid}")
