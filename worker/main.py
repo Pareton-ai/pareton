@@ -25,14 +25,16 @@ logger = logging.getLogger(__name__)
 def _connect_subtensor():
     import bittensor as bt
 
-    return bt.subtensor(network=config.SUBTENSOR_NETWORK)
+    return bt.Subtensor(network=config.SUBTENSOR_NETWORK)
 
 
 def scan_chain_once(subtensor) -> tuple[list[str], list[str]]:
     """One chain scan: enqueue new submissions, return (submission_ids, registered_hotkeys)."""
     from chain.watcher import scan_chain
 
-    created, hotkeys = scan_chain(subtensor, config.NETUID)
+    created, hotkeys = scan_chain(
+        subtensor, config.NETUID, network=config.SUBTENSOR_NETWORK
+    )
     if created:
         logger.info("chain scan enqueued %d new submission(s)", len(created))
     return created, hotkeys

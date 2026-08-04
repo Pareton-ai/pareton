@@ -29,7 +29,7 @@ def test_parse_and_encode_roundtrip():
     assert parsed["patch_hash"] == "sha256:" + "b" * 64
 
 
-def test_reject_cacheon_payload():
+def test_reject_image_payload():
     raw = '{"image":"docker.io/x/y:v1","digest":"sha256:' + ("c" * 64) + '"}'
     assert parse_patch_commitment(raw) is None
 

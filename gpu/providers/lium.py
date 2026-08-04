@@ -1,9 +1,9 @@
 """Lium GPU cloud provider (lium.io SDK).
 
-Ports Cacheon's Lium control plane into Pareton's Provider protocol.
+Implements Pareton's Provider protocol against the Lium control plane.
 Uses ``gpu.ssh`` for data plane (no SDK exec/rsync). Per-pod TTL-named
-volumes (not Cacheon's long-lived shared volume). Injectable ``client``
-for offline tests.
+volumes (no long-lived shared volume). Injectable ``client`` for offline
+tests.
 """
 
 from __future__ import annotations

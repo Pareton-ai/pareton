@@ -1,8 +1,8 @@
 """Shadeform GPU cloud provider (REST v1).
 
-Ports the Cacheon Shadeform control plane into Pareton's Provider protocol.
-Uses ``gpu.ssh`` for workspace mount (no paramiko). Non-root SSH user is
-handled by bootstrap (sudo + docker.sock ACL), not here.
+Implements Pareton's Provider protocol against the Shadeform control
+plane. Uses ``gpu.ssh`` for workspace mount (no paramiko). Non-root SSH
+user is handled by bootstrap (sudo + docker.sock ACL), not here.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _default_transport(
 
 
 def _mount_workspace_script(*, volume_gib: int) -> str:
-    """Adapted from Cacheon: bind/mount block storage at /workspace."""
+    """Bind/mount block storage at /workspace."""
     min_kb = int(volume_gib * 1024 * 1024 * 0.9)
     return f"""set -euo pipefail
 MIN_KB={min_kb}
