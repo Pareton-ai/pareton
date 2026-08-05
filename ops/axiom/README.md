@@ -1,102 +1,119 @@
-# Axiom observability (WS-A7)
+# Axiom observability
 
-Postgres remains the source of truth for operational state. Axiom is for search,
-debugging, and alerting. No agents on GPU pods.
+This page explains the logging setup and how to operate it. Read the first two
+sections once. After that, jump to the task you need.
 
-## Pre-flight
+## What this is
 
-1. Dataset `pareton-prod` in the Pareton Axiom org.
-2. Ingest-only API token as `PARETON_AXIOM_TOKEN` in `/opt/pareton/.env` on the droplet.
-3. Cursor agents query logs via Axiom MCP (`https://mcp.axiom.co/mcp`, OAuth).
+Pareton services on the VPS write logs to journald. A fourth service,
+Vector, reads journald and ships the logs to Axiom, a hosted log database.
+Axiom watches the incoming events and emails you when something breaks.
 
-## Step 1 (code)
-
-Structured lifecycle events emit through logger `pareton.lifecycle` as single-line JSON.
-See `observability/events.py`.
-
-## Step 2 (deploy, Xavier-approved)
-
-1. Install Vector on the droplet: https://vector.dev/docs/setup/installation/
-2. Copy `ops/vector/vector.toml` to `/etc/vector/vector.toml`.
-3. Copy `ops/vector/vector.service` to `/etc/systemd/system/vector.service`.
-4. `sudo mkdir -p /var/lib/vector` (disk buffer data_dir).
-5. Validate before enabling: `vector validate /etc/vector/vector.toml`.
-6. `sudo systemctl daemon-reload && sudo systemctl enable --now vector` and
-   verify `systemctl restart vector`.
-
-## Step 3: monitors and notifier (created 2026-08-05)
-
-Email notifier `pareton-ops-email` → `bohdan@pareton.ai` (ID `LcdCHLqROCgv8il1a8`).
-
-| Monitor | ID | Type |
-| --- | --- | --- |
-| worker-heartbeat-absent | b3ToVKWjImwQD4hpXi | Threshold, Below 1 / 15m |
-| lifecycle-failures | wpbFNgAs8oVKXJtg9X | MatchEvent |
-| job-failure-spike | WwNtNXLgbDmTCCfF1Q | Threshold, Above 5 / 60m |
-
-Create a Discord or email notifier in the Axiom console if you need to change the destination.
-
-### worker-heartbeat-absent
-
-Threshold: zero `heartbeat` events in 15 minutes.
-
-```apl
-['pareton-prod'] | where event == "heartbeat" | summarize count()
+```text
+pareton-worker  --+
+pareton-api      +--> journald --> Vector --> Axiom dataset "pareton-prod" --> monitors --> email
+pareton-gpu-reap-+   (on VPS)    (on VPS)    (cloud, 30-day retention)
 ```
 
-- Type: Threshold
-- Operator: Below
-- Threshold: 1
-- Range: 15 minutes
-- Interval: 5 minutes
+Postgres stays the source of truth for job state. Axiom is for search,
+debugging, and alerts. Nothing is installed on GPU pods.
 
-### lifecycle-failures
+## The moving parts
 
-Match on `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low`.
+| Piece                  | Where it lives                                                                           | What it does                                                                                                                                 |
+| ---------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lifecycle events       | `observability/events.py`                                                                | Code emits one JSON object per event (`heartbeat`, `job_failed`, ...) through the logger `pareton.lifecycle`.                                |
+| journald               | VPS, automatic                                                                           | Systemd log store. `journalctl -u pareton-worker` reads it.                                                                                  |
+| Vector                 | VPS, systemd unit `vector`                                                               | Ships journald lines to Axiom. Config: `/etc/vector/vector.toml` (copy in repo: `ops/vector/vector.toml`). Buffers to disk if Axiom is down. |
+| Dataset `pareton-prod` | Axiom console                                                                            | Where logs land. Keeps 30 days.                                                                                                              |
+| Ingest token           | `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN`, and hardcoded in `/etc/vector/vector.toml` | Password that lets Vector write to the dataset.                                                                                              |
+| Monitors               | Axiom console                                                                            | Alert rules. See "When an alert email arrives".                                                                                              |
+| Axiom MCP              | Cursor settings                                                                          | Lets an agent query logs without SSH. Server `https://mcp.axiom.co/mcp`, browser OAuth sign-in.                                              |
 
-```apl
-['pareton-prod'] | where event in ("destroy_failed", "pod_ttl_exceeded", "provider_balance_low")
-```
+## Search logs
 
-- Type: MatchEvent
-- Range: 5 minutes
-- Interval: 5 minutes
-
-### job-failure-spike
-
-More than 5 `job_failed` events in 1 hour.
+No SSH needed. Open the Axiom console, go to Query, pick `pareton-prod`. Two
+useful queries:
 
 ```apl
-['pareton-prod'] | where event == "job_failed" | summarize count()
+['pareton-prod'] | where _time > ago(1h) | sort by _time desc | limit 50
+['pareton-prod'] | where event == "job_failed" | where _time > ago(24h)
 ```
 
-- Type: Threshold
-- Operator: Above
-- Threshold: 5
-- Range: 60 minutes
-- Interval: 15 minutes
+Or ask a Cursor agent; the Axiom MCP server can run these queries for you.
 
-## Synthetic test events (after monitors exist)
+## Check that shipping works
+
+On the VPS (`ssh root@162.243.21.87`):
 
 ```bash
-set -a && source /opt/pareton/.env && set +a
-curl -X POST "https://api.axiom.co/v1/datasets/pareton-prod/ingest" \
-  -H "Authorization: Bearer ${PARETON_AXIOM_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '[{"event":"destroy_failed","pod":"synthetic-test","provider":"lium","error":"monitor-test"}]'
+journalctl -u vector --since '10 minutes ago'
 ```
 
-## Step 5 verification (post-deploy)
+- No `ERROR` lines: shipping works.
+- `Unauthorized`: the token in `/etc/vector/vector.toml` is wrong or revoked.
+  See "Task: rotate the Axiom token".
 
-1. Validate config before enabling: `vector validate /etc/vector/vector.toml`.
-2. `sudo systemctl restart vector`.
-3. Ingest a synthetic heartbeat (curl above with `"event":"heartbeat"`), then
-   confirm via Axiom MCP that `['pareton-prod'] | where event == "heartbeat" | take 5`
-   returns it with `event` as a top-level field.
-4. `sudo systemctl restart pareton-worker`; the heartbeat thread emits at
-   start, then every 5 minutes (including during long jobs). Confirm a real
-   heartbeat is searchable within a minute.
-5. Stop `pareton-worker`; `worker-heartbeat-absent` fires after its 15-minute
-   window; restart resolves.
-6. Synthetic `destroy_failed` triggers `lifecycle-failures`.
-7. `bench_completed` events include `evidence_s3_url` and `evidence_sha256` on real runs.
+Then confirm events arrive: run the first query in "Task: search the logs".
+
+## Deploy code changes to the VPS
+
+```bash
+ssh root@162.243.21.87
+cd /opt/pareton && git pull
+.venv/bin/pip install -r requirements.txt
+systemctl restart pareton-worker pareton-api
+```
+
+You do not need to restart `vector` for code deploys. Deploys need Xavier's
+approval.
+
+## Change the Vector config
+
+1. Edit `ops/vector/vector.toml` in the repo and merge the change.
+2. On the VPS, copy it to `/etc/vector/vector.toml`.
+3. Run `vector validate /etc/vector/vector.toml`. Do not skip this.
+4. Run `systemctl restart vector`.
+
+The token line is the exception: keep the real token value in
+`/etc/vector/vector.toml` on the VPS and keep `${PARETON_AXIOM_TOKEN}` in the
+repo copy. The repo must not contain the token.
+
+## Rotate the Axiom token
+
+1. Axiom console: Settings, API tokens, create a new ingest token for
+   `pareton-prod`.
+2. On the VPS: put it in `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN=xaat-...`
+   and on the `token = "xaat-..."` line in `/etc/vector/vector.toml`.
+3. Run `vector validate /etc/vector/vector.toml`, then `systemctl restart vector`.
+4. Revoke the old token in the Axiom console.
+
+Why the token is hardcoded: Vector did not expand `${PARETON_AXIOM_TOKEN}`
+under systemd and got 401 Unauthorized from Axiom even with the variable set.
+Hardcoding plus `chmod 600 /etc/vector/vector.toml` is the working setup.
+
+## When an alert email arrives
+
+Alerts go to bohdan@pareton.ai and xavier@pareton.ai.
+
+| Monitor                   | Fires when                                                                     | First check                                                                                                       | Usual fix                                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck.                  | `systemctl status pareton-worker` on the VPS.                                                                     | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                  |
+| `lifecycle-failures`      | A `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low` event.       | Search Axiom for the event; it carries `pod`, `provider`, and `error`.                                            | `destroy_failed`: a GPU pod may still be running and billing; destroy it by hand in the provider console. `provider_balance_low`: top up the provider balance. |
+| `job-failure-spike`       | More than 5 `job_failed` in 1 hour. Systemic breakage, not one bad submission. | Axiom: `['pareton-prod'] \| where event == "job_failed" \| summarize count() by stage` to find the failing stage. | Usually a bad deploy or a provider outage. Roll back or wait, then watch the monitor resolve.                                                                  |
+
+## First-time setup (already done 2026-08-05)
+
+Kept for reference if you rebuild the VPS.
+
+1. Axiom console: create dataset `pareton-prod` and an ingest API token.
+2. VPS: install Vector from https://vector.dev/docs/setup/installation/
+3. Copy `ops/vector/vector.toml` to `/etc/vector/vector.toml` and
+   `ops/vector/vector.service` to `/etc/systemd/system/vector.service`.
+4. Put the token in `/etc/vector/vector.toml` (see "Task: rotate the Axiom
+   token") and run `chmod 600 /etc/vector/vector.toml`.
+5. Run `sudo mkdir -p /var/lib/vector` (disk buffer).
+6. Run `vector validate /etc/vector/vector.toml`, then
+   `sudo systemctl daemon-reload && sudo systemctl enable --now vector`.
+7. Run `systemctl restart pareton-worker` and confirm a `heartbeat` event shows
+   in Axiom within a minute.
