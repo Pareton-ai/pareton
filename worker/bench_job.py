@@ -27,6 +27,8 @@ from builder.registry import baseline_engine_image_ref
 from campaign.cross_env import SPEEDUP_METRIC_KEYS, validate_cross_env
 from campaign.store import finalize_bench_job, set_job_status
 from gate.types import SubmissionState
+from observability import events as obs
+from observability.events import Timer
 
 logger = logging.getLogger(__name__)
 
@@ -602,8 +604,20 @@ def process_bench_job(
         work_root or (config.WORK_DIR / f"bench-{submission_id}-{uuid4().hex[:8]}")
     )
     root.mkdir(parents=True, exist_ok=True)
+    bench_timer = Timer()
+    patch_sha256 = str(row.get("patch_hash", ""))
+    image_digest = str(row.get("engine_image_ref", ""))
+
+    obs.bench_started(
+        submission_id=submission_id,
+        job_id=str(job_id),
+        stage="bench",
+        image_digest=image_digest,
+        patch_sha256=patch_sha256,
+    )
 
     try:
+        bench_timer.__enter__()
         bench = _parse_json_field(row.get("bench"))
         if not isinstance(bench, dict):
             raise BenchInfraError("campaign_bench_missing")
@@ -677,6 +691,22 @@ def process_bench_job(
                     job_status="failed",
                     last_error="bench_destroy_failed",
                 )
+                bench_timer.__exit__(None, None, None)
+                obs.bench_failed(
+                    submission_id=submission_id,
+                    job_id=str(job_id),
+                    stage="bench",
+                    image_digest=image_digest,
+                    patch_sha256=patch_sha256,
+                    duration_s=bench_timer.elapsed_s,
+                    error="bench_destroy_failed",
+                )
+                obs.job_failed(
+                    submission_id=submission_id,
+                    job_id=str(job_id),
+                    stage="bench",
+                    error="bench_destroy_failed",
+                )
                 return "bench_destroy_failed"
 
         # Aggregate verdict across completed SKUs.
@@ -716,14 +746,57 @@ def process_bench_job(
             job_status="done",
             last_error=None,
         )
+        bench_timer.__exit__(None, None, None)
+        obs.bench_completed(
+            submission_id=submission_id,
+            job_id=str(job_id),
+            stage="bench",
+            image_digest=image_digest,
+            patch_sha256=patch_sha256,
+            duration_s=bench_timer.elapsed_s,
+            verdict=agg_verdict,
+        )
         return "ok"
 
     except BenchInfraError as exc:
+        bench_timer.__exit__(None, None, None)
         logger.warning("bench infra fail submission=%s: %s", submission_id, exc)
+        obs.bench_failed(
+            submission_id=submission_id,
+            job_id=str(job_id),
+            stage="bench",
+            image_digest=image_digest,
+            patch_sha256=patch_sha256,
+            duration_s=bench_timer.elapsed_s,
+            error=exc.code,
+        )
+        obs.job_failed(
+            submission_id=submission_id,
+            job_id=str(job_id),
+            stage="bench",
+            error=exc.code,
+        )
         return _fail_job(row, exc.code)
     except Exception as exc:
+        bench_timer.__exit__(None, None, None)
         logger.exception("bench unexpected failure")
-        return _fail_job(row, f"bench_unexpected:{type(exc).__name__}")
+        error_code = f"bench_unexpected:{type(exc).__name__}"
+        obs.bench_failed(
+            submission_id=submission_id,
+            job_id=str(job_id),
+            stage="bench",
+            image_digest=image_digest,
+            patch_sha256=patch_sha256,
+            duration_s=bench_timer.elapsed_s,
+            error=error_code,
+        )
+        obs.job_failed(
+            submission_id=submission_id,
+            job_id=str(job_id),
+            stage="bench",
+            error=error_code,
+        )
+        return _fail_job(row, error_code)
 
 
 def _run_one_sku(

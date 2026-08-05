@@ -16,6 +16,7 @@ import time
 
 import config
 from campaign.store import claim_next_job
+from observability.events import heartbeat as _heartbeat
 from worker.bench_job import process_bench_job
 from worker.pipeline import process_submission
 
@@ -141,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _cycle() -> bool:
         nonlocal registered_hotkeys
+        _heartbeat()
         if subtensor is not None:
             try:
                 _created, hotkeys = scan_chain_once(subtensor)
