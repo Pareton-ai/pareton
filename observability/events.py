@@ -20,15 +20,17 @@ from typing import Any, Self
 _logger = logging.getLogger("pareton.lifecycle")
 
 # Fields that must never appear in event payloads.
-_FORBIDDEN_KEYS = frozenset({
-    "token",
-    "secret",
-    "password",
-    "mnemonic",
-    "private_key",
-    "patch_bytes",
-    "patch_content",
-})
+_FORBIDDEN_KEYS = frozenset(
+    {
+        "token",
+        "secret",
+        "password",
+        "mnemonic",
+        "private_key",
+        "patch_bytes",
+        "patch_content",
+    }
+)
 
 
 def _emit(event: str, **kwargs: Any) -> dict[str, Any]:
@@ -46,11 +48,13 @@ def _emit(event: str, **kwargs: Any) -> dict[str, Any]:
 
 # -- Worker heartbeat --------------------------------------------------------
 
+
 def heartbeat(*, queue_depth: int | None = None) -> dict[str, Any]:
     return _emit("heartbeat", queue_depth=queue_depth)
 
 
 # -- Chain / ingestion -------------------------------------------------------
+
 
 def submission_ingested(
     *,
@@ -69,6 +73,7 @@ def submission_ingested(
 
 
 # -- Gates -------------------------------------------------------------------
+
 
 def gate_passed(
     *,
@@ -101,6 +106,7 @@ def gate_failed(
 
 
 # -- Hermetic build ----------------------------------------------------------
+
 
 def build_started(
     *,
@@ -147,6 +153,7 @@ def build_failed(
 
 
 # -- GPU pods ----------------------------------------------------------------
+
 
 def pod_provisioned(
     *,
@@ -211,6 +218,7 @@ def pod_ttl_exceeded(
 
 
 # -- Bench stages ------------------------------------------------------------
+
 
 def bench_started(
     *,
@@ -292,6 +300,7 @@ def bench_failed(
 
 # -- Provider balance --------------------------------------------------------
 
+
 def provider_balance_low(
     *,
     provider: str,
@@ -307,6 +316,7 @@ def provider_balance_low(
 
 
 # -- Generic terminal failure ------------------------------------------------
+
 
 def job_failed(
     *,

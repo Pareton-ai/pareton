@@ -72,7 +72,10 @@ def _call_event(name: str) -> dict:
         kwargs = {"submission_id": "sub-1", "gate": "identity", "patch_sha256": "abc"}
     elif name == "gate_failed":
         kwargs = {
-            "submission_id": "sub-1", "gate": "integrity", "error": "hash mismatch", "patch_sha256": "abc",
+            "submission_id": "sub-1",
+            "gate": "integrity",
+            "error": "hash mismatch",
+            "patch_sha256": "abc",
         }
     elif name == "build_started":
         kwargs = {"submission_id": "sub-1", "patch_sha256": "abc"}
@@ -120,7 +123,12 @@ def _call_event(name: str) -> dict:
     elif name == "provider_balance_low":
         kwargs = {"provider": "lium", "balance": 5.0, "threshold": 10.0}
     elif name == "job_failed":
-        kwargs = {"submission_id": "sub-1", "job_id": "42", "stage": "bench", "error": "oom"}
+        kwargs = {
+            "submission_id": "sub-1",
+            "job_id": "42",
+            "stage": "bench",
+            "error": "oom",
+        }
     return fn(**kwargs)
 
 
