@@ -13,13 +13,33 @@ include_units = ["pareton-worker", "pareton-api", "pareton-gpu-reap"]
 type = "filter"
 inputs = ["journald"]
 # Keep structured lifecycle JSON (always contains "event":). For other lines,
-# drop DEBUG/TRACE noise. Do not match bare "trace" — it drops lifecycle errors
-# like trace_fetch_failed and bench_report_trace_sha256_mismatch.
-condition = 'includes(string!(.MESSAGE), "\"event\":") || !match(string!(.MESSAGE), r''(?i)debug|trace'')'
+# drop DEBUG-level noise (log format pads the level to 7 chars: " DEBUG  ").
+# Traceback lines survive: they carry failure details.
+condition = '''
+  contains(string!(.message), "\"event\":") || !match(string!(.message), r' DEBUG  ')
+'''
+
+# Lifecycle events arrive as "INFO pareton.lifecycle: {json}". Unwrap the JSON
+# into top-level fields so APL (where event == "heartbeat") can match.
+[transforms.parse_lifecycle]
+type = "remap"
+inputs = ["drop_noise"]
+source = '''
+  msg = string!(.message)
+  if contains(msg, "\"event\":") {
+    extracted, err = parse_regex(msg, r'(?P<json>\{.*\})$')
+    if err == null {
+      parsed, err = parse_json(extracted.json)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+      }
+    }
+  }
+'''
 
 [sinks.axiom]
 type = "axiom"
-inputs = ["drop_noise"]
+inputs = ["parse_lifecycle"]
 token = "${PARETON_AXIOM_TOKEN}"
 dataset = "pareton-prod"
 

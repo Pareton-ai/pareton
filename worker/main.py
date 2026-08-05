@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 import time
 
 import config
@@ -21,6 +22,18 @@ from worker.bench_job import process_bench_job
 from worker.pipeline import process_submission
 
 logger = logging.getLogger(__name__)
+
+# Heartbeats must continue while a long gates/build/bench job blocks the main
+# loop, otherwise the 15-minute heartbeat-absent monitor pages on healthy work.
+HEARTBEAT_INTERVAL_S = 300.0
+
+
+def _heartbeat_loop(
+    stop: threading.Event, interval_s: float = HEARTBEAT_INTERVAL_S
+) -> None:
+    while not stop.is_set():
+        _heartbeat()
+        stop.wait(interval_s)
 
 
 def _connect_subtensor():
@@ -140,9 +153,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         subtensor = _connect_subtensor()
 
+    threading.Thread(
+        target=_heartbeat_loop, args=(threading.Event(),), daemon=True
+    ).start()
+
     def _cycle() -> bool:
         nonlocal registered_hotkeys
-        _heartbeat()
         if subtensor is not None:
             try:
                 _created, hotkeys = scan_chain_once(subtensor)

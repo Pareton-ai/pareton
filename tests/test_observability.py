@@ -229,3 +229,29 @@ class TestTimer:
     def test_zero_before_use(self) -> None:
         t = Timer()
         assert t.elapsed_s == 0.0
+
+
+class TestHeartbeatLoop:
+    """Background heartbeat thread: keeps emitting while jobs block the loop."""
+
+    def test_emits_repeatedly_until_stopped(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import threading
+
+        from worker import main as worker_main
+
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=worker_main._heartbeat_loop,
+            args=(stop,),
+            kwargs={"interval_s": 0.05},
+            daemon=True,
+        )
+        with caplog.at_level(logging.INFO, logger="pareton.lifecycle"):
+            thread.start()
+            time.sleep(0.18)
+            stop.set()
+            thread.join(timeout=2)
+        beats = [r for r in caplog.records if '"heartbeat"' in r.message]
+        assert len(beats) >= 2

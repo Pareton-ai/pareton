@@ -19,7 +19,10 @@ See `observability/events.py`.
 1. Install Vector on the droplet: https://vector.dev/docs/setup/installation/
 2. Copy `ops/vector/vector.toml` to `/etc/vector/vector.toml`.
 3. Copy `ops/vector/vector.service` to `/etc/systemd/system/vector.service`.
-4. `systemctl enable --now vector` and verify `systemctl restart vector`.
+4. `sudo mkdir -p /var/lib/vector` (disk buffer data_dir).
+5. Validate before enabling: `vector validate /etc/vector/vector.toml`.
+6. `sudo systemctl daemon-reload && sudo systemctl enable --now vector` and
+   verify `systemctl restart vector`.
 
 ## Step 3: monitors and notifier (created 2026-08-05)
 
@@ -85,7 +88,15 @@ curl -X POST "https://api.axiom.co/v1/datasets/pareton-prod/ingest" \
 
 ## Step 5 verification (post-deploy)
 
-1. Dry pipeline event searchable by `submission_id` in Axiom MCP.
-2. Stop `pareton-worker` briefly; `worker-heartbeat-absent` fires; restart resolves.
-3. Synthetic `destroy_failed` triggers `lifecycle-failures`.
-4. `bench_completed` events include `evidence_s3_url` and `evidence_sha256` on real runs.
+1. Validate config before enabling: `vector validate /etc/vector/vector.toml`.
+2. `sudo systemctl restart vector`.
+3. Ingest a synthetic heartbeat (curl above with `"event":"heartbeat"`), then
+   confirm via Axiom MCP that `['pareton-prod'] | where event == "heartbeat" | take 5`
+   returns it with `event` as a top-level field.
+4. `sudo systemctl restart pareton-worker`; the heartbeat thread emits at
+   start, then every 5 minutes (including during long jobs). Confirm a real
+   heartbeat is searchable within a minute.
+5. Stop `pareton-worker`; `worker-heartbeat-absent` fires after its 15-minute
+   window; restart resolves.
+6. Synthetic `destroy_failed` triggers `lifecycle-failures`.
+7. `bench_completed` events include `evidence_s3_url` and `evidence_sha256` on real runs.

@@ -288,10 +288,11 @@ def destroy_pod(
         provider = get_provider(pod.provider, state_dir=registry.state_dir)
     try:
         provider.destroy(pod)
-    except DestroyError:
+    except DestroyError as exc:
         obs.destroy_failed(
             pod=pod.name,
             provider=pod.provider,
+            error=str(exc),
             volume_uid=str((pod.raw or {}).get("volume_uid", "")),
         )
         if pod.provider != "static_ssh":
