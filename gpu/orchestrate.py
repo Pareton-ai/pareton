@@ -35,6 +35,7 @@ from gpu.registry import (
 )
 from gpu.ssh import REPO_RSYNC_EXCLUDES, SshRunner, exec as ssh_exec, pull, push
 from gpu.types import Pod, PodSpec
+from observability import events as obs
 
 logger = logging.getLogger(__name__)
 
@@ -262,10 +263,17 @@ def provision_pod(
             ) from exc
         return pod
 
-    if provider.name == "static_ssh":
-        return _do_provision()
-    with registry.provision_lock():
-        return _do_provision()
+    try:
+        if provider.name == "static_ssh":
+            result_pod = _do_provision()
+        else:
+            with registry.provision_lock():
+                result_pod = _do_provision()
+    except (ProvisionError, Exception) as exc:
+        obs.pod_provision_failed(provider=provider.name, error=str(exc))
+        raise
+    obs.pod_provisioned(pod=result_pod.name, provider=result_pod.provider)
+    return result_pod
 
 
 def destroy_pod(
@@ -280,7 +288,13 @@ def destroy_pod(
         provider = get_provider(pod.provider, state_dir=registry.state_dir)
     try:
         provider.destroy(pod)
-    except DestroyError:
+    except DestroyError as exc:
+        obs.destroy_failed(
+            pod=pod.name,
+            provider=pod.provider,
+            error=str(exc),
+            volume_uid=str((pod.raw or {}).get("volume_uid", "")),
+        )
         if pod.provider != "static_ssh":
             try:
                 registry.update(_entry_from_pod(pod, state="destroy_failed"))
@@ -291,6 +305,7 @@ def destroy_pod(
                     reg_exc,
                 )
         raise
+    obs.pod_destroyed(pod=pod.name, provider=pod.provider)
     if pod.provider != "static_ssh":
         registry.remove(pod.name)
 
