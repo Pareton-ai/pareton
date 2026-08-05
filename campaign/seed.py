@@ -166,6 +166,7 @@ def seed_synthetic_campaign(
     success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
     gpu_skus: list[str] | None = None,
     status: str = DEFAULT_STATUS,
+    no_bench: bool = False,
 ) -> str:
     # Normalize before floor lookup / profile insert (build_manifest also validates).
     priority_metric = validate_priority_metric(priority_metric)
@@ -230,18 +231,23 @@ def seed_synthetic_campaign(
     now = datetime.now(timezone.utc)
     opens = now - timedelta(minutes=1)
     closes = now + timedelta(days=90)
-    bench = build_seed_bench_spec(
-        model_repo=bench_model_repo,
-        model_revision=bench_model_revision,
-        dtype=bench_dtype,
-        max_model_len=bench_max_model_len,
-        baseline_engine_image_digest=baseline_engine_image_digest,
-        gpu_count=bench_gpu_count,
-        serve_args=bench_serve_args,
-        cross_env={
-            **DEFAULT_CROSS_ENV,
-            "min_speedup_each": _seed_min_speedup_each(priority_metric),
-        },
+    # no_bench: intake/build e2e tests must not auto-enqueue real GPU bench jobs.
+    bench = (
+        None
+        if no_bench
+        else build_seed_bench_spec(
+            model_repo=bench_model_repo,
+            model_revision=bench_model_revision,
+            dtype=bench_dtype,
+            max_model_len=bench_max_model_len,
+            baseline_engine_image_digest=baseline_engine_image_digest,
+            gpu_count=bench_gpu_count,
+            serve_args=bench_serve_args,
+            cross_env={
+                **DEFAULT_CROSS_ENV,
+                "min_speedup_each": _seed_min_speedup_each(priority_metric),
+            },
+        )
     )
 
     fields_manifest = build_manifest(
@@ -353,6 +359,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Campaign status (default: draft; open only after fee/caps + launch ops)",
     )
     p.add_argument(
+        "--no-bench",
+        action="store_true",
+        help="Omit the bench spec so built submissions do not enqueue GPU bench jobs",
+    )
+    p.add_argument(
         "--workload-trace-url",
         default=None,
         help="file:// or https:// URL stored in the campaign (default: local fixture)",
@@ -399,6 +410,7 @@ def main(argv: list[str] | None = None) -> int:
             success_threshold=args.success_threshold,
             gpu_skus=args.gpu_skus,
             status=args.status,
+            no_bench=args.no_bench,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

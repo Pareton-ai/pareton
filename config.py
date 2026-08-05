@@ -146,6 +146,11 @@ BENCH_MAX_SUBMISSIONS_PER_HOTKEY_PER_DAY: int = int(
     os.environ.get("PARETON_BENCH_MAX_SUBMISSIONS_PER_HOTKEY_PER_DAY", "10")
 )
 
+# Axiom observability (Vector log shipping). Ingest-only token; store in
+# /opt/pareton/.env at deploy time, never in the repo.
+AXIOM_TOKEN: str = os.environ.get("PARETON_AXIOM_TOKEN", "")
+AXIOM_DATASET: str = os.environ.get("PARETON_AXIOM_DATASET", "pareton-prod")
+
 API_ALLOWED_ORIGINS: list[str] = [
     o.strip()
     for o in os.environ.get("PARETON_ALLOWED_ORIGINS", "*").split(",")

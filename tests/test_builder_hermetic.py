@@ -17,7 +17,10 @@ COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 
 
 @pytest.mark.unit
-def test_dockerfile_nonempty_has_apply_and_entrypoint():
+def test_dockerfile_nonempty_has_apply_and_entrypoint(monkeypatch):
+    # .env (loaded by conftest) may set build vars; pin defaults for this test.
+    monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
+    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     text = dockerfile_for_patch(
         allow_empty_patch=False,
         patch_bytes=b"diff --git a/x b/x\n",
@@ -39,7 +42,9 @@ def test_dockerfile_nonempty_has_apply_and_entrypoint():
 
 
 @pytest.mark.unit
-def test_dockerfile_empty_allowed_skips_apply():
+def test_dockerfile_empty_allowed_skips_apply(monkeypatch):
+    monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
+    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     text = dockerfile_for_patch(
         allow_empty_patch=True, patch_bytes=b"", baseline_commit=COMMIT
     )
@@ -191,3 +196,36 @@ def test_pullable_digest_ref_bare_and_pinned():
 def test_pullable_digest_ref_rejects_bad():
     with pytest.raises(ValueError):
         pullable_digest_ref("not-a-digest", image="pareton-engine")
+
+
+@pytest.mark.unit
+def test_baseline_build_image_ref_passes_full_engine_ref():
+    digest = "sha256:" + ("6" * 64)
+    ref = f"ghcr.io/pareton-ai/pareton-engine@{digest}"
+    assert baseline_build_image_ref(ref) == ref
+
+
+@pytest.mark.unit
+def test_build_base_image_prefers_engine_pin():
+    from types import SimpleNamespace
+
+    from worker.pipeline import _build_base_image
+
+    engine = "sha256:" + ("e" * 64)
+    campaign = SimpleNamespace(
+        campaign_id="c1",
+        base_image_digest="sha256:" + ("b" * 64),
+        bench={"baseline_engine_image_digest": engine},
+    )
+    assert _build_base_image(campaign) == baseline_engine_image_ref(engine)
+
+
+@pytest.mark.unit
+def test_build_base_image_falls_back_to_base():
+    from types import SimpleNamespace
+
+    from worker.pipeline import _build_base_image
+
+    base = "sha256:" + ("b" * 64)
+    campaign = SimpleNamespace(campaign_id="c1", base_image_digest=base, bench=None)
+    assert _build_base_image(campaign) == baseline_build_image_ref(base)

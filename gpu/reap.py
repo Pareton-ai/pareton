@@ -11,6 +11,7 @@ from gpu.errors import DestroyError
 from gpu.providers import get_provider
 from gpu.registry import NAME_PREFIX, PodRegistry, is_expired
 from gpu.types import Pod, SshTarget
+from observability import events as obs
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,7 @@ def reap(
             expired = is_expired(pod.name, clock=clock)
             if expired is not True:
                 continue
+            obs.pod_ttl_exceeded(pod=pod.name, provider=provider.name)
             actions.append(
                 ReapAction(
                     kind="workload",
@@ -94,6 +96,7 @@ def reap(
                 registry.remove(pod.name)
             except DestroyError as exc:
                 actions[-1].detail = str(exc)
+                obs.destroy_failed(pod=pod.name, provider=provider.name, error=str(exc))
                 entry = registry.get(pod.name)
                 if entry is not None:
                     entry.state = "destroy_failed"
