@@ -15,7 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Self
+from typing import Any
+
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 _logger = logging.getLogger("pareton.lifecycle")
 
