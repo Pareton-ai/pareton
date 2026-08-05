@@ -112,6 +112,8 @@ def _call_event(name: str) -> dict:
             "stage": "bench",
             "duration_s": 300.0,
             "verdict": "pass",
+            "evidence_s3_url": "s3://pareton-s3/stage0/evidence/sub-1/bundle.tgz",
+            "evidence_sha256": "sha256:abc123",
         }
     elif name == "bench_failed":
         kwargs = {

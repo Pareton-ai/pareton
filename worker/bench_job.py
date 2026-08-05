@@ -747,14 +747,18 @@ def process_bench_job(
             last_error=None,
         )
         bench_timer.__exit__(None, None, None)
+        primary = results[0]
         obs.bench_completed(
             submission_id=submission_id,
             job_id=str(job_id),
             stage="bench",
+            provider=primary.provider or "",
             image_digest=image_digest,
             patch_sha256=patch_sha256,
             duration_s=bench_timer.elapsed_s,
             verdict=agg_verdict,
+            evidence_s3_url=primary.evidence_s3_url or "",
+            evidence_sha256=primary.evidence_sha256 or "",
         )
         return "ok"
 
