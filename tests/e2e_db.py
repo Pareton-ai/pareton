@@ -16,7 +16,13 @@ _E2E_PROFILE_NAMES = ("e2e", "e2e-bench", "e2e-xenv")
 
 
 def _hostname(url: str) -> str | None:
-    return urlparse(url).hostname
+    host = urlparse(url).hostname
+    if host is None:
+        return None
+    # Neon serves one branch at both ep-<id>.<region>... and
+    # ep-<id>-pooler.<region>...; the pair must compare equal (fail closed).
+    first, dot, rest = host.partition(".")
+    return first.removesuffix("-pooler") + dot + rest
 
 
 def require_e2e_database_url() -> str:

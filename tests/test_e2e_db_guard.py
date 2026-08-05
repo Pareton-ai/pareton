@@ -39,3 +39,35 @@ def test_e2e_accepts_distinct_test_host(monkeypatch):
         "postgresql://u:p@ep-test.example/neondb?sslmode=require",
     )
     assert require_e2e_database_url().startswith("postgresql://")
+
+
+@pytest.mark.parametrize(
+    ("main_url", "test_url"),
+    [
+        (
+            "postgresql://u:p@ep-main-pooler.us-east-2.aws.neon.tech/neondb",
+            "postgresql://u:p@ep-main.us-east-2.aws.neon.tech/neondb",
+        ),
+        (
+            "postgresql://u:p@ep-main.us-east-2.aws.neon.tech/neondb",
+            "postgresql://u:p@ep-main-pooler.us-east-2.aws.neon.tech/neondb",
+        ),
+    ],
+)
+def test_e2e_refuses_pooler_alias_of_main(monkeypatch, main_url, test_url):
+    monkeypatch.setenv("PARETON_DATABASE_URL", main_url)
+    monkeypatch.setenv("PARETON_TEST_DATABASE_URL", test_url)
+    with pytest.raises(pytest.fail.Exception, match="same host"):
+        require_e2e_database_url()
+
+
+def test_e2e_accepts_distinct_neon_branches(monkeypatch):
+    monkeypatch.setenv(
+        "PARETON_DATABASE_URL",
+        "postgresql://u:p@ep-main-pooler.us-east-2.aws.neon.tech/neondb",
+    )
+    monkeypatch.setenv(
+        "PARETON_TEST_DATABASE_URL",
+        "postgresql://u:p@ep-test-pooler.us-east-2.aws.neon.tech/neondb",
+    )
+    assert require_e2e_database_url().startswith("postgresql://")
