@@ -1,0 +1,26 @@
+# Deploy to /etc/systemd/system/vector.service on pareton-prod-01.
+# Copy ops/vector/vector.toml to /etc/vector/vector.toml.
+# Requires PARETON_AXIOM_TOKEN in /opt/pareton/.env (ingest-only).
+#
+#   sudo cp ops/vector/vector.toml /etc/vector/vector.toml
+#   sudo cp ops/vector/vector.service /etc/systemd/system/vector.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vector
+#   sudo systemctl restart vector
+
+[Unit]
+Description=Vector log shipper (pareton journald -> Axiom)
+After=network-online.target
+Wants=network-online.target
+Documentation=https://vector.dev/docs/
+
+[Service]
+Type=simple
+EnvironmentFile=-/opt/pareton/.env
+ExecStart=/usr/bin/vector --config /etc/vector/vector.toml
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

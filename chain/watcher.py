@@ -11,6 +11,7 @@ from chain.commitment import (
     build_patch_commitments,
 )
 from chain.rpc import fetch_chain_view
+from observability import events as obs
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,12 @@ def ingest_commitment(com: PatchCommitment) -> str | None:
         sid,
         com.patch_hash,
         com.hotkey[:16],
+    )
+    obs.submission_ingested(
+        submission_id=str(sid),
+        campaign_id=com.campaign_id,
+        patch_sha256=com.patch_hash,
+        hotkey=com.hotkey,
     )
     return str(sid)
 
