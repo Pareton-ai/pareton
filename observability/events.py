@@ -17,11 +17,6 @@ import logging
 import time
 from typing import Any
 
-try:
-    from typing import Self
-except ImportError:
-    from typing_extensions import Self
-
 _logger = logging.getLogger("pareton.lifecycle")
 
 # Fields that must never appear in event payloads.
@@ -356,7 +351,7 @@ class Timer:
         self._start: float = 0.0
         self.elapsed_s: float = 0.0
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> Timer:
         self._start = time.monotonic()
         return self
 
