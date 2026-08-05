@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,13 +19,22 @@ from campaign.store import (
     insert_submission,
     list_events,
 )
+from e2e_db import cleanup_e2e_rows, require_e2e_database_url
 from worker.pipeline import process_submission
 
-# Skip if no DB configured
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("PARETON_DATABASE_URL"),
-    reason="PARETON_DATABASE_URL not set",
-)
+pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(autouse=True)
+def _bind_e2e_database(monkeypatch: pytest.MonkeyPatch):
+    """Point store/connection code at the Neon test branch for this module."""
+    url = require_e2e_database_url()
+    monkeypatch.setenv("PARETON_DATABASE_URL", url)
+    import db.connection as conn
+
+    monkeypatch.setattr(conn, "DATABASE_URL", url)
+    yield
+    cleanup_e2e_rows()
 
 
 def _patch_for_repo(repo: Path) -> bytes:
