@@ -1,3 +1,5 @@
 [lint.per-file-ignores]
 # Tests set pytestmark before imports, which trips E402 intentionally.
 "tests/**" = ["E402"]
+# Standalone scripts insert the repo root into sys.path before package imports.
+"scripts/**" = ["E402"]

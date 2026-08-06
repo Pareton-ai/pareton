@@ -451,6 +451,7 @@ KNOWN_SUBMISSION_STATES: tuple[str, ...] = (
     "verified",
     "applied",
     "surface_ok",
+    "building",
     "built",
     "correct",
     "screened",

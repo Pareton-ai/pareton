@@ -41,6 +41,7 @@ EXPECTED_EVENT_SEQUENCE = [
     "verified",
     "applied",
     "surface_ok",
+    "building",
     "built",
 ]
 _SAFE_RUN_ID = re.compile(r"[^a-zA-Z0-9._-]+")

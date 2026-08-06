@@ -12,6 +12,7 @@ class SubmissionState:
     VERIFIED = "verified"
     APPLIED = "applied"
     SURFACE_OK = "surface_ok"
+    BUILDING = "building"
     BUILT = "built"
     CORRECT = "correct"
     SCREENED = "screened"

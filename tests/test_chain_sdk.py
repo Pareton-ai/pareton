@@ -135,12 +135,53 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
             "--patch",
             str(patch),
             "--retrieval-url",
-            "https://example.com/p.diff",
+            "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
             "--wallet-name",
             "w",
         ]
     )
     assert rc == 0
+
+
+def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    import bittensor as bt
+
+    import miner.commit_patch as cp
+
+    patch = tmp_path / "p.diff"
+    patch.write_bytes(b"diff --git a/x b/x\n")
+
+    monkeypatch.setattr(
+        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+    )
+    monkeypatch.setattr(
+        bt,
+        "Wallet",
+        lambda **_k: SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk")),
+    )
+    # Force a payload that exceeds MaxFields=3 after encode.
+    monkeypatch.setattr(
+        cp,
+        "encode_patch_commitment",
+        lambda **_k: "x" * 385,
+    )
+
+    rc = cp.main(
+        [
+            "--campaign-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--patch",
+            str(patch),
+            "--retrieval-url",
+            "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+            "--wallet-name",
+            "w",
+            "--dry-run",
+        ]
+    )
+    assert rc == 1
 
 
 def test_commitment_entries_mapping():
@@ -175,7 +216,7 @@ def test_scan_chain_folds_commitments(monkeypatch):
         campaign_id="11111111-1111-4111-8111-111111111111",
         baseline_commit="a" * 40,
         patch_hash="sha256:" + "b" * 64,
-        retrieval_url="https://example.com/p.patch",
+        retrieval_url="https://example.com/stage0/campaigns/c/patches/hk2/p.patch",
     )
 
     class Meta:
@@ -190,3 +231,49 @@ def test_scan_chain_folds_commitments(monkeypatch):
     created, hotkeys = watcher.scan_chain(object(), 10, ingest=lambda _com: "sid-1")
     assert created == ["sid-1"]
     assert hotkeys == ["hk1", "hk2"]
+
+
+def test_scan_chain_orders_by_commit_block(monkeypatch):
+    """Lower UID must not steal first-seen when its commit_block is later."""
+    from chain import watcher
+    from chain.commitment import encode_patch_commitment
+
+    campaign_id = "11111111-1111-4111-8111-111111111111"
+    patch_hash = "sha256:" + "b" * 64
+    early = encode_patch_commitment(
+        campaign_id=campaign_id,
+        baseline_commit="a" * 40,
+        patch_hash=patch_hash,
+        retrieval_url="https://example.com/stage0/campaigns/c/patches/hk2/p.patch",
+    )
+    late = encode_patch_commitment(
+        campaign_id=campaign_id,
+        baseline_commit="a" * 40,
+        patch_hash=patch_hash,
+        retrieval_url="https://example.com/stage0/campaigns/c/patches/hk1/p.patch",
+    )
+
+    class Meta:
+        # hk1 is UID 0 (would win under UID-order); hk2 committed earlier.
+        hotkeys = ["hk1", "hk2"]
+        coldkeys = ["ck1", "ck2"]
+
+    monkeypatch.setattr(
+        watcher,
+        "fetch_chain_view",
+        lambda *_a, **_k: (
+            Meta(),
+            {"hk1": [(20, late)], "hk2": [(10, early)]},
+            20,
+            None,
+        ),
+    )
+    seen: list[tuple[int, str]] = []
+
+    def _ingest(com):
+        seen.append((com.commit_block, com.hotkey))
+        return f"sid-{com.hotkey}"
+
+    created, _hotkeys = watcher.scan_chain(object(), 10, ingest=_ingest)
+    assert seen == [(10, "hk2"), (20, "hk1")]
+    assert created == ["sid-hk2", "sid-hk1"]
