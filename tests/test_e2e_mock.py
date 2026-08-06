@@ -99,7 +99,7 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
     profile_id = insert_profile("e2e", {"fixture": True})
     now = datetime.now(timezone.utc)
     campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/e2e.diff"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000000/e2e.diff"
     manifest = build_manifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
@@ -359,7 +359,7 @@ def test_e2e_mock_bench_happy_path(tmp_path, monkeypatch):
     trace_url = f"file://{sample_trace.resolve()}"
     now = datetime.now(timezone.utc)
     campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/e2e.diff"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000001/e2e.diff"
     bench = _bench_campaign_spec(sample_trace, trace_sha)
     _insert_open_campaign(
         repo=repo,
@@ -463,7 +463,7 @@ def test_e2e_mock_bench_adversarial_and_terminal_guard(tmp_path, monkeypatch):
     trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
     now = datetime.now(timezone.utc)
     campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/adv.diff"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000002/adv.diff"
     _insert_open_campaign(
         repo=repo,
         commit=commit,
@@ -527,7 +527,7 @@ def test_e2e_mock_bench_candidate_engine_failure(tmp_path, monkeypatch):
     trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
     now = datetime.now(timezone.utc)
     campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/eng.diff"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000003/eng.diff"
     _insert_open_campaign(
         repo=repo,
         commit=commit,
@@ -586,7 +586,7 @@ def test_e2e_sibling_job_isolation(tmp_path, monkeypatch):
     trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
     now = datetime.now(timezone.utc)
     campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/sib.diff"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000004/sib.diff"
     _insert_open_campaign(
         repo=repo,
         commit=commit,
@@ -664,7 +664,7 @@ def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
     trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
     now = datetime.now(timezone.utc)
     campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/hk/xenv.diff"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000099/xenv.diff"
     bench = _bench_campaign_spec(sample_trace, trace_sha)
     bench["cross_env"] = {
         "aggregate": "min",

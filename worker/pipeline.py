@@ -94,6 +94,7 @@ def process_submission(
     integrity_kwargs: dict[str, Any] = {
         "retrieval_url": retrieval_url,
         "expected_patch_hash": patch_hash,
+        "hotkey": hotkey,
     }
     if fetcher is not None:
         integrity_kwargs["fetcher"] = fetcher

@@ -4,7 +4,7 @@
 Flow:
   1. Request Pareton-presigned S3 upload (or reuse --retrieval-url)
   2. PUT patch bytes
-  3. Commitments.set_commitment with v1 patch payload (plaintext Raw fields)
+  3. Commitments.set_commitment with v2 patch payload (plaintext Raw fields)
 
 Usage:
     python miner/commit_patch.py \\
@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
+from storage.s3 import patch_url_hotkey  # noqa: E402
 
 
 def _sha256_file(path: Path) -> str:
@@ -118,9 +119,9 @@ def _await_visible(
                 commitments = await mg.fetch_commitments(client, netuid)
             c = commitments.get(hotkey)
             if c is not None:
-                if payload in (getattr(c, "data", None) or ""):
+                if (getattr(c, "data", None) or "") == payload:
                     return f"plaintext visible at block {c.block}"
-                if any(payload in str(data) for _block, data in (c.revealed or [])):
+                if any(str(data) == payload for _block, data in (c.revealed or [])):
                     return f"revealed at block {c.block}"
             await asyncio.sleep(6)
         return None
@@ -175,6 +176,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.retrieval_url:
         retrieval_url = args.retrieval_url
+        if patch_url_hotkey(retrieval_url) != hotkey:
+            print(
+                f"error: --retrieval-url path hotkey must match wallet hotkey {hotkey}",
+                file=sys.stderr,
+            )
+            return 1
     else:
         try:
             presign = _http_json(
@@ -193,12 +200,23 @@ def main(argv: list[str] | None = None) -> int:
         retrieval_url = presign["retrieval_url"]
         print(f"uploaded patch to {retrieval_url}")
 
-    payload = encode_patch_commitment(
-        campaign_id=args.campaign_id,
-        baseline_commit=baseline_commit,
-        patch_hash=patch_hash,
-        retrieval_url=retrieval_url,
-    )
+    try:
+        payload = encode_patch_commitment(
+            campaign_id=args.campaign_id,
+            baseline_commit=baseline_commit,
+            patch_hash=patch_hash,
+            retrieval_url=retrieval_url,
+        )
+        if args.timelock:
+            fields, reveal_round = _timelock_fields(payload)
+            mode = f"timelock reveal_round={reveal_round}"
+        else:
+            fields = _plaintext_fields(payload)
+            mode = "plaintext"
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     print(f"commitment payload ({len(payload.encode())} bytes):")
     print(payload)
 
@@ -216,12 +234,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        if args.timelock:
-            fields, reveal_round = _timelock_fields(payload)
-            mode = f"timelock reveal_round={reveal_round}"
-        else:
-            fields = _plaintext_fields(payload)
-            mode = "plaintext"
         call = bt.calls.Commitments.set_commitment(
             netuid=args.netuid,
             info={"fields": fields},
