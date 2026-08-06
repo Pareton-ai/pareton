@@ -175,6 +175,7 @@ def process_submission(
     )
 
     # e. Hermetic build
+    append_event(submission_id, SubmissionState.BUILDING, detail={})
     obs.build_started(submission_id=submission_id, patch_sha256=patch_hash)
     build_timer = Timer()
     with build_timer:
