@@ -35,6 +35,20 @@ def test_sdk_submit_surface():
         assert hasattr(bt.Subtensor, name)
 
 
+def test_timelock_reveal_at_maps_to_near_round():
+    """11.x reveal_in is seconds, not blocks; a tiny value maps to a far-future
+    DRAND round. Use reveal_at with an absolute near-future timestamp so the
+    commitment reveals within minutes, not decades. The DRAND round itself may
+    be large due to epoch offset; assert the reveal time is near instead."""
+    from datetime import datetime, timedelta, timezone
+
+    from bittensor import timelock
+
+    reveal_at = datetime.now(timezone.utc) + timedelta(minutes=2)
+    sealed = timelock.encrypt("x", reveal_at=reveal_at)
+    assert sealed.reveal_at <= reveal_at + timedelta(seconds=30)
+
+
 def test_miner_uses_unwrapped_metagraph():
     """Registration check needs a bare Metagraph. chain.rpc's same-named
     helper returns (meta, block, hash); importing that one crashes
