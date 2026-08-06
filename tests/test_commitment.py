@@ -34,6 +34,40 @@ def test_reject_image_payload():
     assert parse_patch_commitment(raw) is None
 
 
+def test_parse_legacy_v1_json():
+    raw = (
+        '{"v":1,"campaign_id":"123e4567-e89b-12d3-a456-426614174000",'
+        '"baseline_commit":"' + "a" * 40 + '",'
+        '"patch_hash":"sha256:' + "b" * 64 + '",'
+        '"retrieval_url":"https://example.com/a.diff"}'
+    )
+    parsed = parse_patch_commitment(raw)
+    assert parsed is not None
+    assert parsed["patch_hash"] == "sha256:" + "b" * 64
+
+
+def test_reject_v2_wrong_field_count():
+    assert parse_patch_commitment("v2|only|three|parts") is None
+
+
+def test_encode_fits_finney_maxfields():
+    # CommitmentInfo.fields is a BoundedVec with MaxFields=3 on finney
+    # (3 x 128-byte Raw chunks); exceeding it traps validate_transaction.
+    raw = encode_patch_commitment(
+        campaign_id="123e4567-e89b-12d3-a456-426614174000",
+        baseline_commit="a" * 40,
+        patch_hash="sha256:" + "b" * 64,
+        retrieval_url="https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/campaigns/"
+        + "c" * 36
+        + "/patches/"
+        + "h" * 48
+        + "/"
+        + "d" * 36
+        + ".diff",
+    )
+    assert len(raw.encode()) <= 3 * 128
+
+
 def test_reject_bad_url_scheme():
     raw = encode_patch_commitment(
         campaign_id="123e4567-e89b-12d3-a456-426614174000",

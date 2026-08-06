@@ -4,7 +4,7 @@
 Flow:
   1. Request Pareton-presigned S3 upload (or reuse --retrieval-url)
   2. PUT patch bytes
-  3. set_reveal_commitment with v1 patch payload
+  3. Commitments.set_commitment with v1 patch payload (plaintext Raw fields)
 
 Usage:
     python miner/commit_patch.py \\
@@ -63,6 +63,71 @@ def _put_bytes(url: str, data: bytes) -> None:
         resp.read()
 
 
+def _plaintext_fields(payload: str) -> list[dict]:
+    """Split payload into Data::Raw chunks (each variant holds <=128 bytes).
+
+    Finney's CommitmentInfo fields is a BoundedVec with MaxFields=3: a 4th
+    field makes validate_transaction trap (wasm unreachable) instead of
+    erroring cleanly, so fail fast here instead.
+    """
+    raw = payload.encode()
+    fields = [
+        {f"Raw{len(chunk)}": "0x" + chunk.hex()}
+        for chunk in (raw[i : i + 128] for i in range(0, len(raw), 128))
+    ]
+    if len(fields) > 3:
+        raise ValueError(
+            f"commitment payload is {len(raw)} bytes ({len(fields)} Raw fields); "
+            "finney MaxFields=3 caps plaintext commitments at 384 bytes"
+        )
+    return fields
+
+
+def _timelock_fields(payload: str) -> tuple[list[dict], int]:
+    from datetime import datetime, timedelta, timezone
+
+    from bittensor import timelock
+
+    sealed = timelock.encrypt(
+        payload,
+        reveal_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+    )
+    field = {
+        "TimelockEncrypted": {
+            "encrypted": sealed.ciphertext,
+            "reveal_round": sealed.reveal_round,
+        }
+    }
+    return [field], sealed.reveal_round
+
+
+def _await_visible(
+    network: str, netuid: int, hotkey: str, payload: str, *, timeout_s: float = 90.0
+) -> str | None:
+    """Poll until the chain exposes our payload, or return None on timeout."""
+    import asyncio
+    import time
+
+    import bittensor as bt
+    import bittensor.metagraph as mg
+
+    async def _poll() -> str | None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            async with bt.Client(network) as client:
+                commitments = await mg.fetch_commitments(client, netuid)
+            c = commitments.get(hotkey)
+            if c is not None:
+                if payload in (getattr(c, "data", None) or ""):
+                    return f"plaintext visible at block {c.block}"
+                if any(payload in str(data) for _block, data in (c.revealed or [])):
+                    return f"revealed at block {c.block}"
+            await asyncio.sleep(6)
+        return None
+
+    return asyncio.run(_poll())
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Commit a Pareton patch (Stage 0)")
     p.add_argument("--campaign-id", required=True)
@@ -73,6 +138,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--wallet-hotkey", default="default")
     p.add_argument("--network", default="finney")
     p.add_argument("--netuid", type=int, default=10)
+    p.add_argument(
+        "--timelock",
+        action="store_true",
+        help="Seal payload with drand timelock instead of plaintext "
+        "(experimental: finney reveal has not produced entries in ~52 days)",
+    )
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -88,7 +159,6 @@ def main(argv: list[str] | None = None) -> int:
     patch_hash = _sha256_file(args.patch)
 
     import bittensor as bt
-    from bittensor import timelock
 
     wallet = bt.Wallet(name=args.wallet_name, hotkey=args.wallet_hotkey)
     hotkey = wallet.hotkey.ss58_address
@@ -129,8 +199,8 @@ def main(argv: list[str] | None = None) -> int:
         patch_hash=patch_hash,
         retrieval_url=retrieval_url,
     )
-    print("commitment payload:")
-    print(json.dumps(json.loads(payload), indent=2))
+    print(f"commitment payload ({len(payload.encode())} bytes):")
+    print(payload)
 
     if args.dry_run:
         print("dry-run: not submitting on-chain")
@@ -146,29 +216,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        from datetime import datetime, timedelta, timezone
-
-        # reveal_in is seconds, not blocks; a tiny value still maps to a far-future
-        # DRAND round in 11.x. Use an absolute near-future timestamp instead.
-        # 60s clears DRAND's 30s quantization plus extrinsic inclusion (~1-2 blocks).
-        sealed = timelock.encrypt(
-            payload,
-            reveal_at=datetime.now(timezone.utc) + timedelta(seconds=60),
-        )
+        if args.timelock:
+            fields, reveal_round = _timelock_fields(payload)
+            mode = f"timelock reveal_round={reveal_round}"
+        else:
+            fields = _plaintext_fields(payload)
+            mode = "plaintext"
         call = bt.calls.Commitments.set_commitment(
             netuid=args.netuid,
-            info={
-                "fields": [
-                    [
-                        {
-                            "TimelockEncrypted": {
-                                "encrypted": sealed.ciphertext,
-                                "reveal_round": sealed.reveal_round,
-                            }
-                        }
-                    ]
-                ]
-            },
+            info={"fields": fields},
         )
         result = bt.Subtensor(
             network=args.network, policy=bt.Policy(allow_raw_calls=True)
@@ -184,7 +240,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    print(f"committed patch_hash={patch_hash} on netuid {args.netuid}")
+    print(f"committed patch_hash={patch_hash} on netuid {args.netuid} ({mode})")
+
+    # Verify is informational only: the commitment already landed, so a poll
+    # failure must not turn a successful commit into a non-zero exit.
+    try:
+        status = _await_visible(args.network, args.netuid, hotkey, payload)
+    except Exception as exc:
+        print(
+            f"warning: on-chain verify failed ({exc}); commitment is submitted",
+            file=sys.stderr,
+        )
+    else:
+        if status:
+            print(f"verified on-chain: {status}")
+        else:
+            print(
+                "warning: commitment not visible within 90s; check chain "
+                "propagation before expecting the worker to pick it up",
+                file=sys.stderr,
+            )
     return 0
 
 

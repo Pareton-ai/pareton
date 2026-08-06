@@ -41,10 +41,34 @@ class _MetagraphLike(Protocol):
     hotkeys: list[str]
 
 
+def _parse_v2(raw: str) -> dict[str, str] | None:
+    """Parse `v2|campaign_id|baseline_commit|sha256:<hex>|retrieval_url`."""
+    parts = raw.split("|")
+    if len(parts) != 5:
+        return None
+    _v, campaign_id, baseline_commit, patch_hash, retrieval_url = parts
+    if not _UUID_RE.match(campaign_id.strip()):
+        return None
+    if not _GIT_SHA_RE.match(baseline_commit.strip().lower()):
+        return None
+    if not PATCH_HASH_RE.match(patch_hash.strip().lower()):
+        return None
+    if not retrieval_url.strip().startswith(("https://", "http://")):
+        return None
+    return {
+        "campaign_id": str(UUID(campaign_id.strip())),
+        "baseline_commit": baseline_commit.strip().lower(),
+        "patch_hash": patch_hash.strip().lower(),
+        "retrieval_url": retrieval_url.strip(),
+    }
+
+
 def parse_patch_commitment(raw: str) -> dict[str, str] | None:
-    """Parse Pareton v1 patch commitment JSON or return None."""
+    """Parse a Pareton patch commitment (v2 pipe format or legacy v1 JSON)."""
     if not isinstance(raw, str) or not raw:
         return None
+    if raw.startswith("v2|"):
+        return _parse_v2(raw)
     try:
         obj = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
@@ -89,15 +113,22 @@ def encode_patch_commitment(
     patch_hash: str,
     retrieval_url: str,
 ) -> str:
-    """Canonical JSON string for set_reveal_commitment."""
-    payload = {
-        "v": 1,
-        "campaign_id": str(UUID(campaign_id)),
-        "baseline_commit": baseline_commit.lower(),
-        "patch_hash": patch_hash.lower(),
-        "retrieval_url": retrieval_url,
-    }
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    """Canonical v2 wire string for Commitments.set_commitment.
+
+    Positional pipe format: finney's CommitmentInfo allows MaxFields=3
+    (3 x 128-byte Raw chunks = 384 bytes), and the v1 JSON skeleton alone
+    costs ~75 bytes; this format keeps full payloads (~356 bytes) inside
+    the bound. None of the values may contain '|'.
+    """
+    return "|".join(
+        [
+            "v2",
+            str(UUID(campaign_id)),
+            baseline_commit.lower(),
+            patch_hash.lower(),
+            retrieval_url,
+        ]
+    )
 
 
 def build_patch_commitments(
