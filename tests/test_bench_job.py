@@ -609,6 +609,16 @@ def test_pipeline_uses_atomic_complete_gates():
     assert "baseline_build_image_ref" in helper_src
 
 
+def test_pipeline_writes_building_before_build():
+    import inspect
+
+    from worker import pipeline
+
+    src = inspect.getsource(pipeline.process_submission)
+    assert "SubmissionState.BUILDING" in src
+    assert src.index("SubmissionState.BUILDING") < src.index("obs.build_started")
+
+
 def test_build_request_wires_quantization(tmp_path: Path):
     row = _row(
         bench=_bench_spec(

@@ -125,6 +125,24 @@ def is_allowed_retrieval_url(url: str) -> bool:
     return False
 
 
+def patch_url_hotkey(url: str) -> str | None:
+    """Hotkey path segment from `.../campaigns/<cid>/patches/<hotkey>/<file>`."""
+    try:
+        parts = urlparse(url).path.strip("/").split("/")
+    except Exception:
+        return None
+    for i, part in enumerate(parts):
+        if (
+            part == "patches"
+            and i >= 2
+            and parts[i - 2] == "campaigns"
+            and i + 1 < len(parts)
+            and parts[i + 1]
+        ):
+            return parts[i + 1]
+    return None
+
+
 def fetch_patch_bytes(url: str) -> bytes:
     """Fetch patch bytes with size/timeout/retry bounds."""
     if not is_allowed_retrieval_url(url):

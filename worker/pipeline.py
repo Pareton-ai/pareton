@@ -94,6 +94,7 @@ def process_submission(
     integrity_kwargs: dict[str, Any] = {
         "retrieval_url": retrieval_url,
         "expected_patch_hash": patch_hash,
+        "hotkey": hotkey,
     }
     if fetcher is not None:
         integrity_kwargs["fetcher"] = fetcher
@@ -174,6 +175,7 @@ def process_submission(
     )
 
     # e. Hermetic build
+    append_event(submission_id, SubmissionState.BUILDING, detail={})
     obs.build_started(submission_id=submission_id, patch_sha256=patch_hash)
     build_timer = Timer()
     with build_timer:

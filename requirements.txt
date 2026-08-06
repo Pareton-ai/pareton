@@ -4,6 +4,6 @@ psycopg2-binary
 boto3>=1.34
 huggingface_hub>=0.30
 requests>=2.31
-lium.io>=0.0.24
+lium.io>=0.0.30
 bittensor==11.0.2
 -r api/requirements.txt

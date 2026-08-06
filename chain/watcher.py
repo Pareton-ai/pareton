@@ -12,6 +12,7 @@ from chain.commitment import (
 )
 from chain.rpc import fetch_chain_view
 from observability import events as obs
+from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,23 @@ def ingest_commitment(com: PatchCommitment) -> str | None:
             "skip commitment: campaign %s status=%s",
             com.campaign_id,
             campaign.status,
+        )
+        return None
+    # Reject before insert so a mismatched/junk URL cannot burn the
+    # (campaign_id, patch_hash) first-seen dedupe slot.
+    if not is_allowed_retrieval_url(com.retrieval_url):
+        logger.info(
+            "skip commitment: retrieval_url not allowlisted hotkey=%s url=%s",
+            com.hotkey[:16],
+            com.retrieval_url,
+        )
+        return None
+    url_hotkey = patch_url_hotkey(com.retrieval_url)
+    if url_hotkey != com.hotkey:
+        logger.info(
+            "skip commitment: retrieval_url hotkey mismatch signer=%s url_hotkey=%s",
+            com.hotkey[:16],
+            (url_hotkey or "")[:16],
         )
         return None
 
@@ -79,8 +97,11 @@ def scan_chain(
         subtensor, netuid, network=network
     )
     commitments = build_patch_commitments(meta, revealed)
+    # Plaintext makes patch_hash public at commit time; ingest in chain
+    # chronology so a later lower-UID copycat cannot win first-seen dedupe.
+    ordered = sorted(commitments.values(), key=lambda c: (c.commit_block, c.hotkey))
     created: list[str] = []
-    for com in commitments.values():
+    for com in ordered:
         sid = ingest(com)
         if sid:
             created.append(sid)

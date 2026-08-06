@@ -68,15 +68,24 @@ def test_encode_fits_finney_maxfields():
     assert len(raw.encode()) <= 3 * 128
 
 
-def test_reject_bad_url_scheme():
-    raw = encode_patch_commitment(
-        campaign_id="123e4567-e89b-12d3-a456-426614174000",
-        baseline_commit="a" * 40,
-        patch_hash="sha256:" + "b" * 64,
-        retrieval_url="ipfs://QmSomething",
-    )
-    # encode allows any string; parse rejects non-http(s)
-    assert parse_patch_commitment(raw) is None
+def test_encode_rejects_bad_url_scheme():
+    with pytest.raises(ValueError, match="http"):
+        encode_patch_commitment(
+            campaign_id="123e4567-e89b-12d3-a456-426614174000",
+            baseline_commit="a" * 40,
+            patch_hash="sha256:" + "b" * 64,
+            retrieval_url="ipfs://QmSomething",
+        )
+
+
+def test_encode_rejects_pipe_in_url():
+    with pytest.raises(ValueError, match="\\|"):
+        encode_patch_commitment(
+            campaign_id="123e4567-e89b-12d3-a456-426614174000",
+            baseline_commit="a" * 40,
+            patch_hash="sha256:" + "b" * 64,
+            retrieval_url="https://example.com/a|b.diff",
+        )
 
 
 def test_build_patch_commitments_latest_wins():

@@ -120,15 +120,24 @@ def encode_patch_commitment(
     costs ~75 bytes; this format keeps full payloads (~356 bytes) inside
     the bound. None of the values may contain '|'.
     """
-    return "|".join(
-        [
-            "v2",
-            str(UUID(campaign_id)),
-            baseline_commit.lower(),
-            patch_hash.lower(),
-            retrieval_url,
-        ]
-    )
+    cid = str(UUID(campaign_id))
+    baseline = baseline_commit.lower()
+    phash = patch_hash.lower()
+    url = retrieval_url.strip()
+    for name, value in (
+        ("campaign_id", cid),
+        ("baseline_commit", baseline),
+        ("patch_hash", phash),
+        ("retrieval_url", url),
+    ):
+        if "|" in value:
+            raise ValueError(f"{name} must not contain '|'")
+    if not url.startswith(("https://", "http://")):
+        raise ValueError("retrieval_url must start with http:// or https://")
+    raw = "|".join(["v2", cid, baseline, phash, url])
+    if parse_patch_commitment(raw) is None:
+        raise ValueError("encoded commitment failed parse round-trip")
+    return raw
 
 
 def build_patch_commitments(

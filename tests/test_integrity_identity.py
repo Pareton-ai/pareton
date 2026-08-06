@@ -14,7 +14,7 @@ from campaign.manifest import build_manifest
 from campaign.models import SLA
 from gate.identity import check_identity
 from gate.integrity import check_integrity, hash_patch_bytes
-from storage.s3 import is_allowed_retrieval_url
+from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
 import config
 
 
@@ -119,3 +119,37 @@ def test_integrity_mismatch(monkeypatch):
     )
     assert not res.ok
     assert res.reason == "patch_hash mismatch"
+
+
+def test_patch_url_hotkey_extracts_segment():
+    url = "https://cdn.example.com/stage0/campaigns/cid/patches/5Abc/1.diff"
+    assert patch_url_hotkey(url) == "5Abc"
+    assert patch_url_hotkey("https://cdn.example.com/nope") is None
+
+
+def test_integrity_rejects_hotkey_mismatch(monkeypatch):
+    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    url = "https://cdn.example.com/stage0/campaigns/cid/patches/victim/1.diff"
+    res = check_integrity(
+        retrieval_url=url,
+        expected_patch_hash="sha256:" + "0" * 64,
+        hotkey="attacker",
+        fetcher=lambda _u: b"abc",
+    )
+    assert not res.ok
+    assert res.reason == "retrieval_url hotkey mismatch"
+
+
+def test_integrity_accepts_matching_hotkey(monkeypatch):
+    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
+    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    url = "https://cdn.example.com/stage0/campaigns/cid/patches/hk1/1.diff"
+    data = b"abc"
+    res = check_integrity(
+        retrieval_url=url,
+        expected_patch_hash=hash_patch_bytes(data),
+        hotkey="hk1",
+        fetcher=lambda _u: data,
+    )
+    assert res.ok
