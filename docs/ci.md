@@ -24,6 +24,10 @@ must contain:
 - `CI_TESTNET_WALLET_SEED`: seed or mnemonic for the CI-only hotkey registered
   on Bittensor testnet netuid 543. Do not store a coldkey.
 
+The helper also checks a pinned SHA-256 hash of the Neon test-branch hostname.
+It refuses a database URL for any other endpoint, including the main branch.
+The hash does not expose the database hostname or credentials.
+
 The workflow performs these steps:
 
 1. Check the test database schema.

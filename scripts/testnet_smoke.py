@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -31,6 +32,9 @@ BASELINE_REPO = "https://github.com/vllm-project/vllm.git"
 BASELINE_COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 PROFILE_NAME = "e2e-testnet-smoke"
 PLACEHOLDER_IMAGE_DIGEST = "sha256:" + ("d" * 64)
+EXPECTED_TEST_DATABASE_HOST_SHA256 = (
+    "5ce0ba43088ac6c05f7b62c6f389cebecedab04c2efecf9139370c1e83ec1412"
+)
 EXPECTED_EVENT_SEQUENCE = [
     "committed",
     "fetched",
@@ -40,6 +44,16 @@ EXPECTED_EVENT_SEQUENCE = [
     "built",
 ]
 _SAFE_RUN_ID = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _database_host_sha256(url: str) -> str:
+    """Hash the normalized database hostname without exposing it."""
+    host = urlparse(url).hostname
+    if not host:
+        raise RuntimeError("PARETON_TEST_DATABASE_URL has no hostname")
+    first, dot, rest = host.partition(".")
+    normalized = first.removesuffix("-pooler") + dot + rest
+    return hashlib.sha256(normalized.encode()).hexdigest()
 
 
 def _require_test_runtime() -> None:
@@ -54,6 +68,10 @@ def _require_test_runtime() -> None:
         raise RuntimeError(
             "PARETON_DATABASE_URL must equal PARETON_TEST_DATABASE_URL "
             "for the live smoke"
+        )
+    if _database_host_sha256(test_database_url) != EXPECTED_TEST_DATABASE_HOST_SHA256:
+        raise RuntimeError(
+            "PARETON_TEST_DATABASE_URL does not use the approved Neon test branch"
         )
     if os.environ.get("PARETON_NETWORK") != "test":
         raise RuntimeError("PARETON_NETWORK must be test")
@@ -295,8 +313,11 @@ def poll_for_built(patch_hash: str, *, timeout_s: float, interval_s: float) -> i
                 _print_events(str(seen_submission["id"]))
                 return 1
             if states and states[-1] == "built":
-                _assert_built(seen_submission)
-                _print_events(str(seen_submission["id"]))
+                refreshed = get_submission(patch_hash)
+                if refreshed is None:
+                    raise RuntimeError("built submission disappeared during polling")
+                _assert_built(refreshed)
+                _print_events(str(refreshed["id"]))
                 print(f"testnet smoke built patch {patch_hash}")
                 return 0
         time.sleep(interval_s)

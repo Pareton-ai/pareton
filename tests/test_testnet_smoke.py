@@ -20,6 +20,11 @@ def _set_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PARETON_TEST_DATABASE_URL", "postgresql://test.example/db")
     monkeypatch.setenv("PARETON_NETWORK", "test")
     monkeypatch.setenv("PARETON_NETUID", "543")
+    monkeypatch.setattr(
+        testnet_smoke,
+        "EXPECTED_TEST_DATABASE_HOST_SHA256",
+        hashlib.sha256(b"test.example").hexdigest(),
+    )
 
 
 def test_runtime_guard_accepts_explicit_test_configuration(monkeypatch):
@@ -40,6 +45,22 @@ def test_runtime_guard_rejects_unsafe_configuration(monkeypatch, key, value, mes
     monkeypatch.setenv(key, value)
     with pytest.raises(RuntimeError, match=message):
         testnet_smoke._require_test_runtime()
+
+
+def test_runtime_guard_rejects_unapproved_database_host(monkeypatch):
+    _set_test_runtime(monkeypatch)
+    monkeypatch.setenv("PARETON_DATABASE_URL", "postgresql://prod.example/db")
+    monkeypatch.setenv("PARETON_TEST_DATABASE_URL", "postgresql://prod.example/db")
+    with pytest.raises(RuntimeError, match="approved Neon test branch"):
+        testnet_smoke._require_test_runtime()
+
+
+def test_database_host_hash_normalizes_neon_pooler_alias():
+    direct = "postgresql://u:p@ep-test.us-east-2.aws.neon.tech/db"
+    pooled = "postgresql://u:p@ep-test-pooler.us-east-2.aws.neon.tech/db"
+    assert testnet_smoke._database_host_sha256(direct) == (
+        testnet_smoke._database_host_sha256(pooled)
+    )
 
 
 def test_unique_patch_is_allowed_and_applies(tmp_path):
@@ -121,6 +142,33 @@ def test_poll_returns_soft_skip_when_chain_never_ingests(monkeypatch):
         )
         == 78
     )
+
+
+def test_poll_refetches_submission_after_observing_built(monkeypatch):
+    _set_test_runtime(monkeypatch)
+    stale = {"id": "submission-1", "engine_image_ref": None}
+    fresh = {"id": "submission-1", "engine_image_ref": "mock@sha256:abc"}
+    rows = iter([stale, fresh])
+    monkeypatch.setattr(testnet_smoke, "get_submission", lambda _hash: next(rows))
+    monkeypatch.setattr(
+        testnet_smoke,
+        "list_events",
+        lambda _sid: [
+            {"state": state, "detail": {}}
+            for state in testnet_smoke.EXPECTED_EVENT_SEQUENCE
+        ],
+    )
+    asserted = []
+    monkeypatch.setattr(testnet_smoke, "_assert_built", asserted.append)
+
+    result = testnet_smoke.poll_for_built(
+        "sha256:" + ("a" * 64),
+        timeout_s=1,
+        interval_s=0,
+    )
+
+    assert result == 0
+    assert asserted == [fresh]
 
 
 def test_workflow_contract_uses_testnet_and_mock_build():
