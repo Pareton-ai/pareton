@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Commit a Pareton patch (Stage 0)")
     p.add_argument("--campaign-id", required=True)
     p.add_argument("--patch", required=True, type=Path, help="Unified git diff file")
-    p.add_argument("--api-base", default="http://127.0.0.1:8000")
+    p.add_argument("--api-base", default="https://api.pareton.ai")
     p.add_argument("--retrieval-url", default=None, help="Skip upload; use this URL")
     p.add_argument("--wallet-name", required=True)
     p.add_argument("--wallet-hotkey", default="default")
