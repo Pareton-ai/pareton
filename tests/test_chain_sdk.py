@@ -59,6 +59,37 @@ def test_miner_uses_unwrapped_metagraph():
     assert cp.fetch_metagraph is cc.fetch_metagraph
 
 
+def test_plaintext_fields_decode_via_sdk():
+    """Worker contract: miner plaintext fields must survive the SDK's own
+    commitment decoder (_decode_fields concatenates Raw* variants)."""
+    import bittensor.metagraph as mg
+
+    from chain.commitment import encode_patch_commitment
+    from miner.commit_patch import _plaintext_fields
+
+    payload = encode_patch_commitment(
+        campaign_id="11111111-1111-4111-8111-111111111111",
+        baseline_commit="a" * 40,
+        patch_hash="sha256:" + "b" * 64,
+        retrieval_url="https://example.com/p.patch",
+    )
+    fields = _plaintext_fields(payload)
+    variants = [list(f)[0] for f in fields]
+    full, rem = divmod(len(payload), 128)
+    expected = ["Raw128"] * full + ([f"Raw{rem}"] if rem else [])
+    assert variants == expected
+    assert mg._decode_fields(fields) == payload
+
+
+def test_plaintext_fields_maxfields_guard():
+    import pytest
+
+    import miner.commit_patch as cp
+
+    with pytest.raises(ValueError, match="MaxFields=3"):
+        cp._plaintext_fields("x" * 385)
+
+
 def test_commitment_entries_mapping():
     class Plaintext:
         uid = 3
