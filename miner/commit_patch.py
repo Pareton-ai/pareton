@@ -242,15 +242,24 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"committed patch_hash={patch_hash} on netuid {args.netuid} ({mode})")
 
-    status = _await_visible(args.network, args.netuid, hotkey, payload)
-    if status:
-        print(f"verified on-chain: {status}")
-    else:
+    # Verify is informational only: the commitment already landed, so a poll
+    # failure must not turn a successful commit into a non-zero exit.
+    try:
+        status = _await_visible(args.network, args.netuid, hotkey, payload)
+    except Exception as exc:
         print(
-            "warning: commitment not visible within 90s; check chain propagation "
-            "before expecting the worker to pick it up",
+            f"warning: on-chain verify failed ({exc}); commitment is submitted",
             file=sys.stderr,
         )
+    else:
+        if status:
+            print(f"verified on-chain: {status}")
+        else:
+            print(
+                "warning: commitment not visible within 90s; check chain "
+                "propagation before expecting the worker to pick it up",
+                file=sys.stderr,
+            )
     return 0
 
 

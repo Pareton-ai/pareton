@@ -90,6 +90,59 @@ def test_plaintext_fields_maxfields_guard():
         cp._plaintext_fields("x" * 385)
 
 
+def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
+    """A crashed read-back poll must not fail an already-landed commit."""
+    from types import SimpleNamespace
+
+    import bittensor as bt
+
+    import miner.commit_patch as cp
+
+    patch = tmp_path / "p.diff"
+    patch.write_bytes(b"diff --git a/x b/x\n")
+
+    monkeypatch.setattr(
+        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+    )
+    monkeypatch.setattr(
+        cp,
+        "fetch_metagraph",
+        lambda *_a, **_k: SimpleNamespace(by_hotkey=lambda _hk: object()),
+    )
+    monkeypatch.setattr(
+        bt,
+        "Wallet",
+        lambda **_k: SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk")),
+    )
+    monkeypatch.setattr(
+        bt,
+        "Subtensor",
+        lambda *a, **k: SimpleNamespace(
+            submit_call=lambda *_a2, **_k2: SimpleNamespace(success=True)
+        ),
+    )
+    monkeypatch.setattr(bt.calls.Commitments, "set_commitment", lambda **_k: object())
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("finney peer dropped")
+
+    monkeypatch.setattr(cp, "_await_visible", _boom)
+
+    rc = cp.main(
+        [
+            "--campaign-id",
+            "11111111-1111-4111-8111-111111111111",
+            "--patch",
+            str(patch),
+            "--retrieval-url",
+            "https://example.com/p.diff",
+            "--wallet-name",
+            "w",
+        ]
+    )
+    assert rc == 0
+
+
 def test_commitment_entries_mapping():
     class Plaintext:
         uid = 3
