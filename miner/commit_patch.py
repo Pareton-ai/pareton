@@ -146,7 +146,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        sealed = timelock.encrypt(payload, reveal_in=12)  # ~1 block to reveal
+        from datetime import datetime, timedelta, timezone
+
+        # reveal_in is seconds, not blocks; a tiny value still maps to a far-future
+        # DRAND round in 11.x. Use an absolute near-future timestamp instead.
+        # 60s clears DRAND's 30s quantization plus extrinsic inclusion (~1-2 blocks).
+        sealed = timelock.encrypt(
+            payload,
+            reveal_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        )
         call = bt.calls.Commitments.set_commitment(
             netuid=args.netuid,
             info={
