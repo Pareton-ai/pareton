@@ -228,6 +228,19 @@ def test_sanitized_tail_strips_control_chars(tmp_path):
 
 
 @pytest.mark.unit
+def test_sanitized_tail_caps_giant_single_line(tmp_path):
+    from builder.hermetic import _sanitized_tail
+
+    log_path = tmp_path / "build.log"
+    # Miner-influenced output: one newline-free blob must not bypass the cap.
+    log_path.write_bytes(b"A" * 2_000_000)
+
+    out = _sanitized_tail(log_path)
+    assert len(out["build_log_tail"]) <= 4096
+    assert out["build_log_tail"] == "A" * 4096
+
+
+@pytest.mark.unit
 def test_pullable_digest_ref_bare_and_pinned():
     digest = "sha256:" + ("a" * 64)
     assert (

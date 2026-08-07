@@ -148,23 +148,32 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
-def _sanitized_tail(log_path: Path, *, lines: int = 20) -> dict[str, str]:
-    """Last N log lines with ANSI/control chars stripped, plus integrity hash.
+def _sanitized_tail(
+    log_path: Path, *, lines: int = 20, max_chars: int = 4096
+) -> dict[str, str]:
+    """Last N log lines (capped at max_chars), ANSI/control-stripped, plus hash.
 
     Build output is miner-influenced and served by the public API via event
-    detail, so the raw multi-KB tail never leaves the box: only a sanitized
-    excerpt and a hash of the durable on-disk log.
+    detail: the tail is hard-capped (a single newline-free line cannot blow up
+    the JSONB), and the hash is streamed so a GB-scale log cannot OOM the
+    worker on failure paths.
     """
     try:
-        raw = log_path.read_bytes()
+        size = log_path.stat().st_size
+        digest = hashlib.sha256()
+        with log_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+            f.seek(max(0, size - 256 * 1024))
+            raw_tail = f.read()
     except OSError:
         return {}
-    text = raw.decode("utf-8", errors="replace")
+    text = raw_tail.decode("utf-8", errors="replace")
     clean = _CONTROL_CHARS.sub("", _ANSI_SEQ.sub("", text))
-    tail = "\n".join(clean.splitlines()[-lines:])
+    tail = "\n".join(clean.splitlines()[-lines:])[-max_chars:]
     return {
         "build_log": str(log_path),
-        "build_log_sha256": hashlib.sha256(raw).hexdigest(),
+        "build_log_sha256": digest.hexdigest(),
         "build_log_tail": tail,
     }
 
