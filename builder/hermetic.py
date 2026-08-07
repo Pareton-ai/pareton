@@ -386,14 +386,17 @@ def build_engine_image(
                 )
             image_ref = digest_pinned_ref(image_tag, digest)
             _progress(f"done image_ref={image_ref}")
+            pushed = {"pushed": True, "image_digest": digest}
         else:
             _progress(f"done (no push) image_tag={image_tag}")
+            pushed = {}
 
         return GateResult.success(
             SubmissionState.BUILT,
             image_ref=image_ref,
             image_tag=image_tag,
             build_log=str(log_path),
+            **pushed,
         )
     except subprocess.TimeoutExpired as exc:
         fail_line = f"FAIL build_timeout after {config.BUILD_TIMEOUT_S}s\n"

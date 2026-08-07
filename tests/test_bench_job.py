@@ -932,3 +932,36 @@ def test_multi_sku_exit75_stops_no_events(monkeypatch, tmp_path):
     assert finals[0]["events"] == []
     assert finals[0]["job_status"] == "failed"
     assert {r["gpu_sku"] for r in finals[0]["report_rows"]} == {"mock-a"}
+
+
+def test_pipeline_transparency_events():
+    import inspect
+
+    from worker import pipeline
+
+    src = inspect.getsource(pipeline.process_submission)
+    # picked_up before identity gate
+    assert "SubmissionState.PICKED_UP" in src
+    assert src.index("SubmissionState.PICKED_UP") < src.index("check_identity")
+    # image_pushed between build result and built event
+    assert "SubmissionState.IMAGE_PUSHED" in src
+    assert src.index("SubmissionState.IMAGE_PUSHED") < src.index(
+        "SubmissionState.BUILT"
+    )
+    # bench_queued after successful enqueue
+    assert "SubmissionState.BENCH_QUEUED" in src
+    assert src.index("SubmissionState.BENCH_QUEUED") > src.index("complete_gates_job")
+
+
+def test_image_pushed_event_on_real_push(tmp_path, monkeypatch):
+    """Real (pushed) build evidence carries pushed+digest; mock does not."""
+    from builder.hermetic import build_engine_image_local_mock
+
+    res = build_engine_image_local_mock(
+        patch_hash="sha256:" + ("d" * 64),
+        patch_bytes=b"x",
+        work_root=tmp_path,
+    )
+    assert res.ok
+    assert not res.evidence.get("pushed")
+    assert "image_digest" not in res.evidence

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
+from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
     derive_bench_verdict_from_events,
     get_campaign,
@@ -175,6 +176,37 @@ def submission_detail(patch_hash: str):
         ],
         "bench_verdict": derive_bench_verdict_from_events(events),
     }
+
+
+_BUILD_LOG_MAX_TAIL = 2000
+
+
+@app.get("/v1/submissions/{patch_hash}/build-log", response_class=PlainTextResponse)
+def submission_build_log(
+    patch_hash: str,
+    tail: int = Query(default=200, ge=1, le=_BUILD_LOG_MAX_TAIL),
+):
+    """Last `tail` lines of the durable build log (PAR-37 path), sanitized.
+
+    Content is miner-influenced build output: ANSI/control chars stripped,
+    served as text/plain, never cached beyond the shared 30s v1 policy.
+    """
+    row = get_submission(patch_hash)
+    if row is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    log_path = config.BUILD_LOG_DIR / str(row["id"]) / "build.log"
+    if not log_path.is_file():
+        raise HTTPException(status_code=404, detail="build log not found")
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            f.seek(max(0, size - 256 * 1024))
+            raw_tail = f.read()
+    except OSError:
+        raise HTTPException(status_code=404, detail="build log not found") from None
+    text = raw_tail.decode("utf-8", errors="replace")
+    clean = _CONTROL_CHARS.sub("", _ANSI_SEQ.sub("", text))
+    return PlainTextResponse("\n".join(clean.splitlines()[-tail:]) + "\n")
 
 
 @app.post("/v1/uploads/patch")

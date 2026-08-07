@@ -162,3 +162,41 @@ def test_stats_shape(monkeypatch, client: TestClient):
         resp.headers.get("Cache-Control")
         == "public, max-age=30, stale-while-revalidate=300"
     )
+
+
+def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
+    from api import server
+
+    sid = "22222222-2222-2222-2222-222222222222"
+    row = {"id": sid, "patch_hash": "sha256:abc"}
+    monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    log_dir = tmp_path / sid
+    log_dir.mkdir(parents=True)
+    (log_dir / "build.log").write_bytes(b"step1\n\x1b[31mcolored\x1b[0m\nstep3\n")
+    monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
+
+    resp = client.get("/v1/submissions/sha256:abc/build-log")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    body = resp.text
+    assert "colored" in body
+    assert "\x1b" not in body
+    assert body.count("\n") == 3
+
+    resp = client.get("/v1/submissions/sha256:abc/build-log?tail=1")
+    assert resp.text.strip() == "step3"
+
+    resp = client.get("/v1/submissions/sha256:abc/build-log?tail=99999")
+    assert resp.status_code == 422
+
+
+def test_build_log_404s(monkeypatch, client: TestClient, tmp_path):
+    from api import server
+
+    monkeypatch.setattr(server, "get_submission", lambda _h: None)
+    assert client.get("/v1/submissions/nope/build-log").status_code == 404
+
+    row = {"id": "33333333-3333-3333-3333-333333333333", "patch_hash": "p"}
+    monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
+    assert client.get("/v1/submissions/p/build-log").status_code == 404
