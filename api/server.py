@@ -11,10 +11,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import config
 from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
+    count_submission_campaigns,
     derive_bench_verdict_from_events,
     get_campaign,
     get_public_stats,
     get_submission,
+    get_submission_for_campaign,
     list_bench_reports,
     list_bench_summaries,
     list_campaigns,
@@ -137,11 +139,7 @@ def stats():
     return get_public_stats()
 
 
-@app.get("/v1/submissions/{patch_hash}")
-def submission_detail(patch_hash: str):
-    row = get_submission(patch_hash)
-    if row is None:
-        raise HTTPException(status_code=404, detail="submission not found")
+def _submission_detail_payload(row: dict) -> dict:
     events = list_events(row["id"])
     reports = list_bench_reports(row["id"])
     return {
@@ -178,22 +176,38 @@ def submission_detail(patch_hash: str):
     }
 
 
-_BUILD_LOG_MAX_TAIL = 2000
-
-
-@app.get("/v1/submissions/{patch_hash}/build-log", response_class=PlainTextResponse)
-def submission_build_log(
-    patch_hash: str,
-    tail: int = Query(default=200, ge=1, le=_BUILD_LOG_MAX_TAIL),
-):
-    """Last `tail` lines of the durable build log (PAR-37 path), sanitized.
-
-    Content is miner-influenced build output: ANSI/control chars stripped,
-    served as text/plain, never cached beyond the shared 30s v1 policy.
-    """
+def _resolve_unambiguous_submission(patch_hash: str) -> dict:
     row = get_submission(patch_hash)
     if row is None:
         raise HTTPException(status_code=404, detail="submission not found")
+    if count_submission_campaigns(patch_hash) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "patch_hash exists in multiple campaigns; "
+                "use /v1/campaigns/{campaign_id}/submissions/{patch_hash}"
+            ),
+        )
+    return row
+
+
+@app.get("/v1/campaigns/{campaign_id}/submissions/{patch_hash}")
+def campaign_submission_detail(campaign_id: str, patch_hash: str):
+    row = get_submission_for_campaign(campaign_id, patch_hash)
+    if row is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    return _submission_detail_payload(row)
+
+
+@app.get("/v1/submissions/{patch_hash}")
+def submission_detail(patch_hash: str):
+    return _submission_detail_payload(_resolve_unambiguous_submission(patch_hash))
+
+
+_BUILD_LOG_MAX_TAIL = 2000
+
+
+def _build_log_response(row: dict, tail: int) -> PlainTextResponse:
     log_path = config.BUILD_LOG_DIR / str(row["id"]) / "build.log"
     if not log_path.is_file():
         raise HTTPException(status_code=404, detail="build log not found")
@@ -207,6 +221,35 @@ def submission_build_log(
     text = raw_tail.decode("utf-8", errors="replace")
     clean = _CONTROL_CHARS.sub("", _ANSI_SEQ.sub("", text))
     return PlainTextResponse("\n".join(clean.splitlines()[-tail:]) + "\n")
+
+
+@app.get(
+    "/v1/campaigns/{campaign_id}/submissions/{patch_hash}/build-log",
+    response_class=PlainTextResponse,
+)
+def campaign_submission_build_log(
+    campaign_id: str,
+    patch_hash: str,
+    tail: int = Query(default=200, ge=1, le=_BUILD_LOG_MAX_TAIL),
+):
+    row = get_submission_for_campaign(campaign_id, patch_hash)
+    if row is None:
+        raise HTTPException(status_code=404, detail="submission not found")
+    return _build_log_response(row, tail)
+
+
+@app.get("/v1/submissions/{patch_hash}/build-log", response_class=PlainTextResponse)
+def submission_build_log(
+    patch_hash: str,
+    tail: int = Query(default=200, ge=1, le=_BUILD_LOG_MAX_TAIL),
+):
+    """Last `tail` lines of the durable build log (PAR-37 path), sanitized.
+
+    Content is miner-influenced build output: ANSI/control chars stripped,
+    served as text/plain, never cached beyond the shared 30s v1 policy.
+    """
+    row = _resolve_unambiguous_submission(patch_hash)
+    return _build_log_response(row, tail)
 
 
 @app.post("/v1/uploads/patch")

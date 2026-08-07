@@ -830,3 +830,87 @@ def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
     events = list_events(sid)
     assert derive_bench_verdict_from_events(events) == "fail_cross_env_speedup"
     assert list_bench_summaries(campaign_id).get(str(sid)) == "fail_cross_env_speedup"
+
+
+def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
+    """Same patch_hash in two campaigns: scoped routes resolve, bare routes 409."""
+    import config
+    from campaign.store import count_submission_campaigns, get_submission_for_campaign
+    from fastapi.testclient import TestClient
+
+    profile_id = insert_profile("e2e", {"fixture": True})
+    now = datetime.now(timezone.utc)
+    patch_hash = "sha256:" + hashlib.sha256(b"reused patch").hexdigest()
+    campaign_ids = [uuid4(), uuid4()]
+    sids = []
+    for i, campaign_id in enumerate(campaign_ids):
+        manifest = build_manifest(
+            campaign_id=campaign_id,
+            profile_id=profile_id,
+            baseline_repo="https://example/baseline.git",
+            baseline_commit="deadbeef",
+            base_image_digest="sha256:" + ("d" * 64),
+            gpu_skus=["H200"],
+            workload_trace_sha256="sha256:" + ("e" * 64),
+            workload_trace_url="https://cdn.test/trace.json",
+            sla=SLA(),
+            scoring_config_sha256=None,
+            scoring_config_url=None,
+            allowed_paths=["vllm/**"],
+            denied_paths=["tests/**"],
+            window_opens_at=now - timedelta(hours=1),
+            window_closes_at=now + timedelta(days=1),
+            priority_metric="throughput",
+            success_threshold=">=10% at SLA",
+            status="open",
+            customer_signoff=CustomerSignoff(
+                approved_manifest_hash="pending",
+                approver="test",
+                timestamp=now,
+            ),
+        )
+        insert_campaign(manifest)
+        sids.append(
+            insert_submission(
+                campaign_id=campaign_id,
+                patch_hash=patch_hash,
+                hotkey=f"5FakesHotkeyForE2ETesting00000000000000000000{i}",
+                baseline_commit="deadbeef",
+                retrieval_url=(
+                    f"https://cdn.test/stage0/campaigns/{campaign_id}"
+                    "/patches/hk/e2e.diff"
+                ),
+                commit_block=1,
+            )
+        )
+    assert all(sids)
+
+    assert count_submission_campaigns(patch_hash) == 2
+    for campaign_id, sid in zip(campaign_ids, sids):
+        row = get_submission_for_campaign(campaign_id, patch_hash)
+        assert row is not None
+        assert str(row["id"]) == str(sid)
+    assert get_submission_for_campaign(uuid4(), patch_hash) is None
+
+    monkeypatch.setattr(config, "BUILD_LOG_DIR", tmp_path)
+    log_dir = tmp_path / str(sids[0])
+    log_dir.mkdir()
+    (log_dir / "build.log").write_text("scoped-ok\n", encoding="utf-8")
+
+    from api import server
+
+    client = TestClient(server.app)
+    resp = client.get(f"/v1/campaigns/{campaign_ids[0]}/submissions/{patch_hash}")
+    assert resp.status_code == 200
+    assert resp.json()["submission"]["id"] == str(sids[0])
+    resp = client.get(f"/v1/campaigns/{campaign_ids[1]}/submissions/{patch_hash}")
+    assert resp.status_code == 200
+    assert resp.json()["submission"]["id"] == str(sids[1])
+    resp = client.get(
+        f"/v1/campaigns/{campaign_ids[0]}/submissions/{patch_hash}/build-log"
+    )
+    assert resp.status_code == 200
+    assert resp.text.strip() == "scoped-ok"
+
+    assert client.get(f"/v1/submissions/{patch_hash}").status_code == 409
+    assert client.get(f"/v1/submissions/{patch_hash}/build-log").status_code == 409
