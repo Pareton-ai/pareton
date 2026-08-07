@@ -70,6 +70,12 @@ def process_submission(
         _fail(submission_id, result, job_id=job_id)
         return result
 
+    append_event(
+        submission_id,
+        SubmissionState.PICKED_UP,
+        detail={"job_id": int(job_id) if job_id is not None else None},
+    )
+
     # a. Identity (fail-fast; success has no dedicated state in the machine)
     id_res = check_identity(
         hotkey=hotkey,
@@ -232,6 +238,15 @@ def process_submission(
     image_ref = str(build_res.evidence.get("image_ref") or "")
     image_tag = build_res.evidence.get("image_tag")
     set_engine_image(submission_id, image_ref)
+    if build_res.evidence.get("pushed"):
+        append_event(
+            submission_id,
+            SubmissionState.IMAGE_PUSHED,
+            detail={
+                "image_ref": image_ref,
+                "image_digest": build_res.evidence.get("image_digest"),
+            },
+        )
     append_event(
         submission_id,
         SubmissionState.BUILT,
@@ -248,6 +263,7 @@ def process_submission(
         enqueue_bench=campaign.bench is not None,
     )
     if enqueued:
+        append_event(submission_id, SubmissionState.BENCH_QUEUED, detail={})
         logger.info("enqueued bench job for submission %s", submission_id)
     return build_res
 
