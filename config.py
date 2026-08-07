@@ -141,15 +141,8 @@ BENCH_SLA_WARMUP_REQUESTS: int = int(
 )
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 
-# Submission fee + spend caps (tune via env; fee gate off when fee is 0).
 # Set PARETON_SUBMISSION_FEE_TAO > 0 before opening to external miners.
 SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0"))
-BENCH_MAX_INFLIGHT_PER_HOTKEY: int = int(
-    os.environ.get("PARETON_BENCH_MAX_INFLIGHT_PER_HOTKEY", "1")
-)
-BENCH_MAX_SUBMISSIONS_PER_HOTKEY_PER_DAY: int = int(
-    os.environ.get("PARETON_BENCH_MAX_SUBMISSIONS_PER_HOTKEY_PER_DAY", "10")
-)
 
 # Axiom observability (Vector log shipping). Ingest-only token; store in
 # /opt/pareton/.env at deploy time, never in the repo.
