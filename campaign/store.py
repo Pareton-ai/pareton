@@ -444,6 +444,33 @@ def get_submission(patch_hash: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def get_submission_for_campaign(
+    campaign_id: UUID | str, patch_hash: str
+) -> dict[str, Any] | None:
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM submissions
+                WHERE campaign_id = %s AND patch_hash = %s
+                """,
+                (str(campaign_id), patch_hash),
+            )
+            row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def count_submission_campaigns(patch_hash: str) -> int:
+    """Campaign count holding patch_hash; >1 means bare-hash lookup is ambiguous."""
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM submissions WHERE patch_hash = %s",
+                (patch_hash,),
+            )
+            return int(cur.fetchone()["n"])
+
+
 KNOWN_CAMPAIGN_STATUSES: tuple[str, ...] = ("draft", "open", "closed")
 KNOWN_SUBMISSION_STATES: tuple[str, ...] = (
     "committed",

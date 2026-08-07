@@ -170,6 +170,7 @@ def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
     sid = "22222222-2222-2222-2222-222222222222"
     row = {"id": sid, "patch_hash": "sha256:abc"}
     monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
     log_dir = tmp_path / sid
     log_dir.mkdir(parents=True)
     (log_dir / "build.log").write_bytes(b"step1\n\x1b[31mcolored\x1b[0m\nstep3\n")
@@ -198,5 +199,93 @@ def test_build_log_404s(monkeypatch, client: TestClient, tmp_path):
 
     row = {"id": "33333333-3333-3333-3333-333333333333", "patch_hash": "p"}
     monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
     monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
     assert client.get("/v1/submissions/p/build-log").status_code == 404
+
+
+def _detail_row(sid: str, campaign_id: str, patch_hash: str) -> dict:
+    return {
+        "id": sid,
+        "campaign_id": campaign_id,
+        "patch_hash": patch_hash,
+        "hotkey": "hk",
+        "baseline_commit": "deadbeef",
+        "retrieval_url": "https://example/p.diff",
+        "commit_block": 1,
+        "committed_at": "2026-08-07T00:00:00+00:00",
+        "engine_image_ref": None,
+        "created_at": "2026-08-07T00:00:00+00:00",
+    }
+
+
+def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
+    from api import server
+
+    sid = "44444444-4444-4444-4444-444444444444"
+    row = _detail_row(sid, "c1", "sha256:dup")
+    monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
+    monkeypatch.setattr(server, "list_events", lambda _id: [])
+    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
+
+    resp = client.get("/v1/campaigns/c1/submissions/sha256:dup")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["submission"]["id"] == sid
+    assert body["submission"]["campaign_id"] == "c1"
+    assert body["events"] == []
+    assert body["bench_verdict"] is None
+
+    monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: None)
+    assert client.get("/v1/campaigns/c2/submissions/sha256:dup").status_code == 404
+
+
+def test_campaign_scoped_build_log(monkeypatch, client: TestClient, tmp_path):
+    from api import server
+
+    sid = "55555555-5555-5555-5555-555555555555"
+    row = {"id": sid, "patch_hash": "sha256:dup"}
+    monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
+    log_dir = tmp_path / sid
+    log_dir.mkdir(parents=True)
+    (log_dir / "build.log").write_bytes(b"line1\n\x1b[32mline2\x1b[0m\n")
+    monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
+
+    resp = client.get("/v1/campaigns/c1/submissions/sha256:dup/build-log")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert "line2" in resp.text
+    assert "\x1b" not in resp.text
+
+    monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: None)
+    resp = client.get("/v1/campaigns/c2/submissions/sha256:dup/build-log")
+    assert resp.status_code == 404
+
+
+def test_bare_submission_routes_409_when_ambiguous(monkeypatch, client: TestClient):
+    from api import server
+
+    row = {"id": "66666666-6666-6666-6666-666666666666", "patch_hash": "sha256:dup"}
+    monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 2)
+
+    resp = client.get("/v1/submissions/sha256:dup")
+    assert resp.status_code == 409
+    assert "multiple campaigns" in resp.json()["detail"]
+    resp = client.get("/v1/submissions/sha256:dup/build-log")
+    assert resp.status_code == 409
+
+
+def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestClient):
+    from api import server
+
+    sid = "77777777-7777-7777-7777-777777777777"
+    row = _detail_row(sid, "c1", "sha256:solo")
+    monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
+    monkeypatch.setattr(server, "list_events", lambda _id: [])
+    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
+
+    resp = client.get("/v1/submissions/sha256:solo")
+    assert resp.status_code == 200
+    assert resp.json()["submission"]["id"] == sid
