@@ -151,7 +151,11 @@ def _run_logged(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> int:
-    """Run cmd, tee stdout/stderr to log_path and stderr, enforce timeout."""
+    """Run cmd, tee stdout/stderr to log_path, enforce timeout.
+
+    Output goes to the file only: journald gets _progress milestones, not
+    raw build logs (PAR-36). Drill-down: tail -f the build log.
+    """
     with log_path.open("a", encoding="utf-8") as logf:
         logf.write(f"+ {' '.join(cmd)}\n")
         logf.flush()
@@ -170,8 +174,6 @@ def _run_logged(
             for line in proc.stdout:
                 logf.write(line)
                 logf.flush()
-                sys.stderr.write(line)
-                sys.stderr.flush()
 
         reader = threading.Thread(target=_tee, name="pareton-build-tee", daemon=True)
         reader.start()
