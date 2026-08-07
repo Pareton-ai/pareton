@@ -447,12 +447,15 @@ def get_submission(patch_hash: str) -> dict[str, Any] | None:
 KNOWN_CAMPAIGN_STATUSES: tuple[str, ...] = ("draft", "open", "closed")
 KNOWN_SUBMISSION_STATES: tuple[str, ...] = (
     "committed",
+    "picked_up",
     "fetched",
     "verified",
     "applied",
     "surface_ok",
     "building",
+    "image_pushed",
     "built",
+    "bench_queued",
     "correct",
     "screened",
     "benched",

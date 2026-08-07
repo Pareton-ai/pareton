@@ -8,12 +8,15 @@ from typing import Any
 
 class SubmissionState:
     COMMITTED = "committed"
+    PICKED_UP = "picked_up"
     FETCHED = "fetched"
     VERIFIED = "verified"
     APPLIED = "applied"
     SURFACE_OK = "surface_ok"
     BUILDING = "building"
+    IMAGE_PUSHED = "image_pushed"
     BUILT = "built"
+    BENCH_QUEUED = "bench_queued"
     CORRECT = "correct"
     SCREENED = "screened"
     BENCHED = "benched"
