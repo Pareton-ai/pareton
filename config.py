@@ -57,6 +57,11 @@ TORCH_CUDA_ARCH_LIST: str = os.environ.get("PARETON_TORCH_CUDA_ARCH_LIST", "").s
 WORK_DIR: Path = Path(
     os.environ.get("PARETON_WORK_DIR", str(REPO_ROOT / ".pareton-work"))
 ).resolve()
+# Durable per-submission build logs: <BUILD_LOG_DIR>/<submission_id>/build.log.
+# The GB-sized docker context lives under WORK_DIR and is deleted after build.
+BUILD_LOG_DIR: Path = Path(
+    os.environ.get("PARETON_BUILD_LOG_DIR", "/var/log/pareton/builds")
+).resolve()
 
 # Bench harness (engine lifecycle). Overridable per-call; defaults for fresh pods.
 BENCH_HEALTH_TIMEOUT_S: float = float(

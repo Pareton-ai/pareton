@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable
 
 from builder.hermetic import build_engine_image, build_engine_image_local_mock
 from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
+import config
 from campaign.store import (
     append_event,
     complete_gates_job,
@@ -209,6 +210,7 @@ def process_submission(
                 patch_bytes=patch_bytes,
                 patch_hash=patch_hash,
                 work_root=work_root,
+                log_dir=config.BUILD_LOG_DIR / submission_id,
                 push=True,
             )
     if not build_res.ok:
@@ -237,6 +239,7 @@ def process_submission(
             "image_ref": image_ref,
             "image_tag": image_tag,
             "mock": bool(build_res.evidence.get("mock")),
+            "build_log": build_res.evidence.get("build_log"),
         },
     )
     enqueued = complete_gates_job(
