@@ -157,20 +157,74 @@ def test_build_timeout_appends_fail_line(tmp_path, monkeypatch):
     monkeypatch.setattr(hermetic, "_run_logged", boom)
     monkeypatch.setattr(hermetic.config, "BUILD_TIMEOUT_S", 12)
 
+    log_dir = tmp_path / "logs"
     result = build_engine_image(
         baseline_repo="https://example.com/vllm.git",
         baseline_commit=COMMIT,
         base_image="ghcr.io/pareton-ai/pareton-baseline@sha256:" + ("b" * 64),
         patch_bytes=b"diff --git a/x b/x\n",
         patch_hash="sha256:" + ("c" * 64),
-        work_root=tmp_path,
+        work_root=tmp_path / "work",
+        log_dir=log_dir,
         push=False,
         allow_empty_patch=False,
     )
     assert not result.ok
     assert result.reason == "build_timeout"
-    log = (tmp_path / "build.log").read_text(encoding="utf-8")
+    log = (log_dir / "build.log").read_text(encoding="utf-8")
     assert "FAIL build_timeout after 12s" in log
+
+
+@pytest.mark.unit
+def test_build_deletes_work_root_keeps_log(tmp_path, monkeypatch):
+    """The GB-sized docker context must not survive the call (PAR-37)."""
+    import builder.hermetic as hermetic
+
+    monkeypatch.setattr(
+        hermetic.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="boom"
+        ),
+    )
+
+    log_dir = tmp_path / "logs"
+    work_root = tmp_path / "work"
+    result = build_engine_image(
+        baseline_repo="https://example.com/vllm.git",
+        baseline_commit=COMMIT,
+        base_image="ghcr.io/pareton-ai/pareton-baseline@sha256:" + ("b" * 64),
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=work_root,
+        log_dir=log_dir,
+        push=False,
+        allow_empty_patch=False,
+    )
+    assert not result.ok
+    assert not (work_root / "docker-context").exists()
+    assert (log_dir / "build.log").exists()
+
+
+@pytest.mark.unit
+def test_sanitized_tail_strips_control_chars(tmp_path):
+    import hashlib
+
+    from builder.hermetic import _sanitized_tail
+
+    log_path = tmp_path / "build.log"
+    raw = b"line1\n\x1b[31mred\x1b[0m\x07 bell\nline3\n"
+    log_path.write_bytes(raw)
+
+    out = _sanitized_tail(log_path, lines=20)
+    assert out["build_log_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert out["build_log"] == str(log_path)
+    assert "\x1b" not in out["build_log_tail"]
+    assert "\x07" not in out["build_log_tail"]
+    assert "red" in out["build_log_tail"]
+    assert "line1" in out["build_log_tail"]
+
+    assert _sanitized_tail(tmp_path / "missing.log") == {}
 
 
 @pytest.mark.unit

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 import os
 import re
 import shutil
@@ -143,6 +144,31 @@ def _docker_login_ghcr() -> None:
     )
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_ANSI_SEQ = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _sanitized_tail(log_path: Path, *, lines: int = 20) -> dict[str, str]:
+    """Last N log lines with ANSI/control chars stripped, plus integrity hash.
+
+    Build output is miner-influenced and served by the public API via event
+    detail, so the raw multi-KB tail never leaves the box: only a sanitized
+    excerpt and a hash of the durable on-disk log.
+    """
+    try:
+        raw = log_path.read_bytes()
+    except OSError:
+        return {}
+    text = raw.decode("utf-8", errors="replace")
+    clean = _CONTROL_CHARS.sub("", _ANSI_SEQ.sub("", text))
+    tail = "\n".join(clean.splitlines()[-lines:])
+    return {
+        "build_log": str(log_path),
+        "build_log_sha256": hashlib.sha256(raw).hexdigest(),
+        "build_log_tail": tail,
+    }
+
+
 def _run_logged(
     cmd: list[str],
     *,
@@ -199,11 +225,16 @@ def build_engine_image(
     patch_bytes: bytes,
     patch_hash: str,
     work_root: Path | None = None,
+    log_dir: Path | None = None,
     push: bool = True,
     allow_empty_patch: bool = False,
     image_ref_override: str | None = None,
 ) -> GateResult:
     """Build and optionally push an engine image tagged by patch_hash.
+
+    ``work_root`` is the ephemeral docker context (deleted on return).
+    ``log_dir`` is the durable home of build.log; default derives from
+    ``config.BUILD_LOG_DIR`` keyed by patch_hash.
 
     ``allow_empty_patch`` is ops-only (A2b baseline engine). Miner gate surface
     still rejects empty patches before this runs.
@@ -211,7 +242,11 @@ def build_engine_image(
     if _patch_is_empty(patch_bytes) and not allow_empty_patch:
         return GateResult.reject("empty_patch_not_allowed")
 
-    root = work_root or Path(tempfile.mkdtemp(prefix="pareton-build-"))
+    log_dir = log_dir or (
+        config.BUILD_LOG_DIR / patch_hash.replace(":", "_").replace("/", "_")
+    )
+    log_dir.mkdir(parents=True, exist_ok=True)
+    root = (work_root or Path(tempfile.mkdtemp(prefix="pareton-build-"))).resolve()
     root.mkdir(parents=True, exist_ok=True)
     ctx = root / "docker-context"
     if ctx.exists():
@@ -230,7 +265,7 @@ def build_engine_image(
     (ctx / "Dockerfile").write_text(dockerfile)
 
     image_ref = image_ref_override or engine_image_ref(patch_hash)
-    log_path = root / "build.log"
+    log_path = log_dir / "build.log"
     log_path.write_text("", encoding="utf-8")
     _progress(f"work_root={root}")
     _progress(f"build_log={log_path}")
@@ -312,10 +347,9 @@ def build_engine_image(
             env=build_env,
         )
         if rc != 0:
-            tail = log_path.read_text(encoding="utf-8")[-4000:]
             return GateResult.reject(
                 "hermetic_build_failed",
-                build_log_tail=tail,
+                **_sanitized_tail(log_path),
                 image_ref=image_ref,
             )
 
@@ -329,10 +363,9 @@ def build_engine_image(
                 timeout=600,
             )
             if push_rc != 0:
-                tail = log_path.read_text(encoding="utf-8")[-2000:]
                 return GateResult.reject(
                     "registry_push_failed",
-                    stderr=tail,
+                    **_sanitized_tail(log_path),
                     image_ref=image_ref,
                 )
             _progress("step 5/5 resolve RepoDigest")
@@ -361,10 +394,18 @@ def build_engine_image(
         except OSError:
             pass
         _progress(f"FAIL build_timeout after {config.BUILD_TIMEOUT_S}s; see {log_path}")
-        return GateResult.reject("build_timeout", error=str(exc))
+        return GateResult.reject(
+            "build_timeout", error=str(exc), **_sanitized_tail(log_path)
+        )
     except Exception as exc:
         _progress(f"FAIL build_error: {type(exc).__name__}")
-        return GateResult.reject("build_error", error=str(exc))
+        return GateResult.reject(
+            "build_error", error=str(exc), **_sanitized_tail(log_path)
+        )
+    finally:
+        # docker-context holds the full baseline clone (GBs); only build.log
+        # (in log_dir, outside work_root) survives.
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def build_engine_image_local_mock(
