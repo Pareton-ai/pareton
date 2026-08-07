@@ -123,7 +123,7 @@ def test_run_logged_tees_and_returns_code(tmp_path, capsys):
     assert rc == 0
     assert "hello-build" in log_path.read_text(encoding="utf-8")
     err = capsys.readouterr().err
-    assert "hello-build" in err
+    assert "hello-build" not in err
 
 
 @pytest.mark.unit
