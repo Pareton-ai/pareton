@@ -570,6 +570,23 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
     return out
 
 
+def list_submission_jobs(submission_id: UUID | str) -> list[dict[str, Any]]:
+    """Job rows (kind, status, last_error) for one submission, ordered by kind."""
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT kind, status, last_error
+                FROM submission_jobs
+                WHERE submission_id = %s
+                ORDER BY kind ASC
+                """,
+                (str(submission_id),),
+            )
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 def insert_bench_report(
     *,
     submission_id: UUID | str,
