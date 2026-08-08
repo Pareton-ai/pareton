@@ -22,6 +22,7 @@ from campaign.store import (
     list_campaigns,
     list_events,
     list_latest_states,
+    list_submission_jobs,
     list_submissions,
 )
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
@@ -142,10 +143,21 @@ def stats():
 def _submission_detail_payload(row: dict) -> dict:
     events = list_events(row["id"])
     reports = list_bench_reports(row["id"])
+    states = list_latest_states([row["id"]])
+    jobs = list_submission_jobs(row["id"])
     return {
         "submission": {
             **{k: (str(v) if k in ("id", "campaign_id") else v) for k, v in row.items()}
         },
+        "latest_state": states.get(str(row["id"])),
+        "jobs": [
+            {
+                "kind": j["kind"],
+                "status": j["status"],
+                "last_error": j.get("last_error"),
+            }
+            for j in jobs
+        ],
         "events": [
             {
                 "state": e["state"],

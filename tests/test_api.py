@@ -227,6 +227,21 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
     monkeypatch.setattr(server, "list_events", lambda _id: [])
     monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
+    monkeypatch.setattr(
+        server, "list_latest_states", lambda _ids: {sid: "bench_queued"}
+    )
+    monkeypatch.setattr(
+        server,
+        "list_submission_jobs",
+        lambda _id: [
+            {
+                "kind": "bench",
+                "status": "failed",
+                "last_error": "bench_exit_bad_request",
+            },
+            {"kind": "gates", "status": "done", "last_error": None},
+        ],
+    )
 
     resp = client.get("/v1/campaigns/c1/submissions/sha256:dup")
     assert resp.status_code == 200
@@ -235,6 +250,11 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     assert body["submission"]["campaign_id"] == "c1"
     assert body["events"] == []
     assert body["bench_verdict"] is None
+    assert body["latest_state"] == "bench_queued"
+    assert body["jobs"] == [
+        {"kind": "bench", "status": "failed", "last_error": "bench_exit_bad_request"},
+        {"kind": "gates", "status": "done", "last_error": None},
+    ]
 
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: None)
     assert client.get("/v1/campaigns/c2/submissions/sha256:dup").status_code == 404
@@ -285,7 +305,12 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
     monkeypatch.setattr(server, "list_events", lambda _id: [])
     monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
+    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {})
+    monkeypatch.setattr(server, "list_submission_jobs", lambda _id: [])
 
     resp = client.get("/v1/submissions/sha256:solo")
     assert resp.status_code == 200
-    assert resp.json()["submission"]["id"] == sid
+    body = resp.json()
+    assert body["submission"]["id"] == sid
+    assert body["latest_state"] is None
+    assert body["jobs"] == []
