@@ -81,6 +81,11 @@ def dockerfile_for_patch(
         f"ARG CMAKE_BUILD_PARALLEL_LEVEL={jobs}",
         "ENV NVCC_THREADS=1",
         "ENV CCACHE_DIR=/root/.ccache",
+        # PEP 660 editable builds compile in a random /tmp/tmp*.build-temp
+        # directory, and ccache's default hash_dir=true mixes that cwd into
+        # every cache key, so cross-build hits were impossible. Source paths
+        # are absolute and stable (/src); drop the cwd from the key.
+        "ENV CCACHE_NOHASHDIR=1",
     ]
     if arch:
         lines.append(f"ENV TORCH_CUDA_ARCH_LIST={json.dumps(arch)}")
@@ -114,10 +119,23 @@ def dockerfile_for_patch(
         ]
     run_parts = [setup_ccache, *body_steps]
     cache_id = _ccache_mount_id(baseline_commit)
+    if skip_apply:
+        # Trusted baseline build: warms the cache for miner builds.
+        mount_opts = f"id={cache_id},target=/root/.ccache,sharing=locked"
+    else:
+        # Miner-patched Python runs during the build (setup.py executes
+        # vllm/envs.py), so a writable shared cache would let one submission
+        # poison objects served to later submissions. Read-only mount; the
+        # gate already restricts patches to vllm/**, so every compiled object
+        # is baseline content and a warm build never needs to write.
+        mount_opts = f"id={cache_id},target=/root/.ccache,readonly"
+        # A read-only cache dir makes ccache's default temp dir
+        # (<cache_dir>/tmp) unwritable; a miss would fail temp creation and
+        # abort instead of compiling (ccache 4.5.1 manual, read_only note).
+        run_parts.insert(1, "export CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp/ccache-tmp")
     # No # syntax= line — BuildKit builtin frontend supports RUN --mount.
     lines.append(
-        f"RUN --mount=type=cache,id={cache_id},target=/root/.ccache,sharing=locked "
-        + " \\\n    && ".join(run_parts)
+        f"RUN --mount=type=cache,{mount_opts} " + " \\\n    && ".join(run_parts)
     )
     lines.append(_VLLM_API_SERVER_ENTRYPOINT)
     lines.append("")
