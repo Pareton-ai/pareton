@@ -129,7 +129,10 @@ def dockerfile_for_patch(
         # gate already restricts patches to vllm/**, so every compiled object
         # is baseline content and a warm build never needs to write.
         mount_opts = f"id={cache_id},target=/root/.ccache,readonly"
-        run_parts.insert(1, "export CCACHE_READONLY=1")
+        # A read-only cache dir makes ccache's default temp dir
+        # (<cache_dir>/tmp) unwritable; a miss would fail temp creation and
+        # abort instead of compiling (ccache 4.5.1 manual, read_only note).
+        run_parts.insert(1, "export CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp/ccache-tmp")
     # No # syntax= line — BuildKit builtin frontend supports RUN --mount.
     lines.append(
         f"RUN --mount=type=cache,{mount_opts} " + " \\\n    && ".join(run_parts)

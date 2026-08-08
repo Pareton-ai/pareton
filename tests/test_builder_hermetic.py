@@ -45,6 +45,8 @@ def test_dockerfile_nonempty_has_apply_and_entrypoint(monkeypatch):
     assert ",readonly" in text
     assert "sharing=locked" not in text
     assert "export CCACHE_READONLY=1" in text
+    # Read-only cache dir requires a writable temp dir (ccache 4.5.1 manual).
+    assert "CCACHE_TEMPDIR=/tmp/ccache-tmp" in text
 
 
 @pytest.mark.unit
@@ -65,6 +67,7 @@ def test_dockerfile_empty_allowed_skips_apply(monkeypatch):
     assert "sharing=locked" in text
     assert ",readonly" not in text
     assert "CCACHE_READONLY" not in text
+    assert "CCACHE_TEMPDIR" not in text
 
 
 @pytest.mark.unit
