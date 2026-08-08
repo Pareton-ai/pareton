@@ -39,6 +39,12 @@ def test_dockerfile_nonempty_has_apply_and_entrypoint(monkeypatch):
     assert f"id=pareton-ccache-{COMMIT}" in text
     assert "CCACHE_DIR=/root/.ccache" in text
     assert "CMAKE_CXX_COMPILER_LAUNCHER=ccache" in text
+    # Cross-build hits require dropping the random PEP 660 build-temp cwd
+    # from the cache key; miner builds mount the shared cache read-only.
+    assert "ENV CCACHE_NOHASHDIR=1" in text
+    assert ",readonly" in text
+    assert "sharing=locked" not in text
+    assert "export CCACHE_READONLY=1" in text
 
 
 @pytest.mark.unit
@@ -54,6 +60,11 @@ def test_dockerfile_empty_allowed_skips_apply(monkeypatch):
     assert 'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]' in text
     assert "ARG MAX_JOBS=1" in text
     assert "# syntax=" not in text
+    # Trusted baseline build keeps the writable mount to warm the cache.
+    assert "ENV CCACHE_NOHASHDIR=1" in text
+    assert "sharing=locked" in text
+    assert ",readonly" not in text
+    assert "CCACHE_READONLY" not in text
 
 
 @pytest.mark.unit
