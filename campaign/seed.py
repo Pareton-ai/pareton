@@ -23,7 +23,7 @@ from campaign.store import insert_campaign, insert_profile, list_campaigns
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_TRACE = (
-    REPO_ROOT / "fixtures" / "campaigns" / "synthetic_v0" / "workload_trace.json"
+    REPO_ROOT / "fixtures" / "campaigns" / "synthetic_v1" / "workload_trace.json"
 )
 
 # Manual pins for the first synthetic campaign (ops can override via flags).
