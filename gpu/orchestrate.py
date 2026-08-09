@@ -25,6 +25,8 @@ from gpu.bootstrap import (
     pull_engine_images,
 )
 from gpu.errors import DestroyError, GpuError, ProvisionError
+
+
 from gpu.keys import ensure_durable_keypair, read_public_key
 from gpu.providers import get_provider, provider_order
 from gpu.registry import (
@@ -38,6 +40,11 @@ from gpu.types import Pod, PodSpec
 from observability import events as obs
 
 logger = logging.getLogger(__name__)
+
+
+class RegistryAddError(GpuError):
+    """registry.add failed after a successful rent; not a provider failure."""
+
 
 # Under /opt/pareton so the (often non-root) Targon SSH user can write/source it.
 REMOTE_ENV = f"{REMOTE_REPO}/.pareton-bench.env"
@@ -263,12 +270,12 @@ def provision_pod(
                     exc,
                     destroy_exc,
                 )
-                raise ProvisionError(
+                raise RegistryAddError(
                     f"registry.add failed after rent ({exc}); destroy also failed "
                     f"({destroy_exc}); manual cleanup required for {pod.name} "
                     f"volume={(pod.raw or {}).get('volume_uid', '')}"
                 ) from destroy_exc
-            raise ProvisionError(
+            raise RegistryAddError(
                 f"registry.add failed after rent; cloud resource destroyed: {exc}"
             ) from exc
         return pod
@@ -285,6 +292,10 @@ def provision_pod(
         for i, p in enumerate(providers):
             try:
                 return _do_provision(p)
+            except RegistryAddError:
+                # Local registry failure after rent: never fall back and rent
+                # a second pod while the first may still be untracked.
+                raise
             except ProvisionError as exc:
                 last_exc = exc
                 obs.pod_provision_failed(provider=p.name, error=str(exc))

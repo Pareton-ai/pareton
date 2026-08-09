@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from gpu.errors import DestroyError, ProvisionError
+from gpu.errors import DestroyError, GpuError, ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.orchestrate import provision_pod, run_bench_on_pod
 from gpu.providers import provider_order
@@ -194,7 +194,7 @@ def test_registry_add_failure_destroys_cloud_rent(tmp_path: Path):
         raise OSError("disk full")
 
     reg.add = boom_add  # type: ignore[method-assign]
-    with pytest.raises(ProvisionError, match="registry.add failed"):
+    with pytest.raises(GpuError, match="registry.add failed"):
         provision_pod(
             PodSpec(provider="targon", force=True),
             registry=reg,
@@ -936,6 +936,26 @@ def test_single_flight_blocks_fallback(tmp_path: Path, monkeypatch):
         provision_pod(
             PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
         )
+    assert shade.provision_calls == 0
+
+
+def test_registry_add_failure_does_not_fall_back(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    lium = FakeProvider()
+    shade = _shadeform_fake()
+    _patch_provider_factory(monkeypatch, {"lium": lium, "shadeform": shade})
+
+    def fail_add(entry):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(PodRegistry, "add", fail_add)
+    with pytest.raises(GpuError, match="registry.add failed after rent"):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+    # Lium pod was destroyed after the registry failure; Shadeform never tried.
+    assert lium.provision_calls == 1
+    assert lium.destroy_calls
     assert shade.provision_calls == 0
 
 
