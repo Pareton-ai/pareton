@@ -167,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def _cycle() -> bool:
         nonlocal registered_hotkeys
+        if drain.is_set():
+            return False
         if subtensor is not None:
             try:
                 _created, hotkeys = scan_chain_once(subtensor)
@@ -174,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
                     registered_hotkeys = hotkeys
             except Exception:
                 logger.exception("chain scan failed; will retry next cycle")
+        if drain.is_set():
+            return False
         return run_once(
             mock_build=args.mock_build,
             mock_bench=args.mock_bench,
@@ -181,14 +185,12 @@ def main(argv: list[str] | None = None) -> int:
             registered_hotkeys=registered_hotkeys,
         )
 
-    if args.once:
-        _cycle()
-        return 0
-
     # A killed worker strands its claimed job in 'running' forever (only
     # 'pending' jobs are re-claimed) and orphans any rented GPU pod, so on
     # SIGTERM/SIGINT finish the in-flight job before exiting. systemd allows
-    # this up to TimeoutStopSec, then SIGKILLs.
+    # this up to TimeoutStopSec, then SIGKILLs. The drain flag is defined
+    # before _cycle so a signal arriving during the chain scan stops the
+    # worker before it claims a fresh job.
     drain = threading.Event()
 
     def _request_drain(signum, _frame):
@@ -197,6 +199,10 @@ def main(argv: list[str] | None = None) -> int:
 
     signal.signal(signal.SIGTERM, _request_drain)
     signal.signal(signal.SIGINT, _request_drain)
+
+    if args.once:
+        _cycle()
+        return 0
 
     _run_loop(_cycle, drain, config.POLL_INTERVAL_S)
     logger.info("drain complete; exiting")

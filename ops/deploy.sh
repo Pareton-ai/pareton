@@ -31,12 +31,17 @@ worker_busy() {
     # shellcheck disable=SC1091
     source "$REPO/.env"
     set +a
+    # Exit 0 = busy, 1 = idle, 2 = probe error. Callers must treat 2 as busy
+    # (fail closed) so a broken probe never restarts a worker mid-job.
     "$REPO/.venv/bin/python" -c "
 import sys
-from db.connection import db_connection
-with db_connection() as conn, conn.cursor() as cur:
-    cur.execute(\"SELECT 1 FROM submission_jobs WHERE status = 'running' LIMIT 1\")
-    sys.exit(0 if cur.fetchone() else 1)
+try:
+    from db.connection import db_connection
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(\"SELECT 1 FROM submission_jobs WHERE status = 'running' LIMIT 1\")
+        sys.exit(0 if cur.fetchone() else 1)
+except Exception:
+    sys.exit(2)
 "
 }
 
@@ -45,22 +50,28 @@ LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
 
 if [ "$LOCAL" != "$REMOTE" ]; then
+    # Mark pending BEFORE the steps that can fail. With set -e, a failed pip
+    # install or api restart would otherwise abort after the pull with HEAD
+    # already at origin/main, so no later tick would ever retry the rest.
+    touch "$PENDING_FLAG"
     git pull --ff-only --quiet origin main
     if git diff --name-only "$LOCAL" HEAD | grep -qx requirements.txt; then
         "$REPO/.venv/bin/pip" install --quiet -r requirements.txt
         echo "deploy: requirements.txt changed, venv updated"
     fi
     systemctl restart pareton-api
-    touch "$PENDING_FLAG"
     echo "deploy: $LOCAL -> $(git rev-parse HEAD); pareton-api restarted"
 fi
 
 if [ -f "$PENDING_FLAG" ]; then
-    if worker_busy; then
-        echo "deploy: worker has a running job; restart deferred"
-    else
+    worker_busy && rc=0 || rc=$?
+    if [ "$rc" -eq 1 ]; then
         systemctl restart pareton-worker
         rm -f "$PENDING_FLAG"
         echo "deploy: pareton-worker restarted"
+    elif [ "$rc" -eq 0 ]; then
+        echo "deploy: worker has a running job; restart deferred"
+    else
+        echo "deploy: worker probe failed (rc=$rc); treating as busy, restart deferred"
     fi
 fi
