@@ -43,7 +43,7 @@ def bootstrap_script(*, with_nvidia_toolkit_install: bool = True) -> str:
 if ! $SUDO docker info 2>/dev/null | grep -qi nvidia; then
   echo "nvidia container runtime missing; installing nvidia-container-toolkit"
   distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | $SUDO gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | $SUDO gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
   curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
     $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
