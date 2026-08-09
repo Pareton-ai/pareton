@@ -12,6 +12,7 @@ import pytest
 from gpu.errors import DestroyError, ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.orchestrate import provision_pod, run_bench_on_pod
+from gpu.providers import provider_order
 from gpu.reap import reap
 from gpu.registry import PodRegistry, RegistryEntry, encode_pod_name
 from gpu.ssh import SshResult
@@ -848,3 +849,101 @@ def test_orchestrate_repetitions_invalid(tmp_path: Path):
             provider=FakeProvider(),
             state_dir=tmp_path / "st",
         )
+
+
+class CapacityMissProvider(FakeProvider):
+    name = "lium"
+
+    def search(self, spec: PodSpec) -> list[Offer]:
+        return []
+
+
+class ProvisionErrorProvider(FakeProvider):
+    name = "lium"
+
+    def provision(self, offer: Offer, *, name: str, ssh_public_key: str) -> Pod:
+        raise ProvisionError("simulated lium rent failure")
+
+
+def _shadeform_fake() -> FakeProvider:
+    p = FakeProvider()
+    p.name = "shadeform"
+    return p
+
+
+def _patch_provider_factory(monkeypatch, by_name: dict) -> None:
+    monkeypatch.setattr(
+        "gpu.orchestrate.get_provider", lambda name, **kw: by_name[name]
+    )
+    monkeypatch.setenv("PARETON_GPU_PROVIDER", "lium")
+    monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "shadeform")
+
+
+def test_provision_fallback_on_capacity_miss(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    lium = CapacityMissProvider()
+    shade = _shadeform_fake()
+    _patch_provider_factory(monkeypatch, {"lium": lium, "shadeform": shade})
+    pod = provision_pod(
+        PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+    )
+    assert pod.provider == "shadeform"
+    assert shade.provision_calls == 1
+    assert PodRegistry(tmp_path / "st").get(pod.name) is not None
+
+
+def test_provision_fallback_on_provision_error(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    lium = ProvisionErrorProvider()
+    shade = _shadeform_fake()
+    _patch_provider_factory(monkeypatch, {"lium": lium, "shadeform": shade})
+    pod = provision_pod(
+        PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+    )
+    assert pod.provider == "shadeform"
+    assert shade.provision_calls == 1
+
+
+def test_provision_fallback_all_fail_raises_last(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    lium = CapacityMissProvider()
+    shade = ProvisionErrorProvider()
+    shade.name = "shadeform"
+    _patch_provider_factory(monkeypatch, {"lium": lium, "shadeform": shade})
+    with pytest.raises(ProvisionError, match="simulated lium rent failure"):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+
+
+def test_single_flight_blocks_fallback(tmp_path: Path, monkeypatch):
+    ensure_durable_keypair(tmp_path / "st")
+    reg = PodRegistry(tmp_path / "st")
+    reg.add(
+        RegistryEntry(
+            provider="lium",
+            pod_id="old",
+            name=encode_pod_name(ttl_hours=2),
+            deadline="2099-01-01T00:00:00Z",
+            hourly_price_cents=1,
+            state="active",
+        )
+    )
+    lium = CapacityMissProvider()
+    shade = _shadeform_fake()
+    _patch_provider_factory(monkeypatch, {"lium": lium, "shadeform": shade})
+    with pytest.raises(ProvisionError, match="single-flight"):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+    assert shade.provision_calls == 0
+
+
+def test_provider_order_default_dedup_and_static_ssh(monkeypatch):
+    monkeypatch.setenv("PARETON_GPU_PROVIDER", "lium")
+    monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "shadeform")
+    assert provider_order("auto") == ["lium", "shadeform"]
+    assert provider_order("shadeform") == ["shadeform"]
+    assert provider_order("static_ssh") == ["static_ssh"]
+    monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "")
+    assert provider_order("auto") == ["lium"]

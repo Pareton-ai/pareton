@@ -26,7 +26,7 @@ from gpu.bootstrap import (
 )
 from gpu.errors import DestroyError, GpuError, ProvisionError
 from gpu.keys import ensure_durable_keypair, read_public_key
-from gpu.providers import get_provider
+from gpu.providers import get_provider, provider_order
 from gpu.registry import (
     PodRegistry,
     RegistryEntry,
@@ -207,43 +207,53 @@ def provision_pod(
     provider=None,
     state_dir: Path | None = None,
 ) -> Pod:
+    """Rent one pod, falling back through the configured provider order.
+
+    With no injected ``provider``, the primary comes from ``spec.provider``
+    and fallbacks from ``PARETON_GPU_PROVIDER_FALLBACKS`` (default shadeform).
+    A ``ProvisionError`` (no capacity, rent/wait-ready failure) tries the next
+    provider; any other exception aborts immediately. The single-flight check
+    is local policy and never triggers fallback.
+    """
     registry = registry or PodRegistry(state_dir)
-    if provider is None:
-        provider = get_provider(spec.provider, state_dir=registry.state_dir)
+    if provider is not None:
+        providers = [provider]
+    else:
+        providers = []
+        order = provider_order(spec.provider)
+        for name in order:
+            try:
+                providers.append(get_provider(name, state_dir=registry.state_dir))
+            except ProvisionError as exc:
+                logger.warning("provider %s unavailable, skipping: %s", name, exc)
+                obs.pod_provision_failed(provider=name, error=str(exc))
+        if not providers:
+            raise ProvisionError(f"no usable GPU provider (order: {', '.join(order)})")
 
     ensure_durable_keypair(registry.state_dir)
     pub = read_public_key(registry.state_dir)
 
-    def _do_provision() -> Pod:
-        if provider.name != "static_ssh" and not spec.force:
-            blocking = registry.has_blocking_managed()
-            if blocking is not None:
-                raise ProvisionError(
-                    f"single-flight: registry already has {blocking.state} pod "
-                    f"{blocking.name} ({blocking.provider}); pass --force to override"
-                )
-        offer = _select_offer(provider, spec)
+    def _do_provision(p) -> Pod:
+        offer = _select_offer(p, spec)
         pod_name = encode_pod_name(ttl_hours=spec.ttl_hours)
         if spec.manual:
-            if provider.name == "static_ssh":
+            if p.name == "static_ssh":
                 raise ProvisionError("--manual is not supported for static_ssh")
-            provision_fn = getattr(provider, "provision_manual", None)
+            provision_fn = getattr(p, "provision_manual", None)
             if provision_fn is None:
-                raise ProvisionError(
-                    f"provider {provider.name!r} does not support --manual"
-                )
+                raise ProvisionError(f"provider {p.name!r} does not support --manual")
             pod = provision_fn(offer, name=pod_name, ssh_public_key=pub)
         else:
-            pod = provider.provision(offer, name=pod_name, ssh_public_key=pub)
+            pod = p.provision(offer, name=pod_name, ssh_public_key=pub)
         pod.ttl_hours = spec.ttl_hours
-        if provider.name == "static_ssh":
+        if p.name == "static_ssh":
             return pod
         try:
             registry.add(_entry_from_pod(pod, state="active"))
         except Exception as exc:
             # Cloud rent succeeded; must not leave a billable orphan without a handle.
             try:
-                provider.destroy(pod)
+                p.destroy(pod)
             except Exception as destroy_exc:  # noqa: BLE001
                 logger.error(
                     "registry.add failed after rent AND destroy failed for "
@@ -263,15 +273,39 @@ def provision_pod(
             ) from exc
         return pod
 
-    try:
-        if provider.name == "static_ssh":
-            result_pod = _do_provision()
-        else:
-            with registry.provision_lock():
-                result_pod = _do_provision()
-    except (ProvisionError, Exception) as exc:
-        obs.pod_provision_failed(provider=provider.name, error=str(exc))
-        raise
+    def _attempt_providers() -> Pod:
+        if providers[0].name != "static_ssh" and not spec.force:
+            blocking = registry.has_blocking_managed()
+            if blocking is not None:
+                raise ProvisionError(
+                    f"single-flight: registry already has {blocking.state} pod "
+                    f"{blocking.name} ({blocking.provider}); pass --force to override"
+                )
+        last_exc: ProvisionError | None = None
+        for i, p in enumerate(providers):
+            try:
+                return _do_provision(p)
+            except ProvisionError as exc:
+                last_exc = exc
+                obs.pod_provision_failed(provider=p.name, error=str(exc))
+                if i + 1 < len(providers):
+                    logger.warning(
+                        "provision failed on %s (%s); falling back to %s",
+                        p.name,
+                        exc,
+                        providers[i + 1].name,
+                    )
+            except Exception as exc:
+                obs.pod_provision_failed(provider=p.name, error=str(exc))
+                raise
+        assert last_exc is not None
+        raise last_exc
+
+    if providers[0].name == "static_ssh":
+        result_pod = _attempt_providers()
+    else:
+        with registry.provision_lock():
+            result_pod = _attempt_providers()
     obs.pod_provisioned(pod=result_pod.name, provider=result_pod.provider)
     return result_pod
 
@@ -354,10 +388,10 @@ def run_bench_on_pod(
     exit_code = 1
     destroy_failed = False
     pending: BaseException | None = None
-    if provider is None:
-        provider = get_provider(spec.provider, state_dir=registry.state_dir)
 
     try:
+        # provider=None: provision_pod walks the configured fallback order and
+        # destroy_pod later resolves the real provider from pod.provider.
         pod = provision_pod(
             spec, registry=registry, provider=provider, state_dir=registry.state_dir
         )
