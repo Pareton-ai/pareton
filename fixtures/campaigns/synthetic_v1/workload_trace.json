@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "name": "pareton-synthetic-v1",
+    "description": "Stage 0 synthetic stub for campaign seed; 16 short text prompts; supersedes synthetic_v0 (2 requests, below correctness.num_prompts=8)"
+  },
+  "requests": [
+    {
+      "id": "syn-001",
+      "arrival_offset_ms": 0,
+      "prompt": "Summarize the benefits of continuous batching in LLM serving.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-002",
+      "arrival_offset_ms": 100,
+      "prompt": "Explain KV cache paging in one paragraph.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-003",
+      "arrival_offset_ms": 200,
+      "prompt": "What is tensor parallelism and when is it needed?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-004",
+      "arrival_offset_ms": 300,
+      "prompt": "Describe the difference between prefill and decode in transformer inference.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-005",
+      "arrival_offset_ms": 400,
+      "prompt": "Why does prefix caching improve time to first token?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-006",
+      "arrival_offset_ms": 500,
+      "prompt": "List three causes of GPU memory fragmentation during model serving.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-007",
+      "arrival_offset_ms": 600,
+      "prompt": "Explain speculative decoding in two sentences.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-008",
+      "arrival_offset_ms": 700,
+      "prompt": "What trade-off does chunked prefill make between latency and throughput?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-009",
+      "arrival_offset_ms": 800,
+      "prompt": "How does quantization to FP8 affect model quality and speed?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-010",
+      "arrival_offset_ms": 900,
+      "prompt": "What is the purpose of a warmup pass before benchmarking an inference engine?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-011",
+      "arrival_offset_ms": 1000,
+      "prompt": "Define time to first token and inter-token latency.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-012",
+      "arrival_offset_ms": 1100,
+      "prompt": "Why do benchmarks replay a fixed workload trace instead of random prompts?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-013",
+      "arrival_offset_ms": 1200,
+      "prompt": "Explain how CUDA graphs reduce kernel launch overhead.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-014",
+      "arrival_offset_ms": 1300,
+      "prompt": "What is a p99 latency and why does it matter for serving SLAs?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-015",
+      "arrival_offset_ms": 1400,
+      "prompt": "Describe how a tokenizer affects end-to-end inference latency.",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    },
+    {
+      "id": "syn-016",
+      "arrival_offset_ms": 1500,
+      "prompt": "Why must a correctness check compare logprobs and not only final text?",
+      "max_tokens": 128,
+      "sampling": {
+        "temperature": 0.0,
+        "top_p": 1.0
+      }
+    }
+  ]
+}
