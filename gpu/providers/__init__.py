@@ -39,6 +39,33 @@ def resolve_provider_name(name: str | None = None) -> str:
     return configured
 
 
+def _fallback_names() -> list[str]:
+    raw = os.environ.get("PARETON_GPU_PROVIDER_FALLBACKS")
+    if raw is not None:
+        return [p.strip().lower() for p in raw.split(",") if p.strip()]
+    try:
+        import config as _cfg
+
+        val = getattr(_cfg, "GPU_PROVIDER_FALLBACKS", None)
+        if val is None:
+            return ["shadeform"]
+        return [str(p).strip().lower() for p in val if str(p).strip()]
+    except Exception:  # noqa: BLE001
+        return ["shadeform"]
+
+
+def provider_order(name: str | None = None) -> list[str]:
+    """Primary provider plus configured fallbacks, deduped.
+
+    static_ssh never falls back: a local SSH target failure must not rent a
+    cloud pod as a surprise side effect.
+    """
+    primary = resolve_provider_name(name)
+    if primary == "static_ssh":
+        return [primary]
+    return [primary] + [f for f in _fallback_names() if f != primary]
+
+
 def get_provider(name: str, **kwargs) -> Provider:
     n = resolve_provider_name(name)
     if n == "targon":
@@ -77,6 +104,7 @@ def get_provider(name: str, **kwargs) -> Provider:
 __all__ = [
     "Provider",
     "get_provider",
+    "provider_order",
     "resolve_provider_name",
     "TargonProvider",
     "ShadeformProvider",
