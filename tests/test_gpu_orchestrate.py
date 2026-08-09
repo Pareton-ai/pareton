@@ -698,6 +698,8 @@ def test_bootstrap_script_verify_first_no_token():
     assert "python${PYVER}-venv" in script or "python${PYVER}-venv" in script
     assert "ghp_" not in script
     assert "PARETON_GHCR_TOKEN" not in script
+    # gpg must not prompt on existing keyring (no /dev/tty over ssh)
+    assert "gpg --batch --yes --dearmor" in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
     # sock ACL after toolkit restart so chmod hits the final socket
