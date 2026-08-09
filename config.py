@@ -140,6 +140,13 @@ BENCH_SLA_WARMUP_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
 )
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
+# Ordered fallback providers tried after GPU_PROVIDER on no-capacity or
+# provision error. Comma-separated; empty string disables fallback.
+GPU_PROVIDER_FALLBACKS: list[str] = [
+    p.strip().lower()
+    for p in os.environ.get("PARETON_GPU_PROVIDER_FALLBACKS", "shadeform").split(",")
+    if p.strip()
+]
 
 # Set PARETON_SUBMISSION_FEE_TAO > 0 before opening to external miners.
 SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0"))
