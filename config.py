@@ -99,9 +99,8 @@ GPU_VOLUME_GIB: int = int(os.environ.get("PARETON_GPU_VOLUME_GIB", "250"))
 GPU_STATIC_SSH: str = os.environ.get("PARETON_GPU_STATIC_SSH", "")
 GPU_SSH_KEY_PATH: str = os.environ.get("PARETON_GPU_SSH_KEY_PATH", "")
 
-
 _PUBKEY_RE = re.compile(
-    r"^(?:ssh|ecdsa)-[A-Za-z0-9@.-]+ [A-Za-z0-9+/]{40,}={0,3}(?: \S.*)?$"
+    r"^(?:sk-)?(?:ssh|ecdsa)-[A-Za-z0-9@.-]+ [A-Za-z0-9+/]{40,}={0,3}(?: \S.*)?$"
 )
 
 

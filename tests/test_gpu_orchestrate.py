@@ -1092,6 +1092,22 @@ def test_parse_pubkeys_accepts_and_dedupes():
     assert _parse_pubkeys("") == []
 
 
+def test_parse_pubkeys_accepts_fido_keys():
+    from config import _parse_pubkeys
+
+    body = "AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t" + "C" * 20
+    for ktype in ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"):
+        assert _parse_pubkeys(f"{ktype} {body} yubikey") == [f"{ktype} {body} yubikey"]
+
+
+def test_parse_pubkeys_rejects_authorized_keys_options():
+    from config import _parse_pubkeys
+
+    body = "AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 20
+    with pytest.raises(ValueError):
+        _parse_pubkeys(f'command="/bin/sh" ssh-ed25519 {body} x')
+
+
 def test_parse_pubkeys_rejects_malformed():
     from config import _parse_pubkeys
 
