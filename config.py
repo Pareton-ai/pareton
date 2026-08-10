@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -97,6 +98,33 @@ GPU_STATE_DIR: Path = Path(
 GPU_VOLUME_GIB: int = int(os.environ.get("PARETON_GPU_VOLUME_GIB", "250"))
 GPU_STATIC_SSH: str = os.environ.get("PARETON_GPU_STATIC_SSH", "")
 GPU_SSH_KEY_PATH: str = os.environ.get("PARETON_GPU_SSH_KEY_PATH", "")
+
+
+_PUBKEY_RE = re.compile(
+    r"^(?:ssh|ecdsa)-[A-Za-z0-9@.-]+ [A-Za-z0-9+/]{40,}={0,3}(?: \S.*)?$"
+)
+
+
+def _parse_pubkeys(raw: str) -> list[str]:
+    """Split newline-separated pubkeys; reject malformed lines loudly."""
+    keys: list[str] = []
+    for line in raw.splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        if not _PUBKEY_RE.match(entry):
+            raise ValueError(
+                "PARETON_GPU_EXTRA_SSH_PUBKEYS has a malformed entry "
+                f"(want 'ssh-<type> <base64> [comment]'): {entry[:40]!r}"
+            )
+        if entry not in keys:
+            keys.append(entry)
+    return keys
+
+
+GPU_EXTRA_SSH_PUBKEYS: list[str] = _parse_pubkeys(
+    os.environ.get("PARETON_GPU_EXTRA_SSH_PUBKEYS", "")
+)
 GHCR_USER: str = os.environ.get(
     "PARETON_GHCR_USER", os.environ.get("PARETON_GHCR_USERNAME", "")
 )
