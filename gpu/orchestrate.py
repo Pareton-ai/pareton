@@ -105,7 +105,12 @@ def _select_offer(provider, spec: PodSpec):
 def _write_remote_env(
     pod: Pod, *, runner: SshRunner | None, state_dir: Path | None
 ) -> None:
-    lines: list[str] = [f"PARETON_BENCH_HF_CACHE_DIR={REMOTE_HF_CACHE}"]
+    lines: list[str] = [
+        f"PARETON_BENCH_HF_CACHE_DIR={REMOTE_HF_CACHE}",
+        # Harness reads config on the pod, which has no .env; forward the
+        # worker-side value so large models get the same health window.
+        f"PARETON_BENCH_HEALTH_TIMEOUT_S={config.BENCH_HEALTH_TIMEOUT_S}",
+    ]
     hf = os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN")
     if hf:
         lines.append(f"HF_TOKEN={hf}")

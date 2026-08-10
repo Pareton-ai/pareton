@@ -335,6 +335,37 @@ def test_write_remote_env_does_not_put_secrets_in_ssh_argv(tmp_path: Path, monke
     assert all(secret not in r for r in ssh_remotes)
 
 
+def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import _write_remote_env
+    from gpu.types import Pod, SshTarget
+
+    ensure_durable_keypair(tmp_path / "st")
+    monkeypatch.setattr("gpu.orchestrate.config.BENCH_HEALTH_TIMEOUT_S", 1800.0)
+    pushed: list[str] = []
+
+    def capturing_push(pod, local, remote, **kwargs):
+        pushed.append(Path(local).read_text(encoding="utf-8"))
+
+    monkeypatch.setattr("gpu.orchestrate.push", capturing_push)
+    monkeypatch.setattr(
+        "gpu.orchestrate.ssh_exec",
+        lambda *a, **k: SshResult(0, "", ""),
+    )
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
+    assert pushed
+    assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
+
+
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):
     ensure_durable_keypair(tmp_path / "st")
     provider = FakeProvider()
