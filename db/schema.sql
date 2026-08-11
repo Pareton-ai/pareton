@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
   status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft', 'open', 'closed')),
   bench JSONB,
+  -- Build/launch recipe (campaign.engine): {name, install_cmd, entrypoint}.
+  -- NULL means the vLLM default and is excluded from manifest_hash, so
+  -- campaigns pinned before engine profiles existed keep their hash.
+  engine JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)

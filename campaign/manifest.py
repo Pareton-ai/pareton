@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from .engine import validate_engine
 from .models import (
     CampaignManifest,
     CustomerSignoff,
@@ -48,10 +49,13 @@ def freeze_manifest_fields(
     priority_metric: str,
     success_threshold: str,
     bench: dict[str, Any] | None = None,
+    engine: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
 
     Include ``bench`` only when not None so pre-WS-D campaign hashes stay valid.
+    ``engine`` follows the same rule: absent means the vLLM default, and every
+    campaign hashed before engine profiles existed keeps its hash.
     """
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
     out: dict[str, Any] = {
@@ -79,6 +83,8 @@ def freeze_manifest_fields(
     }
     if bench is not None:
         out["bench"] = bench
+    if engine is not None:
+        out["engine"] = validate_engine(engine)
     return out
 
 
@@ -112,6 +118,7 @@ def build_manifest(
     customer_signoff: CustomerSignoff | None = None,
     manifest_hash: str | None = None,
     bench: dict[str, Any] | None = None,
+    engine: dict[str, Any] | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
         campaign_id=campaign_id,
@@ -132,9 +139,13 @@ def build_manifest(
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         bench=bench,
+        engine=engine,
     )
     mh = manifest_hash or compute_manifest_hash(fields)
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
+    # Carry the normalized form onto the object so callers and the DB see the
+    # same bytes that were hashed.
+    engine_obj = fields.get("engine")
     return CampaignManifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
@@ -159,4 +170,5 @@ def build_manifest(
         priority_metric=validate_priority_metric(priority_metric),
         success_threshold=success_threshold,
         bench=bench,
+        engine=engine_obj,
     )

@@ -27,6 +27,9 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
     bench = row.get("bench")
     if isinstance(bench, str):
         bench = json.loads(bench)
+    engine = row.get("engine")
+    if isinstance(engine, str):
+        engine = json.loads(engine)
     return build_manifest(
         campaign_id=row["id"],
         profile_id=row.get("profile_id"),
@@ -49,6 +52,7 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         customer_signoff=CustomerSignoff.from_dict(row.get("customer_signoff")),
         manifest_hash=row["manifest_hash"],
         bench=bench if isinstance(bench, dict) else None,
+        engine=engine if isinstance(engine, dict) else None,
     )
 
 
@@ -79,14 +83,14 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   gpu_skus, workload_trace_sha256, workload_trace_url, sla,
                   scoring_config_sha256, scoring_config_url,
                   allowed_paths, denied_paths, window_opens_at, window_closes_at,
-                  manifest_hash, customer_signoff, status, bench,
+                  manifest_hash, customer_signoff, status, bench, engine,
                   priority_metric, success_threshold
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s,
                   %s, %s, %s, %s,
-                  %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s,
                   %s, %s
                 )
                 RETURNING id
@@ -111,6 +115,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                     signoff,
                     manifest.status,
                     Json(manifest.bench) if manifest.bench is not None else None,
+                    Json(manifest.engine) if manifest.engine is not None else None,
                     manifest.priority_metric,
                     manifest.success_threshold,
                 ),

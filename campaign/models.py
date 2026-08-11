@@ -115,6 +115,9 @@ class CampaignManifest:
     priority_metric: str  # one of PRIORITY_METRICS
     success_threshold: str  # human-readable win condition for the pilot
     bench: dict[str, Any] | None = None
+    # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
+    # out of the manifest pin set so pre-engine campaign hashes remain valid.
+    engine: dict[str, Any] | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -143,4 +146,5 @@ class CampaignManifest:
             "priority_metric": self.priority_metric,
             "success_threshold": self.success_threshold,
             "bench": self.bench,
+            "engine": self.engine,
         }
