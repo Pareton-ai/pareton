@@ -148,8 +148,13 @@ GPU_PROVIDER_FALLBACKS: list[str] = [
     if p.strip()
 ]
 
-# Set PARETON_SUBMISSION_FEE_TAO > 0 before opening to external miners.
-SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0"))
+# Per-submission fee the miner transfers to PAYMENT_RECIPIENT_ADDRESS before
+# committing. Declared for ops and the miner CLI; no gate reads it yet.
+SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.05"))
+PAYMENT_RECIPIENT_ADDRESS: str = os.environ.get(
+    "PARETON_PAYMENT_RECIPIENT_ADDRESS",
+    "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+)
 
 # Axiom observability (Vector log shipping). Ingest-only token; store in
 # /opt/pareton/.env at deploy time, never in the repo.
