@@ -9,8 +9,6 @@ from fastapi.testclient import TestClient
 
 from campaign.store import KNOWN_CAMPAIGN_STATUSES, KNOWN_SUBMISSION_STATES
 
-V1_CACHE_CONTROL_EXPECTED = "public, max-age=30, stale-while-revalidate=300"
-
 
 @pytest.fixture()
 def client(monkeypatch):
@@ -173,9 +171,6 @@ def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
     row = {"id": sid, "patch_hash": "sha256:abc"}
     monkeypatch.setattr(server, "get_submission", lambda _h: row)
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: "building"}
-    )
     log_dir = tmp_path / sid
     log_dir.mkdir(parents=True)
     (log_dir / "build.log").write_bytes(b"step1\n\x1b[31mcolored\x1b[0m\nstep3\n")
@@ -184,7 +179,6 @@ def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
     resp = client.get("/v1/submissions/sha256:abc/build-log")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
-    assert resp.headers.get("Cache-Control") == "no-store"
     body = resp.text
     assert "colored" in body
     assert "\x1b" not in body
@@ -206,7 +200,6 @@ def test_build_log_404s(monkeypatch, client: TestClient, tmp_path):
     row = {"id": "33333333-3333-3333-3333-333333333333", "patch_hash": "p"}
     monkeypatch.setattr(server, "get_submission", lambda _h: row)
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
-    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {})
     monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
     assert client.get("/v1/submissions/p/build-log").status_code == 404
 
@@ -252,7 +245,6 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
 
     resp = client.get("/v1/campaigns/c1/submissions/sha256:dup")
     assert resp.status_code == 200
-    assert resp.headers.get("Cache-Control") == "no-store"
     body = resp.json()
     assert body["submission"]["id"] == sid
     assert body["submission"]["campaign_id"] == "c1"
@@ -274,9 +266,6 @@ def test_campaign_scoped_build_log(monkeypatch, client: TestClient, tmp_path):
     sid = "55555555-5555-5555-5555-555555555555"
     row = {"id": sid, "patch_hash": "sha256:dup"}
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: "building"}
-    )
     log_dir = tmp_path / sid
     log_dir.mkdir(parents=True)
     (log_dir / "build.log").write_bytes(b"line1\n\x1b[32mline2\x1b[0m\n")
@@ -285,7 +274,6 @@ def test_campaign_scoped_build_log(monkeypatch, client: TestClient, tmp_path):
     resp = client.get("/v1/campaigns/c1/submissions/sha256:dup/build-log")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
-    assert resp.headers.get("Cache-Control") == "no-store"
     assert "line2" in resp.text
     assert "\x1b" not in resp.text
 
@@ -322,67 +310,7 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
 
     resp = client.get("/v1/submissions/sha256:solo")
     assert resp.status_code == 200
-    # Missing latest_state is treated as still live → no-store.
-    assert resp.headers.get("Cache-Control") == "no-store"
     body = resp.json()
     assert body["submission"]["id"] == sid
     assert body["latest_state"] is None
     assert body["jobs"] == []
-
-
-@pytest.mark.parametrize(
-    ("latest_state", "expected_cache"),
-    [
-        ("building", "no-store"),
-        ("bench_queued", "no-store"),
-        ("benched", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected", V1_CACHE_CONTROL_EXPECTED),
-    ],
-)
-def test_submission_detail_cache_control_by_state(
-    monkeypatch, client: TestClient, latest_state: str, expected_cache: str
-):
-    from api import server
-
-    sid = "88888888-8888-8888-8888-888888888888"
-    row = _detail_row(sid, "c1", "sha256:live")
-    monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
-    monkeypatch.setattr(server, "list_events", lambda _id: [])
-    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: latest_state}
-    )
-    monkeypatch.setattr(server, "list_submission_jobs", lambda _id: [])
-
-    resp = client.get("/v1/campaigns/c1/submissions/sha256:live")
-    assert resp.status_code == 200
-    assert resp.headers.get("Cache-Control") == expected_cache
-
-
-@pytest.mark.parametrize(
-    ("latest_state", "expected_cache"),
-    [
-        ("building", "no-store"),
-        ("benched", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected", V1_CACHE_CONTROL_EXPECTED),
-    ],
-)
-def test_build_log_cache_control_by_state(
-    monkeypatch, client: TestClient, tmp_path, latest_state: str, expected_cache: str
-):
-    from api import server
-
-    sid = "99999999-9999-9999-9999-999999999999"
-    row = {"id": sid, "patch_hash": "sha256:log"}
-    monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: latest_state}
-    )
-    log_dir = tmp_path / sid
-    log_dir.mkdir(parents=True)
-    (log_dir / "build.log").write_bytes(b"ok\n")
-    monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
-
-    resp = client.get("/v1/campaigns/c1/submissions/sha256:log/build-log")
-    assert resp.status_code == 200
-    assert resp.headers.get("Cache-Control") == expected_cache
