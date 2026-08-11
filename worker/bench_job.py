@@ -115,6 +115,7 @@ def campaign_calibration_fingerprint(
 ) -> dict[str, Any]:
     """Key fields that must match a stored correctness.calibration fingerprint."""
     model = bench.get("model") or {}
+    quant = model.get("quantization")
     return {
         "model_repo": str(model.get("hf_repo") or ""),
         "model_revision": str(model.get("hf_revision") or ""),
@@ -123,6 +124,10 @@ def campaign_calibration_fingerprint(
         ).lower(),
         "trace_sha256": str(row.get("workload_trace_sha256") or "").lower(),
         "serve_args": [str(x) for x in (bench.get("serve_args") or [])],
+        "dtype": str(model.get("dtype") or ""),
+        "quantization": "" if quant is None else str(quant),
+        "max_model_len": int(model.get("max_model_len") or 0),
+        "gpu_count": int(bench.get("gpu_count") or 1),
     }
 
 

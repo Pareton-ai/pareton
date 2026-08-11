@@ -333,6 +333,56 @@ def test_correctness_dict_from_summary_sets_calibration_blob():
     }
     out = correctness_dict_from_summary(summary, campaign_fingerprint=fp)
     assert out["thresholds"]["mean_abs_logprob_diff"] == 0.05
-    assert out["min_positions_compared"] == APPLY_DEFAULT_MIN_POSITIONS
+    planned = out["num_prompts"] * out["max_new_tokens"]
+    assert out["min_positions_compared"] == min(APPLY_DEFAULT_MIN_POSITIONS, planned)
     assert out["calibration"]["thresholds"] == out["thresholds"]
     assert out["calibration"]["fingerprint"] == fp
+
+
+def test_correctness_dict_from_summary_caps_min_positions_to_planned():
+    summary = {
+        "correctness": {
+            "mean_abs_logprob_diff": {"suggested": 0.05},
+            "max_abs_logprob_diff": {"suggested": 0.1},
+            "argmax_mismatch_rate": {"suggested": 0.01},
+        },
+    }
+    out = correctness_dict_from_summary(
+        summary,
+        existing_correctness={
+            "num_prompts": 8,
+            "max_new_tokens": 32,
+            "min_positions_compared": 1024,
+        },
+        campaign_fingerprint={"model_repo": "x"},
+    )
+    assert out["min_positions_compared"] == 256
+
+
+def test_assert_summary_matches_campaign_rejects_mismatch():
+    from bench.calibrate import assert_summary_matches_campaign, CalibrationError
+
+    bench = {
+        "baseline_engine_image_digest": DIGEST,
+        "model": {
+            "hf_repo": "Qwen/Qwen2.5-7B-Instruct",
+            "hf_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+        },
+    }
+    ok = {
+        "fingerprint": {
+            "engine_digest": DIGEST,
+            "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+            "model_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+            "trace_sha256": A3A_TRACE_SHA256,
+        }
+    }
+    assert_summary_matches_campaign(ok, bench=bench, trace_sha256=A3A_TRACE_SHA256)
+    bad = {
+        "fingerprint": {
+            **ok["fingerprint"],
+            "model_revision": "deadbeef",
+        }
+    }
+    with pytest.raises(CalibrationError, match="model_revision"):
+        assert_summary_matches_campaign(bad, bench=bench, trace_sha256=A3A_TRACE_SHA256)

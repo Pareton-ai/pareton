@@ -450,6 +450,52 @@ def test_require_calibration_missing_and_stale(tmp_path: Path):
     assert ei2.value.code == "campaign_correctness_calibration_stale"
 
 
+def test_calibration_fingerprint_includes_scoring_knobs():
+    from worker.bench_job import campaign_calibration_fingerprint
+
+    bench = _bench_spec()
+    row = _row(bench=bench)
+    fp = campaign_calibration_fingerprint(bench, row)
+    assert fp["dtype"] == "bfloat16"
+    assert fp["quantization"] == ""
+    assert fp["max_model_len"] == 8192
+    assert fp["gpu_count"] == 1
+
+    bench["model"]["quantization"] = "fp8"
+    bench["model"]["dtype"] = "auto"
+    bench["model"]["max_model_len"] = 131072
+    bench["gpu_count"] = 8
+    fp2 = campaign_calibration_fingerprint(bench, row)
+    assert fp2["quantization"] == "fp8"
+    assert fp2["dtype"] == "auto"
+    assert fp2["max_model_len"] == 131072
+    assert fp2["gpu_count"] == 8
+    # Changing a scoring knob after apply must invalidate calibration.
+    bench["correctness"] = {
+        "thresholds": {
+            "mean_abs_logprob_diff": 0.01,
+            "max_abs_logprob_diff": 0.1,
+            "argmax_mismatch_rate": 0.01,
+        },
+        "calibration": {
+            "thresholds": {
+                "mean_abs_logprob_diff": 0.01,
+                "max_abs_logprob_diff": 0.1,
+                "argmax_mismatch_rate": 0.01,
+            },
+            "fingerprint": fp,  # old fingerprint without fp8/8gpu
+        },
+    }
+    with pytest.raises(BenchInfraError) as ei:
+        build_bench_request_dict(
+            _row(bench=bench),
+            task_id=str(uuid4()),
+            trace_path=str(SAMPLE_TRACE),
+            require_calibration=True,
+        )
+    assert ei.value.code == "campaign_correctness_calibration_stale"
+
+
 def test_non_digest_candidate_fails(tmp_path: Path):
     row = _row(engine_image_ref="ghcr.io/pareton-ai/pareton-engine:latest")
     trace = materialize_trace(

@@ -308,16 +308,24 @@ def correctness_dict_from_summary(
         thresholds[key] = float(block["suggested"])
 
     existing = dict(existing_correctness or {})
+    num_prompts = int(existing.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS))
+    max_new_tokens = int(
+        existing.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
+    )
+    planned = num_prompts * max_new_tokens
+    if planned < 1:
+        raise CalibrationError(
+            f"num_prompts * max_new_tokens must be >= 1, got {planned}"
+        )
+    # Cap at planned size: positions_compared can never exceed the generation budget.
+    desired_min = int(
+        existing.get("min_positions_compared", APPLY_DEFAULT_MIN_POSITIONS)
+    )
+    min_positions = min(desired_min, planned)
     out: dict[str, Any] = {
-        "num_prompts": int(
-            existing.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS)
-        ),
-        "max_new_tokens": int(
-            existing.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
-        ),
-        "min_positions_compared": int(
-            existing.get("min_positions_compared", APPLY_DEFAULT_MIN_POSITIONS)
-        ),
+        "num_prompts": num_prompts,
+        "max_new_tokens": max_new_tokens,
+        "min_positions_compared": min_positions,
         "thresholds": thresholds,
         "calibration": {
             "thresholds": dict(thresholds),
@@ -694,6 +702,47 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def assert_summary_matches_campaign(
+    summary: dict[str, Any], *, bench: dict[str, Any], trace_sha256: str
+) -> None:
+    """Refuse apply when analyze summary was measured on a different campaign pin."""
+    summary_fp = summary.get("fingerprint")
+    if not isinstance(summary_fp, dict):
+        raise CalibrationError("summary missing fingerprint object")
+    model = bench.get("model") or {}
+    try:
+        campaign_digest = normalize_digest(
+            str(bench.get("baseline_engine_image_digest") or "")
+        )
+    except ValueError as exc:
+        raise CalibrationError(
+            f"campaign baseline_engine_image_digest invalid: {exc}"
+        ) from exc
+    expected = {
+        "engine_digest": campaign_digest,
+        "model_repo": str(model.get("hf_repo") or ""),
+        "model_revision": str(model.get("hf_revision") or ""),
+        "trace_sha256": str(trace_sha256 or "").lower(),
+    }
+    for key, expect in expected.items():
+        got_raw = summary_fp.get(key)
+        if key == "engine_digest":
+            try:
+                got = normalize_digest(str(got_raw or ""))
+            except ValueError as exc:
+                raise CalibrationError(
+                    f"summary fingerprint.engine_digest invalid: {exc}"
+                ) from exc
+        elif key == "trace_sha256":
+            got = str(got_raw or "").lower()
+        else:
+            got = str(got_raw or "")
+        if got != expect:
+            raise CalibrationError(
+                f"summary fingerprint {key} mismatch: {got!r} != {expect!r}"
+            )
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     try:
         summary_path = Path(args.summary)
@@ -714,6 +763,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
             raise CalibrationError(f"campaign not found: {args.campaign_id}")
         if not isinstance(manifest.bench, dict):
             raise CalibrationError("campaign.bench missing")
+        assert_summary_matches_campaign(
+            summary,
+            bench=manifest.bench,
+            trace_sha256=str(manifest.workload_trace_sha256 or ""),
+        )
         row = {
             "workload_trace_sha256": manifest.workload_trace_sha256,
         }
