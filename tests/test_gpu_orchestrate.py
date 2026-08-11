@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1000,3 +1001,121 @@ def test_provider_order_default_dedup_and_static_ssh(monkeypatch):
     assert provider_order("static_ssh") == ["static_ssh"]
     monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "")
     assert provider_order("auto") == ["lium"]
+
+
+def _pod_for_keys(tmp_path: Path) -> Pod:
+    ensure_durable_keypair(tmp_path / "st")
+    return Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="root"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+
+
+def test_authorize_extra_keys_appends_idempotently(tmp_path: Path):
+    from gpu.bootstrap import authorize_extra_keys
+
+    remote_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        remote_cmds.append(cmd[-1] if cmd else "")
+        return SshResult(0, "", "")
+
+    keys = ["ssh-ed25519 AAAAC3Nz xavier", "ssh-ed25519 AAAAB4Qq bohdan"]
+    authorize_extra_keys(
+        _pod_for_keys(tmp_path),
+        keys=keys,
+        runner=runner,
+        state_dir=tmp_path / "st",
+    )
+    assert len(remote_cmds) == 1
+    remote = remote_cmds[0]
+    # Append-only: never truncates the file.
+    assert ">>" in remote
+    assert ">>>" not in remote
+    assert "> $HOME/.ssh/authorized_keys" not in remote.replace(">>", "")
+    # Idempotent: each key is guarded by an exact-line grep.
+    for key in keys:
+        assert f"grep -qxF -- '{key}'" in remote
+    assert remote.count("grep -qxF") == 2
+    assert "chmod 600" in remote
+
+
+def test_authorize_extra_keys_noop_when_unset(tmp_path: Path):
+    from gpu.bootstrap import authorize_extra_keys
+
+    calls: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        calls.append(cmd[-1] if cmd else "")
+        return SshResult(0, "", "")
+
+    authorize_extra_keys(
+        _pod_for_keys(tmp_path), keys=[], runner=runner, state_dir=tmp_path / "st"
+    )
+    assert calls == []
+
+
+def test_authorize_extra_keys_quotes_injection(tmp_path: Path):
+    from gpu.bootstrap import authorize_extra_keys
+
+    remote_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        remote_cmds.append(cmd[-1] if cmd else "")
+        return SshResult(0, "", "")
+
+    evil = "ssh-ed25519 AAAA';rm -rf /;'"
+    authorize_extra_keys(
+        _pod_for_keys(tmp_path),
+        keys=[evil],
+        runner=runner,
+        state_dir=tmp_path / "st",
+    )
+    assert ";rm -rf /;" not in remote_cmds[0].replace(shlex.quote(evil), "")
+
+
+def test_parse_pubkeys_accepts_and_dedupes():
+    from config import _parse_pubkeys
+
+    x = "AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 20
+    r = "AAAAB3NzaC1yc2EAAAADAQAB" + "B" * 20
+    raw = f"\n{x} xavier\n\n{r}\n{x} xavier\n".replace(x, f"ssh-ed25519 {x}").replace(
+        r, f"ssh-rsa {r}"
+    )
+    assert _parse_pubkeys(raw) == [f"ssh-ed25519 {x} xavier", f"ssh-rsa {r}"]
+    assert _parse_pubkeys("") == []
+
+
+def test_parse_pubkeys_accepts_fido_keys():
+    from config import _parse_pubkeys
+
+    body = "AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29t" + "C" * 20
+    for ktype in ("sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com"):
+        assert _parse_pubkeys(f"{ktype} {body} yubikey") == [f"{ktype} {body} yubikey"]
+
+
+def test_parse_pubkeys_rejects_authorized_keys_options():
+    from config import _parse_pubkeys
+
+    body = "AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 20
+    with pytest.raises(ValueError):
+        _parse_pubkeys(f'command="/bin/sh" ssh-ed25519 {body} x')
+
+
+def test_parse_pubkeys_rejects_malformed():
+    from config import _parse_pubkeys
+
+    for bad in (
+        "not-a-key",
+        "ssh-ed25519",
+        "AAAAC3Nz xavier",
+        "ssh-ed25519 not base64!",
+    ):
+        with pytest.raises(ValueError):
+            _parse_pubkeys(bad)

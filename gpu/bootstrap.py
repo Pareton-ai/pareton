@@ -99,6 +99,49 @@ $SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} || true
 """
 
 
+def _extra_ssh_pubkeys() -> list[str]:
+    try:
+        import config as _cfg
+
+        return list(getattr(_cfg, "GPU_EXTRA_SSH_PUBKEYS", []) or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def authorize_extra_keys(
+    pod: Pod,
+    *,
+    keys: list[str] | None = None,
+    runner: SshRunner | None = None,
+    state_dir: Path | None = None,
+) -> None:
+    """Append operator pubkeys to the pod's authorized_keys (idempotent)."""
+    keys = _extra_ssh_pubkeys() if keys is None else keys
+    if not keys:
+        return
+    auth = "$HOME/.ssh/authorized_keys"
+    lines = [
+        'mkdir -p "$HOME/.ssh"',
+        'chmod 700 "$HOME/.ssh"',
+        f'touch "{auth}"',
+        f'chmod 600 "{auth}"',
+        # A file not ending in a newline would concatenate onto the last key.
+        f'if [ -s "{auth}" ] && [ -n "$(tail -c1 "{auth}")" ]; then'
+        f' printf "\\n" >> "{auth}"; fi',
+    ]
+    for key in keys:
+        q = shlex.quote(key)
+        lines.append(f'grep -qxF -- {q} "{auth}" || printf "%s\\n" {q} >> "{auth}"')
+    ssh_exec(
+        pod,
+        " && ".join(lines),
+        timeout_s=60.0,
+        runner=runner,
+        state_dir=state_dir,
+    )
+    logger.info("authorized %d extra SSH key(s) on pod %s", len(keys), pod.name)
+
+
 def remote_docker(pod: Pod) -> str:
     """Docker argv prefix; Shadeform (and other non-root) need sudo."""
     if (pod.ssh.user or "").strip() in ("", "root"):
@@ -124,6 +167,7 @@ def bootstrap_pod(
         runner=runner,
         state_dir=state_dir,
     )
+    authorize_extra_keys(pod, runner=runner, state_dir=state_dir)
     code_sha = local_code_sha(repo_root)
     # Ensure remote dir exists then rsync.
     ssh_exec(
