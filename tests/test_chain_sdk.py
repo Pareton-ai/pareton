@@ -184,6 +184,118 @@ def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
     assert rc == 1
 
 
+def _fee_cli_stubs(monkeypatch, tmp_path, *, execute):
+    """Wire commit_patch for a fee-on run; returns (module, patch path, order)."""
+    from types import SimpleNamespace
+
+    import bittensor as bt
+
+    import config
+    import miner.commit_patch as cp
+
+    patch = tmp_path / "p.diff"
+    patch.write_bytes(b"diff --git a/x b/x\n")
+
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0.05)
+    monkeypatch.setattr(config, "PAYMENT_RECIPIENT_ADDRESS", "5Recipient")
+    monkeypatch.setattr(
+        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+    )
+    monkeypatch.setattr(
+        cp,
+        "fetch_metagraph",
+        lambda *_a, **_k: SimpleNamespace(by_hotkey=lambda _hk: object()),
+    )
+    monkeypatch.setattr(
+        bt,
+        "Wallet",
+        lambda **_k: SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk")),
+    )
+    monkeypatch.setattr(cp, "_await_visible", lambda *_a, **_k: "visible")
+    monkeypatch.setattr(bt.calls.Commitments, "set_commitment", lambda **_k: object())
+
+    order: list[str] = []
+
+    def _submit_call(*_a, **_k):
+        order.append("commit")
+        return SimpleNamespace(success=True, extrinsic_id="901-4")
+
+    def _execute(intent, wallet, **kwargs):
+        order.append("pay")
+        return execute(intent, wallet, **kwargs)
+
+    monkeypatch.setattr(
+        bt,
+        "Subtensor",
+        lambda *_a, **_k: SimpleNamespace(execute=_execute, submit_call=_submit_call),
+    )
+    return cp, patch, order
+
+
+def _fee_cli_argv(patch) -> list[str]:
+    return [
+        "--campaign-id",
+        "11111111-1111-4111-8111-111111111111",
+        "--patch",
+        str(patch),
+        "--retrieval-url",
+        "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+        "--wallet-name",
+        "w",
+    ]
+
+
+def test_fee_is_paid_before_commit_and_referenced_in_payload(monkeypatch, tmp_path):
+    """Transfer lands first; the commitment then carries its (block, index)."""
+    from types import SimpleNamespace
+
+    paid: list = []
+
+    def _execute(intent, _wallet, **_k):
+        paid.append(intent)
+        return SimpleNamespace(success=True, extrinsic_id="900-2")
+
+    cp, patch, order = _fee_cli_stubs(monkeypatch, tmp_path, execute=_execute)
+
+    committed: list[str] = []
+    monkeypatch.setattr(
+        cp,
+        "_plaintext_fields",
+        lambda payload: committed.append(payload) or [{"Raw4": "0x00"}],
+    )
+
+    assert cp.main(_fee_cli_argv(patch)) == 0
+    assert order == ["pay", "commit"]
+    assert paid[0].dest_ss58 == "5Recipient"
+    # Last encode is the committed one; the earlier call is the size pre-flight.
+    assert committed[-1].endswith("|900|2")
+
+
+def test_commit_aborts_when_the_fee_transfer_fails(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    def _execute(_intent, _wallet, **_k):
+        return SimpleNamespace(success=False, message="insufficient balance")
+
+    cp, patch, order = _fee_cli_stubs(monkeypatch, tmp_path, execute=_execute)
+
+    assert cp.main(_fee_cli_argv(patch)) == 1
+    assert order == ["pay"]
+
+
+def test_commit_aborts_when_payment_cannot_be_referenced(monkeypatch, tmp_path):
+    """A paid transfer with no extrinsic id cannot be proven, so stop."""
+    from types import SimpleNamespace
+
+    def _execute(_intent, _wallet, **_k):
+        return SimpleNamespace(success=True, extrinsic_id=None)
+
+    cp, patch, order = _fee_cli_stubs(monkeypatch, tmp_path, execute=_execute)
+
+    assert cp.main(_fee_cli_argv(patch)) == 1
+    assert order == ["pay"]
+
+
 def test_commitment_entries_mapping():
     class Plaintext:
         uid = 3

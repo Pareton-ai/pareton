@@ -150,6 +150,8 @@ def insert_submission(
     baseline_commit: str,
     retrieval_url: str,
     commit_block: int | None = None,
+    payment_block: int | None = None,
+    payment_tx: int | None = None,
 ) -> UUID | None:
     """Insert submission. Returns id, or None if (campaign_id, patch_hash) exists."""
     with db_connection() as conn:
@@ -158,8 +160,8 @@ def insert_submission(
                 """
                 INSERT INTO submissions (
                   campaign_id, patch_hash, hotkey, baseline_commit,
-                  retrieval_url, commit_block
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                  retrieval_url, commit_block, payment_block, payment_tx
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (campaign_id, patch_hash) DO NOTHING
                 RETURNING id
                 """,
@@ -170,6 +172,8 @@ def insert_submission(
                     baseline_commit.lower(),
                     retrieval_url,
                     commit_block,
+                    payment_block,
+                    payment_tx,
                 ),
             )
             row = cur.fetchone()
@@ -184,17 +188,33 @@ def insert_submission(
                 """,
                 (str(submission_id),),
             )
+            detail: dict[str, Any] = {"commit_block": commit_block, "hotkey": hotkey}
+            if payment_block is not None:
+                detail["payment_block"] = payment_block
+                detail["payment_tx"] = payment_tx
             cur.execute(
                 """
                 INSERT INTO submission_events (submission_id, state, detail)
                 VALUES (%s, 'committed', %s)
                 """,
-                (
-                    str(submission_id),
-                    Json({"commit_block": commit_block, "hotkey": hotkey}),
-                ),
+                (str(submission_id), Json(detail)),
             )
             return submission_id
+
+
+def payment_ref_consumed(payment_block: int, payment_tx: int) -> bool:
+    """Whether a fee payment already backs a submission."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM submissions
+                WHERE payment_block = %s AND payment_tx = %s
+                LIMIT 1
+                """,
+                (payment_block, payment_tx),
+            )
+            return cur.fetchone() is not None
 
 
 def append_event(

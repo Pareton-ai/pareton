@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import Any, Callable
 
-from campaign.store import get_campaign, insert_submission
+import config
+from campaign.store import get_campaign, insert_submission, payment_ref_consumed
 from chain.commitment import (
     PatchCommitment,
     build_patch_commitments,
+)
+from chain.payment import (
+    PaymentCheck,
+    fee_rao,
+    fetch_block_extrinsics,
+    verify_payment,
 )
 from chain.rpc import fetch_chain_view
 from observability import events as obs
@@ -16,8 +24,38 @@ from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
 
 logger = logging.getLogger(__name__)
 
+ExtrinsicFetcher = Callable[[int], list[Any] | None]
 
-def ingest_commitment(com: PatchCommitment) -> str | None:
+
+def check_fee_proof(
+    com: PatchCommitment,
+    fetch_extrinsics: ExtrinsicFetcher | None,
+) -> PaymentCheck:
+    """Verify the commitment's fee proof. Only called when the fee is on."""
+    if com.payment_block is None or com.payment_tx is None:
+        return PaymentCheck.reject("payment_proof_missing")
+    if payment_ref_consumed(com.payment_block, com.payment_tx):
+        return PaymentCheck.reject("payment_ref_already_used")
+    if fetch_extrinsics is None:
+        return PaymentCheck.reject("payment_no_chain_access")
+    extrinsics = fetch_extrinsics(com.payment_block)
+    if extrinsics is None:
+        return PaymentCheck.reject("payment_block_unavailable")
+    return verify_payment(
+        extrinsics=extrinsics,
+        extrinsic_index=com.payment_tx,
+        recipient=config.PAYMENT_RECIPIENT_ADDRESS,
+        min_amount_rao=fee_rao(config.SUBMISSION_FEE_TAO),
+        hotkey=com.hotkey,
+        coldkey=com.coldkey,
+    )
+
+
+def ingest_commitment(
+    com: PatchCommitment,
+    *,
+    fetch_extrinsics: ExtrinsicFetcher | None = None,
+) -> str | None:
     """Insert a submission from a commitment. Returns submission id or None if dupe/invalid."""
     campaign = get_campaign(com.campaign_id)
     if campaign is None:
@@ -52,6 +90,21 @@ def ingest_commitment(com: PatchCommitment) -> str | None:
         )
         return None
 
+    # No GPU spend without proof the miner paid: reject before insert so a
+    # missing or junk proof cannot burn the first-seen dedupe slot either.
+    payment_block = payment_tx = None
+    if config.SUBMISSION_FEE_TAO > 0:
+        check = check_fee_proof(com, fetch_extrinsics)
+        if not check.ok:
+            logger.info(
+                "skip commitment: %s hotkey=%s patch_hash=%s",
+                check.reason,
+                com.hotkey[:16],
+                com.patch_hash,
+            )
+            return None
+        payment_block, payment_tx = com.payment_block, com.payment_tx
+
     sid = insert_submission(
         campaign_id=com.campaign_id,
         patch_hash=com.patch_hash,
@@ -59,6 +112,8 @@ def ingest_commitment(com: PatchCommitment) -> str | None:
         baseline_commit=com.baseline_commit,
         retrieval_url=com.retrieval_url,
         commit_block=com.commit_block,
+        payment_block=payment_block,
+        payment_tx=payment_tx,
     )
     if sid is None:
         logger.info(
@@ -87,12 +142,17 @@ def scan_chain(
     netuid: int,
     *,
     network: str = "finney",
-    ingest: Callable[[PatchCommitment], str | None] = ingest_commitment,
+    ingest: Callable[[PatchCommitment], str | None] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Fetch revealed commitments and enqueue new submissions.
 
     Returns (new submission ids, registered hotkeys from the metagraph).
     """
+    if ingest is None:
+        ingest = partial(
+            ingest_commitment,
+            fetch_extrinsics=partial(fetch_block_extrinsics, subtensor),
+        )
     meta, revealed, _block, _block_hash = fetch_chain_view(
         subtensor, netuid, network=network
     )

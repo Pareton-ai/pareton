@@ -4,7 +4,8 @@
 Flow:
   1. Request Pareton-presigned S3 upload (or reuse --retrieval-url)
   2. PUT patch bytes
-  3. Commitments.set_commitment with v2 patch payload (plaintext Raw fields)
+  3. Transfer the submission fee from the coldkey (when the fee is on)
+  4. Commitments.set_commitment with v2 patch payload (plaintext Raw fields)
 
 Usage:
     python miner/commit_patch.py \\
@@ -29,8 +30,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import config  # noqa: E402
 from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
 from storage.s3 import patch_url_hotkey  # noqa: E402
+
+# Widest fee proof the payload may need to hold (10-digit block, 4-digit index),
+# used to size the payload before any money moves.
+_PREFLIGHT_BLOCK = 2**31 - 1
+_PREFLIGHT_TX = 9999
 
 
 def _sha256_file(path: Path) -> str:
@@ -100,6 +107,45 @@ def _timelock_fields(payload: str) -> tuple[list[dict], int]:
         }
     }
     return [field], sealed.reveal_round
+
+
+def _commitment_fields(payload: str, *, timelock: bool) -> tuple[list[dict], str]:
+    """Commitment Data fields plus a human label for the mode."""
+    if timelock:
+        fields, reveal_round = _timelock_fields(payload)
+        return fields, f"timelock reveal_round={reveal_round}"
+    return _plaintext_fields(payload), "plaintext"
+
+
+def _payment_ref(result: object) -> tuple[int, int] | None:
+    """`(block, extrinsic_index)` from an ExtrinsicResult's `block-index` id."""
+    raw = getattr(result, "extrinsic_id", None)
+    if not isinstance(raw, str):
+        return None
+    block, _, index = raw.rpartition("-")
+    if not block.isdigit() or not index.isdigit():
+        return None
+    return int(block), int(index)
+
+
+def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int, int]:
+    """Send the fee from the coldkey and return the proof reference."""
+    import bittensor as bt
+
+    result = subtensor.execute(
+        bt.Transfer(dest_ss58=recipient, amount_tao=str(fee_tao)), wallet
+    )
+    if not getattr(result, "success", False):
+        message = getattr(result, "message", None) or getattr(result, "error", result)
+        raise RuntimeError(f"fee transfer failed: {message}")
+    ref = _payment_ref(result)
+    if ref is None:
+        raise RuntimeError(
+            "fee transfer landed but the chain returned no extrinsic id, so the "
+            "payment cannot be referenced; find its block and index on an "
+            "explorer before retrying (do not pay twice)"
+        )
+    return ref
 
 
 def _await_visible(
@@ -200,27 +246,34 @@ def main(argv: list[str] | None = None) -> int:
         retrieval_url = presign["retrieval_url"]
         print(f"uploaded patch to {retrieval_url}")
 
+    payload_args: dict[str, object] = {
+        "campaign_id": args.campaign_id,
+        "baseline_commit": baseline_commit,
+        "patch_hash": patch_hash,
+        "retrieval_url": retrieval_url,
+    }
+    fee_tao = config.SUBMISSION_FEE_TAO
+    recipient = config.PAYMENT_RECIPIENT_ADDRESS
     try:
-        payload = encode_patch_commitment(
-            campaign_id=args.campaign_id,
-            baseline_commit=baseline_commit,
-            patch_hash=patch_hash,
-            retrieval_url=retrieval_url,
-        )
-        if args.timelock:
-            fields, reveal_round = _timelock_fields(payload)
-            mode = f"timelock reveal_round={reveal_round}"
-        else:
-            fields = _plaintext_fields(payload)
-            mode = "plaintext"
+        payload = encode_patch_commitment(**payload_args)
+        # Size the payload against a worst-case proof before any money moves.
+        probe = payload
+        if fee_tao > 0:
+            probe = encode_patch_commitment(
+                **payload_args,
+                payment_block=_PREFLIGHT_BLOCK,
+                payment_tx=_PREFLIGHT_TX,
+            )
+        _commitment_fields(probe, timelock=args.timelock)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"commitment payload ({len(payload.encode())} bytes):")
-    print(payload)
-
     if args.dry_run:
+        print(f"commitment payload ({len(payload.encode())} bytes):")
+        print(payload)
+        if fee_tao > 0:
+            print(f"dry-run: would transfer {fee_tao} TAO to {recipient}")
         print("dry-run: not submitting on-chain")
         return 0
 
@@ -232,6 +285,32 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Pay only after the hotkey is known registered: an unregistered hotkey
+    # cannot commit, and the fee would be spent for nothing.
+    if fee_tao > 0:
+        try:
+            payment_block, payment_tx = _pay_fee(
+                subtensor, wallet, fee_tao=fee_tao, recipient=recipient
+            )
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"paid fee {fee_tao} TAO to {recipient} (payment {payment_block}-{payment_tx})"
+        )
+        payload_args["payment_block"] = payment_block
+        payload_args["payment_tx"] = payment_tx
+
+    try:
+        payload = encode_patch_commitment(**payload_args)
+        fields, mode = _commitment_fields(payload, timelock=args.timelock)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"commitment payload ({len(payload.encode())} bytes):")
+    print(payload)
 
     try:
         call = bt.calls.Commitments.set_commitment(
@@ -252,7 +331,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    print(f"committed patch_hash={patch_hash} on netuid {args.netuid} ({mode})")
+    commit_ref = getattr(result, "extrinsic_id", None) or "unknown"
+    print(
+        f"committed patch_hash={patch_hash} on netuid {args.netuid} "
+        f"({mode}, commitment {commit_ref})"
+    )
 
     # Verify is informational only: the commitment already landed, so a poll
     # failure must not turn a successful commit into a non-zero exit.
