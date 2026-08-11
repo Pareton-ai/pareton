@@ -395,6 +395,11 @@ def finish_correctness_with_candidate(
             "correctness compared 0 output positions "
             "(empty continuations or alignment produced no scores)"
         )
+    if positions_compared < cfg.min_positions_compared:
+        raise EngineError(
+            f"correctness compared {positions_compared} positions but "
+            f"min_positions_compared={cfg.min_positions_compared}"
+        )
 
     partial_path.replace(evidence_path)
 
@@ -425,6 +430,7 @@ def finish_correctness_with_candidate(
         mean_abs_logprob_diff=mean_diff,
         max_abs_logprob_diff=max_diff,
         argmax_mismatch_rate=argmax_rate,
+        argmax_mismatches=argmax_mismatches,
         evidence=rel_evidence,
     )
 

@@ -110,6 +110,22 @@ def materialize_trace(
     return path
 
 
+def campaign_calibration_fingerprint(
+    bench: dict[str, Any], row: dict[str, Any]
+) -> dict[str, Any]:
+    """Key fields that must match a stored correctness.calibration fingerprint."""
+    model = bench.get("model") or {}
+    return {
+        "model_repo": str(model.get("hf_repo") or ""),
+        "model_revision": str(model.get("hf_revision") or ""),
+        "baseline_engine_image_digest": str(
+            bench.get("baseline_engine_image_digest") or ""
+        ).lower(),
+        "trace_sha256": str(row.get("workload_trace_sha256") or "").lower(),
+        "serve_args": [str(x) for x in (bench.get("serve_args") or [])],
+    }
+
+
 def build_bench_request_dict(
     row: dict[str, Any],
     *,
@@ -117,8 +133,13 @@ def build_bench_request_dict(
     trace_path: str,
     gpu_sku: str | None = None,
     fetcher: Callable[[str], bytes] | None = None,
+    require_calibration: bool = False,
 ) -> dict[str, Any]:
-    """Operator-pinned bench_request from campaign + submission (image only from miner)."""
+    """Operator-pinned bench_request from campaign + submission (image only from miner).
+
+    ``require_calibration`` is True for real GPU benches. Mock/calibrate paths leave
+    it False so unit tests and B7 prepare stay unblocked.
+    """
     del fetcher  # binding happens in materialize_trace before this is called
     bench = _parse_json_field(row.get("bench"))
     if not isinstance(bench, dict):
@@ -162,6 +183,22 @@ def build_bench_request_dict(
     serve_args.extend(str(x) for x in extra_serve)
 
     corr_cfg = dict(bench.get("correctness") or {})
+    if require_calibration:
+        cal = corr_cfg.get("calibration")
+        if not isinstance(cal, dict) or cal.get("thresholds") is None:
+            raise BenchInfraError("campaign_correctness_calibration_missing")
+        expect_fp = campaign_calibration_fingerprint(bench, row)
+        got_fp = cal.get("fingerprint")
+        if not isinstance(got_fp, dict):
+            raise BenchInfraError(
+                "campaign_correctness_calibration_stale", "fingerprint"
+            )
+        for key, expect in expect_fp.items():
+            if got_fp.get(key) != expect:
+                raise BenchInfraError(
+                    "campaign_correctness_calibration_stale",
+                    f"{key}: {got_fp.get(key)!r} != {expect!r}",
+                )
     thresholds = dict(corr_cfg.get("thresholds") or {})
     correctness = {
         "num_prompts": int(
@@ -170,6 +207,7 @@ def build_bench_request_dict(
         "max_new_tokens": int(
             corr_cfg.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
         ),
+        "min_positions_compared": int(corr_cfg.get("min_positions_compared", 1)),
         "thresholds": {
             "mean_abs_logprob_diff": float(
                 thresholds.get(
@@ -191,6 +229,11 @@ def build_bench_request_dict(
             ),
         },
     }
+    planned = correctness["num_prompts"] * correctness["max_new_tokens"]
+    floor = 1.5 / planned if planned > 0 else 0.0
+    correctness["thresholds"]["argmax_mismatch_rate"] = max(
+        correctness["thresholds"]["argmax_mismatch_rate"], floor
+    )
 
     perf_cfg = dict(bench.get("perf_screen") or {})
     perf_screen = {
@@ -832,6 +875,7 @@ def _run_one_sku(
         task_id=task_id,
         trace_path=str(trace_path.resolve()),
         gpu_sku=gpu_sku,
+        require_calibration=not mock_bench,
     )
     request_path = sku_dir / "bench_request.json"
     request_bytes = (json.dumps(req, indent=2) + "\n").encode("utf-8")

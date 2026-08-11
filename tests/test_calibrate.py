@@ -10,10 +10,12 @@ import pytest
 import config
 from bench.calibrate import (
     A3A_TRACE_SHA256,
+    APPLY_DEFAULT_MIN_POSITIONS,
     CalibrationError,
     analyze_reports,
     analyze_runs_dir,
     compare_shape_to_fixture,
+    correctness_dict_from_summary,
     correctness_would_pass,
     discover_run_dirs,
     prepare_calibration_request,
@@ -291,3 +293,46 @@ def test_discover_flat_and_numbered(tmp_path: Path):
     (nested / "run-002").mkdir(parents=True)
     (nested / "run-001").mkdir(parents=True)
     assert [p.name for p in discover_run_dirs(nested)] == ["run-001", "run-002"]
+
+
+def test_analyze_correctness_only_skips_sla(tmp_path: Path):
+    r = _report(mean=0.01, max_d=0.02, argmax=0.0)
+    del r["sla_bench"]
+    del r["perf_screen"]
+    p = tmp_path / "corr-only.json"
+    p.write_text(json.dumps(r), encoding="utf-8")
+    summary = analyze_reports([p], safety_factor=2.0)
+    assert summary["sla_repro"] is None
+    assert summary["correctness"]["mean_abs_logprob_diff"][
+        "observed_max"
+    ] == pytest.approx(0.01)
+    assert summary["correctness"]["mean_abs_logprob_diff"]["suggested"] >= 0.01
+
+
+def test_correctness_dict_from_summary_sets_calibration_blob():
+    summary = {
+        "fingerprint": {
+            "engine_digest": DIGEST,
+            "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+            "model_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+            "trace_sha256": A3A_TRACE_SHA256,
+        },
+        "correctness": {
+            "mean_abs_logprob_diff": {"suggested": 0.05},
+            "max_abs_logprob_diff": {"suggested": 0.1},
+            "argmax_mismatch_rate": {"suggested": 0.01},
+            "observed": {"mean_abs_logprob_diff": [0.02]},
+        },
+    }
+    fp = {
+        "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+        "model_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+        "baseline_engine_image_digest": DIGEST,
+        "trace_sha256": A3A_TRACE_SHA256,
+        "serve_args": [],
+    }
+    out = correctness_dict_from_summary(summary, campaign_fingerprint=fp)
+    assert out["thresholds"]["mean_abs_logprob_diff"] == 0.05
+    assert out["min_positions_compared"] == APPLY_DEFAULT_MIN_POSITIONS
+    assert out["calibration"]["thresholds"] == out["thresholds"]
+    assert out["calibration"]["fingerprint"] == fp

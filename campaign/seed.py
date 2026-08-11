@@ -255,6 +255,15 @@ def seed_synthetic_campaign(
         )
     )
 
+    if status == "open":
+        corr = (bench or {}).get("correctness") if isinstance(bench, dict) else None
+        cal = corr.get("calibration") if isinstance(corr, dict) else None
+        if not isinstance(cal, dict) or cal.get("thresholds") is None:
+            raise ValueError(
+                "status=open requires campaigns.bench.correctness.calibration "
+                "with thresholds; seed draft first, run bench.calibrate apply, then open"
+            )
+
     fields_manifest = build_manifest(
         campaign_id=campaign_id,
         profile_id=profile_id,

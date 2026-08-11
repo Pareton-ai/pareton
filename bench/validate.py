@@ -191,6 +191,8 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         raise RequestValidationError("correctness.num_prompts must be >= 1")
     if int(corr["max_new_tokens"]) < 1:
         raise RequestValidationError("correctness.max_new_tokens must be >= 1")
+    if "min_positions_compared" in corr and int(corr["min_positions_compared"]) < 1:
+        raise RequestValidationError("correctness.min_positions_compared must be >= 1")
     thr = corr["thresholds"]
     if not isinstance(thr, dict):
         raise RequestValidationError("correctness.thresholds must be an object")

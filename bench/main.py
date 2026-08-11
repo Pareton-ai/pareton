@@ -47,6 +47,7 @@ from bench.schemas import (
     BenchReport,
     BenchRequest,
     CorrectnessReport,
+    EngineSpec,
     InputsFingerprint,
     PerfScreenReport,
     SlaBenchReport,
@@ -65,12 +66,28 @@ from bench.weights import stage_weights
 
 MOCK_WEIGHTS_SHA256 = "sha256:" + ("0" * 64)
 
+# Correctness-phase only. FlashInfer autotune flag is conditional on the pinned
+# vLLM accepting --no-enable-flashinfer-autotune (GPU smoke later may drop it).
+CORRECTNESS_EXTRA_SERVE_ARGS = [
+    "--no-enable-prefix-caching",
+    "--no-enable-flashinfer-autotune",
+]
+
 EXIT_OK = 0
 EXIT_BAD_REQUEST = 1
 EXIT_ENV = 2
 EXIT_ENGINE = 3
 
 logger = logging.getLogger("bench")
+
+
+def correctness_engine_spec(spec: EngineSpec) -> EngineSpec:
+    """Copy of ``spec`` with correctness-only serve args appended."""
+    return EngineSpec(
+        image=spec.image,
+        serve_args=list(spec.serve_args) + list(CORRECTNESS_EXTRA_SERVE_ARGS),
+        env=dict(spec.env),
+    )
 
 
 def _utc_now_iso() -> str:
@@ -241,12 +258,23 @@ class _EngineProvider:
             base.__exit__(None, None, None)
             self._mocks = None
 
-    def _docker_phase(self, net: BenchNetwork, role: str) -> EngineContainer:
+    def _docker_phase(
+        self,
+        net: BenchNetwork,
+        role: str,
+        extra_serve_args: tuple[str, ...] | list[str] = (),
+    ) -> EngineContainer:
         spec = (
             self._req.engines.baseline
             if role == "baseline"
             else self._req.engines.candidate
         )
+        if extra_serve_args:
+            spec = EngineSpec(
+                image=spec.image,
+                serve_args=list(spec.serve_args) + list(extra_serve_args),
+                env=dict(spec.env),
+            )
         return EngineContainer(
             spec=spec,
             network=net,
@@ -279,7 +307,9 @@ class _EngineProvider:
             )
         with BenchNetwork(run_id=new_run_id(), internal=True) as net:
             try:
-                with self._docker_phase(net, "baseline") as base:
+                with self._docker_phase(
+                    net, "baseline", extra_serve_args=CORRECTNESS_EXTRA_SERVE_ARGS
+                ) as base:
                     phase = collect_baseline_correctness(
                         base.base_url,
                         prompts=prompts,
@@ -291,7 +321,9 @@ class _EngineProvider:
             except EngineError as exc:
                 self._reraise_with_role("baseline", exc)
             try:
-                with self._docker_phase(net, "candidate") as cand:
+                with self._docker_phase(
+                    net, "candidate", extra_serve_args=CORRECTNESS_EXTRA_SERVE_ARGS
+                ) as cand:
                     report = finish_correctness_with_candidate(
                         cand.base_url, phase, cfg=cfg, evidence_dir=evidence_dir
                     )

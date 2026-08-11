@@ -176,6 +176,7 @@ class CorrectnessConfig:
     num_prompts: int
     max_new_tokens: int
     thresholds: CorrectnessThresholds
+    min_positions_compared: int = 1
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessConfig:
@@ -183,6 +184,7 @@ class CorrectnessConfig:
             num_prompts=int(d["num_prompts"]),
             max_new_tokens=int(d["max_new_tokens"]),
             thresholds=CorrectnessThresholds.from_dict(d["thresholds"]),
+            min_positions_compared=int(d.get("min_positions_compared", 1)),
         )
 
 
@@ -327,6 +329,7 @@ class CorrectnessReport:
     mean_abs_logprob_diff: float
     max_abs_logprob_diff: float
     argmax_mismatch_rate: float
+    argmax_mismatches: int
     evidence: str
 
     def to_dict(self) -> dict[str, Any]:

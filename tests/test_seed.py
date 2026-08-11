@@ -218,12 +218,21 @@ def test_seed_gpu_skus_and_status_override(monkeypatch: pytest.MonkeyPatch):
     seed_synthetic_campaign(
         allow_placeholders=True,
         gpu_skus=["H200-SXM-141GB", "B200"],
-        status="open",
+        status="draft",
     )
     m = captured["manifest"]
-    assert m.status == "open"
+    assert m.status == "draft"
     assert m.gpu_skus == ["H200-SXM-141GB", "B200"]
     assert captured["profile_data"]["hardware"] == ["H200-SXM-141GB", "B200"]
+
+
+def test_seed_open_requires_calibration(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(
+        ValueError, match="requires campaigns.bench.correctness.calibration"
+    ):
+        seed_synthetic_campaign(allow_placeholders=True, status="open")
+    assert captured["inserts"] == 0
 
 
 def test_seed_rejects_empty_gpu_skus(monkeypatch: pytest.MonkeyPatch):

@@ -33,11 +33,23 @@ def test_sample_request_round_trip():
     assert req.mode == "all"
     assert req.model.quantization is None
     assert "@sha256:" in req.engines.baseline.image
+    assert req.correctness.min_positions_compared == 1
     back = req.to_dict()
     # Round-trip through validator again
     again = validate_bench_request_dict(back)
     assert again.task_id == req.task_id
     assert again.correctness.thresholds.mean_abs_logprob_diff == 0.005
+    assert again.correctness.min_positions_compared == 1
+
+
+def test_min_positions_compared_optional_and_validated():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["min_positions_compared"] = 1024
+    req = validate_bench_request_dict(raw)
+    assert req.correctness.min_positions_compared == 1024
+    raw["correctness"]["min_positions_compared"] = 0
+    with pytest.raises(RequestValidationError, match="min_positions_compared"):
+        validate_bench_request_dict(raw)
 
 
 def test_load_bench_request_file():

@@ -349,6 +349,107 @@ def test_campaign_bench_overrides(tmp_path: Path):
     assert req["perf_screen"]["min_throughput_ratio"] == 1.2
 
 
+def test_argmax_mismatch_rate_floor_raises_for_small_plan(tmp_path: Path):
+    """256 planned positions → floor 1.5/256 ≈ 0.00586 > configured 0.001."""
+    row = _row(
+        bench=_bench_spec(
+            correctness={
+                "num_prompts": 16,
+                "max_new_tokens": 16,
+                "thresholds": {
+                    "mean_abs_logprob_diff": 0.01,
+                    "max_abs_logprob_diff": 0.1,
+                    "argmax_mismatch_rate": 0.001,
+                },
+            }
+        )
+    )
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path,
+    )
+    req = build_bench_request_dict(row, task_id=str(uuid4()), trace_path=str(trace))
+    assert req["correctness"]["thresholds"]["argmax_mismatch_rate"] == pytest.approx(
+        1.5 / 256
+    )
+
+
+def test_argmax_mismatch_rate_floor_keeps_high_configured(tmp_path: Path):
+    """Large plan leaves a high configured rate unchanged."""
+    row = _row(
+        bench=_bench_spec(
+            correctness={
+                "num_prompts": 64,
+                "max_new_tokens": 64,
+                "thresholds": {
+                    "mean_abs_logprob_diff": 0.01,
+                    "max_abs_logprob_diff": 0.1,
+                    "argmax_mismatch_rate": 0.05,
+                },
+            }
+        )
+    )
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path,
+    )
+    req = build_bench_request_dict(row, task_id=str(uuid4()), trace_path=str(trace))
+    assert req["correctness"]["thresholds"]["argmax_mismatch_rate"] == 0.05
+
+
+def test_require_calibration_missing_and_stale(tmp_path: Path):
+    trace = materialize_trace(
+        url=f"file://{SAMPLE_TRACE.resolve()}",
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path,
+    )
+    row = _row()
+    with pytest.raises(BenchInfraError) as ei:
+        build_bench_request_dict(
+            row,
+            task_id=str(uuid4()),
+            trace_path=str(trace),
+            require_calibration=True,
+        )
+    assert ei.value.code == "campaign_correctness_calibration_missing"
+
+    from worker.bench_job import campaign_calibration_fingerprint
+
+    bench2 = _bench_spec(
+        correctness={
+            "num_prompts": 2,
+            "max_new_tokens": 8,
+            "thresholds": {
+                "mean_abs_logprob_diff": 0.01,
+                "max_abs_logprob_diff": 0.1,
+                "argmax_mismatch_rate": 0.01,
+            },
+            "calibration": {
+                "thresholds": {
+                    "mean_abs_logprob_diff": 0.01,
+                    "max_abs_logprob_diff": 0.1,
+                    "argmax_mismatch_rate": 0.01,
+                },
+                "fingerprint": {},
+            },
+        }
+    )
+    row2 = _row(bench=bench2)
+    fp = campaign_calibration_fingerprint(bench2, row2)
+    fp["model_revision"] = "deadbeef"
+    bench2["correctness"]["calibration"]["fingerprint"] = fp
+    with pytest.raises(BenchInfraError) as ei2:
+        build_bench_request_dict(
+            row2,
+            task_id=str(uuid4()),
+            trace_path=str(trace),
+            require_calibration=True,
+        )
+    assert ei2.value.code == "campaign_correctness_calibration_stale"
+
+
 def test_non_digest_candidate_fails(tmp_path: Path):
     row = _row(engine_image_ref="ghcr.io/pareton-ai/pareton-engine:latest")
     trace = materialize_trace(

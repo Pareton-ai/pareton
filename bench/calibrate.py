@@ -1,10 +1,13 @@
-"""B7 calibration: prepare baseline-vs-baseline request + analyze reports.
+"""B7 + per-campaign correctness calibration.
 
 Usage:
   python -m bench.calibrate prepare --engine-digest sha256:... --gpu-sku SKU \\
       --output-dir out/b7/RUN
-  python -m bench.calibrate analyze --runs-dir out/b7/RUN/runs \\
-      --output out/b7/RUN/calibration_summary.json
+  python -m bench.calibrate prepare --campaign-id UUID --output-dir out/calib/RUN
+  python -m bench.calibrate analyze --runs-dir out/calib/RUN/runs \\
+      --output out/calib/RUN/calibration_summary.json
+  python -m bench.calibrate apply --campaign-id UUID \\
+      --summary out/calib/RUN/calibration_summary.json
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import json
 import math
 import statistics
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -25,8 +29,12 @@ from builder.registry import baseline_engine_image_ref, normalize_digest
 from worker.bench_job import (
     BenchInfraError,
     build_bench_request_dict,
+    campaign_calibration_fingerprint,
     materialize_trace,
 )
+
+# Default min positions written by apply (schema default stays 1 for old fixtures).
+APPLY_DEFAULT_MIN_POSITIONS = 1024
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHAPE_FIXTURE = REPO_ROOT / "fixtures" / "bench" / "vllm_completion_response_shape.json"
@@ -150,6 +158,7 @@ def prepare_calibration_request(
             row,
             task_id=task_id or str(uuid4()),
             trace_path=str(trace_path.resolve()),
+            require_calibration=False,
         )
     except BenchInfraError as exc:
         raise CalibrationError(str(exc)) from exc
@@ -161,6 +170,165 @@ def prepare_calibration_request(
     out_req = output_dir / "bench_request.json"
     out_req.write_text(json.dumps(req, indent=2) + "\n", encoding="utf-8")
     return req
+
+
+def prepare_campaign_calibration_request(
+    *,
+    campaign_id: str,
+    output_dir: Path,
+    fetcher: Callable[[str], bytes] | None = None,
+    task_id: str | None = None,
+    get_campaign_fn: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Build mode=correctness baseline==candidate request from a campaign row."""
+    if get_campaign_fn is None:
+        from campaign.store import get_campaign as get_campaign_fn  # type: ignore[no-redef]
+
+    manifest = get_campaign_fn(campaign_id)
+    if manifest is None:
+        raise CalibrationError(f"campaign not found: {campaign_id}")
+    bench = manifest.bench
+    if not isinstance(bench, dict):
+        raise CalibrationError("campaign.bench missing")
+    model = bench.get("model")
+    if not isinstance(model, dict):
+        raise CalibrationError("campaign.bench.model missing")
+    baseline_digest = bench.get("baseline_engine_image_digest")
+    if not baseline_digest:
+        raise CalibrationError("campaign.bench.baseline_engine_image_digest missing")
+    digest = normalize_digest(str(baseline_digest))
+    engine_ref = baseline_engine_image_ref(digest)
+
+    gpu_skus = list(manifest.gpu_skus or [])
+    if not gpu_skus:
+        raise CalibrationError("campaign.gpu_skus empty")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        trace_path = materialize_trace(
+            url=manifest.workload_trace_url,
+            expected_sha256=manifest.workload_trace_sha256,
+            dest_dir=output_dir,
+            fetcher=fetcher,
+        )
+    except BenchInfraError as exc:
+        raise CalibrationError(str(exc)) from exc
+
+    try:
+        trace_doc = json.loads(trace_path.read_text(encoding="utf-8"))
+        trace_n = len(trace_doc.get("requests") or [])
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        raise CalibrationError(f"unreadable workload trace: {exc}") from exc
+    if trace_n < 1:
+        raise CalibrationError("workload trace has no requests")
+
+    corr_cfg = dict(bench.get("correctness") or {})
+    num_prompts = min(
+        int(corr_cfg.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS)),
+        trace_n,
+    )
+    max_new = int(
+        corr_cfg.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
+    )
+    calib_bench = {
+        "model": dict(model),
+        "baseline_engine_image_digest": digest,
+        "gpu_count": int(bench.get("gpu_count") or 1),
+        "serve_args": list(bench.get("serve_args") or []) or None,
+        "correctness": {
+            "num_prompts": num_prompts,
+            "max_new_tokens": max_new,
+            "min_positions_compared": int(corr_cfg.get("min_positions_compared", 1)),
+            "thresholds": {
+                "mean_abs_logprob_diff": _CALIB_CORR_MEAN,
+                "max_abs_logprob_diff": _CALIB_CORR_MAX,
+                "argmax_mismatch_rate": _CALIB_CORR_ARGMAX,
+            },
+        },
+        "perf_screen": {
+            "num_requests": min(
+                int(config.BENCH_PERF_NUM_REQUESTS),
+                trace_n,
+            ),
+            "concurrency": 1,
+            "min_throughput_ratio": _CALIB_PERF_RATIO,
+        },
+    }
+    sla = manifest.sla.to_dict() if manifest.sla is not None else {}
+    row: dict[str, Any] = {
+        "engine_image_ref": engine_ref,
+        "workload_trace_sha256": manifest.workload_trace_sha256,
+        "gpu_skus": gpu_skus,
+        "bench": calib_bench,
+        "sla": {
+            "p99_ttft_ms": sla.get("p99_ttft_ms") or _CALIB_SLA_P99,
+            "p99_itl_ms": sla.get("p99_itl_ms") or _CALIB_SLA_P99,
+        },
+    }
+    try:
+        req = build_bench_request_dict(
+            row,
+            task_id=task_id or str(uuid4()),
+            trace_path=str(trace_path.resolve()),
+            require_calibration=False,
+        )
+    except BenchInfraError as exc:
+        raise CalibrationError(str(exc)) from exc
+
+    req["mode"] = "correctness"
+    req["engines"]["candidate"]["image"] = engine_ref
+    req["engines"]["baseline"]["image"] = engine_ref
+
+    out_req = output_dir / "bench_request.json"
+    out_req.write_text(json.dumps(req, indent=2) + "\n", encoding="utf-8")
+    return req
+
+
+def correctness_dict_from_summary(
+    summary: dict[str, Any],
+    *,
+    existing_correctness: dict[str, Any] | None = None,
+    campaign_fingerprint: dict[str, Any],
+    safety_factor: float = DEFAULT_SAFETY_FACTOR,
+) -> dict[str, Any]:
+    """Build campaigns.bench.correctness from an analyze summary."""
+    corr = summary.get("correctness")
+    if not isinstance(corr, dict):
+        raise CalibrationError("summary missing correctness section")
+    thresholds: dict[str, float] = {}
+    for key in (
+        "mean_abs_logprob_diff",
+        "max_abs_logprob_diff",
+        "argmax_mismatch_rate",
+    ):
+        block = corr.get(key)
+        if not isinstance(block, dict) or block.get("suggested") is None:
+            raise CalibrationError(f"summary correctness.{key}.suggested missing")
+        thresholds[key] = float(block["suggested"])
+
+    existing = dict(existing_correctness or {})
+    out: dict[str, Any] = {
+        "num_prompts": int(
+            existing.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS)
+        ),
+        "max_new_tokens": int(
+            existing.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
+        ),
+        "min_positions_compared": int(
+            existing.get("min_positions_compared", APPLY_DEFAULT_MIN_POSITIONS)
+        ),
+        "thresholds": thresholds,
+        "calibration": {
+            "thresholds": dict(thresholds),
+            "fingerprint": dict(campaign_fingerprint),
+            "safety_factor": float(safety_factor),
+            "calibrated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "observed": corr.get("observed") or {},
+            "summary_fingerprint": summary.get("fingerprint") or {},
+        },
+    }
+    return out
 
 
 def discover_run_dirs(runs_dir: Path) -> list[Path]:
@@ -343,6 +511,8 @@ def analyze_reports(
     argmaxes: list[float] = []
     inner_rel: list[float] = []
     cand_p99_ttft: list[float] = []
+    has_sla = False
+    warnings: list[str] = []
 
     for r in reports:
         corr = r.get("correctness")
@@ -359,7 +529,8 @@ def analyze_reports(
         )
         sla = r.get("sla_bench")
         if not isinstance(sla, dict):
-            raise CalibrationError("report missing sla_bench section")
+            continue
+        has_sla = True
         var = sla.get("cross_rep_variance") or {}
         if "p99_ttft_ms_rel_range" not in var:
             raise CalibrationError(
@@ -389,20 +560,27 @@ def analyze_reports(
         safety_factor=safety_factor,
         floor=float(config.BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE),
     )
-    warnings: list[str] = []
     if arg_s["suggested"] > 1.0:
         warnings.append(
             f"suggested argmax_mismatch_rate {arg_s['suggested']} > 1.0; unusable"
         )
         arg_s["suggested"] = None
 
-    outer_rel = _relative_range(cand_p99_ttft)
-    repro_obs = max(max(inner_rel), outer_rel)
-    repro_s = suggest_threshold(
-        repro_obs,
-        safety_factor=safety_factor,
-        floor=0.335,  # current REPRO_BAR_MAX_REL_RANGE (B7 2026-08-03)
-    )
+    sla_repro: dict[str, Any] | None = None
+    if has_sla:
+        outer_rel = _relative_range(cand_p99_ttft)
+        repro_obs = max(max(inner_rel), outer_rel)
+        repro_s = suggest_threshold(
+            repro_obs,
+            safety_factor=safety_factor,
+            floor=0.335,  # current REPRO_BAR_MAX_REL_RANGE (B7 2026-08-03)
+        )
+        sla_repro = {
+            "inner_p99_ttft_ms_rel_range_max": max(inner_rel),
+            "outer_p99_ttft_ms_rel_range": outer_rel,
+            "suggested_rel_range": repro_s,
+            "note": "suggestion only; do not auto-edit REPRO_BAR_MAX_REL_RANGE",
+        }
 
     shape_status: dict[str, Any] = {"checked": False, "match": None, "diffs": []}
     if shape_paths:
@@ -448,12 +626,7 @@ def analyze_reports(
                 "argmax_mismatch_rate": argmaxes,
             },
         },
-        "sla_repro": {
-            "inner_p99_ttft_ms_rel_range_max": max(inner_rel),
-            "outer_p99_ttft_ms_rel_range": outer_rel,
-            "suggested_rel_range": repro_s,
-            "note": "suggestion only; do not auto-edit REPRO_BAR_MAX_REL_RANGE",
-        },
+        "sla_repro": sla_repro,
         "shape": shape_status,
         "warnings": warnings,
         "report_paths": [str(p) for p in report_paths],
@@ -476,13 +649,23 @@ def analyze_runs_dir(
 
 def cmd_prepare(args: argparse.Namespace) -> int:
     try:
-        req = prepare_calibration_request(
-            engine_digest=args.engine_digest,
-            gpu_sku=args.gpu_sku,
-            output_dir=Path(args.output_dir),
-            trace_url=args.trace_url,
-            trace_sha256=args.trace_sha256,
-        )
+        if args.campaign_id:
+            req = prepare_campaign_calibration_request(
+                campaign_id=str(args.campaign_id),
+                output_dir=Path(args.output_dir),
+            )
+        else:
+            if not args.engine_digest or not args.gpu_sku:
+                raise CalibrationError(
+                    "prepare requires --campaign-id, or both --engine-digest and --gpu-sku"
+                )
+            req = prepare_calibration_request(
+                engine_digest=args.engine_digest,
+                gpu_sku=args.gpu_sku,
+                output_dir=Path(args.output_dir),
+                trace_url=args.trace_url,
+                trace_sha256=args.trace_sha256,
+            )
     except (CalibrationError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -490,6 +673,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     print(f"baseline=candidate={req['engines']['baseline']['image']}")
     print(f"model={req['model']['hf_repo']}@{req['model']['hf_revision']}")
     print(f"gpu_sku={req['hardware']['gpu_sku_expected']}")
+    print(f"mode={req['mode']}")
     return 0
 
 
@@ -510,18 +694,64 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_apply(args: argparse.Namespace) -> int:
+    try:
+        summary_path = Path(args.summary)
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CalibrationError(f"cannot load summary: {exc}") from exc
+        if not isinstance(summary, dict):
+            raise CalibrationError("summary must be a JSON object")
+
+        from campaign.store import (
+            apply_campaign_correctness_calibration,
+            get_campaign,
+        )
+
+        manifest = get_campaign(str(args.campaign_id))
+        if manifest is None:
+            raise CalibrationError(f"campaign not found: {args.campaign_id}")
+        if not isinstance(manifest.bench, dict):
+            raise CalibrationError("campaign.bench missing")
+        row = {
+            "workload_trace_sha256": manifest.workload_trace_sha256,
+        }
+        fp = campaign_calibration_fingerprint(manifest.bench, row)
+        correctness = correctness_dict_from_summary(
+            summary,
+            existing_correctness=manifest.bench.get("correctness")
+            if isinstance(manifest.bench.get("correctness"), dict)
+            else None,
+            campaign_fingerprint=fp,
+            safety_factor=float(args.safety_factor),
+        )
+        new_hash = apply_campaign_correctness_calibration(
+            str(args.campaign_id),
+            correctness,
+            approver=str(args.approver),
+        )
+    except (CalibrationError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"applied calibration to campaign {args.campaign_id}")
+    print(f"manifest_hash={new_hash}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m bench.calibrate",
-        description="B7 calibration request builder + offline threshold analysis",
+        description="Correctness calibration: prepare, analyze, apply",
     )
     sub = p.add_subparsers(dest="command", required=True)
 
     prep = sub.add_parser(
         "prepare", help="Write baseline-vs-baseline bench_request.json"
     )
-    prep.add_argument("--engine-digest", required=True)
-    prep.add_argument("--gpu-sku", required=True)
+    prep.add_argument("--campaign-id", default=None)
+    prep.add_argument("--engine-digest", default=None)
+    prep.add_argument("--gpu-sku", default=None)
     prep.add_argument("--output-dir", required=True, type=Path)
     prep.add_argument("--trace-url", default=A3A_TRACE_URL)
     prep.add_argument("--trace-sha256", default=A3A_TRACE_SHA256)
@@ -532,6 +762,15 @@ def build_parser() -> argparse.ArgumentParser:
     ana.add_argument("--safety-factor", type=float, default=DEFAULT_SAFETY_FACTOR)
     ana.add_argument("--output", required=True, type=Path)
     ana.set_defaults(func=cmd_analyze)
+
+    apply_p = sub.add_parser(
+        "apply", help="Write calibrated correctness into a draft campaign"
+    )
+    apply_p.add_argument("--campaign-id", required=True)
+    apply_p.add_argument("--summary", required=True, type=Path)
+    apply_p.add_argument("--safety-factor", type=float, default=DEFAULT_SAFETY_FACTOR)
+    apply_p.add_argument("--approver", default="pareton-admin")
+    apply_p.set_defaults(func=cmd_apply)
 
     return p
 

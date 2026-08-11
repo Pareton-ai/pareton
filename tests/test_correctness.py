@@ -255,6 +255,7 @@ def test_baseline_vs_baseline_passes(tmp_path: Path):
     assert report.mean_abs_logprob_diff == 0.0
     assert report.max_abs_logprob_diff == 0.0
     assert report.argmax_mismatch_rate == 0.0
+    assert report.argmax_mismatches == 0
     evidence = tmp_path / "correctness" / "logprob_diffs.jsonl"
     assert evidence.is_file()
     assert not (tmp_path / "correctness" / "logprob_diffs.jsonl.partial").exists()
@@ -279,6 +280,33 @@ def test_threshold_equality_is_fail(tmp_path: Path):
         )
     assert report.mean_abs_logprob_diff == 0.0
     assert report.verdict == "fail_correctness"
+
+
+def test_min_positions_compared_raises_engine_error(tmp_path: Path):
+    prompts = [PromptCase(id="p1", prompt="Hello world")]
+    cfg = CorrectnessConfig(
+        num_prompts=1,
+        max_new_tokens=2,
+        thresholds=CorrectnessThresholds(
+            mean_abs_logprob_diff=1.0,
+            max_abs_logprob_diff=1.0,
+            argmax_mismatch_rate=1.0,
+        ),
+        min_positions_compared=10_000,
+    )
+    with (
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
+        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
+    ):
+        with pytest.raises(EngineError, match="min_positions_compared"):
+            run_correctness(
+                base.base_url,
+                cand.base_url,
+                prompts=prompts,
+                cfg=cfg,
+                task_id="550e8400-e29b-41d4-a716-446655440000",
+                evidence_dir=tmp_path / "correctness",
+            )
 
 
 def test_partial_evidence_left_on_engine_error(
