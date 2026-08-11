@@ -914,3 +914,193 @@ def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
 
     assert client.get(f"/v1/submissions/{patch_hash}").status_code == 409
     assert client.get(f"/v1/submissions/{patch_hash}/build-log").status_code == 409
+
+
+def _insert_draft_calibration_campaign(*, repo, commit, campaign_id, now, bench):
+    """Draft campaign with zero submissions: the only state `apply` accepts."""
+    profile_id = insert_profile("e2e-calib", {"fixture": True})
+    sample_trace = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
+    )
+    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
+    kwargs = dict(
+        campaign_id=campaign_id,
+        profile_id=profile_id,
+        baseline_repo=str(repo),
+        baseline_commit=commit,
+        base_image_digest="sha256:" + ("d" * 64),
+        gpu_skus=["H200"],
+        workload_trace_sha256=trace_sha,
+        workload_trace_url=f"file://{sample_trace.resolve()}",
+        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
+        scoring_config_sha256=None,
+        scoring_config_url=None,
+        allowed_paths=["vllm/**"],
+        denied_paths=["tests/**"],
+        window_opens_at=now - timedelta(hours=1),
+        window_closes_at=now + timedelta(days=1),
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
+        status="draft",
+        bench=bench,
+    )
+    manifest = build_manifest(
+        customer_signoff=CustomerSignoff(
+            approved_manifest_hash="pending", approver="test", timestamp=now
+        ),
+        **kwargs,
+    )
+    manifest = build_manifest(
+        customer_signoff=CustomerSignoff(
+            approved_manifest_hash=manifest.manifest_hash,
+            approver="test",
+            timestamp=now,
+        ),
+        manifest_hash=manifest.manifest_hash,
+        **kwargs,
+    )
+    insert_campaign(manifest)
+    return manifest, sample_trace, trace_sha
+
+
+def _campaign_row(campaign_id):
+    from psycopg2.extras import RealDictCursor
+
+    from db.connection import db_connection
+
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM campaigns WHERE id = %s", (str(campaign_id),))
+            row = dict(cur.fetchone())
+    row["engine_image_ref"] = "ghcr.io/pareton/e2e@sha256:" + ("c" * 64)
+    return row
+
+
+def test_e2e_calibration_missing_then_applied_unblocks_bench(tmp_path, monkeypatch):
+    """Full calibration path against the real DB: gate -> prepare -> analyze -> apply.
+
+    The mock bench tests all run with ``require_calibration=False``, so this is
+    the only e2e coverage of the enforcement and apply code paths.
+    """
+    import json
+
+    import config
+    from bench.calibrate import (
+        analyze_reports,
+        correctness_dict_from_summary,
+        prepare_campaign_calibration_request,
+    )
+    from campaign.store import apply_campaign_correctness_calibration
+    from test_calibrate import _report
+    from worker.bench_job import (
+        build_bench_request_dict,
+        campaign_calibration_fingerprint,
+    )
+
+    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
+
+    repo, _patch, _patch_hash, commit = _make_repo_and_patch(tmp_path)
+    now = datetime.now(timezone.utc)
+    campaign_id = uuid4()
+    sample_trace = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
+    )
+    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
+    bench = _bench_campaign_spec(sample_trace, trace_sha)
+    assert "calibration" not in bench["correctness"]
+    manifest, sample_trace, trace_sha = _insert_draft_calibration_campaign(
+        repo=repo, commit=commit, campaign_id=campaign_id, now=now, bench=bench
+    )
+    old_hash = manifest.manifest_hash
+
+    # 1. An uncalibrated campaign must refuse a real (non-mock) bench.
+    row = _campaign_row(campaign_id)
+    with pytest.raises(Exception) as excinfo:
+        build_bench_request_dict(
+            row,
+            trace_path=str(sample_trace),
+            gpu_sku="H200",
+            require_calibration=True,
+        )
+    assert "calibration_missing" in str(excinfo.value)
+
+    # ...while the mock path still builds, which is why the mock e2e tests
+    # cannot catch a regression in the block above.
+    assert build_bench_request_dict(row, trace_path=str(sample_trace), gpu_sku="H200")[
+        "mode"
+    ] in ("full", "correctness", "all")
+
+    # 2. prepare reads the campaign from the DB and pins baseline == candidate.
+    prep_dir = tmp_path / "calib-prep"
+    req = prepare_campaign_calibration_request(
+        campaign_id=str(campaign_id),
+        output_dir=prep_dir,
+        fetcher=lambda _u: sample_trace.read_bytes(),
+    )
+    assert req["mode"] == "correctness"
+    assert req["engines"]["baseline"]["image"] == req["engines"]["candidate"]["image"]
+    assert (prep_dir / "bench_request.json").is_file()
+
+    # 3. analyze three agreeing self-check reports into suggested thresholds.
+    report_paths = []
+    for i, (mean, max_d, argmax) in enumerate(
+        [(0.002, 0.02, 0.0), (0.0025, 0.03, 0.0004), (0.0018, 0.025, 0.0002)]
+    ):
+        rep = _report(mean=mean, max_d=max_d, argmax=argmax)
+        rep["inputs_fingerprint"]["trace_sha256"] = trace_sha
+        p = tmp_path / f"report-{i}.json"
+        p.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
+        report_paths.append(p)
+    summary = analyze_reports(report_paths)
+
+    # 4. apply writes thresholds, recomputes manifest_hash, refreshes signoff.
+    fingerprint = campaign_calibration_fingerprint(bench, row)
+    correctness = correctness_dict_from_summary(
+        summary,
+        existing_correctness=bench["correctness"],
+        campaign_fingerprint=fingerprint,
+    )
+    new_hash = apply_campaign_correctness_calibration(campaign_id, correctness)
+    assert new_hash != old_hash
+
+    applied = _campaign_row(campaign_id)
+    stored = applied["bench"]
+    if isinstance(stored, str):
+        stored = json.loads(stored)
+    assert stored["correctness"]["calibration"]["fingerprint"] == fingerprint
+    assert applied["manifest_hash"] == new_hash
+    signoff = applied["customer_signoff"]
+    if isinstance(signoff, str):
+        signoff = json.loads(signoff)
+    assert signoff["approved_manifest_hash"] == new_hash
+
+    # 5. the same bench request now builds, with the calibrated thresholds.
+    request = build_bench_request_dict(
+        applied,
+        trace_path=str(sample_trace),
+        gpu_sku="H200",
+        require_calibration=True,
+    )
+    applied_thresholds = request["correctness"]["thresholds"]
+    suggested = stored["correctness"]["thresholds"]
+    assert applied_thresholds["mean_abs_logprob_diff"] == pytest.approx(
+        suggested["mean_abs_logprob_diff"]
+    )
+    assert applied_thresholds["max_abs_logprob_diff"] == pytest.approx(
+        suggested["max_abs_logprob_diff"]
+    )
+
+    # 6. a serve_args change invalidates the calibration instead of silently
+    #    scoring against thresholds measured on a different engine config.
+    stale = dict(applied)
+    stale_bench = json.loads(json.dumps(stored))
+    stale_bench["serve_args"] = ["--no-enable-prefix-caching"]
+    stale["bench"] = stale_bench
+    with pytest.raises(Exception) as excinfo:
+        build_bench_request_dict(
+            stale,
+            trace_path=str(sample_trace),
+            gpu_sku="H200",
+            require_calibration=True,
+        )
+    assert "calibration_stale" in str(excinfo.value)
