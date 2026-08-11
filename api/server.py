@@ -31,7 +31,9 @@ from storage.s3 import create_presigned_patch_upload
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # Live pipeline endpoints use no-store until the submission reaches a terminal
 # state (PAR-44). Lists / campaigns keep the shared short TTL above.
-_TERMINAL_SUBMISSION_STATES = frozenset({"benched", "rejected"})
+# ``built`` is terminal for no-bench campaigns; bench campaigns continue via
+# ``bench_queued`` (and later) in the same worker turn after enqueue.
+_TERMINAL_SUBMISSION_STATES = frozenset({"built", "benched", "rejected"})
 _NO_STORE = "no-store"
 
 

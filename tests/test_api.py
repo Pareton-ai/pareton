@@ -331,6 +331,7 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     [
         ("building", "no-store"),
         ("bench_queued", "no-store"),
+        ("built", V1_CACHE_CONTROL_EXPECTED),
         ("benched", V1_CACHE_CONTROL_EXPECTED),
         ("rejected", V1_CACHE_CONTROL_EXPECTED),
     ],
@@ -357,6 +358,7 @@ def test_submission_detail_cache_control_by_state(
     ("latest_state", "expected_cache"),
     [
         ("building", "no-store"),
+        ("built", V1_CACHE_CONTROL_EXPECTED),
         ("benched", V1_CACHE_CONTROL_EXPECTED),
         ("rejected", V1_CACHE_CONTROL_EXPECTED),
     ],
