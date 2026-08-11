@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import config
 from campaign.cross_env import DEFAULT_CROSS_ENV, validate_cross_env
+from campaign.engine import ENGINE_PRESETS, preset as engine_preset
 from campaign.manifest import build_manifest
 from campaign.models import CustomerSignoff, SLA, validate_priority_metric
 from campaign.store import insert_campaign, insert_profile, list_campaigns
@@ -167,10 +168,14 @@ def seed_synthetic_campaign(
     gpu_skus: list[str] | None = None,
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
+    engine: str | None = None,
 ) -> str:
     # Normalize before floor lookup / profile insert (build_manifest also validates).
     priority_metric = validate_priority_metric(priority_metric)
     status = _normalize_status(status)
+    # None (not "vllm") is the default: it keeps engine out of the manifest pin
+    # set, so re-seeding an existing campaign reproduces its original hash.
+    engine_profile = None if engine is None else engine_preset(engine)
     skus = _normalize_gpu_skus(
         list(DEFAULT_GPU_SKUS) if gpu_skus is None else list(gpu_skus)
     )
@@ -275,6 +280,7 @@ def seed_synthetic_campaign(
         status=status,
         customer_signoff=None,
         bench=bench,
+        engine=engine_profile,
     )
 
     signoff = CustomerSignoff(
@@ -308,6 +314,7 @@ def seed_synthetic_campaign(
         customer_signoff=signoff,
         manifest_hash=fields_manifest.manifest_hash,
         bench=bench,
+        engine=engine_profile,
     )
 
     inserted = insert_campaign(manifest)
@@ -364,6 +371,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Omit the bench spec so built submissions do not enqueue GPU bench jobs",
     )
     p.add_argument(
+        "--engine",
+        default=None,
+        choices=sorted(ENGINE_PRESETS),
+        help=(
+            "Engine build/launch profile. Omit for the implied vLLM default "
+            "(keeps engine out of manifest_hash); pass sglang for SGLang campaigns"
+        ),
+    )
+    p.add_argument(
         "--workload-trace-url",
         default=None,
         help="file:// or https:// URL stored in the campaign (default: local fixture)",
@@ -411,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
             gpu_skus=args.gpu_skus,
             status=args.status,
             no_bench=args.no_bench,
+            engine=args.engine,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

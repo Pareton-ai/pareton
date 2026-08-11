@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-_E2E_PROFILE_NAMES = ("e2e", "e2e-bench", "e2e-xenv")
+_E2E_PROFILE_NAMES = ("e2e", "e2e-bench", "e2e-xenv", "e2e-engine")
 
 
 def _hostname(url: str) -> str | None:
