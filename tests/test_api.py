@@ -173,9 +173,7 @@ def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
     row = {"id": sid, "patch_hash": "sha256:abc"}
     monkeypatch.setattr(server, "get_submission", lambda _h: row)
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: "building"}
-    )
+    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: "building"})
     log_dir = tmp_path / sid
     log_dir.mkdir(parents=True)
     (log_dir / "build.log").write_bytes(b"step1\n\x1b[31mcolored\x1b[0m\nstep3\n")
@@ -274,9 +272,7 @@ def test_campaign_scoped_build_log(monkeypatch, client: TestClient, tmp_path):
     sid = "55555555-5555-5555-5555-555555555555"
     row = {"id": sid, "patch_hash": "sha256:dup"}
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: "building"}
-    )
+    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: "building"})
     log_dir = tmp_path / sid
     log_dir.mkdir(parents=True)
     (log_dir / "build.log").write_bytes(b"line1\n\x1b[32mline2\x1b[0m\n")
@@ -349,9 +345,7 @@ def test_submission_detail_cache_control_by_state(
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
     monkeypatch.setattr(server, "list_events", lambda _id: [])
     monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: latest_state}
-    )
+    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: latest_state})
     monkeypatch.setattr(server, "list_submission_jobs", lambda _id: [])
 
     resp = client.get("/v1/campaigns/c1/submissions/sha256:live")
@@ -375,9 +369,7 @@ def test_build_log_cache_control_by_state(
     sid = "99999999-9999-9999-9999-999999999999"
     row = {"id": sid, "patch_hash": "sha256:log"}
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: latest_state}
-    )
+    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: latest_state})
     log_dir = tmp_path / sid
     log_dir.mkdir(parents=True)
     (log_dir / "build.log").write_bytes(b"ok\n")

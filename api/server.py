@@ -222,9 +222,7 @@ def _resolve_unambiguous_submission(patch_hash: str) -> dict:
 
 
 @app.get("/v1/campaigns/{campaign_id}/submissions/{patch_hash}")
-def campaign_submission_detail(
-    campaign_id: str, patch_hash: str, response: Response
-):
+def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Response):
     row = get_submission_for_campaign(campaign_id, patch_hash)
     if row is None:
         raise HTTPException(status_code=404, detail="submission not found")
