@@ -124,25 +124,41 @@ def build_seed_bench_spec(
     model_revision: str = DEFAULT_BENCH_MODEL_REVISION,
     dtype: str = DEFAULT_BENCH_DTYPE,
     max_model_len: int = DEFAULT_BENCH_MAX_MODEL_LEN,
+    quantization: str | None = None,
     baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
     gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     serve_args: list[str] | None = None,
     cross_env: dict | None = None,
+    correctness_num_prompts: int | None = None,
+    correctness_max_new_tokens: int | None = None,
+    perf_concurrency: int | None = None,
 ) -> dict:
     ce = DEFAULT_CROSS_ENV if cross_env is None else cross_env
+    # Sample-size fields only; thresholds and calibration come from
+    # bench.calibrate apply, never from seed.
+    correctness: dict | None = None
+    if correctness_num_prompts is not None or correctness_max_new_tokens is not None:
+        correctness = {}
+        if correctness_num_prompts is not None:
+            correctness["num_prompts"] = int(correctness_num_prompts)
+        if correctness_max_new_tokens is not None:
+            correctness["max_new_tokens"] = int(correctness_max_new_tokens)
+    perf_screen: dict | None = None
+    if perf_concurrency is not None:
+        perf_screen = {"concurrency": int(perf_concurrency)}
     return {
         "model": {
             "hf_repo": model_repo,
             "hf_revision": model_revision,
             "dtype": dtype,
-            "quantization": None,
+            "quantization": quantization,
             "max_model_len": max_model_len,
         },
         "baseline_engine_image_digest": baseline_engine_image_digest,
         "gpu_count": gpu_count,
         "serve_args": list(serve_args) if serve_args else None,
-        "correctness": None,
-        "perf_screen": None,
+        "correctness": correctness,
+        "perf_screen": perf_screen,
         "cross_env": validate_cross_env(ce),
     }
 
@@ -157,9 +173,13 @@ def seed_synthetic_campaign(
     bench_model_revision: str = DEFAULT_BENCH_MODEL_REVISION,
     bench_dtype: str = DEFAULT_BENCH_DTYPE,
     bench_max_model_len: int = DEFAULT_BENCH_MAX_MODEL_LEN,
+    bench_quantization: str | None = None,
     baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
     bench_gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     bench_serve_args: list[str] | None = None,
+    bench_correctness_num_prompts: int | None = None,
+    bench_correctness_max_new_tokens: int | None = None,
+    bench_perf_concurrency: int | None = None,
     workload_trace_url: str | None = None,
     workload_trace_sha256: str | None = None,
     allow_placeholders: bool = False,
@@ -245,9 +265,13 @@ def seed_synthetic_campaign(
             model_revision=bench_model_revision,
             dtype=bench_dtype,
             max_model_len=bench_max_model_len,
+            quantization=bench_quantization,
             baseline_engine_image_digest=baseline_engine_image_digest,
             gpu_count=bench_gpu_count,
             serve_args=bench_serve_args,
+            correctness_num_prompts=bench_correctness_num_prompts,
+            correctness_max_new_tokens=bench_correctness_max_new_tokens,
+            perf_concurrency=bench_perf_concurrency,
             cross_env={
                 **DEFAULT_CROSS_ENV,
                 "min_speedup_each": _seed_min_speedup_each(priority_metric),
@@ -344,6 +368,29 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-max-model-len", type=int, default=DEFAULT_BENCH_MAX_MODEL_LEN
     )
     p.add_argument(
+        "--bench-quantization",
+        default=None,
+        help="Model quantization passed to the engine (example: fp8)",
+    )
+    p.add_argument(
+        "--bench-correctness-num-prompts",
+        type=int,
+        default=None,
+        help="Correctness prompts (default: PARETON_BENCH_CORRECTNESS_NUM_PROMPTS)",
+    )
+    p.add_argument(
+        "--bench-correctness-max-new-tokens",
+        type=int,
+        default=None,
+        help="Forced continuation length per correctness prompt",
+    )
+    p.add_argument(
+        "--bench-perf-concurrency",
+        type=int,
+        default=None,
+        help="Perf screen concurrency (default: PARETON_BENCH_PERF_CONCURRENCY)",
+    )
+    p.add_argument(
         "--baseline-engine-image-digest",
         default=DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
     )
@@ -425,9 +472,13 @@ def main(argv: list[str] | None = None) -> int:
             bench_model_revision=args.bench_model_revision,
             bench_dtype=args.bench_dtype,
             bench_max_model_len=args.bench_max_model_len,
+            bench_quantization=args.bench_quantization,
             baseline_engine_image_digest=args.baseline_engine_image_digest,
             bench_gpu_count=args.bench_gpu_count,
             bench_serve_args=args.bench_serve_args,
+            bench_correctness_num_prompts=args.bench_correctness_num_prompts,
+            bench_correctness_max_new_tokens=args.bench_correctness_max_new_tokens,
+            bench_perf_concurrency=args.bench_perf_concurrency,
             workload_trace_url=args.workload_trace_url,
             workload_trace_sha256=args.workload_trace_sha256,
             allow_placeholders=args.allow_placeholders,
