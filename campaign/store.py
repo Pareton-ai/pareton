@@ -70,6 +70,103 @@ def insert_profile(name: str, data: dict[str, Any]) -> UUID:
             return cur.fetchone()[0]
 
 
+def apply_campaign_correctness_calibration(
+    campaign_id: UUID | str,
+    correctness_dict: dict[str, Any],
+    *,
+    approver: str = "pareton-admin",
+) -> str:
+    """Write calibrated correctness into a draft campaign with zero submissions.
+
+    Updates ``bench.correctness``, recomputes ``manifest_hash``, and refreshes
+    ``customer_signoff`` in one transaction. Returns the new manifest_hash.
+    """
+    from .manifest import compute_manifest_hash, freeze_manifest_fields
+
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM campaigns WHERE id = %s FOR UPDATE",
+                (str(campaign_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"campaign not found: {campaign_id}")
+            if str(row["status"]) != "draft":
+                raise ValueError(
+                    f"campaign status must be draft, got {row['status']!r}"
+                )
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM submissions WHERE campaign_id = %s",
+                (str(campaign_id),),
+            )
+            n_subs = int(cur.fetchone()["n"])
+            if n_subs != 0:
+                raise ValueError(
+                    f"campaign has {n_subs} submissions; calibration apply requires zero"
+                )
+
+            bench = row.get("bench")
+            if isinstance(bench, str):
+                bench = json.loads(bench)
+            if not isinstance(bench, dict):
+                raise ValueError("campaign.bench missing")
+            bench = dict(bench)
+            bench["correctness"] = correctness_dict
+
+            engine = row.get("engine")
+            if isinstance(engine, str):
+                engine = json.loads(engine)
+            if engine is not None and not isinstance(engine, dict):
+                engine = None
+
+            fields = freeze_manifest_fields(
+                campaign_id=row["id"],
+                profile_id=row.get("profile_id"),
+                baseline_repo=row["baseline_repo"],
+                baseline_commit=row["baseline_commit"],
+                base_image_digest=row["base_image_digest"],
+                gpu_skus=list(row.get("gpu_skus") or []),
+                workload_trace_sha256=row["workload_trace_sha256"],
+                workload_trace_url=row["workload_trace_url"],
+                sla=SLA.from_dict(row.get("sla") or {}),
+                scoring_config_sha256=row.get("scoring_config_sha256"),
+                scoring_config_url=row.get("scoring_config_url"),
+                allowed_paths=list(row.get("allowed_paths") or []),
+                denied_paths=list(row.get("denied_paths") or []),
+                window_opens_at=_parse_ts(row["window_opens_at"]),
+                window_closes_at=_parse_ts(row["window_closes_at"]),
+                priority_metric=row["priority_metric"],
+                success_threshold=row["success_threshold"],
+                bench=bench,
+                engine=engine if isinstance(engine, dict) else None,
+            )
+            new_hash = compute_manifest_hash(fields)
+            now = datetime.now(timezone.utc)
+            signoff = CustomerSignoff(
+                approved_manifest_hash=new_hash,
+                approver=approver,
+                timestamp=now,
+            )
+            cur.execute(
+                """
+                UPDATE campaigns
+                SET bench = %s,
+                    manifest_hash = %s,
+                    customer_signoff = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    Json(bench),
+                    new_hash,
+                    Json(signoff.to_dict()),
+                    str(campaign_id),
+                ),
+            )
+            return new_hash
+
+
 def insert_campaign(manifest: CampaignManifest) -> UUID:
     signoff = (
         Json(manifest.customer_signoff.to_dict()) if manifest.customer_signoff else None

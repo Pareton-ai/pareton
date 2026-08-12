@@ -56,6 +56,33 @@ def test_default_file_url_with_placeholders(monkeypatch: pytest.MonkeyPatch):
     assert m.workload_trace_sha256 == _fixture_sha()
 
 
+def test_bench_flags_shape_correctness_and_perf(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        allow_placeholders=True,
+        bench_quantization="fp8",
+        bench_correctness_num_prompts=16,
+        bench_correctness_max_new_tokens=64,
+        bench_perf_concurrency=8,
+    )
+    bench = captured["manifest"].bench
+    assert bench["model"]["quantization"] == "fp8"
+    assert bench["correctness"] == {"num_prompts": 16, "max_new_tokens": 64}
+    assert bench["perf_screen"] == {"concurrency": 8}
+    # Seed never pins thresholds or calibration; that is bench.calibrate apply.
+    assert "thresholds" not in bench["correctness"]
+    assert "calibration" not in bench["correctness"]
+
+
+def test_bench_flags_default_to_none(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True)
+    bench = captured["manifest"].bench
+    assert bench["model"]["quantization"] is None
+    assert bench["correctness"] is None
+    assert bench["perf_screen"] is None
+
+
 def test_https_url_with_matching_sha(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(
@@ -218,12 +245,21 @@ def test_seed_gpu_skus_and_status_override(monkeypatch: pytest.MonkeyPatch):
     seed_synthetic_campaign(
         allow_placeholders=True,
         gpu_skus=["H200-SXM-141GB", "B200"],
-        status="open",
+        status="draft",
     )
     m = captured["manifest"]
-    assert m.status == "open"
+    assert m.status == "draft"
     assert m.gpu_skus == ["H200-SXM-141GB", "B200"]
     assert captured["profile_data"]["hardware"] == ["H200-SXM-141GB", "B200"]
+
+
+def test_seed_open_requires_calibration(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(
+        ValueError, match="requires campaigns.bench.correctness.calibration"
+    ):
+        seed_synthetic_campaign(allow_placeholders=True, status="open")
+    assert captured["inserts"] == 0
 
 
 def test_seed_rejects_empty_gpu_skus(monkeypatch: pytest.MonkeyPatch):
