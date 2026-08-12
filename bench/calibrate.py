@@ -185,8 +185,8 @@ def prepare_campaign_calibration_request(
     """Build mode=correctness baseline==candidate request from a campaign row.
 
     trace_url/trace_sha256 override the campaign's pinned trace (used by the
-    pool path to calibrate one request per pool entry). The model, gpu_count,
-    and serve_args always come from campaign.bench.
+    generated-sample path). The model, gpu_count, and serve_args always come
+    from campaign.bench.
     """
     if get_campaign_fn is None:
         from campaign.store import get_campaign as get_campaign_fn  # type: ignore[no-redef]
@@ -673,13 +673,14 @@ def prepare_pool_calibration_requests(
     max_samples: int | None = None,
     fetcher: Callable[[str], bytes] | None = None,
     get_campaign_fn: Callable[[str], Any] | None = None,
+    row_fetcher: Callable[[int], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Write one baseline==candidate request per distinct pool trace.
+    """Write one baseline==candidate request per generated calib trace.
 
-    Uses campaign.workload_pool when present; otherwise the single pinned trace.
-    Caps at ``max_samples`` (default ``PARETON_CALIB_MIN_SAMPLES``).
+    Requires campaign.sampling_rule.type == hf_rows. Caps at ``max_samples``
+    (default ``PARETON_CALIB_MIN_SAMPLES``).
     """
-    from bench.sampler import resolve_workload_pool
+    from bench.sampler import calib_seed, fetch_hf_row, generate_trace, parse_sampling_rule
 
     if get_campaign_fn is None:
         from campaign.store import get_campaign as get_campaign_fn  # type: ignore[no-redef]
@@ -696,34 +697,46 @@ def prepare_pool_calibration_requests(
     if not gpu_skus:
         raise CalibrationError("campaign.gpu_skus empty")
 
-    pool = resolve_workload_pool(
-        workload_pool=manifest.workload_pool,
-        workload_trace_sha256=manifest.workload_trace_sha256,
-        workload_trace_url=manifest.workload_trace_url,
-    )
+    try:
+        rule = parse_sampling_rule(manifest.sampling_rule)
+    except Exception as exc:
+        raise CalibrationError(f"campaign.sampling_rule invalid: {exc}") from exc
+
     limit = int(max_samples if max_samples is not None else config.CALIB_MIN_SAMPLES)
     if limit < 1:
         raise CalibrationError("max_samples must be >= 1")
-    selected = pool[:limit]
-    if len(selected) < 1:
-        raise CalibrationError("workload pool is empty")
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for i, entry in enumerate(selected):
-        sha = str(entry["sha256"]).lower()
+    cid = str(campaign_id)
+    hf_fetch = row_fetcher or (lambda idx: fetch_hf_row(rule, idx))
+    for i in range(limit):
+        seed = calib_seed(cid, i)
+        try:
+            sampled = generate_trace(
+                rule=rule,
+                seed_hex=seed,
+                row_fetcher=hf_fetch,
+            )
+        except Exception as exc:
+            raise CalibrationError(f"calib sample {i} generate failed: {exc}") from exc
+        sha = sampled.sha256.lower()
         if sha in seen:
-            raise CalibrationError(f"repeated trace in pool: {sha}")
+            raise CalibrationError(f"repeated generated trace at sample {i}: {sha}")
         seen.add(sha)
         sample_dir = output_dir / f"sample-{i:03d}"
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = sample_dir / "workload_trace.json"
+        trace_path.write_bytes(sampled.body)
+        body = sampled.body
         req = prepare_campaign_calibration_request(
             campaign_id=campaign_id,
             output_dir=sample_dir,
-            fetcher=fetcher,
+            fetcher=fetcher or (lambda _u, _b=body: _b),
             get_campaign_fn=lambda _cid: manifest,
-            trace_url=str(entry["url"]),
+            trace_url=f"file://{trace_path.resolve()}",
             trace_sha256=sha,
         )
         written.append(req)
@@ -819,7 +832,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
                 output_dir=Path(args.output_dir),
                 max_samples=args.max_samples,
             )
-            print(f"wrote {len(reqs)} pool sample requests under {args.output_dir}")
+            print(f"wrote {len(reqs)} generated sample requests under {args.output_dir}")
             print(
                 f"calib knobs: pods={config.CALIB_PODS} "
                 f"samples_per_pod={config.CALIB_SAMPLES_PER_POD} "
@@ -1026,13 +1039,13 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument(
         "--pool",
         action="store_true",
-        help="With --campaign-id, write one request per distinct pool trace",
+        help="With --campaign-id, generate N on-the-fly traces and write one request each",
     )
     prep.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help=f"Cap pool prepare count (default {config.CALIB_MIN_SAMPLES})",
+        help=f"Cap generated prepare count (default {config.CALIB_MIN_SAMPLES})",
     )
     prep.set_defaults(func=cmd_prepare)
 

@@ -460,6 +460,7 @@ def test_calibration_fingerprint_includes_scoring_knobs():
     assert fp["quantization"] == ""
     assert fp["max_model_len"] == 8192
     assert fp["gpu_count"] == 1
+    assert "trace_sha256" not in fp
 
     bench["model"]["quantization"] = "fp8"
     bench["model"]["dtype"] = "auto"

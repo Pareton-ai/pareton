@@ -40,8 +40,6 @@ def _calib(**means_stds: tuple[float, float]) -> dict:
         "max_abs_logprob_diff": (0.02, 0.01),
         "argmax_mismatch_rate": (0.0, 0.01),
         "neg_throughput_ratio": (-1.0, 0.05),
-        "p99_ttft_ms": (100.0, 10.0),
-        "p99_itl_ms": (20.0, 5.0),
     }
     defaults.update(means_stds)
     return {
@@ -79,14 +77,26 @@ def test_reject_when_aggregate_z_at_or_above_threshold():
     assert result.promoted is False
 
 
-def test_positive_z_means_worse_latency():
+def test_positive_z_means_worse_throughput():
+    # throughput_ratio 0.85 → neg = -0.85; mean -1.0, std 0.05 → z = 3.0
     result = decide_promotion(
-        report=_report(p99_ttft=130.0),  # (130-100)/10 = 3.0
+        report=_report(throughput_ratio=0.85),
         calibration=_calib(),
         z_threshold=2.5,
     )
-    assert result.z_scores["p99_ttft_ms"] == pytest.approx(3.0)
+    assert result.z_scores["neg_throughput_ratio"] == pytest.approx(3.0)
     assert result.promoted is False
+
+def test_extract_does_not_require_p99():
+    obs = extract_observed_metrics(_report())
+    assert "p99_ttft_ms" not in obs
+    assert "p99_itl_ms" not in obs
+    assert set(obs) == {
+        "mean_abs_logprob_diff",
+        "max_abs_logprob_diff",
+        "argmax_mismatch_rate",
+        "neg_throughput_ratio",
+    }
 
 
 def test_hard_error_never_promotes():

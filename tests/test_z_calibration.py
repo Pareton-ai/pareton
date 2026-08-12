@@ -172,3 +172,78 @@ def test_analyze_z_accepts_varied_traces(tmp_path: Path):
     for _name, block in summary["metrics"].items():
         assert block["std"] > 0
         assert block["n"] == 3
+    assert "p99_ttft_ms" not in summary["metrics"]
+
+
+def test_analyze_z_default_floor_is_twenty(tmp_path: Path):
+    paths = [
+        _report(
+            tmp_path / f"{i}.json",
+            trace=_trace(i + 1),
+            mean=0.01 * (i + 1),
+            max_d=0.02 * (i + 1),
+            argmax=0.001 * i,
+            ttft=100.0 + i,
+            itl=10.0 + i,
+            throughput=1.0 + 0.01 * i,
+        )
+        for i in range(3)
+    ]
+    with pytest.raises(CalibrationError, match="need at least 20"):
+        analyze_z_calibration(paths)
+
+
+def test_prepare_generates_distinct_traces(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from bench.calibrate import prepare_pool_calibration_requests
+    from campaign.models import SLA
+
+    rows = [{"trajectory": [{"role": "user", "text": f"prompt-{i}"}]} for i in range(8)]
+    rule = {
+        "type": "hf_rows",
+        "seed_block_offset": 10,
+        "dataset": "nebius/SWE-agent-trajectories",
+        "revision": "deadbeef" * 5,
+        "config": "default",
+        "split": "train",
+        "n_rows": 8,
+        "n_prompts": 3,
+        "max_tokens": 128,
+        "algo_version": 1,
+    }
+    manifest = SimpleNamespace(
+        bench={
+            "model": {
+                "hf_repo": "Qwen/Qwen2.5-7B-Instruct",
+                "hf_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
+                "dtype": "bfloat16",
+                "quantization": None,
+                "max_model_len": 8192,
+            },
+            "baseline_engine_image_digest": DIGEST,
+            "gpu_count": 1,
+            "serve_args": [],
+            "correctness": {"num_prompts": 3, "max_new_tokens": 8},
+        },
+        gpu_skus=["H200"],
+        sampling_rule=rule,
+        workload_trace_sha256=DIGEST,
+        workload_trace_url="file:///unused.json",
+        sla=SLA(p99_ttft_ms=1e9, p99_itl_ms=1e9),
+    )
+    reqs = prepare_pool_calibration_requests(
+        campaign_id="11111111-1111-1111-1111-111111111111",
+        output_dir=tmp_path,
+        max_samples=3,
+        get_campaign_fn=lambda _cid: manifest,
+        row_fetcher=lambda idx: rows[idx],
+    )
+    assert len(reqs) == 3
+    shas = [r["workload_trace"]["sha256"] for r in reqs]
+    assert len(set(shas)) == 3
+    assert (tmp_path / "sample-000" / "workload_trace.json").is_file()
+    assert (tmp_path / "sample-000" / "bench_request.json").is_file()
+    assert reqs[0]["model"]["hf_repo"] == "Qwen/Qwen2.5-7B-Instruct"
+    assert reqs[0]["hardware"]["gpu_count"] == 1
+

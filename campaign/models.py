@@ -118,8 +118,9 @@ class CampaignManifest:
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
     engine: dict[str, Any] | None = None
-    # Dynamic workload pool + sampler + z-score promotion. None stays out of
-    # the manifest pin set (same back-compat rule as bench/engine).
+    # Dynamic sampling + z-score promotion. None stays out of the manifest
+    # pin set (same back-compat rule as bench/engine). workload_pool is
+    # unused by the sampler; sampling_rule.type hf_rows generates traces.
     workload_pool: list[dict[str, Any]] | None = None
     sampling_rule: dict[str, Any] | None = None
     z_threshold: float | None = None

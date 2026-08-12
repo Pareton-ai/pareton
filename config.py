@@ -170,7 +170,7 @@ BENCH_SLA_WARMUP_REQUESTS: int = int(
 # Dynamic workload sampling + z-score promotion calibration.
 CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))
 # Minimum distinct baseline-vs-baseline samples for campaigns.calibration.
-CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "50"))
+CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "20"))
 # Soft guidance for how many pods / concurrent prepare dirs operators run.
 CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
 CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))

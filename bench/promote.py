@@ -17,8 +17,6 @@ PROMOTION_METRICS: tuple[str, ...] = (
     "max_abs_logprob_diff",
     "argmax_mismatch_rate",
     "neg_throughput_ratio",
-    "p99_ttft_ms",
-    "p99_itl_ms",
 )
 
 
@@ -39,10 +37,6 @@ def extract_observed_metrics(report: Mapping[str, Any]) -> dict[str, float]:
     """Pull the promotion metric vector from a full bench report."""
     corr = report.get("correctness") or {}
     perf = report.get("perf_screen") or {}
-    sla = report.get("sla_bench") or {}
-    cand = sla.get("candidate") or {}
-    ttft = (cand.get("ttft_ms") or {}).get("p99")
-    itl = (cand.get("itl_ms") or {}).get("p99")
     try:
         throughput_ratio = float(perf["throughput_ratio"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -53,8 +47,6 @@ def extract_observed_metrics(report: Mapping[str, Any]) -> dict[str, float]:
             "max_abs_logprob_diff": float(corr["max_abs_logprob_diff"]),
             "argmax_mismatch_rate": float(corr["argmax_mismatch_rate"]),
             "neg_throughput_ratio": -throughput_ratio,
-            "p99_ttft_ms": float(ttft),
-            "p99_itl_ms": float(itl),
         }
     except (KeyError, TypeError, ValueError) as exc:
         raise PromoteError(f"incomplete metric vector: {exc}") from exc

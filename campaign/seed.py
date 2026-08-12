@@ -461,13 +461,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--workload-pool-json",
         default=None,
-        help="Path to JSON list of {sha256,url} pre-baked traces (pins workload_pool)",
+        help="Path to JSON list of {sha256,url} (legacy; unused by hf_rows sampler)",
     )
     p.add_argument(
         "--sampling-rule-json",
         default=None,
-        help='Path to JSON sampling rule (default shape: '
-        '{"type":"uniform_index","seed_block_offset":10})',
+        help='Path to JSON sampling rule (hf_rows: dataset, revision, n_rows, n_prompts)',
     )
     p.add_argument(
         "--z-threshold",

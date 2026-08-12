@@ -28,7 +28,6 @@ from bench.promote import PromoteError, decide_promotion
 from bench.sampler import (
     SamplerError,
     parse_sampling_rule,
-    resolve_workload_pool,
     sample_workload,
 )
 from campaign.cross_env import SPEEDUP_METRIC_KEYS, validate_cross_env
@@ -121,22 +120,32 @@ def materialize_trace(
 def campaign_calibration_fingerprint(
     bench: dict[str, Any], row: dict[str, Any]
 ) -> dict[str, Any]:
-    """Key fields that must match a stored correctness.calibration fingerprint."""
+    """Key fields that must match a stored correctness.calibration fingerprint.
+
+    Per-submission trace sha256 is not included: sampled campaigns generate a
+    new trace each job. Bind dataset pin fields instead when sampling is on.
+    """
     model = bench.get("model") or {}
     quant = model.get("quantization")
-    return {
+    fp: dict[str, Any] = {
         "model_repo": str(model.get("hf_repo") or ""),
         "model_revision": str(model.get("hf_revision") or ""),
         "baseline_engine_image_digest": str(
             bench.get("baseline_engine_image_digest") or ""
         ).lower(),
-        "trace_sha256": str(row.get("workload_trace_sha256") or "").lower(),
         "serve_args": [str(x) for x in (bench.get("serve_args") or [])],
         "dtype": str(model.get("dtype") or ""),
         "quantization": "" if quant is None else str(quant),
         "max_model_len": int(model.get("max_model_len") or 0),
         "gpu_count": int(bench.get("gpu_count") or 1),
     }
+    rule = _parse_json_field(row.get("sampling_rule"))
+    if isinstance(rule, dict) and str(rule.get("type") or "") == "hf_rows":
+        fp["sampling_dataset"] = str(rule.get("dataset") or "")
+        fp["sampling_revision"] = str(rule.get("revision") or "")
+        fp["sampling_n_prompts"] = int(rule.get("n_prompts") or 0)
+        fp["sampling_algo_version"] = int(rule.get("algo_version") or 0)
+    return fp
 
 
 def build_bench_request_dict(
@@ -648,12 +657,9 @@ def _event_base_for_results(
 
 
 def campaign_uses_dynamic_sampling(row: dict[str, Any]) -> bool:
-    """True when campaign pins a sampling_rule or a multi-entry workload_pool."""
+    """True when campaign pins an hf_rows sampling_rule."""
     rule = _parse_json_field(row.get("sampling_rule"))
-    pool = _parse_json_field(row.get("workload_pool"))
-    if isinstance(rule, dict):
-        return True
-    return isinstance(pool, list) and len(pool) > 1
+    return isinstance(rule, dict) and str(rule.get("type") or "") == "hf_rows"
 
 
 def realize_submission_sample(
@@ -661,18 +667,15 @@ def realize_submission_sample(
     *,
     block_hash_fn: Callable[[int], str] | None = None,
     record_sample_fn: Callable[..., None] | None = None,
+    row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    upload_trace_fn: Callable[..., str] | None = None,
 ) -> dict[str, str]:
-    """Sample pool entry from commit_block seed; persist receipt; return url/sha.
+    """Generate a trace from the future-block seed; persist receipt; return url/sha.
 
     Raises BenchInfraError when the seed block hash is unavailable (job fail,
-    no rejection event).
+    no rejection event). HF fetch failures are infra, never candidate FAIL.
     """
     try:
-        pool = resolve_workload_pool(
-            workload_pool=_parse_json_field(row.get("workload_pool")),
-            workload_trace_sha256=str(row["workload_trace_sha256"]),
-            workload_trace_url=str(row["workload_trace_url"]),
-        )
         rule = parse_sampling_rule(_parse_json_field(row.get("sampling_rule")))
     except SamplerError as exc:
         raise BenchInfraError("sampling_config_invalid", str(exc)) from exc
@@ -713,15 +716,44 @@ def realize_submission_sample(
 
     try:
         sampled = sample_workload(
-            pool=pool,
+            rule=rule,
             commit_block=int(commit_block),
-            seed_block_offset=int(rule["seed_block_offset"]),
             block_hash=str(block_hash),
             patch_hash=str(row["patch_hash"]),
             campaign_id=str(row["campaign_id"]),
+            row_fetcher=row_fetcher,
         )
     except SamplerError as exc:
         raise BenchInfraError("sampling_failed", str(exc)) from exc
+
+    if upload_trace_fn is None:
+        from storage.s3 import upload_realized_trace
+
+        def _default_upload(*, campaign_id: str, body: bytes, sha256: str) -> str:
+            try:
+                return upload_realized_trace(
+                    campaign_id=campaign_id, body=body, sha256=sha256
+                )
+            except Exception as exc:
+                raise BenchInfraError("realized_trace_upload_failed", str(exc)) from exc
+
+        upload_trace_fn = _default_upload
+
+    try:
+        url = upload_trace_fn(
+            campaign_id=str(row["campaign_id"]),
+            body=sampled.body,
+            sha256=sampled.sha256,
+        )
+    except BenchInfraError:
+        raise
+    except Exception as exc:
+        raise BenchInfraError("realized_trace_upload_failed", str(exc)) from exc
+
+    receipt = dict(sampled.receipt)
+    receipt["sampled_trace_url"] = url
+    receipt["patch_hash"] = str(row["patch_hash"]).strip().lower()
+    receipt["campaign_id"] = str(row["campaign_id"]).strip().lower()
 
     writer = record_sample_fn or record_submission_sample
     writer(
@@ -729,16 +761,15 @@ def realize_submission_sample(
         sample_seed_block=sampled.sample_seed_block,
         sample_seed_block_hash=sampled.sample_seed_block_hash,
         sampled_trace_sha256=sampled.sha256,
-        sampling_receipt=sampled.receipt,
+        sampling_receipt=receipt,
     )
-    # Prefer sampled bytes for the rest of this job (pod gets one immutable ref).
-    row["workload_trace_url"] = sampled.url
+    row["workload_trace_url"] = url
     row["workload_trace_sha256"] = sampled.sha256
     row["sampled_trace_sha256"] = sampled.sha256
     row["sample_seed_block"] = sampled.sample_seed_block
     row["sample_seed_block_hash"] = sampled.sample_seed_block_hash
-    row["sampling_receipt"] = sampled.receipt
-    return {"url": sampled.url, "sha256": sampled.sha256}
+    row["sampling_receipt"] = receipt
+    return {"url": url, "sha256": sampled.sha256}
 
 
 def process_bench_job(
@@ -757,6 +788,8 @@ def process_bench_job(
     injected_report: dict[str, Any] | None = None,
     block_hash_fn: Callable[[int], str] | None = None,
     record_sample_fn: Callable[..., None] | None = None,
+    row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    upload_trace_fn: Callable[..., str] | None = None,
 ) -> str:
     """Run one bench job across all gpu_skus. Returns 'ok' or last_error code."""
     submission_id = str(row["id"])
@@ -789,6 +822,8 @@ def process_bench_job(
                 row,
                 block_hash_fn=block_hash_fn,
                 record_sample_fn=record_sample_fn,
+                row_fetcher=row_fetcher,
+                upload_trace_fn=upload_trace_fn,
             )
 
         trace_path = materialize_trace(

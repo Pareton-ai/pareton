@@ -172,6 +172,27 @@ def evidence_object_key(submission_id: str, task_id: str) -> str:
     return f"{prefix}/evidence/{submission_id}/{task_id}.tar.gz"
 
 
+def realized_trace_object_key(campaign_id: str, sha256: str) -> str:
+    digest = str(sha256).lower()
+    if digest.startswith("sha256:"):
+        digest = digest[len("sha256:") :]
+    prefix = config.S3_PREFIX.strip("/")
+    return f"{prefix}/campaigns/{campaign_id}/realized-traces/{digest}.json"
+
+
+def upload_realized_trace(*, campaign_id: str, body: bytes, sha256: str) -> str:
+    """Put a generated workload trace; return the public retrieval URL."""
+    key = realized_trace_object_key(campaign_id, sha256)
+    client = _client()
+    client.put_object(
+        Bucket=config.S3_BUCKET,
+        Key=key,
+        Body=body,
+        ContentType="application/json",
+    )
+    return public_retrieval_url(key)
+
+
 def upload_evidence_bundle(
     submission_id: str,
     task_id: str,

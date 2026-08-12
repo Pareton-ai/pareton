@@ -43,10 +43,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- NULL means the vLLM default and is excluded from manifest_hash, so
   -- campaigns pinned before engine profiles existed keep their hash.
   engine JSONB,
-  -- Pre-baked workload pool: [{sha256, url}, ...]. NULL ⇒ pool-of-1 from
-  -- workload_trace_sha256 / workload_trace_url (back-compat).
   workload_pool JSONB,
-  -- Sampler rule, e.g. {type: "uniform_index", seed_block_offset: 10}.
+  -- Sampler pin: {type: "hf_rows", dataset, revision, n_rows, n_prompts, ...}.
   -- NULL ⇒ no dynamic sampling (use fixed workload_trace_*).
   sampling_rule JSONB,
   -- Z-score promotion distribution: {metrics: {name: {mean, std}, ...}, ...}.
