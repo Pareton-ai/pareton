@@ -30,7 +30,7 @@ def _user_row(text: str) -> dict:
 def _rule(**overrides) -> dict:
     base = {
         "type": "hf_rows",
-        "seed_block_offset": 10,
+        "seed_block_offset": 1,
         "dataset": "nebius/SWE-agent-trajectories",
         "revision": "deadbeef" * 5,
         "config": "default",
@@ -70,6 +70,9 @@ def test_parse_sampling_rule_requires_hf_rows():
     parsed = parse_sampling_rule(_rule())
     assert parsed["type"] == "hf_rows"
     assert parsed["n_prompts"] == 3
+    omitted = _rule()
+    del omitted["seed_block_offset"]
+    assert parse_sampling_rule(omitted)["seed_block_offset"] == 1
     with pytest.raises(SamplerError, match="unsupported"):
         parse_sampling_rule({"type": "uniform_index"})
     with pytest.raises(SamplerError, match="must be an object"):
@@ -141,7 +144,7 @@ def test_sample_workload_uses_future_block():
         campaign_id=CAMPAIGN,
         row_fetcher=_fetcher(rows),
     )
-    assert sampled.sample_seed_block == 110
+    assert sampled.sample_seed_block == 101
     assert sampled.receipt["type"] == "hf_rows"
     assert sampled.receipt["row_indices"] == list(sampled.row_indices)
 

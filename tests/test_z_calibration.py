@@ -202,7 +202,7 @@ def test_prepare_generates_distinct_traces(tmp_path: Path):
     rows = [{"trajectory": [{"role": "user", "text": f"prompt-{i}"}]} for i in range(8)]
     rule = {
         "type": "hf_rows",
-        "seed_block_offset": 10,
+        "seed_block_offset": 1,
         "dataset": "nebius/SWE-agent-trajectories",
         "revision": "deadbeef" * 5,
         "config": "default",

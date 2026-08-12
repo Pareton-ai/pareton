@@ -148,7 +148,7 @@ def test_workload_pool_and_z_threshold_change_hash():
             {"sha256": "sha256:" + ("1" * 64), "url": "https://x/1.json"},
             {"sha256": "sha256:" + ("2" * 64), "url": "https://x/2.json"},
         ],
-        sampling_rule={"type": "uniform_index", "seed_block_offset": 10},
+        sampling_rule={"type": "uniform_index", "seed_block_offset": 1},
         z_threshold=3.0,
     )
     assert a.manifest_hash != b.manifest_hash

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.unit
 
 HF_RULE = {
     "type": "hf_rows",
-    "seed_block_offset": 10,
+    "seed_block_offset": 1,
     "dataset": "nebius/SWE-agent-trajectories",
     "revision": "deadbeef" * 5,
     "config": "default",
@@ -91,7 +91,7 @@ def test_realize_sample_writes_receipt(tmp_path: Path):
         upload_trace_fn=_upload,
     )
     assert out["sha256"] == uploaded["sha256"]
-    assert recorded["sample_seed_block"] == 1010
+    assert recorded["sample_seed_block"] == 1001
     assert recorded["sampling_receipt"]["type"] == "hf_rows"
     assert recorded["sampling_receipt"]["row_indices"]
     assert row["sampled_trace_sha256"] == out["sha256"]
