@@ -23,13 +23,19 @@ def _parse_ts(value: Any) -> datetime:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
 
 
+def _parse_json_obj(value: Any) -> Any:
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
 def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
-    bench = row.get("bench")
-    if isinstance(bench, str):
-        bench = json.loads(bench)
-    engine = row.get("engine")
-    if isinstance(engine, str):
-        engine = json.loads(engine)
+    bench = _parse_json_obj(row.get("bench"))
+    engine = _parse_json_obj(row.get("engine"))
+    workload_pool = _parse_json_obj(row.get("workload_pool"))
+    sampling_rule = _parse_json_obj(row.get("sampling_rule"))
+    z_raw = row.get("z_threshold")
+    z_threshold = float(z_raw) if z_raw is not None else None
     return build_manifest(
         campaign_id=row["id"],
         profile_id=row.get("profile_id"),
@@ -53,6 +59,9 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         manifest_hash=row["manifest_hash"],
         bench=bench if isinstance(bench, dict) else None,
         engine=engine if isinstance(engine, dict) else None,
+        workload_pool=list(workload_pool) if isinstance(workload_pool, list) else None,
+        sampling_rule=dict(sampling_rule) if isinstance(sampling_rule, dict) else None,
+        z_threshold=z_threshold,
     )
 
 
@@ -120,6 +129,10 @@ def apply_campaign_correctness_calibration(
             if engine is not None and not isinstance(engine, dict):
                 engine = None
 
+            workload_pool = _parse_json_obj(row.get("workload_pool"))
+            sampling_rule = _parse_json_obj(row.get("sampling_rule"))
+            z_raw = row.get("z_threshold")
+            z_threshold = float(z_raw) if z_raw is not None else None
             fields = freeze_manifest_fields(
                 campaign_id=row["id"],
                 profile_id=row.get("profile_id"),
@@ -140,6 +153,13 @@ def apply_campaign_correctness_calibration(
                 success_threshold=row["success_threshold"],
                 bench=bench,
                 engine=engine if isinstance(engine, dict) else None,
+                workload_pool=(
+                    list(workload_pool) if isinstance(workload_pool, list) else None
+                ),
+                sampling_rule=(
+                    dict(sampling_rule) if isinstance(sampling_rule, dict) else None
+                ),
+                z_threshold=z_threshold,
             )
             new_hash = compute_manifest_hash(fields)
             now = datetime.now(timezone.utc)
@@ -167,6 +187,64 @@ def apply_campaign_correctness_calibration(
             return new_hash
 
 
+def apply_campaign_z_calibration(
+    campaign_id: UUID | str,
+    calibration: dict[str, Any],
+    *,
+    approver: str = "pareton-admin",
+) -> str:
+    """Write z-score distribution into campaigns.calibration (draft, zero subs).
+
+    Does not change manifest_hash pin set (calibration is measured, not pinned).
+    Refreshes customer_signoff timestamp only. Returns current manifest_hash.
+    """
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM campaigns WHERE id = %s FOR UPDATE",
+                (str(campaign_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"campaign not found: {campaign_id}")
+            if str(row["status"]) != "draft":
+                raise ValueError(
+                    f"campaign status must be draft, got {row['status']!r}"
+                )
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM submissions WHERE campaign_id = %s",
+                (str(campaign_id),),
+            )
+            n_subs = int(cur.fetchone()["n"])
+            if n_subs != 0:
+                raise ValueError(
+                    f"campaign has {n_subs} submissions; calibration apply requires zero"
+                )
+            if not isinstance(calibration, dict) or not calibration.get("metrics"):
+                raise ValueError("calibration must include metrics object")
+            now = datetime.now(timezone.utc)
+            signoff = CustomerSignoff(
+                approved_manifest_hash=str(row["manifest_hash"]),
+                approver=approver,
+                timestamp=now,
+            )
+            cur.execute(
+                """
+                UPDATE campaigns
+                SET calibration = %s,
+                    customer_signoff = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    Json(calibration),
+                    Json(signoff.to_dict()),
+                    str(campaign_id),
+                ),
+            )
+            return str(row["manifest_hash"])
+
+
 def insert_campaign(manifest: CampaignManifest) -> UUID:
     signoff = (
         Json(manifest.customer_signoff.to_dict()) if manifest.customer_signoff else None
@@ -181,14 +259,16 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   scoring_config_sha256, scoring_config_url,
                   allowed_paths, denied_paths, window_opens_at, window_closes_at,
                   manifest_hash, customer_signoff, status, bench, engine,
-                  priority_metric, success_threshold
+                  priority_metric, success_threshold,
+                  workload_pool, sampling_rule, z_threshold
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s,
                   %s, %s, %s, %s,
                   %s, %s, %s, %s, %s,
-                  %s, %s
+                  %s, %s,
+                  %s, %s, %s
                 )
                 RETURNING id
                 """,
@@ -215,6 +295,17 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                     Json(manifest.engine) if manifest.engine is not None else None,
                     manifest.priority_metric,
                     manifest.success_threshold,
+                    (
+                        Json(manifest.workload_pool)
+                        if manifest.workload_pool is not None
+                        else None
+                    ),
+                    (
+                        Json(manifest.sampling_rule)
+                        if manifest.sampling_rule is not None
+                        else None
+                    ),
+                    manifest.z_threshold,
                 ),
             )
             return cur.fetchone()[0]
@@ -539,6 +630,7 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
                        c.window_opens_at, c.window_closes_at,
                        c.bench, c.sla, c.workload_trace_url, c.workload_trace_sha256,
                        c.gpu_skus, c.manifest_hash,
+                       c.workload_pool, c.sampling_rule, c.calibration, c.z_threshold,
                        %s::bigint AS job_id, %s::text AS job_kind
                 FROM submissions s
                 JOIN campaigns c ON c.id = s.campaign_id
@@ -605,6 +697,7 @@ KNOWN_SUBMISSION_STATES: tuple[str, ...] = (
     "image_pushed",
     "built",
     "bench_queued",
+    "sampled",
     "correct",
     "screened",
     "benched",
@@ -772,8 +865,46 @@ BENCH_REJECT_REASONS = frozenset(
         "fail_sla",
         "fail_engine_candidate",
         "fail_cross_env_speedup",
+        "fail_promotion",
     }
 )
+
+
+def record_submission_sample(
+    *,
+    submission_id: UUID | str,
+    sample_seed_block: int,
+    sample_seed_block_hash: str,
+    sampled_trace_sha256: str,
+    sampling_receipt: dict[str, Any],
+) -> None:
+    """Persist realized sample columns and append a sampled event."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE submissions
+                SET sample_seed_block = %s,
+                    sample_seed_block_hash = %s,
+                    sampled_trace_sha256 = %s,
+                    sampling_receipt = %s
+                WHERE id = %s
+                """,
+                (
+                    int(sample_seed_block),
+                    str(sample_seed_block_hash),
+                    str(sampled_trace_sha256).lower(),
+                    Json(sampling_receipt),
+                    str(submission_id),
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO submission_events (submission_id, state, detail)
+                VALUES (%s, 'sampled', %s)
+                """,
+                (str(submission_id), Json(sampling_receipt)),
+            )
 
 
 def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None:
@@ -938,8 +1069,9 @@ def finalize_bench_job(
                         """
                         INSERT INTO bench_reports (
                           submission_id, task_id, stage, verdict, report,
-                          evidence_s3_url, gpu_sku, mock
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                          evidence_s3_url, gpu_sku, mock,
+                          z_scores, aggregate_z, promoted
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             str(submission_id),
@@ -950,6 +1082,13 @@ def finalize_bench_job(
                             row.get("evidence_s3_url"),
                             row.get("gpu_sku") or "unknown",
                             bool(row.get("mock", False)),
+                            (
+                                Json(row["z_scores"])
+                                if row.get("z_scores") is not None
+                                else None
+                            ),
+                            row.get("aggregate_z"),
+                            row.get("promoted"),
                         ),
                     )
             except pg_errors.UniqueViolation as exc:

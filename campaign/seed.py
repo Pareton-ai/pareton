@@ -182,6 +182,9 @@ def seed_synthetic_campaign(
     bench_perf_concurrency: int | None = None,
     workload_trace_url: str | None = None,
     workload_trace_sha256: str | None = None,
+    workload_pool: list[dict] | None = None,
+    sampling_rule: dict | None = None,
+    z_threshold: float | None = None,
     allow_placeholders: bool = False,
     priority_metric: str = DEFAULT_PRIORITY_METRIC,
     success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
@@ -288,6 +291,10 @@ def seed_synthetic_campaign(
                 "with thresholds; seed draft first, run bench.calibrate apply, then open"
             )
 
+    pool = list(workload_pool) if workload_pool is not None else None
+    rule = dict(sampling_rule) if sampling_rule is not None else None
+    z_thr = float(z_threshold) if z_threshold is not None else None
+
     fields_manifest = build_manifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
@@ -314,6 +321,9 @@ def seed_synthetic_campaign(
         customer_signoff=None,
         bench=bench,
         engine=engine_profile,
+        workload_pool=pool,
+        sampling_rule=rule,
+        z_threshold=z_thr,
     )
 
     signoff = CustomerSignoff(
@@ -348,6 +358,9 @@ def seed_synthetic_campaign(
         manifest_hash=fields_manifest.manifest_hash,
         bench=bench,
         engine=engine_profile,
+        workload_pool=pool,
+        sampling_rule=rule,
+        z_threshold=z_thr,
     )
 
     inserted = insert_campaign(manifest)
@@ -446,6 +459,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Must match local fixture hash; required when URL is https://",
     )
     p.add_argument(
+        "--workload-pool-json",
+        default=None,
+        help="Path to JSON list of {sha256,url} pre-baked traces (pins workload_pool)",
+    )
+    p.add_argument(
+        "--sampling-rule-json",
+        default=None,
+        help='Path to JSON sampling rule (default shape: '
+        '{"type":"uniform_index","seed_block_offset":10})',
+    )
+    p.add_argument(
+        "--z-threshold",
+        type=float,
+        default=None,
+        help="Z-score promotion threshold (promote when aggregate_z < value)",
+    )
+    p.add_argument(
         "--allow-placeholders",
         action="store_true",
         help="Allow default placeholder base/engine digests (dev only)",
@@ -463,6 +493,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
     try:
+        pool = None
+        if args.workload_pool_json:
+            pool_path = Path(args.workload_pool_json)
+            pool = json.loads(pool_path.read_text(encoding="utf-8"))
+            if not isinstance(pool, list):
+                raise ValueError("--workload-pool-json must be a JSON list")
+        rule = None
+        if args.sampling_rule_json:
+            rule_path = Path(args.sampling_rule_json)
+            rule = json.loads(rule_path.read_text(encoding="utf-8"))
+            if not isinstance(rule, dict):
+                raise ValueError("--sampling-rule-json must be a JSON object")
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -481,6 +523,9 @@ def main(argv: list[str] | None = None) -> int:
             bench_perf_concurrency=args.bench_perf_concurrency,
             workload_trace_url=args.workload_trace_url,
             workload_trace_sha256=args.workload_trace_sha256,
+            workload_pool=pool,
+            sampling_rule=rule,
+            z_threshold=args.z_threshold,
             allow_placeholders=args.allow_placeholders,
             priority_metric=args.priority_metric,
             success_threshold=args.success_threshold,

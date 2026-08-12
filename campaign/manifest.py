@@ -50,12 +50,17 @@ def freeze_manifest_fields(
     success_threshold: str,
     bench: dict[str, Any] | None = None,
     engine: dict[str, Any] | None = None,
+    workload_pool: list[dict[str, Any]] | None = None,
+    sampling_rule: dict[str, Any] | None = None,
+    z_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
 
     Include ``bench`` only when not None so pre-WS-D campaign hashes stay valid.
     ``engine`` follows the same rule: absent means the vLLM default, and every
     campaign hashed before engine profiles existed keeps its hash.
+    ``workload_pool``, ``sampling_rule``, and ``z_threshold`` use the same
+    absent-means-unpinned rule.
     """
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
     out: dict[str, Any] = {
@@ -85,6 +90,12 @@ def freeze_manifest_fields(
         out["bench"] = bench
     if engine is not None:
         out["engine"] = validate_engine(engine)
+    if workload_pool is not None:
+        out["workload_pool"] = _canon(list(workload_pool))
+    if sampling_rule is not None:
+        out["sampling_rule"] = _canon(dict(sampling_rule))
+    if z_threshold is not None:
+        out["z_threshold"] = float(z_threshold)
     return out
 
 
@@ -119,6 +130,9 @@ def build_manifest(
     manifest_hash: str | None = None,
     bench: dict[str, Any] | None = None,
     engine: dict[str, Any] | None = None,
+    workload_pool: list[dict[str, Any]] | None = None,
+    sampling_rule: dict[str, Any] | None = None,
+    z_threshold: float | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
         campaign_id=campaign_id,
@@ -140,12 +154,18 @@ def build_manifest(
         success_threshold=success_threshold,
         bench=bench,
         engine=engine,
+        workload_pool=workload_pool,
+        sampling_rule=sampling_rule,
+        z_threshold=z_threshold,
     )
     mh = manifest_hash or compute_manifest_hash(fields)
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
     # Carry the normalized form onto the object so callers and the DB see the
     # same bytes that were hashed.
     engine_obj = fields.get("engine")
+    pool_obj = fields.get("workload_pool")
+    rule_obj = fields.get("sampling_rule")
+    z_obj = fields.get("z_threshold")
     return CampaignManifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
@@ -171,4 +191,7 @@ def build_manifest(
         success_threshold=success_threshold,
         bench=bench,
         engine=engine_obj,
+        workload_pool=list(pool_obj) if isinstance(pool_obj, list) else None,
+        sampling_rule=dict(rule_obj) if isinstance(rule_obj, dict) else None,
+        z_threshold=float(z_obj) if z_obj is not None else None,
     )

@@ -655,8 +655,166 @@ def analyze_runs_dir(
     return analyze_reports(reports, safety_factor=safety_factor, shape_paths=shapes)
 
 
+def prepare_pool_calibration_requests(
+    *,
+    campaign_id: str,
+    output_dir: Path,
+    max_samples: int | None = None,
+    fetcher: Callable[[str], bytes] | None = None,
+    get_campaign_fn: Callable[[str], Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Write one baseline==candidate request per distinct pool trace.
+
+    Uses campaign.workload_pool when present; otherwise the single pinned trace.
+    Caps at ``max_samples`` (default ``PARETON_CALIB_MIN_SAMPLES``).
+    """
+    from bench.sampler import resolve_workload_pool
+
+    if get_campaign_fn is None:
+        from campaign.store import get_campaign as get_campaign_fn  # type: ignore[no-redef]
+
+    manifest = get_campaign_fn(campaign_id)
+    if manifest is None:
+        raise CalibrationError(f"campaign not found: {campaign_id}")
+    if not isinstance(manifest.bench, dict):
+        raise CalibrationError("campaign.bench missing")
+    baseline_digest = manifest.bench.get("baseline_engine_image_digest")
+    if not baseline_digest:
+        raise CalibrationError("campaign.bench.baseline_engine_image_digest missing")
+    gpu_skus = list(manifest.gpu_skus or [])
+    if not gpu_skus:
+        raise CalibrationError("campaign.gpu_skus empty")
+
+    pool = resolve_workload_pool(
+        workload_pool=manifest.workload_pool,
+        workload_trace_sha256=manifest.workload_trace_sha256,
+        workload_trace_url=manifest.workload_trace_url,
+    )
+    limit = int(max_samples if max_samples is not None else config.CALIB_MIN_SAMPLES)
+    if limit < 1:
+        raise CalibrationError("max_samples must be >= 1")
+    selected = pool[:limit]
+    if len(selected) < 1:
+        raise CalibrationError("workload pool is empty")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for i, entry in enumerate(selected):
+        sha = str(entry["sha256"]).lower()
+        if sha in seen:
+            raise CalibrationError(f"repeated trace in pool: {sha}")
+        seen.add(sha)
+        sample_dir = output_dir / f"sample-{i:03d}"
+        req = prepare_calibration_request(
+            engine_digest=str(baseline_digest),
+            gpu_sku=str(gpu_skus[0]),
+            output_dir=sample_dir,
+            trace_url=str(entry["url"]),
+            trace_sha256=sha,
+            fetcher=fetcher,
+        )
+        written.append(req)
+    return written
+
+
+def analyze_z_calibration(
+    report_paths: list[Path],
+    *,
+    min_samples: int | None = None,
+) -> dict[str, Any]:
+    """Build campaigns.calibration mean/std from baseline-vs-baseline reports.
+
+    Rejects repeated trace_sha256 values and zero-variance metrics.
+    Requires at least ``min_samples`` reports (default PARETON_CALIB_MIN_SAMPLES).
+    """
+    from bench.promote import PROMOTION_METRICS, PromoteError, extract_observed_metrics
+
+    floor = int(min_samples if min_samples is not None else config.CALIB_MIN_SAMPLES)
+    if not report_paths:
+        raise CalibrationError("no reports to analyze")
+    if len(report_paths) < floor:
+        raise CalibrationError(
+            f"need at least {floor} reports for z-calibration, got {len(report_paths)}"
+        )
+
+    reports = [_load_report(Path(p)) for p in report_paths]
+    traces: list[str] = []
+    for r in reports:
+        fp = r.get("inputs_fingerprint") or {}
+        sha = str(fp.get("trace_sha256") or "").lower()
+        if not sha:
+            raise CalibrationError("report missing inputs_fingerprint.trace_sha256")
+        traces.append(sha)
+    if len(set(traces)) != len(traces):
+        raise CalibrationError(
+            "repeated traces in z-calibration set; each sample must be distinct"
+        )
+
+    # Self-check: baseline digest must equal candidate.
+    for r in reports:
+        _fingerprint_key(r)
+
+    vectors: list[dict[str, float]] = []
+    for r in reports:
+        try:
+            vectors.append(extract_observed_metrics(r))
+        except PromoteError as exc:
+            raise CalibrationError(str(exc)) from exc
+
+    metrics_out: dict[str, Any] = {}
+    for name in PROMOTION_METRICS:
+        values = [v[name] for v in vectors]
+        mean = float(statistics.fmean(values))
+        # population std so a fixed calibrator set is reproducible
+        std = float(statistics.pstdev(values))
+        if std == 0.0:
+            raise CalibrationError(
+                f"zero variance for metric {name}; refuse z-calibration"
+            )
+        metrics_out[name] = {
+            "mean": mean,
+            "std": std,
+            "n": len(values),
+            "min": min(values),
+            "max": max(values),
+        }
+
+    digest, revision, _trace, model_repo = _fingerprint_key(reports[0])
+    return {
+        "schema_version": 1,
+        "n_reports": len(reports),
+        "min_samples": floor,
+        "metrics": metrics_out,
+        "trace_sha256s": traces,
+        "fingerprint": {
+            "engine_digest": digest,
+            "model_repo": model_repo,
+            "model_revision": revision,
+        },
+        "report_paths": [str(p) for p in report_paths],
+        "calibrated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
 def cmd_prepare(args: argparse.Namespace) -> int:
     try:
+        if getattr(args, "pool", False):
+            if not args.campaign_id:
+                raise CalibrationError("--pool requires --campaign-id")
+            reqs = prepare_pool_calibration_requests(
+                campaign_id=str(args.campaign_id),
+                output_dir=Path(args.output_dir),
+                max_samples=args.max_samples,
+            )
+            print(f"wrote {len(reqs)} pool sample requests under {args.output_dir}")
+            print(
+                f"calib knobs: pods={config.CALIB_PODS} "
+                f"samples_per_pod={config.CALIB_SAMPLES_PER_POD} "
+                f"min_samples={config.CALIB_MIN_SAMPLES}"
+            )
+            return 0
         if args.campaign_id:
             req = prepare_campaign_calibration_request(
                 campaign_id=str(args.campaign_id),
@@ -793,10 +951,55 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze_z(args: argparse.Namespace) -> int:
+    try:
+        run_dirs = discover_run_dirs(Path(args.runs_dir))
+        reports = [d / "bench_report.json" for d in run_dirs]
+        missing = [str(p) for p in reports if not p.is_file()]
+        if missing:
+            raise CalibrationError(f"missing bench_report.json: {missing}")
+        summary = analyze_z_calibration(
+            reports, min_samples=int(args.min_samples) if args.min_samples else None
+        )
+    except CalibrationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {out}")
+    print(f"n_reports={summary['n_reports']} metrics={list(summary['metrics'])}")
+    return 0
+
+
+def cmd_apply_z(args: argparse.Namespace) -> int:
+    try:
+        summary_path = Path(args.summary)
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CalibrationError(f"cannot load summary: {exc}") from exc
+        if not isinstance(summary, dict) or not isinstance(summary.get("metrics"), dict):
+            raise CalibrationError("summary must include metrics object")
+        from campaign.store import apply_campaign_z_calibration
+
+        manifest_hash = apply_campaign_z_calibration(
+            str(args.campaign_id),
+            summary,
+            approver=str(args.approver),
+        )
+    except (CalibrationError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"applied z-calibration to campaign {args.campaign_id}")
+    print(f"manifest_hash={manifest_hash}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m bench.calibrate",
-        description="Correctness calibration: prepare, analyze, apply",
+        description="Correctness + z-score calibration: prepare, analyze, apply",
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -809,6 +1012,17 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--output-dir", required=True, type=Path)
     prep.add_argument("--trace-url", default=A3A_TRACE_URL)
     prep.add_argument("--trace-sha256", default=A3A_TRACE_SHA256)
+    prep.add_argument(
+        "--pool",
+        action="store_true",
+        help="With --campaign-id, write one request per distinct pool trace",
+    )
+    prep.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help=f"Cap pool prepare count (default {config.CALIB_MIN_SAMPLES})",
+    )
     prep.set_defaults(func=cmd_prepare)
 
     ana = sub.add_parser("analyze", help="Suggest thresholds from self-check reports")
@@ -816,6 +1030,20 @@ def build_parser() -> argparse.ArgumentParser:
     ana.add_argument("--safety-factor", type=float, default=DEFAULT_SAFETY_FACTOR)
     ana.add_argument("--output", required=True, type=Path)
     ana.set_defaults(func=cmd_analyze)
+
+    ana_z = sub.add_parser(
+        "analyze-z",
+        help="Build z-score mean/std from distinct-trace self-check reports",
+    )
+    ana_z.add_argument("--runs-dir", required=True, type=Path)
+    ana_z.add_argument("--output", required=True, type=Path)
+    ana_z.add_argument(
+        "--min-samples",
+        type=int,
+        default=None,
+        help=f"Minimum reports required (default {config.CALIB_MIN_SAMPLES})",
+    )
+    ana_z.set_defaults(func=cmd_analyze_z)
 
     apply_p = sub.add_parser(
         "apply", help="Write calibrated correctness into a draft campaign"
@@ -825,6 +1053,14 @@ def build_parser() -> argparse.ArgumentParser:
     apply_p.add_argument("--safety-factor", type=float, default=DEFAULT_SAFETY_FACTOR)
     apply_p.add_argument("--approver", default="pareton-admin")
     apply_p.set_defaults(func=cmd_apply)
+
+    apply_z = sub.add_parser(
+        "apply-z", help="Write z-score distribution into campaigns.calibration"
+    )
+    apply_z.add_argument("--campaign-id", required=True)
+    apply_z.add_argument("--summary", required=True, type=Path)
+    apply_z.add_argument("--approver", default="pareton-admin")
+    apply_z.set_defaults(func=cmd_apply_z)
 
     return p
 

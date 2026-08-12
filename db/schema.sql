@@ -43,6 +43,17 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- NULL means the vLLM default and is excluded from manifest_hash, so
   -- campaigns pinned before engine profiles existed keep their hash.
   engine JSONB,
+  -- Pre-baked workload pool: [{sha256, url}, ...]. NULL ⇒ pool-of-1 from
+  -- workload_trace_sha256 / workload_trace_url (back-compat).
+  workload_pool JSONB,
+  -- Sampler rule, e.g. {type: "uniform_index", seed_block_offset: 10}.
+  -- NULL ⇒ no dynamic sampling (use fixed workload_trace_*).
+  sampling_rule JSONB,
+  -- Z-score promotion distribution: {metrics: {name: {mean, std}, ...}, ...}.
+  -- Distinct from bench.correctness.calibration (threshold fingerprint).
+  calibration JSONB,
+  -- Promote when aggregate_z < z_threshold (and no hard error).
+  z_threshold NUMERIC,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)
@@ -63,6 +74,11 @@ CREATE TABLE IF NOT EXISTS submissions (
   payment_tx INTEGER,
   committed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   engine_image_ref TEXT,
+  -- Realized workload sample (dynamic pool). NULL when campaign has no pool.
+  sample_seed_block INTEGER,
+  sample_seed_block_hash TEXT,
+  sampled_trace_sha256 TEXT,
+  sampling_receipt JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (campaign_id, patch_hash)
 );
@@ -109,12 +125,15 @@ CREATE TABLE IF NOT EXISTS bench_reports (
   submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
   task_id TEXT NOT NULL,
   stage TEXT NOT NULL
-    CHECK (stage IN ('correctness', 'perf_screen', 'sla_bench')),
+    CHECK (stage IN ('correctness', 'perf_screen', 'sla_bench', 'promotion')),
   verdict TEXT NOT NULL,
   report JSONB NOT NULL DEFAULT '{}'::jsonb,
   evidence_s3_url TEXT,
   gpu_sku TEXT NOT NULL DEFAULT 'unknown',
   mock BOOLEAN NOT NULL DEFAULT false,
+  z_scores JSONB,
+  aggregate_z NUMERIC,
+  promoted BOOLEAN,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (submission_id, stage, gpu_sku)
 );

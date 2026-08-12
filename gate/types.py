@@ -17,6 +17,7 @@ class SubmissionState:
     IMAGE_PUSHED = "image_pushed"
     BUILT = "built"
     BENCH_QUEUED = "bench_queued"
+    SAMPLED = "sampled"
     CORRECT = "correct"
     SCREENED = "screened"
     BENCHED = "benched"

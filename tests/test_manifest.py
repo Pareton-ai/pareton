@@ -129,3 +129,28 @@ def test_success_threshold_changes_manifest_hash():
         )
     )
     assert a.manifest_hash != b.manifest_hash
+
+
+def test_workload_pool_absent_keeps_hash_stable():
+    kwargs = _manifest_kwargs()
+    base = freeze_manifest_fields(**kwargs)
+    with_none = freeze_manifest_fields(**kwargs, workload_pool=None)
+    assert compute_manifest_hash(base) == compute_manifest_hash(with_none)
+    assert "workload_pool" not in base
+
+
+def test_workload_pool_and_z_threshold_change_hash():
+    kwargs = _manifest_kwargs()
+    a = build_manifest(**kwargs)
+    b = build_manifest(
+        **kwargs,
+        workload_pool=[
+            {"sha256": "sha256:" + ("1" * 64), "url": "https://x/1.json"},
+            {"sha256": "sha256:" + ("2" * 64), "url": "https://x/2.json"},
+        ],
+        sampling_rule={"type": "uniform_index", "seed_block_offset": 10},
+        z_threshold=3.0,
+    )
+    assert a.manifest_hash != b.manifest_hash
+    assert b.workload_pool is not None
+    assert b.z_threshold == 3.0

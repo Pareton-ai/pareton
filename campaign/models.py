@@ -118,9 +118,14 @@ class CampaignManifest:
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
     engine: dict[str, Any] | None = None
+    # Dynamic workload pool + sampler + z-score promotion. None stays out of
+    # the manifest pin set (same back-compat rule as bench/engine).
+    workload_pool: list[dict[str, Any]] | None = None
+    sampling_rule: dict[str, Any] | None = None
+    z_threshold: float | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "campaign_id": str(self.campaign_id) if self.campaign_id else None,
             "profile_id": str(self.profile_id) if self.profile_id else None,
             "baseline_repo": self.baseline_repo,
@@ -148,3 +153,10 @@ class CampaignManifest:
             "bench": self.bench,
             "engine": self.engine,
         }
+        if self.workload_pool is not None:
+            out["workload_pool"] = list(self.workload_pool)
+        if self.sampling_rule is not None:
+            out["sampling_rule"] = dict(self.sampling_rule)
+        if self.z_threshold is not None:
+            out["z_threshold"] = self.z_threshold
+        return out

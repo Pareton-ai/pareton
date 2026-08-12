@@ -166,6 +166,14 @@ BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS",
 BENCH_SLA_WARMUP_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
 )
+
+# Dynamic workload sampling + z-score promotion calibration.
+CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))
+# Minimum distinct baseline-vs-baseline samples for campaigns.calibration.
+CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "50"))
+# Soft guidance for how many pods / concurrent prepare dirs operators run.
+CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
+CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 # Ordered fallback providers tried after GPU_PROVIDER on no-capacity or
 # provision error. Comma-separated; empty string disables fallback.
