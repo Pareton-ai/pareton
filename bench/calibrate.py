@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -708,12 +710,24 @@ def prepare_pool_calibration_requests(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    token_set = bool(
+        (os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN") or "").strip()
+    )
+    print(
+        f"prepare --pool campaign={campaign_id} "
+        f"dataset={rule['dataset']}@{rule['revision'][:12]} "
+        f"n_prompts={rule['n_prompts']} n_rows={rule['n_rows']} "
+        f"samples={limit} hf_auth={'yes' if token_set else 'no'}",
+        flush=True,
+    )
     written: list[dict[str, Any]] = []
     seen: set[str] = set()
     cid = str(campaign_id)
     hf_fetch = row_fetcher or (lambda idx: fetch_hf_row(rule, idx))
     for i in range(limit):
         seed = calib_seed(cid, i)
+        print(f"generating sample {i + 1}/{limit} (sample-{i:03d}) ...", flush=True)
+        t0 = time.monotonic()
         try:
             sampled = generate_trace(
                 rule=rule,
@@ -740,6 +754,12 @@ def prepare_pool_calibration_requests(
             trace_sha256=sha,
         )
         written.append(req)
+        elapsed = time.monotonic() - t0
+        print(
+            f"wrote sample-{i:03d} prompts={len(sampled.row_indices)} "
+            f"{sha[:19]} {elapsed:.1f}s",
+            flush=True,
+        )
     return written
 
 

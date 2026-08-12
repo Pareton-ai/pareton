@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
 
@@ -24,7 +23,9 @@ MAX_PROMPT_CHARS = 8000
 DEFAULT_N_PROMPTS = 32
 DEFAULT_MAX_TOKENS = 128
 DEFAULT_SEED_BLOCK_OFFSET = 1
-HF_ROWS_URL = "https://datasets-server.huggingface.co/rows"
+
+# process-local cache: one Arrow split per pinned (dataset, revision, config, split)
+_HF_SPLIT_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
 
 class SamplerError(ValueError):
@@ -213,31 +214,62 @@ def encode_trace(trace: dict[str, Any]) -> bytes:
     return (json.dumps(trace, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def fetch_hf_row(rule: dict[str, Any], index: int) -> dict[str, Any]:
-    """Fetch one row from the HuggingFace datasets-server. Network path."""
-    params = urllib.parse.urlencode(
-        {
-            "dataset": rule["dataset"],
-            "config": rule["config"],
-            "split": rule["split"],
-            "revision": rule["revision"],
-            "offset": int(index),
-            "length": 1,
-        }
+def _hf_token() -> str | None:
+    token = (
+        os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN") or ""
+    ).strip()
+    return token or None
+
+
+def _call_load_dataset(**kwargs: Any) -> Any:
+    from datasets import load_dataset
+
+    return load_dataset(**kwargs)
+
+
+def _cached_hf_split(rule: dict[str, Any]) -> Any:
+    key = (
+        str(rule["dataset"]),
+        str(rule["revision"]),
+        str(rule["config"]),
+        str(rule["split"]),
     )
-    url = f"{HF_ROWS_URL}?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "pareton-sampler/1.0"})
+    cached = _HF_SPLIT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    print(
+        f"loading HF dataset {key[0]}@{key[1][:12]} "
+        f"config={key[2]} split={key[3]} (once, then index locally)",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
-        raise SamplerError(f"hf row fetch failed at offset {index}: {exc}") from exc
-    rows = data.get("rows") if isinstance(data, dict) else None
-    if not isinstance(rows, list) or not rows:
-        raise SamplerError(f"hf row fetch empty at offset {index}")
-    row = rows[0].get("row") if isinstance(rows[0], dict) else None
+        ds = _call_load_dataset(
+            path=key[0],
+            name=key[2],
+            split=key[3],
+            revision=key[1],
+            token=_hf_token(),
+        )
+    except Exception as exc:
+        raise SamplerError(f"hf load_dataset failed: {exc}") from exc
+    _HF_SPLIT_CACHE[key] = ds
+    return ds
+
+
+def fetch_hf_row(rule: dict[str, Any], index: int) -> dict[str, Any]:
+    """Return one row from the pinned HF split. Downloads parquet once per process."""
+    ds = _cached_hf_split(rule)
+    idx = int(index)
+    try:
+        row = ds[idx]
+    except IndexError as exc:
+        raise SamplerError(f"hf row missing at offset {index}") from exc
     if not isinstance(row, dict):
-        raise SamplerError(f"hf row missing at offset {index}")
+        try:
+            row = dict(row)
+        except Exception as exc:
+            raise SamplerError(f"hf row missing at offset {index}") from exc
     return row
 
 

@@ -12,6 +12,7 @@ from bench.sampler import (
     calib_seed,
     compute_sample_seed,
     extract_prompt,
+    fetch_hf_row,
     generate_trace,
     parse_sampling_rule,
     sample_workload,
@@ -164,3 +165,44 @@ def test_select_row_indices_modulo_distinct():
     assert len(idxs) == 3
     assert len(set(idxs)) == 3
     assert all(0 <= i < 5 for i in idxs)
+
+
+def test_fetch_hf_row_uses_load_dataset_and_caches(monkeypatch):
+    from bench.sampler import _HF_SPLIT_CACHE
+
+    _HF_SPLIT_CACHE.clear()
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    monkeypatch.delenv("PARETON_HF_TOKEN", raising=False)
+    calls: list[dict] = []
+    split = [
+        {"trajectory": [{"role": "user", "text": "a"}]},
+        {"trajectory": [{"role": "user", "text": "b"}]},
+        {"trajectory": [{"role": "user", "text": "c"}]},
+    ]
+
+    def fake_load(**kwargs):
+        calls.append(kwargs)
+        return split
+
+    monkeypatch.setattr("bench.sampler._call_load_dataset", fake_load)
+    rule = _rule()
+    assert fetch_hf_row(rule, 1)["trajectory"][0]["text"] == "b"
+    assert fetch_hf_row(rule, 2)["trajectory"][0]["text"] == "c"
+    assert len(calls) == 1
+    assert calls[0]["path"] == rule["dataset"]
+    assert calls[0]["revision"] == rule["revision"]
+    assert calls[0]["name"] == "default"
+    assert calls[0]["split"] == "train"
+    assert calls[0]["token"] == "hf_test_token"
+
+
+def test_fetch_hf_row_index_error(monkeypatch):
+    from bench.sampler import _HF_SPLIT_CACHE
+
+    _HF_SPLIT_CACHE.clear()
+    monkeypatch.setattr(
+        "bench.sampler._call_load_dataset",
+        lambda **_k: [{"trajectory": []}],
+    )
+    with pytest.raises(SamplerError, match="missing at offset"):
+        fetch_hf_row(_rule(), 5)

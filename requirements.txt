@@ -3,6 +3,7 @@ ruff>=0.15
 psycopg2-binary
 boto3>=1.34
 huggingface_hub>=0.30
+datasets>=2.21
 requests>=2.31
 lium.io>=0.0.30
 bittensor==11.0.2
