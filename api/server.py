@@ -29,6 +29,24 @@ from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from storage.s3 import create_presigned_patch_upload
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
+# Live pipeline endpoints use no-store until the submission reaches a terminal
+# state (PAR-44). Lists / campaigns keep the shared short TTL above.
+# ``built`` is terminal for no-bench campaigns; bench campaigns continue via
+# ``bench_queued`` (and later) in the same worker turn after enqueue.
+_TERMINAL_SUBMISSION_STATES = frozenset({"built", "benched", "rejected"})
+_NO_STORE = "no-store"
+
+
+def _is_terminal_submission_state(state: str | None) -> bool:
+    return state in _TERMINAL_SUBMISSION_STATES
+
+
+def _set_live_submission_cache_control(
+    response: Response, latest_state: str | None
+) -> None:
+    """Detail + build-log stay fresh while the pipeline is still moving."""
+    if not _is_terminal_submission_state(latest_state):
+        response.headers["Cache-Control"] = _NO_STORE
 
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
@@ -36,12 +54,14 @@ class CacheControlMiddleware(BaseHTTPMiddleware):
         response: Response = await call_next(request)
         path = request.url.path
         if path == "/health":
-            response.headers["Cache-Control"] = "no-store"
+            response.headers["Cache-Control"] = _NO_STORE
             return response
         if (
             request.method == "GET"
             and path.startswith("/v1/")
             and response.status_code == 200
+            # Handlers may already have set no-store for live submissions.
+            and "cache-control" not in response.headers
         ):
             response.headers["Cache-Control"] = V1_CACHE_CONTROL
         return response
@@ -204,16 +224,20 @@ def _resolve_unambiguous_submission(patch_hash: str) -> dict:
 
 
 @app.get("/v1/campaigns/{campaign_id}/submissions/{patch_hash}")
-def campaign_submission_detail(campaign_id: str, patch_hash: str):
+def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Response):
     row = get_submission_for_campaign(campaign_id, patch_hash)
     if row is None:
         raise HTTPException(status_code=404, detail="submission not found")
-    return _submission_detail_payload(row)
+    payload = _submission_detail_payload(row)
+    _set_live_submission_cache_control(response, payload.get("latest_state"))
+    return payload
 
 
 @app.get("/v1/submissions/{patch_hash}")
-def submission_detail(patch_hash: str):
-    return _submission_detail_payload(_resolve_unambiguous_submission(patch_hash))
+def submission_detail(patch_hash: str, response: Response):
+    payload = _submission_detail_payload(_resolve_unambiguous_submission(patch_hash))
+    _set_live_submission_cache_control(response, payload.get("latest_state"))
+    return payload
 
 
 _BUILD_LOG_MAX_TAIL = 2000
@@ -232,7 +256,10 @@ def _build_log_response(row: dict, tail: int) -> PlainTextResponse:
         raise HTTPException(status_code=404, detail="build log not found") from None
     text = raw_tail.decode("utf-8", errors="replace")
     clean = _CONTROL_CHARS.sub("", _ANSI_SEQ.sub("", text))
-    return PlainTextResponse("\n".join(clean.splitlines()[-tail:]) + "\n")
+    resp = PlainTextResponse("\n".join(clean.splitlines()[-tail:]) + "\n")
+    states = list_latest_states([row["id"]])
+    _set_live_submission_cache_control(resp, states.get(str(row["id"])))
+    return resp
 
 
 @app.get(
@@ -258,7 +285,8 @@ def submission_build_log(
     """Last `tail` lines of the durable build log (PAR-37 path), sanitized.
 
     Content is miner-influenced build output: ANSI/control chars stripped,
-    served as text/plain, never cached beyond the shared 30s v1 policy.
+    served as text/plain. Non-terminal submissions are Cache-Control: no-store
+    so live tails are not held by CDN/browser caches (PAR-44).
     """
     row = _resolve_unambiguous_submission(patch_hash)
     return _build_log_response(row, tail)
