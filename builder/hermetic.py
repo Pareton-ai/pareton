@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 
 import config
 from builder.digest import (
@@ -21,13 +22,11 @@ from builder.digest import (
     resolve_image_repo_digest,
 )
 from builder.registry import engine_image_ref
+from campaign.engine import resolve_engine
 from gate.types import GateResult, SubmissionState
 
 logger = logging.getLogger(__name__)
 
-_VLLM_API_SERVER_ENTRYPOINT = (
-    'ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]'
-)
 _CACHE_ID_SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
@@ -52,6 +51,7 @@ def dockerfile_for_patch(
     baseline_commit: str = "unknown",
     max_jobs: int | None = None,
     torch_cuda_arch_list: str | None = None,
+    engine: dict[str, Any] | None = None,
 ) -> str:
     """Generate the hermetic engine Dockerfile text (unit-testable, no Docker).
 
@@ -60,10 +60,19 @@ def dockerfile_for_patch(
 
     Parallelism uses ARG (build-time) so job count is not a permanent image ENV
     fingerprint; ARG values are visible to RUN. NVCC_THREADS stays 1 (ENV).
+
+    ``engine`` is the campaign's engine profile (PAR-55). It supplies the only
+    two engine-specific pieces of this file — ``install_cmd`` and ``entrypoint``
+    — and ``None`` resolves to the vLLM default, so a campaign pinned before
+    engine profiles existed emits a byte-identical Dockerfile.
     """
     jobs = int(config.BUILD_MAX_JOBS if max_jobs is None else max_jobs)
     if jobs < 1:
         raise ValueError(f"BUILD_MAX_JOBS must be >= 1, got {jobs}")
+    # Raises on an unknown engine name or a token carrying newlines/control
+    # characters, so a malformed profile fails here rather than injecting extra
+    # directives into the generated Dockerfile.
+    profile = resolve_engine(engine)
     arch = (
         config.TORCH_CUDA_ARCH_LIST
         if torch_cuda_arch_list is None
@@ -104,18 +113,20 @@ def dockerfile_for_patch(
         "CMAKE_CUDA_COMPILER_LAUNCHER=ccache; "
         'else echo "pareton-builder: ccache missing; continuing without"; fi'
     )
+    # Drop compile debris so export does not unpack multi-GB rust/CUDA
+    # intermediates (VPS ENOSPC on unpack after a successful wheel build).
+    # Engine-neutral by inspection, not by luck: PAR-54 found SGLang also has a
+    # rust/ cargo workspace (sglang-grpc, sglang-mm, sglang-server), and `rm -rf`
+    # is a no-op on paths an engine does not have. No engine field needed.
+    cleanup = "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip"
+    install = profile["install_cmd"]
     if skip_apply:
-        body_steps = [
-            "pip install --no-deps --no-build-isolation -e .",
-            # Drop compile debris so export does not unpack multi-GB rust/CUDA
-            # intermediates (VPS ENOSPC on unpack after a successful wheel build).
-            "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip",
-        ]
+        body_steps = [install, cleanup]
     else:
         body_steps = [
             "git apply --whitespace=nowarn /tmp/submission.diff",
-            "pip install --no-deps --no-build-isolation -e .",
-            "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip",
+            install,
+            cleanup,
         ]
     run_parts = [setup_ccache, *body_steps]
     cache_id = _ccache_mount_id(baseline_commit)
@@ -137,7 +148,9 @@ def dockerfile_for_patch(
     lines.append(
         f"RUN --mount=type=cache,{mount_opts} " + " \\\n    && ".join(run_parts)
     )
-    lines.append(_VLLM_API_SERVER_ENTRYPOINT)
+    # json.dumps renders exec-form ENTRYPOINT with ", " separators, which is
+    # byte-identical to the vLLM literal this replaced.
+    lines.append(f"ENTRYPOINT {json.dumps(profile['entrypoint'])}")
     lines.append("")
     return "\n".join(lines)
 
@@ -256,6 +269,7 @@ def build_engine_image(
     push: bool = True,
     allow_empty_patch: bool = False,
     image_ref_override: str | None = None,
+    engine: dict[str, Any] | None = None,
 ) -> GateResult:
     """Build and optionally push an engine image tagged by patch_hash.
 
@@ -265,6 +279,9 @@ def build_engine_image(
 
     ``allow_empty_patch`` is ops-only (A2b baseline engine). Miner gate surface
     still rejects empty patches before this runs.
+
+    ``engine`` is the campaign's engine profile; ``None`` means vLLM. An invalid
+    profile is rejected as ``build_config_invalid`` alongside a bad max_jobs.
     """
     if _patch_is_empty(patch_bytes) and not allow_empty_patch:
         return GateResult.reject("empty_patch_not_allowed")
@@ -286,6 +303,7 @@ def build_engine_image(
             allow_empty_patch=allow_empty_patch,
             patch_bytes=patch_bytes,
             baseline_commit=baseline_commit,
+            engine=engine,
         )
     except ValueError as exc:
         return GateResult.reject("build_config_invalid", error=str(exc))
@@ -301,6 +319,9 @@ def build_engine_image(
         f"build_max_jobs={config.BUILD_MAX_JOBS} "
         f"torch_cuda_arch_list={config.TORCH_CUDA_ARCH_LIST or '(default)'}"
     )
+    # Which recipe ran is the first thing to check when an image starts the
+    # wrong server, so surface it next to the other build knobs.
+    _progress(f"engine={resolve_engine(engine)['name']}")
 
     try:
         _progress("step 1/5 clone baseline repo")

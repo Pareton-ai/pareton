@@ -218,6 +218,7 @@ def process_submission(
                 work_root=work_root,
                 log_dir=config.BUILD_LOG_DIR / submission_id,
                 push=True,
+                engine=campaign.engine,
             )
     if not build_res.ok:
         obs.build_failed(
