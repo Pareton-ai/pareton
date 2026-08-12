@@ -143,7 +143,8 @@ def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int,
         raise RuntimeError(
             "fee transfer landed but the chain returned no extrinsic id, so the "
             "payment cannot be referenced; find its block and index on an "
-            "explorer before retrying (do not pay twice)"
+            "explorer, then retry with --payment-block / --payment-tx "
+            "(do not pay twice)"
         )
     return ref
 
@@ -196,7 +197,35 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print commitment payload without submitting on-chain",
     )
+    p.add_argument(
+        "--payment-block",
+        type=int,
+        default=None,
+        help="Reuse an already-paid fee: block number of the transfer "
+        "(skip a second transfer after a failed commitment)",
+    )
+    p.add_argument(
+        "--payment-tx",
+        type=int,
+        default=None,
+        help="Reuse an already-paid fee: extrinsic index within that block",
+    )
     args = p.parse_args(argv)
+
+    if (args.payment_block is None) != (args.payment_tx is None):
+        print(
+            "error: --payment-block and --payment-tx must be set together",
+            file=sys.stderr,
+        )
+        return 1
+    if args.payment_block is not None and (
+        args.payment_block < 1 or args.payment_tx < 0
+    ):
+        print(
+            "error: --payment-block must be >= 1 and --payment-tx >= 0",
+            file=sys.stderr,
+        )
+        return 1
 
     if not args.patch.is_file():
         print(f"error: patch not found: {args.patch}", file=sys.stderr)
@@ -254,6 +283,12 @@ def main(argv: list[str] | None = None) -> int:
     }
     fee_tao = config.SUBMISSION_FEE_TAO
     recipient = config.PAYMENT_RECIPIENT_ADDRESS
+    if args.payment_block is not None and fee_tao <= 0:
+        print(
+            "error: --payment-block/--payment-tx require PARETON_SUBMISSION_FEE_TAO > 0",
+            file=sys.stderr,
+        )
+        return 1
     try:
         payload = encode_patch_commitment(**payload_args)
         # Size the payload against a worst-case proof before any money moves.
@@ -270,10 +305,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
+        if fee_tao > 0 and args.payment_block is not None:
+            payload = encode_patch_commitment(
+                **payload_args,
+                payment_block=args.payment_block,
+                payment_tx=args.payment_tx,
+            )
         print(f"commitment payload ({len(payload.encode())} bytes):")
         print(payload)
         if fee_tao > 0:
-            print(f"dry-run: would transfer {fee_tao} TAO to {recipient}")
+            if args.payment_block is not None:
+                print(
+                    f"dry-run: would reuse payment "
+                    f"{args.payment_block}-{args.payment_tx}"
+                )
+            else:
+                print(f"dry-run: would transfer {fee_tao} TAO to {recipient}")
         print("dry-run: not submitting on-chain")
         return 0
 
@@ -287,18 +334,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Pay only after the hotkey is known registered: an unregistered hotkey
-    # cannot commit, and the fee would be spent for nothing.
+    # cannot commit, and the fee would be spent for nothing. Reuse flags let
+    # a miner retry the commitment after a transfer that already landed.
+    payment_block = payment_tx = None
     if fee_tao > 0:
-        try:
-            payment_block, payment_tx = _pay_fee(
-                subtensor, wallet, fee_tao=fee_tao, recipient=recipient
+        if args.payment_block is not None:
+            payment_block, payment_tx = args.payment_block, args.payment_tx
+            print(f"reusing payment {payment_block}-{payment_tx}")
+        else:
+            try:
+                payment_block, payment_tx = _pay_fee(
+                    subtensor, wallet, fee_tao=fee_tao, recipient=recipient
+                )
+            except Exception as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            print(
+                f"paid fee {fee_tao} TAO to {recipient} "
+                f"(payment {payment_block}-{payment_tx})"
             )
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-        print(
-            f"paid fee {fee_tao} TAO to {recipient} (payment {payment_block}-{payment_tx})"
-        )
         payload_args["payment_block"] = payment_block
         payload_args["payment_tx"] = payment_tx
 
@@ -312,6 +366,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"commitment payload ({len(payload.encode())} bytes):")
     print(payload)
 
+    def _reuse_hint() -> None:
+        if payment_block is None or payment_tx is None:
+            return
+        print(
+            f"reuse the fee with --payment-block {payment_block} "
+            f"--payment-tx {payment_tx} (do not pay twice)",
+            file=sys.stderr,
+        )
+
     try:
         call = bt.calls.Commitments.set_commitment(
             netuid=args.netuid,
@@ -322,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         ).submit_call(call, wallet, signer="hotkey")
     except Exception as exc:
         print(f"error: commitment failed: {exc}", file=sys.stderr)
+        _reuse_hint()
         return 1
     if not getattr(result, "success", False):
         print(
@@ -329,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{getattr(result, 'message', None) or getattr(result, 'error', result)}",
             file=sys.stderr,
         )
+        _reuse_hint()
         return 1
 
     commit_ref = getattr(result, "extrinsic_id", None) or "unknown"

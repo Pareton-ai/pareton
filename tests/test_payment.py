@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 pytestmark = pytest.mark.unit
 
 from chain.payment import (
+    BlockPaymentView,
     PaymentCheck,
     extract_transfer,
+    extrinsic_succeeded,
     fee_rao,
-    fetch_block_extrinsics,
+    fetch_block_payment_view,
     verify_payment,
 )
 
@@ -51,7 +55,24 @@ def _timestamp_inherent() -> dict:
     }
 
 
-def _check(extrinsics: list, index: int = 0, **overrides) -> PaymentCheck:
+def _system_event(event_id: str, index: int = 0, *, via_phase: bool = False) -> dict:
+    event = {
+        "event": {
+            "module_id": "System",
+            "event_id": event_id,
+            "attributes": {},
+        }
+    }
+    if via_phase:
+        event["phase"] = {"ApplyExtrinsic": index}
+    else:
+        event["extrinsic_idx"] = index
+    return event
+
+
+def _check(
+    extrinsics: list, index: int = 0, events: list | None = None, **overrides
+) -> PaymentCheck:
     kwargs = dict(
         recipient=RECIPIENT,
         min_amount_rao=FEE_RAO,
@@ -59,7 +80,11 @@ def _check(extrinsics: list, index: int = 0, **overrides) -> PaymentCheck:
         coldkey=COLDKEY,
     )
     kwargs.update(overrides)
-    return verify_payment(extrinsics=extrinsics, extrinsic_index=index, **kwargs)
+    if events is None:
+        events = [_system_event("ExtrinsicSuccess", index)]
+    return verify_payment(
+        extrinsics=extrinsics, events=events, extrinsic_index=index, **kwargs
+    )
 
 
 @pytest.mark.parametrize(
@@ -145,7 +170,35 @@ def test_amount_that_is_not_an_integer_is_rejected():
     assert check.reason == "payment_not_a_transfer"
 
 
-def test_fetch_block_extrinsics_returns_none_when_block_is_unreadable():
+def test_failed_extrinsic_does_not_count_as_payment():
+    # Failed Substrate extrinsics stay in the block with intact call args.
+    check = _check(
+        [_transfer()],
+        events=[_system_event("ExtrinsicFailed")],
+    )
+    assert not check.ok
+    assert check.reason == "payment_extrinsic_failed"
+
+
+def test_missing_success_event_is_rejected():
+    check = _check([_transfer()], events=[])
+    assert not check.ok
+    assert check.reason == "payment_outcome_unknown"
+
+
+def test_success_event_via_apply_extrinsic_phase():
+    assert extrinsic_succeeded(
+        [_system_event("ExtrinsicSuccess", 2, via_phase=True)], 2
+    )
+    check = _check(
+        [_timestamp_inherent(), _timestamp_inherent(), _transfer()],
+        index=2,
+        events=[_system_event("ExtrinsicSuccess", 2, via_phase=True)],
+    )
+    assert check.ok
+
+
+def test_fetch_block_payment_view_returns_none_when_unreadable():
     class Boom:
         def block_info(self, _block):
             raise RuntimeError("rpc down")
@@ -154,16 +207,21 @@ def test_fetch_block_extrinsics_returns_none_when_block_is_unreadable():
         def block_info(self, _block):
             return None
 
-    assert fetch_block_extrinsics(Boom(), 42) is None
-    assert fetch_block_extrinsics(Missing(), 42) is None
+    assert fetch_block_payment_view(Boom(), 42) is None
+    assert fetch_block_payment_view(Missing(), 42) is None
 
 
-def test_fetch_block_extrinsics_unwraps_block_info():
-    class Info:
-        extrinsics = [_transfer()]
-
+def test_fetch_block_payment_view_loads_extrinsics_and_events():
     class Sub:
         def block_info(self, _block):
-            return Info()
+            return SimpleNamespace(extrinsics=[_transfer()])
 
-    assert fetch_block_extrinsics(Sub(), 42) == [_transfer()]
+        def query(self, _item, block=None):
+            assert block == 42
+            return [_system_event("ExtrinsicSuccess")]
+
+    view = fetch_block_payment_view(Sub(), 42)
+    assert view == BlockPaymentView(
+        extrinsics=[_transfer()],
+        events=[_system_event("ExtrinsicSuccess")],
+    )
