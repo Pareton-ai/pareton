@@ -17,6 +17,11 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+# finney CommitmentInfo allows MaxFields=3 Data::Raw chunks of 128 bytes each.
+MAX_PLAINTEXT_BYTES = 384
+# Payment refs land in Postgres INTEGER columns.
+_MAX_PAYMENT_REF = 2**31 - 1
+_DIGITS_RE = re.compile(r"^[0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,9 @@ class PatchCommitment:
     patch_hash: str
     retrieval_url: str
     raw: str
+    # Submission-fee proof: block and extrinsic index of the miner's transfer.
+    payment_block: int | None = None
+    payment_tx: int | None = None
 
     def as_key(self) -> tuple[str, str]:
         return (self.campaign_id, self.patch_hash)
@@ -41,12 +49,27 @@ class _MetagraphLike(Protocol):
     hotkeys: list[str]
 
 
-def _parse_v2(raw: str) -> dict[str, str] | None:
-    """Parse `v2|campaign_id|baseline_commit|sha256:<hex>|retrieval_url`."""
-    parts = raw.split("|")
-    if len(parts) != 5:
+def _parse_payment_ref(block: str, tx: str) -> dict[str, int] | None:
+    """Parse the `|<block>|<extrinsic_index>` fee-proof tail."""
+    b, t = block.strip(), tx.strip()
+    if not _DIGITS_RE.match(b) or not _DIGITS_RE.match(t):
         return None
-    _v, campaign_id, baseline_commit, patch_hash, retrieval_url = parts
+    block_num, tx_index = int(b), int(t)
+    if block_num < 1 or block_num > _MAX_PAYMENT_REF or tx_index > _MAX_PAYMENT_REF:
+        return None
+    return {"payment_block": block_num, "payment_tx": tx_index}
+
+
+def _parse_v2(raw: str) -> dict[str, Any] | None:
+    """Parse `v2|campaign_id|baseline_commit|sha256:<hex>|retrieval_url`.
+
+    A 7-part payload carries the submission-fee proof as two extra positional
+    fields: `|<payment_block>|<payment_extrinsic_index>`.
+    """
+    parts = raw.split("|")
+    if len(parts) not in (5, 7):
+        return None
+    _v, campaign_id, baseline_commit, patch_hash, retrieval_url = parts[:5]
     if not _UUID_RE.match(campaign_id.strip()):
         return None
     if not _GIT_SHA_RE.match(baseline_commit.strip().lower()):
@@ -55,15 +78,21 @@ def _parse_v2(raw: str) -> dict[str, str] | None:
         return None
     if not retrieval_url.strip().startswith(("https://", "http://")):
         return None
-    return {
+    parsed: dict[str, Any] = {
         "campaign_id": str(UUID(campaign_id.strip())),
         "baseline_commit": baseline_commit.strip().lower(),
         "patch_hash": patch_hash.strip().lower(),
         "retrieval_url": retrieval_url.strip(),
     }
+    if len(parts) == 7:
+        payment = _parse_payment_ref(parts[5], parts[6])
+        if payment is None:
+            return None
+        parsed.update(payment)
+    return parsed
 
 
-def parse_patch_commitment(raw: str) -> dict[str, str] | None:
+def parse_patch_commitment(raw: str) -> dict[str, Any] | None:
     """Parse a Pareton patch commitment (v2 pipe format or legacy v1 JSON)."""
     if not isinstance(raw, str) or not raw:
         return None
@@ -112,6 +141,8 @@ def encode_patch_commitment(
     baseline_commit: str,
     patch_hash: str,
     retrieval_url: str,
+    payment_block: int | None = None,
+    payment_tx: int | None = None,
 ) -> str:
     """Canonical v2 wire string for Commitments.set_commitment.
 
@@ -119,6 +150,10 @@ def encode_patch_commitment(
     (3 x 128-byte Raw chunks = 384 bytes), and the v1 JSON skeleton alone
     costs ~75 bytes; this format keeps full payloads (~356 bytes) inside
     the bound. None of the values may contain '|'.
+
+    The submission-fee proof is the payment's block and extrinsic index, not
+    its 32-byte hash: `|<block>|<index>` costs ~12 bytes against ~67 for
+    `0x<hash>`, which matters against the 384-byte cap.
     """
     cid = str(UUID(campaign_id))
     baseline = baseline_commit.lower()
@@ -134,7 +169,20 @@ def encode_patch_commitment(
             raise ValueError(f"{name} must not contain '|'")
     if not url.startswith(("https://", "http://")):
         raise ValueError("retrieval_url must start with http:// or https://")
-    raw = "|".join(["v2", cid, baseline, phash, url])
+    if (payment_block is None) != (payment_tx is None):
+        raise ValueError("payment_block and payment_tx must be set together")
+    parts = ["v2", cid, baseline, phash, url]
+    if payment_block is not None and payment_tx is not None:
+        if payment_block < 1 or payment_tx < 0:
+            raise ValueError("payment_block must be >= 1 and payment_tx >= 0")
+        parts += [str(payment_block), str(payment_tx)]
+    raw = "|".join(parts)
+    size = len(raw.encode())
+    if size > MAX_PLAINTEXT_BYTES:
+        raise ValueError(
+            f"commitment payload is {size} bytes; finney MaxFields=3 caps "
+            f"plaintext commitments at {MAX_PLAINTEXT_BYTES} bytes"
+        )
     if parse_patch_commitment(raw) is None:
         raise ValueError("encoded commitment failed parse round-trip")
     return raw
@@ -175,6 +223,8 @@ def build_patch_commitments(
             patch_hash=parsed["patch_hash"],
             retrieval_url=parsed["retrieval_url"],
             raw=raw,
+            payment_block=parsed.get("payment_block"),
+            payment_tx=parsed.get("payment_tx"),
         )
     return out
 

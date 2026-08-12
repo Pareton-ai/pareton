@@ -175,8 +175,15 @@ GPU_PROVIDER_FALLBACKS: list[str] = [
     if p.strip()
 ]
 
-# Set PARETON_SUBMISSION_FEE_TAO > 0 before opening to external miners.
+# Per-submission fee the miner transfers to PAYMENT_RECIPIENT_ADDRESS before
+# committing; > 0 makes a verified fee proof mandatory. Default off so local
+# and mock runs need no payments: set 0.05 in the deployed env (.env.example)
+# and keep it > 0 whenever a campaign is open to external miners.
 SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0"))
+PAYMENT_RECIPIENT_ADDRESS: str = os.environ.get(
+    "PARETON_PAYMENT_RECIPIENT_ADDRESS",
+    "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+)
 
 # Axiom observability (Vector log shipping). Ingest-only token; store in
 # /opt/pareton/.env at deploy time, never in the repo.

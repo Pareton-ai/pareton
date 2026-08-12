@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS submissions (
   baseline_commit TEXT NOT NULL,
   retrieval_url TEXT NOT NULL,
   commit_block INTEGER,
+  payment_block INTEGER,
+  payment_tx INTEGER,
   committed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   engine_image_ref TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -68,6 +70,11 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE INDEX IF NOT EXISTS submissions_campaign_id_idx ON submissions (campaign_id);
 CREATE INDEX IF NOT EXISTS submissions_hotkey_idx ON submissions (hotkey);
 CREATE INDEX IF NOT EXISTS submissions_patch_hash_idx ON submissions (patch_hash);
+
+-- Replay guard: one fee payment backs exactly one submission.
+CREATE UNIQUE INDEX IF NOT EXISTS submissions_payment_ref_idx
+  ON submissions (payment_block, payment_tx)
+  WHERE payment_block IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS submission_events (
   id BIGSERIAL PRIMARY KEY,
