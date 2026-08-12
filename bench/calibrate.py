@@ -179,8 +179,15 @@ def prepare_campaign_calibration_request(
     fetcher: Callable[[str], bytes] | None = None,
     task_id: str | None = None,
     get_campaign_fn: Callable[[str], Any] | None = None,
+    trace_url: str | None = None,
+    trace_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Build mode=correctness baseline==candidate request from a campaign row."""
+    """Build mode=correctness baseline==candidate request from a campaign row.
+
+    trace_url/trace_sha256 override the campaign's pinned trace (used by the
+    pool path to calibrate one request per pool entry). The model, gpu_count,
+    and serve_args always come from campaign.bench.
+    """
     if get_campaign_fn is None:
         from campaign.store import get_campaign as get_campaign_fn  # type: ignore[no-redef]
 
@@ -205,10 +212,14 @@ def prepare_campaign_calibration_request(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    use_trace_url = trace_url if trace_url is not None else manifest.workload_trace_url
+    use_trace_sha = (
+        trace_sha256 if trace_sha256 is not None else manifest.workload_trace_sha256
+    )
     try:
         trace_path = materialize_trace(
-            url=manifest.workload_trace_url,
-            expected_sha256=manifest.workload_trace_sha256,
+            url=use_trace_url,
+            expected_sha256=use_trace_sha,
             dest_dir=output_dir,
             fetcher=fetcher,
         )
@@ -258,7 +269,7 @@ def prepare_campaign_calibration_request(
     sla = manifest.sla.to_dict() if manifest.sla is not None else {}
     row: dict[str, Any] = {
         "engine_image_ref": engine_ref,
-        "workload_trace_sha256": manifest.workload_trace_sha256,
+        "workload_trace_sha256": use_trace_sha,
         "gpu_skus": gpu_skus,
         "bench": calib_bench,
         "sla": {
@@ -707,13 +718,13 @@ def prepare_pool_calibration_requests(
             raise CalibrationError(f"repeated trace in pool: {sha}")
         seen.add(sha)
         sample_dir = output_dir / f"sample-{i:03d}"
-        req = prepare_calibration_request(
-            engine_digest=str(baseline_digest),
-            gpu_sku=str(gpu_skus[0]),
+        req = prepare_campaign_calibration_request(
+            campaign_id=campaign_id,
             output_dir=sample_dir,
+            fetcher=fetcher,
+            get_campaign_fn=lambda _cid: manifest,
             trace_url=str(entry["url"]),
             trace_sha256=sha,
-            fetcher=fetcher,
         )
         written.append(req)
     return written
