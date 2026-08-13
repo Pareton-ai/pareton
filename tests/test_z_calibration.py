@@ -246,4 +246,5 @@ def test_prepare_generates_distinct_traces(tmp_path: Path):
     assert (tmp_path / "sample-000" / "bench_request.json").is_file()
     assert reqs[0]["model"]["hf_repo"] == "Qwen/Qwen2.5-7B-Instruct"
     assert reqs[0]["hardware"]["gpu_count"] == 1
+    assert reqs[0]["mode"] == "all"
 

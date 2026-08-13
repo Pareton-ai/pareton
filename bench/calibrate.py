@@ -183,8 +183,12 @@ def prepare_campaign_calibration_request(
     get_campaign_fn: Callable[[str], Any] | None = None,
     trace_url: str | None = None,
     trace_sha256: str | None = None,
+    mode: str = "correctness",
 ) -> dict[str, Any]:
-    """Build mode=correctness baseline==candidate request from a campaign row.
+    """Build a baseline==candidate bench request from a campaign row.
+
+    Default mode is correctness (threshold calibration). Pool z-calibration
+    passes mode="all" so perf_screen runs; analyze-z needs throughput_ratio.
 
     trace_url/trace_sha256 override the campaign's pinned trace (used by the
     generated-sample path). The model, gpu_count, and serve_args always come
@@ -289,7 +293,7 @@ def prepare_campaign_calibration_request(
     except BenchInfraError as exc:
         raise CalibrationError(str(exc)) from exc
 
-    req["mode"] = "correctness"
+    req["mode"] = mode
     req["engines"]["candidate"]["image"] = engine_ref
     req["engines"]["baseline"]["image"] = engine_ref
 
@@ -752,6 +756,7 @@ def prepare_pool_calibration_requests(
             get_campaign_fn=lambda _cid: manifest,
             trace_url=f"file://{trace_path.resolve()}",
             trace_sha256=sha,
+            mode="all",
         )
         written.append(req)
         elapsed = time.monotonic() - t0
