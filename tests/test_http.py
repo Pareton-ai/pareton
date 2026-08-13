@@ -222,3 +222,35 @@ def test_stream_missing_usage_is_engine_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
     with pytest.raises(EngineError, match="usage.completion_tokens"):
         post_completion_stream("http://example", prompt="p", max_tokens=5)
+
+
+def test_post_completion_clamps_zero_max_tokens(monkeypatch: pytest.MonkeyPatch):
+    from bench.http import post_completion
+
+    captured: dict[str, Any] = {}
+
+    class _CM:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self) -> bytes:
+            return self._body
+
+    def fake_urlopen(req, timeout=60):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _CM(
+            json.dumps(
+                {"id": "c1", "choices": [{"text": "", "logprobs": {"tokens": []}}]}
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    post_completion("http://example", prompt="probe", max_tokens=0, echo=True)
+    assert captured["body"]["max_tokens"] == 1
+    assert captured["body"]["echo"] is True

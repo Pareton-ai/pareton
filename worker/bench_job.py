@@ -705,7 +705,9 @@ def realize_submission_sample(
                     delay_s=float(config.CHAIN_RETRY_DELAY_S),
                 )
             except ChainError as exc:
-                raise BenchInfraError("sample_seed_block_unavailable", str(exc)) from exc
+                raise BenchInfraError(
+                    "sample_seed_block_unavailable", str(exc)
+                ) from exc
 
         block_hash_fn = _default_hash
 

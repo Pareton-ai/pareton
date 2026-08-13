@@ -342,6 +342,7 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
 
     ensure_durable_keypair(tmp_path / "st")
     monkeypatch.setattr("gpu.orchestrate.config.BENCH_HEALTH_TIMEOUT_S", 1800.0)
+    monkeypatch.setattr("gpu.orchestrate.config.BENCH_SKIP_SLA", False)
     pushed: list[str] = []
 
     def capturing_push(pod, local, remote, **kwargs):
@@ -366,6 +367,39 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     assert pushed
     assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
     assert "HF_XET_HIGH_PERFORMANCE=1" in pushed[0]
+    assert "PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/sglang-cache" in pushed[0]
+    assert "PARETON_BENCH_SKIP_SLA=" not in pushed[0]
+
+
+def test_write_remote_env_forwards_skip_sla(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import _write_remote_env
+    from gpu.types import Pod, SshTarget
+
+    ensure_durable_keypair(tmp_path / "st")
+    monkeypatch.setattr("gpu.orchestrate.config.BENCH_SKIP_SLA", True)
+    pushed: list[str] = []
+
+    def capturing_push(pod, local, remote, **kwargs):
+        pushed.append(Path(local).read_text(encoding="utf-8"))
+
+    monkeypatch.setattr("gpu.orchestrate.push", capturing_push)
+    monkeypatch.setattr(
+        "gpu.orchestrate.ssh_exec",
+        lambda *a, **k: SshResult(0, "", ""),
+    )
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
+    assert pushed
+    assert "PARETON_BENCH_SKIP_SLA=1" in pushed[0]
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):

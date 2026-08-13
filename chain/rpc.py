@@ -160,8 +160,7 @@ def fetch_finalized_block_hash(
         need = int(block_number) + int(finality_depth)
         if current < need:
             raise ChainError(
-                f"block {block_number} not finalized "
-                f"(current={current}, need>={need})"
+                f"block {block_number} not finalized (current={current}, need>={need})"
             )
         block_hash: str | None = None
         # Prefer explicit historical lookup; fall back to block_info(block).

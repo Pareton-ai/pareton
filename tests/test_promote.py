@@ -42,11 +42,7 @@ def _calib(**means_stds: tuple[float, float]) -> dict:
         "neg_throughput_ratio": (-1.0, 0.05),
     }
     defaults.update(means_stds)
-    return {
-        "metrics": {
-            k: {"mean": v[0], "std": v[1]} for k, v in defaults.items()
-        }
-    }
+    return {"metrics": {k: {"mean": v[0], "std": v[1]} for k, v in defaults.items()}}
 
 
 def test_extract_inverts_throughput():
@@ -86,6 +82,7 @@ def test_positive_z_means_worse_throughput():
     )
     assert result.z_scores["neg_throughput_ratio"] == pytest.approx(3.0)
     assert result.promoted is False
+
 
 def test_extract_does_not_require_p99():
     obs = extract_observed_metrics(_report())

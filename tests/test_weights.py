@@ -142,7 +142,10 @@ def test_download_call_shape_and_token(
     assert call["revision"] == model.hf_revision
     assert call["token"] == "tok-secret-value"
     assert "/.partial/" in call["local_dir"].replace("\\", "/")
-    assert Path(call["local_dir"]).name == f"{repo_slug(model.hf_repo)}-{model.hf_revision}"
+    assert (
+        Path(call["local_dir"]).name
+        == f"{repo_slug(model.hf_repo)}-{model.hf_revision}"
+    )
     assert "local_dir_use_symlinks" not in call["kwargs"]
 
     monkeypatch.delenv("MY_HF_TOKEN", raising=False)

@@ -169,9 +169,7 @@ def select_row_indices(
     max_tries = n_rows * 8
     while len(chosen) < n_prompts:
         if counter >= max_tries:
-            raise SamplerError(
-                f"could not fill {n_prompts} prompts from {n_rows} rows"
-            )
+            raise SamplerError(f"could not fill {n_prompts} prompts from {n_rows} rows")
         idx = _index_at(cleaned, counter, n_rows)
         counter += 1
         if idx in seen:

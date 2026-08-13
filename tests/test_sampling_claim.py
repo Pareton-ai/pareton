@@ -45,7 +45,10 @@ def _fetcher():
 
 def test_campaign_uses_dynamic_sampling_flags():
     assert campaign_uses_dynamic_sampling({}) is False
-    assert campaign_uses_dynamic_sampling({"sampling_rule": {"type": "uniform_index"}}) is False
+    assert (
+        campaign_uses_dynamic_sampling({"sampling_rule": {"type": "uniform_index"}})
+        is False
+    )
     assert campaign_uses_dynamic_sampling({"sampling_rule": HF_RULE})
     assert (
         campaign_uses_dynamic_sampling(

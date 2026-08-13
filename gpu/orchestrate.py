@@ -19,6 +19,7 @@ from bench.validate import (
 )
 
 from gpu.bootstrap import (
+    REMOTE_ENGINE_CACHE,
     REMOTE_HF_CACHE,
     REMOTE_REPO,
     REMOTE_VENV,
@@ -108,6 +109,7 @@ def _write_remote_env(
 ) -> None:
     lines: list[str] = [
         f"PARETON_BENCH_HF_CACHE_DIR={REMOTE_HF_CACHE}",
+        f"PARETON_BENCH_ENGINE_CACHE_DIR={REMOTE_ENGINE_CACHE}",
         # Harness reads config on the pod, which has no .env; forward the
         # worker-side value so large models get the same health window.
         f"PARETON_BENCH_HEALTH_TIMEOUT_S={config.BENCH_HEALTH_TIMEOUT_S}",
@@ -116,6 +118,8 @@ def _write_remote_env(
         # on laptops (can be slower with less RAM).
         "HF_XET_HIGH_PERFORMANCE=1",
     ]
+    if config.BENCH_SKIP_SLA:
+        lines.append("PARETON_BENCH_SKIP_SLA=1")
     hf = os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN")
     if hf:
         lines.append(f"HF_TOKEN={hf}")
@@ -435,16 +439,12 @@ def _bench_jobs(
     resolved = Path(request_path).resolve()
     if repetitions == 1:
         return [(resolved, output_dir)]
-    return [
-        (resolved, output_dir / f"run-{i:03d}") for i in range(1, repetitions + 1)
-    ]
+    return [(resolved, output_dir / f"run-{i:03d}") for i in range(1, repetitions + 1)]
 
 
 def _preflight_request(request_path: Path, repo_root: Path):
     req, _raw = load_bench_request(request_path)
-    trace_path = resolve_trace_path(
-        req.workload_trace.path, request_path=request_path
-    )
+    trace_path = resolve_trace_path(req.workload_trace.path, request_path=request_path)
     load_workload_trace(trace_path, expected_sha256=req.workload_trace.sha256)
     return req, trace_path
 

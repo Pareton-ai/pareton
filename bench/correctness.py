@@ -220,6 +220,52 @@ def extract_output_logprobs(
                 top1=_top1_token(top_dict),
             )
         )
+    if out:
+        return out
+    # SGLang: echo logprobs are often completion-only with offsets into
+    # choices[0].text (0-based), not into prompt+text. vLLM's char-offset
+    # cut then yields nothing.
+    usage = resp.get("usage") if isinstance(resp.get("usage"), dict) else {}
+    try:
+        n_comp = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        n_comp = 0
+    start = max(0, n - n_comp) if n_comp > 0 else 0
+    logger.warning(
+        "logprobs text_offset missed original_prompt "
+        "(n=%d n_comp=%d max_off=%s prompt_len=%d); "
+        "using tokens[%d:]",
+        n,
+        n_comp,
+        max(int(x) for x in text_offset if x is not None) if text_offset else None,
+        prompt_len,
+        start,
+    )
+    for i in range(start, n):
+        raw_lp = token_logprobs[i]
+        if raw_lp is None:
+            continue
+        try:
+            lp_val = float(raw_lp)
+        except (TypeError, ValueError) as exc:
+            raise EngineError(
+                f"malformed logprobs.token_logprobs[{i}]: {raw_lp!r}"
+            ) from exc
+        try:
+            off = int(text_offset[i])
+        except (TypeError, ValueError):
+            off = i
+        top = top_logprobs[i]
+        top_dict = top if isinstance(top, dict) else None
+        out.append(
+            _PositionScore(
+                position=i,
+                token=str(tokens[i]),
+                text_offset=off,
+                logprob=lp_val,
+                top1=_top1_token(top_dict),
+            )
+        )
     return out
 
 
@@ -245,7 +291,7 @@ def collect_baseline_correctness(
     prompts: list[PromptCase],
     cfg: CorrectnessConfig,
     task_id: str,
-    request_timeout_s: float = 60.0,
+    request_timeout_s: float = 300.0,
     evidence_dir: Path | None = None,
 ) -> BaselineCorrectnessPhase:
     """Generate forced continuations and score them on the baseline engine."""
@@ -316,7 +362,7 @@ def finish_correctness_with_candidate(
     *,
     cfg: CorrectnessConfig,
     evidence_dir: Path,
-    request_timeout_s: float = 60.0,
+    request_timeout_s: float = 300.0,
 ) -> CorrectnessReport:
     """Score forced sequences on the candidate and compare to baseline."""
     probe_logprob_capability(candidate_url, timeout=request_timeout_s)
@@ -443,7 +489,7 @@ def run_correctness(
     cfg: CorrectnessConfig,
     task_id: str,
     evidence_dir: Path,
-    request_timeout_s: float = 60.0,
+    request_timeout_s: float = 300.0,
 ) -> CorrectnessReport:
     """Run Module A when both engines are reachable (e.g. in-process mocks)."""
     baseline = collect_baseline_correctness(

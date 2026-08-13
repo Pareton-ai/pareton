@@ -466,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--sampling-rule-json",
         default=None,
-        help='Path to JSON sampling rule (hf_rows: dataset, revision, n_rows, n_prompts)',
+        help="Path to JSON sampling rule (hf_rows: dataset, revision, n_rows, n_prompts)",
     )
     p.add_argument(
         "--z-threshold",

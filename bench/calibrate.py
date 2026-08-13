@@ -79,10 +79,7 @@ def _b7_bench_spec(
     """Minimal campaign.bench dict for calibration (no campaign.seed import)."""
     if trace_request_count < 1:
         raise CalibrationError("workload trace has no requests")
-    # A3a synthetic_v0 has 2 prompts; clamp config defaults (often 8) to the trace.
-    num_prompts = min(int(config.BENCH_CORRECTNESS_NUM_PROMPTS), trace_request_count)
-    num_requests = min(int(config.BENCH_PERF_NUM_REQUESTS), trace_request_count)
-    concurrency = min(int(config.BENCH_PERF_CONCURRENCY), num_requests)
+    concurrency = min(int(config.BENCH_PERF_CONCURRENCY), trace_request_count)
     return {
         "model": {
             "hf_repo": B7_MODEL_REPO,
@@ -95,7 +92,7 @@ def _b7_bench_spec(
         "gpu_count": 1,
         "serve_args": None,
         "correctness": {
-            "num_prompts": num_prompts,
+            "num_prompts": trace_request_count,
             "max_new_tokens": int(config.BENCH_CORRECTNESS_MAX_NEW_TOKENS),
             "thresholds": {
                 "mean_abs_logprob_diff": _CALIB_CORR_MEAN,
@@ -104,7 +101,7 @@ def _b7_bench_spec(
             },
         },
         "perf_screen": {
-            "num_requests": num_requests,
+            "num_requests": trace_request_count,
             "concurrency": concurrency,
             "min_throughput_ratio": _CALIB_PERF_RATIO,
         },
@@ -241,10 +238,6 @@ def prepare_campaign_calibration_request(
         raise CalibrationError("workload trace has no requests")
 
     corr_cfg = dict(bench.get("correctness") or {})
-    num_prompts = min(
-        int(corr_cfg.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS)),
-        trace_n,
-    )
     max_new = int(
         corr_cfg.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
     )
@@ -254,7 +247,7 @@ def prepare_campaign_calibration_request(
         "gpu_count": int(bench.get("gpu_count") or 1),
         "serve_args": list(bench.get("serve_args") or []) or None,
         "correctness": {
-            "num_prompts": num_prompts,
+            "num_prompts": trace_n,
             "max_new_tokens": max_new,
             "min_positions_compared": int(corr_cfg.get("min_positions_compared", 1)),
             "thresholds": {
@@ -264,10 +257,7 @@ def prepare_campaign_calibration_request(
             },
         },
         "perf_screen": {
-            "num_requests": min(
-                int(config.BENCH_PERF_NUM_REQUESTS),
-                trace_n,
-            ),
+            "num_requests": trace_n,
             "concurrency": 1,
             "min_throughput_ratio": _CALIB_PERF_RATIO,
         },
@@ -283,8 +273,9 @@ def prepare_campaign_calibration_request(
             "p99_itl_ms": sla.get("p99_itl_ms") or _CALIB_SLA_P99,
         },
     }
-    if manifest.engine is not None:
-        row["engine"] = manifest.engine
+    engine = getattr(manifest, "engine", None)
+    if engine is not None:
+        row["engine"] = engine
     try:
         req = build_bench_request_dict(
             row,
@@ -688,7 +679,12 @@ def prepare_pool_calibration_requests(
     Requires campaign.sampling_rule.type == hf_rows. Caps at ``max_samples``
     (default ``PARETON_CALIB_MIN_SAMPLES``).
     """
-    from bench.sampler import calib_seed, fetch_hf_row, generate_trace, parse_sampling_rule
+    from bench.sampler import (
+        calib_seed,
+        fetch_hf_row,
+        generate_trace,
+        parse_sampling_rule,
+    )
 
     if get_campaign_fn is None:
         from campaign.store import get_campaign as get_campaign_fn  # type: ignore[no-redef]
@@ -859,7 +855,9 @@ def cmd_prepare(args: argparse.Namespace) -> int:
                 output_dir=Path(args.output_dir),
                 max_samples=args.max_samples,
             )
-            print(f"wrote {len(reqs)} generated sample requests under {args.output_dir}")
+            print(
+                f"wrote {len(reqs)} generated sample requests under {args.output_dir}"
+            )
             print(
                 f"calib knobs: pods={config.CALIB_PODS} "
                 f"samples_per_pod={config.CALIB_SAMPLES_PER_POD} "
@@ -1031,7 +1029,9 @@ def cmd_apply_z(args: argparse.Namespace) -> int:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise CalibrationError(f"cannot load summary: {exc}") from exc
-        if not isinstance(summary, dict) or not isinstance(summary.get("metrics"), dict):
+        if not isinstance(summary, dict) or not isinstance(
+            summary.get("metrics"), dict
+        ):
             raise CalibrationError("summary must include metrics object")
         from campaign.store import apply_campaign_z_calibration
 

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 REMOTE_REPO = "/opt/pareton"
 REMOTE_VENV = f"{REMOTE_REPO}/.venv"
 REMOTE_HF_CACHE = "/workspace/hf-cache"
+REMOTE_ENGINE_CACHE = "/workspace/sglang-cache"
 
 
 def local_code_sha(repo_root: Path) -> str:
@@ -96,8 +97,8 @@ python3 -c "import ensurepip" || {{
   exit 1
 }}
 
-$SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE}
-$SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} || true
+$SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE}
+$SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE} || true
 """
 
 

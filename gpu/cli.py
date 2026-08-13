@@ -250,8 +250,28 @@ def cmd_exec(args: argparse.Namespace) -> int:
     return int(result.exit_code)
 
 
+class _GpuParser(argparse.ArgumentParser):
+    """Python 3.10 drops leftover positionals after ``--timeout`` following pod_name.
+
+    3.11+ ``parse_args`` already assigns them to ``cmd``. On 3.10 they become
+    unrecognized arguments unless we attach parse_known leftovers for ``exec``.
+    """
+
+    def parse_args(self, args=None, namespace=None):
+        ns, unknown = self.parse_known_args(args, namespace)
+        if getattr(ns, "command", None) == "exec":
+            extra = list(unknown)
+            if extra and extra[0] == "--":
+                extra = extra[1:]
+            ns.cmd = list(getattr(ns, "cmd", None) or []) + extra
+            return ns
+        if unknown:
+            self.error("unrecognized arguments: %s" % " ".join(unknown))
+        return ns
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _GpuParser(
         prog="python -m gpu",
         description="Pareton GPU pod rent / reap / remote bench",
     )

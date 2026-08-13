@@ -127,6 +127,27 @@ def test_extract_skips_null_and_prompt_portion():
     assert all(s.position > 0 for s in scores)
 
 
+def test_extract_sglang_completion_only_offsets():
+    """SGLang echo logprobs offset into choices[0].text, not the prompt."""
+    prompt = "Hello world" * 20
+    resp = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": [" OK"],
+                    "token_logprobs": [-0.2],
+                    "top_logprobs": [{" OK": -0.2}],
+                    "text_offset": [0],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 1},
+    }
+    scores = extract_output_logprobs(resp, original_prompt=prompt)
+    assert len(scores) == 1
+    assert scores[0].token == " OK"
+
+
 def test_extract_non_numeric_logprobs_is_engine_error():
     resp = {
         "choices": [

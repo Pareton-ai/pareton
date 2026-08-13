@@ -112,14 +112,10 @@ def test_empty_and_too_long_rows_skipped_deterministically():
         _user_row("ok-6"),
     ]
     rule = _rule(n_prompts=3)
-    sampled = generate_trace(
-        rule=rule, seed_hex="cc" * 32, row_fetcher=_fetcher(rows)
-    )
+    sampled = generate_trace(rule=rule, seed_hex="cc" * 32, row_fetcher=_fetcher(rows))
     assert 0 not in sampled.row_indices
     assert 2 not in sampled.row_indices
-    again = generate_trace(
-        rule=rule, seed_hex="cc" * 32, row_fetcher=_fetcher(rows)
-    )
+    again = generate_trace(rule=rule, seed_hex="cc" * 32, row_fetcher=_fetcher(rows))
     assert sampled.row_indices == again.row_indices
     assert sampled.sha256 == again.sha256
 

@@ -82,6 +82,18 @@ BENCH_HF_CACHE_DIR: Path = Path(
         str(Path.home() / ".cache" / "pareton" / "hf"),
     )
 ).expanduser()
+# Host dir mounted at /root/.cache/sglang inside the engine container.
+# Empty means no mount (laptop tests). GPU remote env sets /workspace/sglang-cache
+# so FlashInfer autotune survives container restarts.
+BENCH_ENGINE_CACHE_DIR: str = os.environ.get(
+    "PARETON_BENCH_ENGINE_CACHE_DIR", ""
+).strip()
+# Z-calibrate needs correctness + perf_screen only. Skip sla_bench when set.
+BENCH_SKIP_SLA: bool = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # GPU pod orchestration (WS-C)
 TARGON_API_KEY: str = os.environ.get("PARETON_TARGON_API_KEY", "")

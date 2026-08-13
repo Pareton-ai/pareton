@@ -224,7 +224,7 @@ def test_prepare_generates_distinct_traces(tmp_path: Path):
             "baseline_engine_image_digest": DIGEST,
             "gpu_count": 1,
             "serve_args": [],
-            "correctness": {"num_prompts": 3, "max_new_tokens": 8},
+            "correctness": {"num_prompts": 8, "max_new_tokens": 8},
         },
         gpu_skus=["H200"],
         sampling_rule=rule,
@@ -247,4 +247,5 @@ def test_prepare_generates_distinct_traces(tmp_path: Path):
     assert reqs[0]["model"]["hf_repo"] == "Qwen/Qwen2.5-7B-Instruct"
     assert reqs[0]["hardware"]["gpu_count"] == 1
     assert reqs[0]["mode"] == "all"
-
+    assert reqs[0]["correctness"]["num_prompts"] == 3
+    assert reqs[0]["perf_screen"]["num_requests"] == 3

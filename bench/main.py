@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +80,7 @@ def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
     if "--tp-size" in serve_args:
         return []
     return list(CORRECTNESS_EXTRA_SERVE_ARGS)
+
 
 EXIT_OK = 0
 EXIT_BAD_REQUEST = 1
@@ -458,7 +460,12 @@ def run_all_modules(
             )
             return corr, perf, None, skipped_note
 
-    if req.mode in ("all", "sla_bench"):
+    skip_sla = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if req.mode in ("all", "sla_bench") and not skip_sla:
         sla = provider.run_sla_bench(trace, req.sla_bench, layout.sla_bench_dir)
 
     return corr, perf, sla, skipped_note
