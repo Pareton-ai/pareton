@@ -8,6 +8,9 @@ Usage:
     --image-ref ghcr.io/pareton-ai/pareton-engine:baseline \\
     --empty-patch \\
     --push
+
+Add --engine sglang to build against an SGLang baseline image; the default is
+vLLM. The engine must match the one pinned on the campaign manifest.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import sys
 from pathlib import Path
 
 from builder.hermetic import build_engine_image
+from campaign.engine import ENGINE_PRESETS, preset
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--push", action="store_true", default=False)
     p.add_argument("--no-push", action="store_true", default=False)
     p.add_argument("--work-root", type=Path, default=None)
+    p.add_argument(
+        "--engine",
+        choices=sorted(ENGINE_PRESETS),
+        default=None,
+        help="Engine profile (default: vllm). Must match the campaign's engine.",
+    )
     args = p.parse_args(argv)
 
     if args.empty_patch and args.patch_file is not None:
@@ -65,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         push=push,
         allow_empty_patch=bool(args.empty_patch),
         image_ref_override=args.image_ref,
+        engine=None if args.engine is None else preset(args.engine),
     )
     if not result.ok:
         print(f"FAIL {result.reason}: {result.evidence}", file=sys.stderr)

@@ -7,6 +7,8 @@ import subprocess
 import pytest
 
 from builder.hermetic import build_engine_image, dockerfile_for_patch
+from campaign.engine import preset
+from gate.types import GateResult, SubmissionState
 from builder.registry import (
     baseline_build_image_ref,
     baseline_engine_image_ref,
@@ -310,3 +312,166 @@ def test_build_base_image_falls_back_to_base():
     base = "sha256:" + ("b" * 64)
     campaign = SimpleNamespace(campaign_id="c1", base_image_digest=base, bench=None)
     assert _build_base_image(campaign) == baseline_build_image_ref(base)
+
+
+# --- PAR-57: engine profile drives install_cmd + entrypoint -------------------
+
+
+@pytest.mark.unit
+def test_dockerfile_sglang_profile_swaps_install_and_entrypoint(monkeypatch):
+    """SGLang differs from vLLM in exactly two lines (PAR-54, verified on B300)."""
+    monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
+    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
+    kw = dict(
+        allow_empty_patch=False,
+        patch_bytes=b"diff --git a/x b/x\n",
+        baseline_commit=COMMIT,
+    )
+    vllm_text = dockerfile_for_patch(**kw)
+    sglang_text = dockerfile_for_patch(**kw, engine=preset("sglang"))
+
+    assert "pip install --no-deps --no-build-isolation -e python/" in sglang_text
+    assert 'ENTRYPOINT ["python3", "-m", "sglang.launch_server"]' in sglang_text
+    assert "vllm" not in sglang_text
+
+    differing = [
+        (a, b)
+        for a, b in zip(vllm_text.splitlines(), sglang_text.splitlines())
+        if a != b
+    ]
+    assert len(differing) == 2, differing
+
+
+@pytest.mark.unit
+def test_dockerfile_explicit_vllm_matches_no_engine(monkeypatch):
+    """A campaign pinned before engine profiles must emit identical bytes."""
+    monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
+    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
+    kw = dict(
+        allow_empty_patch=False,
+        patch_bytes=b"diff --git a/x b/x\n",
+        baseline_commit=COMMIT,
+    )
+    assert dockerfile_for_patch(**kw) == dockerfile_for_patch(**kw, engine=None)
+    assert dockerfile_for_patch(**kw) == dockerfile_for_patch(
+        **kw, engine=preset("vllm")
+    )
+
+
+@pytest.mark.unit
+def test_dockerfile_sglang_keeps_miner_build_security(monkeypatch):
+    """A non-default engine must not relax the read-only ccache mount."""
+    monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
+    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
+    text = dockerfile_for_patch(
+        allow_empty_patch=False,
+        patch_bytes=b"diff --git a/x b/x\n",
+        baseline_commit=COMMIT,
+        engine=preset("sglang"),
+    )
+    assert ",readonly" in text
+    assert "export CCACHE_READONLY=1" in text
+    assert "git apply --whitespace=nowarn /tmp/submission.diff" in text
+    # Cleanup is engine-neutral: SGLang has a rust/ workspace too (PAR-54).
+    assert "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip" in text
+
+
+@pytest.mark.unit
+def test_dockerfile_sglang_empty_patch_skips_apply(monkeypatch):
+    monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
+    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
+    text = dockerfile_for_patch(
+        allow_empty_patch=True,
+        patch_bytes=b"",
+        baseline_commit=COMMIT,
+        engine=preset("sglang"),
+    )
+    assert "git apply" not in text
+    assert "pip install --no-deps --no-build-isolation -e python/" in text
+    assert ",readonly" not in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"name": "trtllm", "install_cmd": "pip install -e .", "entrypoint": ["x"]},
+        {"name": "vllm", "install_cmd": "ok\nRUN echo pwned", "entrypoint": ["x"]},
+        {"name": "vllm", "install_cmd": "pip install -e .", "entrypoint": []},
+        {"name": "vllm", "install_cmd": "pip install -e ."},
+    ],
+)
+def test_dockerfile_rejects_bad_engine(bad):
+    """Unknown names and injected newlines must fail loudly, not fall back."""
+    with pytest.raises(ValueError):
+        dockerfile_for_patch(
+            allow_empty_patch=False,
+            patch_bytes=b"diff --git a/x b/x\n",
+            baseline_commit=COMMIT,
+            engine=bad,
+        )
+
+
+@pytest.mark.unit
+def test_build_engine_image_rejects_bad_engine(tmp_path):
+    """An invalid profile surfaces as build_config_invalid, not a crash."""
+    res = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image="ghcr.io/pareton-ai/pareton-baseline@sha256:" + ("b" * 64),
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("a" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+        engine={"name": "nope", "install_cmd": "x", "entrypoint": ["y"]},
+    )
+    assert not res.ok
+    assert res.reason == "build_config_invalid"
+
+
+@pytest.mark.unit
+def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path):
+    """`--engine sglang` must reach build_engine_image as the SGLang profile."""
+    import builder.__main__ as cli
+
+    seen: dict = {}
+
+    def fake_build(**kwargs):
+        seen.update(kwargs)
+        return GateResult.success(SubmissionState.BUILT, image_ref="img")
+
+    monkeypatch.setattr(cli, "build_engine_image", fake_build)
+    rc = cli.main(
+        [
+            "--baseline-repo",
+            "https://example.invalid/repo.git",
+            "--baseline-commit",
+            COMMIT,
+            "--base-image",
+            "ghcr.io/pareton-ai/pareton-baseline@sha256:" + ("b" * 64),
+            "--image-ref",
+            "ghcr.io/pareton-ai/pareton-engine:baseline-sglang",
+            "--empty-patch",
+            "--engine",
+            "sglang",
+        ]
+    )
+    assert rc == 0
+    assert seen["engine"] == preset("sglang")
+
+    seen.clear()
+    cli.main(
+        [
+            "--baseline-repo",
+            "https://example.invalid/repo.git",
+            "--baseline-commit",
+            COMMIT,
+            "--base-image",
+            "ghcr.io/pareton-ai/pareton-baseline@sha256:" + ("b" * 64),
+            "--image-ref",
+            "ghcr.io/pareton-ai/pareton-engine:baseline",
+            "--empty-patch",
+        ]
+    )
+    assert seen["engine"] is None
