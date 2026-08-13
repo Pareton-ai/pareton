@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import tempfile
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Sequence
 
 import config
 from bench.correctness import resolve_trace_path
@@ -36,7 +37,7 @@ from gpu.registry import (
     parse_pod_name,
 )
 from gpu.ssh import REPO_RSYNC_EXCLUDES, SshRunner, exec as ssh_exec, pull, push
-from gpu.types import Pod, PodSpec
+from gpu.types import Pod, PodSpec, SshTarget
 from observability import events as obs
 
 logger = logging.getLogger(__name__)
@@ -364,43 +365,194 @@ def destroy_pod(
         registry.remove(pod.name)
 
 
+def discover_calib_requests(requests_dir: Path) -> list[Path]:
+    """Return sample-*/bench_request.json paths sorted by sample index."""
+    root = Path(requests_dir)
+    found = list(root.glob("sample-*/bench_request.json"))
+    if not found:
+        raise ProvisionError(f"no sample-*/bench_request.json under {root}")
+
+    def _idx(path: Path) -> int:
+        name = path.parent.name
+        try:
+            return int(name.split("-", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise ProvisionError(f"bad sample dir name {name!r}") from exc
+
+    return [p.resolve() for p in sorted(found, key=_idx)]
+
+
+def _report_is_pass(run_dir: Path) -> bool:
+    report = Path(run_dir) / "bench_report.json"
+    if not report.is_file():
+        return False
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return str(data.get("verdict", "")).lower() == "pass"
+
+
+def _pod_from_entry(entry: RegistryEntry) -> Pod:
+    return Pod(
+        provider=entry.provider,
+        pod_id=entry.pod_id,
+        name=entry.name,
+        ssh=SshTarget(
+            host=entry.ssh_host,
+            port=entry.ssh_port,
+            user=entry.ssh_user,
+        ),
+        key_path=Path(entry.key_path),
+        hourly_price_cents=entry.hourly_price_cents,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=entry.ttl_hours,
+        raw={
+            "volume_uid": entry.volume_uid,
+            "volume_name": entry.volume_name,
+        },
+    )
+
+
+def _bench_jobs(
+    *,
+    request_path: Path | None,
+    request_paths: Sequence[Path] | None,
+    output_dir: Path,
+    repetitions: int,
+) -> list[tuple[Path, Path]]:
+    if request_paths is not None:
+        if request_path is not None:
+            raise ProvisionError("provide --request or --requests-dir, not both")
+        if repetitions != 1:
+            raise ProvisionError("--requests-dir is incompatible with --repetitions")
+        return [
+            (Path(p).resolve(), output_dir / f"run-{i:03d}")
+            for i, p in enumerate(request_paths, start=1)
+        ]
+    if request_path is None:
+        raise ProvisionError("provide --request or --requests-dir")
+    resolved = Path(request_path).resolve()
+    if repetitions == 1:
+        return [(resolved, output_dir)]
+    return [
+        (resolved, output_dir / f"run-{i:03d}") for i in range(1, repetitions + 1)
+    ]
+
+
+def _preflight_request(request_path: Path, repo_root: Path):
+    req, _raw = load_bench_request(request_path)
+    trace_path = resolve_trace_path(
+        req.workload_trace.path, request_path=request_path
+    )
+    load_workload_trace(trace_path, expected_sha256=req.workload_trace.sha256)
+    return req, trace_path
+
+
+def _push_remote_request(
+    pod: Pod,
+    *,
+    request_path: Path,
+    trace_path: Path,
+    local_out: Path,
+    repo_root: Path,
+    runner: SshRunner | None,
+    state_dir: Path | None,
+) -> None:
+    remote_req = json.loads(request_path.read_text(encoding="utf-8"))
+    if _trace_needs_explicit_push(trace_path, repo_root):
+        ssh_exec(
+            pod,
+            f"mkdir -p {REMOTE_TRACE_DIR}",
+            timeout_s=60.0,
+            runner=runner,
+            state_dir=state_dir,
+        )
+        remote_trace = f"{REMOTE_TRACE_DIR}/{trace_path.name}"
+        push(
+            pod,
+            trace_path,
+            remote_trace,
+            excludes=[],
+            runner=runner,
+            state_dir=state_dir,
+        )
+        remote_req["workload_trace"]["path"] = remote_trace
+    else:
+        rel = trace_path.resolve().relative_to(repo_root.resolve()).as_posix()
+        remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
+
+    local_out.mkdir(parents=True, exist_ok=True)
+    local_remote_req = local_out / "bench_request.remote.json"
+    local_remote_req.write_text(
+        json.dumps(remote_req, indent=2) + "\n", encoding="utf-8"
+    )
+    push(
+        pod,
+        local_remote_req,
+        REMOTE_REQUEST,
+        excludes=[],
+        runner=runner,
+        state_dir=state_dir,
+    )
+
+
 def run_bench_on_pod(
     spec: PodSpec,
     *,
-    request_path: Path,
+    request_path: Path | None = None,
+    request_paths: Sequence[Path] | None = None,
     output_dir: Path,
     mock_engine: bool = False,
     repetitions: int = 1,
+    pod_name: str | None = None,
+    keep: bool = False,
     registry: PodRegistry | None = None,
     provider=None,
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
     repo_root: Path | None = None,
 ) -> int:
-    """Full provision -> bench -> tear down.
+    """Run bench request(s) on a GPU pod.
 
-    When repetitions > 1, runs the remote harness sequentially into distinct
-    run-001..run-NNN directories after a single provision/bootstrap/image pull.
+    Default: provision -> bench -> destroy. ``--pod`` reuses a registry pod.
+    ``--keep`` skips destroy. ``request_paths`` (from ``--requests-dir``) runs
+    each sample-N request into output_dir/run-00N and skips local pass reports.
 
-    Returns the bench exit code, or EXIT_DESTROY_FAILED (75) if teardown failed
-    (pod/volume may still be billing; takes precedence over the bench code).
+    ``--repetitions`` still replays one request N times (not a sample pool).
+
+    Returns the last bench exit code, or EXIT_DESTROY_FAILED (75) if teardown
+    failed (pod/volume may still be billing; takes precedence).
     """
     if repetitions < 1:
         raise ProvisionError(f"repetitions must be >= 1, got {repetitions}")
 
     registry = registry or PodRegistry(state_dir)
     repo_root = (repo_root or _repo_root()).resolve()
-    request_path = Path(request_path).resolve()
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    pool = request_paths is not None
+    jobs = _bench_jobs(
+        request_path=request_path,
+        request_paths=request_paths,
+        output_dir=output_dir,
+        repetitions=repetitions,
+    )
+    pending_jobs: list[tuple[Path, Path]] = []
+    for req_p, local_out in jobs:
+        if pool and _report_is_pass(local_out):
+            logger.info("skip %s (already pass)", local_out)
+            continue
+        pending_jobs.append((req_p, local_out))
+    if not pending_jobs:
+        logger.info("all %d sample(s) already pass; nothing to run", len(jobs))
+        return 0
 
-    # Preflight BEFORE rent (shape + existence + digest).
+    preflighted: list[tuple[Path, Path, object, Path]] = []
     try:
-        req, _raw = load_bench_request(request_path)
-        trace_path = resolve_trace_path(
-            req.workload_trace.path, request_path=request_path
-        )
-        load_workload_trace(trace_path, expected_sha256=req.workload_trace.sha256)
+        for req_p, local_out in pending_jobs:
+            req, trace_path = _preflight_request(req_p, repo_root)
+            preflighted.append((req_p, local_out, req, trace_path))
     except RequestValidationError as exc:
         raise ProvisionError(f"bench request preflight failed: {exc}") from exc
 
@@ -410,76 +562,61 @@ def run_bench_on_pod(
     pending: BaseException | None = None
 
     try:
-        # provider=None: provision_pod walks the configured fallback order and
-        # destroy_pod later resolves the real provider from pod.provider.
-        pod = provision_pod(
-            spec, registry=registry, provider=provider, state_dir=registry.state_dir
-        )
+        if pod_name:
+            entry = registry.get(pod_name)
+            if entry is None:
+                raise ProvisionError(f"unknown pod {pod_name!r} in registry")
+            pod = _pod_from_entry(entry)
+            logger.info("reusing pod %s", pod.name)
+        else:
+            # provider=None: provision_pod walks the configured fallback order
+            # and destroy_pod later resolves the real provider from pod.provider.
+            pod = provision_pod(
+                spec,
+                registry=registry,
+                provider=provider,
+                state_dir=registry.state_dir,
+            )
         code_sha = bootstrap_pod(
             pod,
             repo_root=repo_root,
             runner=runner,
             state_dir=registry.state_dir,
         )
-
-        # Prepare remote request (+ push trace when bootstrap rsync would omit it).
-        remote_req = json.loads(request_path.read_text(encoding="utf-8"))
-        if _trace_needs_explicit_push(trace_path, repo_root):
-            ssh_exec(
-                pod,
-                f"mkdir -p {REMOTE_TRACE_DIR}",
-                timeout_s=60.0,
-                runner=runner,
-                state_dir=registry.state_dir,
-            )
-            remote_trace = f"{REMOTE_TRACE_DIR}/{trace_path.name}"
-            push(
-                pod,
-                trace_path,
-                remote_trace,
-                excludes=[],
-                runner=runner,
-                state_dir=registry.state_dir,
-            )
-            remote_req["workload_trace"]["path"] = remote_trace
-        else:
-            rel = trace_path.resolve().relative_to(repo_root.resolve()).as_posix()
-            remote_req["workload_trace"]["path"] = f"{REMOTE_REPO}/{rel}"
-
-        local_remote_req = output_dir / "bench_request.remote.json"
-        local_remote_req.write_text(
-            json.dumps(remote_req, indent=2) + "\n", encoding="utf-8"
-        )
-        push(
-            pod,
-            local_remote_req,
-            REMOTE_REQUEST,
-            excludes=[],
-            runner=runner,
-            state_dir=registry.state_dir,
-        )
-
         _write_remote_env(pod, runner=runner, state_dir=registry.state_dir)
 
         if not mock_engine:
+            refs: list[str] = []
+            for _req_p, _local_out, req, _trace in preflighted:
+                for ref in _engine_image_refs(req):
+                    if ref not in refs:
+                        refs.append(ref)
             pull_engine_images(
                 pod,
-                _engine_image_refs(req),
+                refs,
                 env_file=REMOTE_ENV,
                 runner=runner,
                 state_dir=registry.state_dir,
             )
 
         mock_flag = " --mock-engine" if mock_engine else ""
-        for i in range(1, repetitions + 1):
-            if repetitions == 1:
-                remote_out = REMOTE_OUT
-                local_out = output_dir
-            else:
-                run_name = f"run-{i:03d}"
+        for req_p, local_out, _req, trace_path in preflighted:
+            local_out.mkdir(parents=True, exist_ok=True)
+            if pool or repetitions > 1:
+                run_name = local_out.name
                 remote_out = f"{REMOTE_OUT}/{run_name}"
-                local_out = output_dir / run_name
-                local_out.mkdir(parents=True, exist_ok=True)
+            else:
+                remote_out = REMOTE_OUT
+
+            _push_remote_request(
+                pod,
+                request_path=req_p,
+                trace_path=trace_path,
+                local_out=local_out,
+                repo_root=repo_root,
+                runner=runner,
+                state_dir=registry.state_dir,
+            )
 
             bench_cmd = (
                 f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
@@ -519,31 +656,34 @@ def run_bench_on_pod(
         pending = exc
     finally:
         if pod is not None:
-            _delete_remote_env(pod, runner=runner, state_dir=registry.state_dir)
-            try:
-                destroy_pod(
-                    pod,
-                    registry=registry,
-                    provider=provider,
-                    state_dir=registry.state_dir,
-                )
-            except DestroyError as exc:
-                destroy_failed = True
-                logger.error(
-                    "DESTROY FAILED for pod=%s volume=%s provider=%s: %s. "
-                    "Destroy manually NOW in the provider dashboard "
-                    "(https://targon.com/rentals).",
-                    pod.name,
-                    (pod.raw or {}).get("volume_uid", ""),
-                    pod.provider,
-                    exc,
-                )
-                print(
-                    f"ERROR: destroy failed for {pod.name} "
-                    f"volume={(pod.raw or {}).get('volume_uid', '')} - "
-                    f"destroy manually NOW on the {pod.provider} dashboard",
-                    flush=True,
-                )
+            if keep:
+                print(f"keep pod={pod.name}", flush=True)
+            else:
+                _delete_remote_env(pod, runner=runner, state_dir=registry.state_dir)
+                try:
+                    destroy_pod(
+                        pod,
+                        registry=registry,
+                        provider=provider,
+                        state_dir=registry.state_dir,
+                    )
+                except DestroyError as exc:
+                    destroy_failed = True
+                    logger.error(
+                        "DESTROY FAILED for pod=%s volume=%s provider=%s: %s. "
+                        "Destroy manually NOW in the provider dashboard "
+                        "(https://targon.com/rentals).",
+                        pod.name,
+                        (pod.raw or {}).get("volume_uid", ""),
+                        pod.provider,
+                        exc,
+                    )
+                    print(
+                        f"ERROR: destroy failed for {pod.name} "
+                        f"volume={(pod.raw or {}).get('volume_uid', '')} - "
+                        f"destroy manually NOW on the {pod.provider} dashboard",
+                        flush=True,
+                    )
 
     if destroy_failed:
         return EXIT_DESTROY_FAILED

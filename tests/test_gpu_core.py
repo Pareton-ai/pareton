@@ -219,6 +219,7 @@ def test_ssh_exec_argv_and_nonzero(tmp_path: Path):
     argv = calls[0]
     assert argv[0] == "ssh"
     assert "BatchMode=yes" in argv
+    assert "ServerAliveInterval=30" in argv
     assert str(pod.key_path) in argv
     assert any("UserKnownHostsFile=" in a for a in argv)
 

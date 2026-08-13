@@ -9,7 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from gpu.errors import DestroyError, GpuError, ProvisionError
-from gpu.orchestrate import destroy_pod, provision_pod, run_bench_on_pod
+from gpu.orchestrate import (
+    destroy_pod,
+    discover_calib_requests,
+    provision_pod,
+    run_bench_on_pod,
+)
 from gpu.providers import get_provider
 from gpu.reap import reap
 from gpu.registry import PodRegistry, parse_pod_name
@@ -186,13 +191,35 @@ def cmd_reap(args: argparse.Namespace) -> int:
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
+    request = getattr(args, "request", None)
+    requests_dir = getattr(args, "requests_dir", None)
+    if bool(request) == bool(requests_dir):
+        print(
+            "error: provide exactly one of --request or --requests-dir",
+            file=sys.stderr,
+        )
+        return 2
+    if requests_dir is not None and int(args.repetitions) != 1:
+        print(
+            "error: --requests-dir is incompatible with --repetitions",
+            file=sys.stderr,
+        )
+        return 2
     try:
+        paths = (
+            discover_calib_requests(Path(requests_dir))
+            if requests_dir is not None
+            else None
+        )
         return run_bench_on_pod(
             _spec_from_args(args),
-            request_path=Path(args.request),
+            request_path=Path(request) if request is not None else None,
+            request_paths=paths,
             output_dir=Path(args.output_dir),
             mock_engine=bool(args.mock_engine),
             repetitions=int(args.repetitions),
+            pod_name=getattr(args, "pod_name", None),
+            keep=bool(getattr(args, "keep", False)),
         )
     except (ProvisionError, GpuError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -239,16 +266,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_reap.add_argument("--dry-run", action="store_true")
     p_reap.set_defaults(func=cmd_reap)
 
-    p_bench = sub.add_parser("bench", help="Provision, run bench, destroy")
+    p_bench = sub.add_parser(
+        "bench",
+        help="Run bench request(s) on a GPU pod (default: provision, run, destroy)",
+    )
     _add_provision_flags(p_bench)
-    p_bench.add_argument("--request", required=True, type=Path)
+    p_bench.add_argument("--request", type=Path, default=None)
+    p_bench.add_argument(
+        "--requests-dir",
+        type=Path,
+        default=None,
+        help="Run each sample-*/bench_request.json into --output-dir/run-00N",
+    )
     p_bench.add_argument("--output-dir", required=True, type=Path)
     p_bench.add_argument("--mock-engine", action="store_true")
     p_bench.add_argument(
         "--repetitions",
         type=int,
         default=1,
-        help="Harness runs on one pod (default 1); writes run-001.. when >1",
+        help="Replay one --request N times on one pod; incompatible with --requests-dir",
+    )
+    p_bench.add_argument(
+        "--pod",
+        dest="pod_name",
+        default=None,
+        help="Reuse this registry pod instead of provisioning",
+    )
+    p_bench.add_argument(
+        "--keep",
+        action="store_true",
+        help="Do not destroy the pod when the command exits",
     )
     p_bench.set_defaults(func=cmd_bench)
 
