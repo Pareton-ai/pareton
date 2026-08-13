@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import shutil
-import uuid
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,19 @@ _DEFAULT_CACHE = Path.home() / ".cache" / "pareton" / "hf"
 
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
 _TOKENIZER_NAMES = frozenset({"tokenizer.json", "tokenizer.model"})
+_STAGING_ATTEMPTS = 5
+_TRANSIENT_STAGING = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    ConnectionError,
+    TimeoutError,
+)
+# EPIPE, ECONNRESET, ETIMEDOUT (Linux numbers; macOS EPIPE is also 32).
+_TRANSIENT_ERRNOS = frozenset({32, 104, 110})
+_TRANSIENT_EXC_NAMES = frozenset(
+    {"RemoteProtocolError", "ReadTimeout", "ConnectTimeout", "ReadError"}
+)
 
 
 class WeightsError(HostEnvironmentError):
@@ -151,18 +164,18 @@ def _rm_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _cleanup_partials(cache_root: Path) -> None:
-    partial_root = cache_root / ".partial"
-    if not partial_root.is_dir():
-        return
-    for child in list(partial_root.iterdir()):
-        try:
-            if child.is_dir():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        except OSError as exc:
-            logger.warning("failed to clean partial %s: %s", child, exc)
+def _is_transient_staging_error(exc: BaseException) -> bool:
+    """True for dropped connections that huggingface_hub can resume."""
+    if isinstance(exc, _TRANSIENT_STAGING):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in _TRANSIENT_ERRNOS:
+        return True
+    if type(exc).__name__ in _TRANSIENT_EXC_NAMES:
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return _is_transient_staging_error(cause)
+    return False
 
 
 def _finalize(root: Path, model: ModelSpec) -> StagedWeights:
@@ -186,18 +199,33 @@ def _download_to_partial(
     token_env: str,
 ) -> None:
     token = os.environ.get(token_env)
-    try:
-        snapshot_download(
-            repo_id=model.hf_repo,
-            revision=model.hf_revision,
-            token=token,
-            local_dir=str(partial),
-        )
-    except Exception as exc:  # noqa: BLE001 — wrap all hub/network failures
-        _rm_tree(partial)
-        raise WeightsError(
-            f"{type(exc).__name__} staging {model.hf_repo}@{model.hf_revision}"
-        ) from None
+    for attempt in range(1, _STAGING_ATTEMPTS + 1):
+        try:
+            snapshot_download(
+                repo_id=model.hf_repo,
+                revision=model.hf_revision,
+                token=token,
+                local_dir=str(partial),
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — wrap all hub/network failures
+            transient = _is_transient_staging_error(exc)
+            if transient and attempt < _STAGING_ATTEMPTS:
+                logger.warning(
+                    "transient %s staging %s@%s (attempt %d/%d); retrying",
+                    type(exc).__name__,
+                    model.hf_repo,
+                    model.hf_revision,
+                    attempt,
+                    _STAGING_ATTEMPTS,
+                )
+                time.sleep(min(2**attempt, 30))
+                continue
+            if not transient:
+                _rm_tree(partial)
+            raise WeightsError(
+                f"{type(exc).__name__} staging {model.hf_repo}@{model.hf_revision}"
+            ) from None
 
 
 def stage_weights(
@@ -209,7 +237,6 @@ def stage_weights(
     """Download (or reuse) pinned HF weights; return staged path + aggregate hash."""
     cache_root = _cache_root(cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
-    _cleanup_partials(cache_root)
 
     slug = repo_slug(model.hf_repo)
     final = cache_root / slug / model.hf_revision
@@ -225,10 +252,11 @@ def stage_weights(
             )
             _rm_tree(final)
 
+    # Deterministic partial dir so a later bench on the same pod resumes.
     partial_root = cache_root / ".partial"
     partial_root.mkdir(parents=True, exist_ok=True)
-    partial = partial_root / f"{slug}-{model.hf_revision}-{uuid.uuid4().hex}"
-    partial.mkdir(parents=True, exist_ok=False)
+    partial = partial_root / f"{slug}-{model.hf_revision}"
+    partial.mkdir(parents=True, exist_ok=True)
 
     _download_to_partial(model, partial=partial, token_env=token_env)
 

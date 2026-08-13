@@ -110,6 +110,10 @@ def _write_remote_env(
         # Harness reads config on the pod, which has no .env; forward the
         # worker-side value so large models get the same health window.
         f"PARETON_BENCH_HEALTH_TIMEOUT_S={config.BENCH_HEALTH_TIMEOUT_S}",
+        # GPU pods have the RAM/bandwidth for Xet HP mode (>=64 GB). Hub >=0.32
+        # already uses hf_xet; this only raises concurrency/buffers. Do not set
+        # on laptops (can be slower with less RAM).
+        "HF_XET_HIGH_PERFORMANCE=1",
     ]
     hf = os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN")
     if hf:

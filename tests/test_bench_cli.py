@@ -315,3 +315,21 @@ def test_docker_engines_run_sequentially(tmp_path: Path, monkeypatch):
     )
     assert live["max"] == 1
     assert live["n"] == 0
+
+
+def test_sku_mismatch_accepts_rtx5090_with_spaces():
+    from bench.env import warn_gpu_sku_mismatch
+    from bench.schemas import EnvironmentInfo, GpuInfo
+
+    env = EnvironmentInfo(
+        gpu=[
+            GpuInfo(index=0, name="NVIDIA GeForce RTX 5090", vbios="", memory_mb=32768)
+        ],
+        driver_version="",
+        cuda_version="",
+        docker_version="",
+        harness_version="0",
+        hostname_hash="sha256:" + ("a" * 64),
+    )
+    assert warn_gpu_sku_mismatch(env, "RTX5090") is None
+    assert warn_gpu_sku_mismatch(env, "H200") is not None

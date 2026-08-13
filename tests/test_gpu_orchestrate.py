@@ -365,6 +365,7 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
     assert pushed
     assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
+    assert "HF_XET_HIGH_PERFORMANCE=1" in pushed[0]
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):
@@ -738,6 +739,9 @@ def test_bootstrap_script_verify_first_no_token():
     assert script.index("systemctl restart docker") < script.index(
         "chmod 666 /var/run/docker.sock"
     )
+    assert "stable/deb/nvidia-container-toolkit.list" in script
+    assert "$distribution/libnvidia-container.list" not in script
+    assert "grep -q '^deb '" in script
 
 
 def test_orchestrate_repetitions_one_pod_five_runs(tmp_path: Path, monkeypatch):

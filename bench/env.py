@@ -136,6 +136,10 @@ def collect_env_raw_dumps() -> dict[str, str]:
     return dumps
 
 
+def _sku_compact(s: str) -> str:
+    return s.lower().replace(" ", "").replace("-", "").replace("_", "")
+
+
 def warn_gpu_sku_mismatch(env: EnvironmentInfo, expected: str) -> str | None:
     """Return a warning string if expected SKU not found among probed GPUs."""
     if not expected:
@@ -143,9 +147,10 @@ def warn_gpu_sku_mismatch(env: EnvironmentInfo, expected: str) -> str | None:
     if not env.gpu:
         return f"gpu_sku_expected={expected!r} but no GPUs detected"
     names = " ".join(g.name for g in env.gpu)
-    # Loose match: expected token appears in any GPU name (case-insensitive).
-    token = expected.replace("NVIDIA-", "").replace("_", " ")
-    if token.lower() not in names.lower() and expected.lower() not in names.lower():
+    # Loose match: ignore spaces/hyphens so RTX5090 matches "NVIDIA GeForce RTX 5090".
+    names_c = _sku_compact(names)
+    expected_c = _sku_compact(expected.replace("NVIDIA-", ""))
+    if expected_c not in names_c and expected.lower() not in names.lower():
         return f"gpu_sku_expected={expected!r} not found in detected GPUs: {names!r}"
     return None
 
