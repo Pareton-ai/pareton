@@ -700,6 +700,30 @@ def test_remote_docker_root_vs_nonroot():
     assert remote_docker(user) == "sudo -E docker"
 
 
+def test_exec_parser_timeout_after_pod_name():
+    """REMAINDER used to swallow `--timeout` into the remote string (OpenSSH 9.8)."""
+    from gpu.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "exec",
+            "pt-pod",
+            "--timeout",
+            "3600",
+            "docker pull x && docker run --rm img",
+        ]
+    )
+    assert args.timeout == 3600.0
+    assert args.pod_name == "pt-pod"
+    assert args.cmd == ["docker pull x && docker run --rm img"]
+    dashed = parser.parse_args(
+        ["exec", "pt-pod", "--timeout", "3600", "--", "docker", "run", "--rm", "img"]
+    )
+    assert dashed.timeout == 3600.0
+    assert dashed.cmd == ["docker", "run", "--rm", "img"]
+
+
 def test_cli_help_and_missing_key(monkeypatch):
     from gpu.cli import main
 

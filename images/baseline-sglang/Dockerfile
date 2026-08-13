@@ -5,9 +5,9 @@
 # Pin and publish; put the resulting digest into the campaign manifest.
 #
 # Unlike the vLLM baseline this image bakes NO TORCH_CUDA_ARCH_LIST: SGLang
-# compiles no CUDA kernels. sglang-kernel ships as a prebuilt wheel, so the
-# image is arch-agnostic (one image serves Hopper and Blackwell alike) and no
-# GPU is needed to build it.
+# compiles no CUDA kernels. sglang-kernel ships as a prebuilt wheel, so no GPU
+# is needed to build. The wheel is CUDA-flavor specific (+cu130 for this pin),
+# not a generic "any GPU" binary: PyPI's plain 0.4.5 fails on RTX 5090 (sm_120).
 #
 # The kernel wheel MUST stay version-matched to the source tag the campaign
 # pins. sglang-kernel 0.4.5 pairs with v0.5.17; a mismatched pair builds green
@@ -66,9 +66,11 @@ RUN pip install --upgrade pip \
         "packaging>=24.2" \
     && rm -rf /tmp/* /root/.cache/pip
 
-# Torch alone (pulls CUDA 13 wheels). Separate layer so rebuilds of lighter
-# deps do not re-download ~2GB of NVIDIA packages.
-RUN pip install --no-cache-dir "torch==2.11.0" \
+# Torch from the cu130 index (plain PyPI 2.11.0 is not +cu130). Official
+# lmsysorg/sglang:v0.5.17 is torch==2.11.0+cu130; an unpinned torchvision
+# previously pulled torch 2.13 and broke sglang-kernel 0.4.5 on sm_120.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
+        "torch==2.11.0" "torchvision==0.26.0" "torchaudio==2.11.0" \
     && rm -rf /tmp/* /root/.cache/pip
 
 # Runtime deps for hermetic `pip install --no-deps --no-build-isolation -e python/`.
@@ -76,6 +78,9 @@ RUN pip install --no-cache-dir "torch==2.11.0" \
 # gated paths (flashinfer, sglang-kernel, xgrammar) at startup.
 COPY images/baseline-sglang/requirements-runtime.txt /tmp/requirements-runtime.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-runtime.txt \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
+        "torch==2.11.0" "torchvision==0.26.0" "torchaudio==2.11.0" \
+    && python3 -c "import torch; v=torch.__version__; assert v.startswith('2.11.0'), v; assert (torch.version.cuda or '').startswith('13'), torch.version.cuda" \
     && rm -rf /tmp/* /root/.cache/pip
 
 WORKDIR /opt/pareton

@@ -4,10 +4,12 @@
 # Pre-baked so the hermetic build can run --network=none with
 # `pip install --no-deps --no-build-isolation -e python/`.
 #
-# sglang-kernel==0.4.5 is a PREBUILT wheel: SGLang compiles no CUDA, so this
-# image is arch-agnostic (no TORCH_CUDA_ARCH_LIST) and needs no GPU to build.
-# It must stay version-matched to the source tag -- the PAR-54 spike died at
-# serve time on kernel 0.4.5 vs a source HEAD that wanted 0.4.6.post1.
+# sglang-kernel 0.4.5 is a PREBUILT wheel (no TORCH_CUDA_ARCH_LIST; no GPU to
+# build). Use the SGLang-hosted +cu130 build, not PyPI: PyPI's plain 0.4.5
+# wheel loads sm100/common_ops that fail on RTX 5090 (sm_120) with an
+# undefined TensorBase symbol. Official lmsysorg/sglang:v0.5.17 uses +cu130
+# and imports cleanly on sm_120. Keep the version matched to the source tag
+# (PAR-54: 0.4.5 vs HEAD wanting 0.4.6.post1 died at serve).
 aiohttp
 anthropic>=0.20.0
 apache-tvm-ffi==0.1.11
@@ -60,7 +62,7 @@ scipy
 sentencepiece
 setproctitle
 sgl-deep-gemm==0.1.5.post1
-sglang-kernel==0.4.5
+sglang-kernel @ https://github.com/sgl-project/whl/releases/download/v0.4.5/sglang_kernel-0.4.5%2Bcu130-cp310-abi3-manylinux2014_x86_64.whl
 smg-grpc-servicer>=0.5.0
 soundfile==0.13.1
 tiktoken
@@ -71,7 +73,7 @@ torch_memory_saver>=0.0.9.post1
 torchao==0.17.0
 torchaudio==2.11.0
 torchcodec==0.11.1 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')
-torchvision
+torchvision==0.26.0
 tqdm
 transformers==5.12.1
 uvicorn

@@ -233,7 +233,13 @@ def cmd_exec(args: argparse.Namespace) -> int:
         print(f"error: unknown pod {args.pod_name!r}", file=sys.stderr)
         return 2
     pod = _pod_from_registry(entry)
-    cmd = " ".join(args.cmd)
+    cmd_parts = list(args.cmd)
+    if cmd_parts and cmd_parts[0] == "--":
+        cmd_parts = cmd_parts[1:]
+    if not cmd_parts:
+        print("error: missing remote command", file=sys.stderr)
+        return 2
+    cmd = " ".join(cmd_parts)
     try:
         result = ssh_exec(pod, cmd, timeout_s=float(args.timeout), check=False)
     except GpuError as exc:
@@ -300,9 +306,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_bench.set_defaults(func=cmd_bench)
 
     p_exec = sub.add_parser("exec", help="Run a command on a registry pod")
-    p_exec.add_argument("pod_name")
     p_exec.add_argument("--timeout", type=float, default=600.0)
-    p_exec.add_argument("cmd", nargs=argparse.REMAINDER)
+    p_exec.add_argument("pod_name")
+    p_exec.add_argument(
+        "cmd",
+        nargs="*",
+        help="Remote command; quote it, or put -- before args that start with -",
+    )
     p_exec.set_defaults(func=cmd_exec)
 
     return p

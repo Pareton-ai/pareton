@@ -155,9 +155,12 @@ def exec(
 ) -> ExecResult:
     runner = runner or default_ssh_runner
     remote = cmd if isinstance(cmd, str) else " ".join(shlex.quote(c) for c in cmd)
+    # OpenSSH 9.8+ still getopt-parses argv after destination when it starts with
+    # `--` (`gpu exec --timeout` used to leak into the remote string).
     argv = [
         "ssh",
         *ssh_base_opts(pod, state_dir=state_dir),
+        "--",
         f"{pod.ssh.user}@{pod.ssh.host}",
         remote,
     ]
