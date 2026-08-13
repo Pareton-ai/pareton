@@ -87,6 +87,18 @@ def _attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _download_mbps(ex: Any) -> float:
+    """Executor download speed; 0.0 when Lium reports nothing usable."""
+    raw = _attr(ex, "effective_download_speed_mbps")
+    if raw in (None, ""):
+        network = _attr(_attr(ex, "specs"), "network")
+        raw = _attr(network, "download_speed")
+    try:
+        return max(0.0, float(raw or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _parse_ssh_target(ssh_cmd: str | None) -> SshTarget:
     """Parse ``ssh user@host -p N`` (Lium PodInfo.ssh_cmd shape)."""
     cmd = (ssh_cmd or "").strip()
@@ -180,10 +192,31 @@ class LiumProvider:
                     hourly_price_cents=price_cents,
                     gpu_count=gpu_count,
                     gpu_type=gpu_type,
-                    raw={"executor_id": executor_id},
+                    raw={
+                        "executor_id": executor_id,
+                        "download_mbps": _download_mbps(ex),
+                    },
                 )
             )
-        out.sort(key=lambda o: (o.hourly_price_cents, o.gpu_count))
+        # Download speed dominates pod cost for weight/image pulls; price stays a
+        # hard cap above and only breaks ties. Unknown speed (0.0) sorts last.
+        out.sort(
+            key=lambda o: (
+                -float(o.raw["download_mbps"]),
+                o.hourly_price_cents,
+                o.gpu_count,
+            )
+        )
+        if out:
+            best = out[0]
+            logger.info(
+                "Lium best offer: executor=%s gpu=%sx%s download=%.0f Mbps price=%s c/h",
+                best.instance_id,
+                best.gpu_count,
+                best.gpu_type,
+                float(best.raw["download_mbps"]),
+                best.hourly_price_cents,
+            )
         return out
 
     def _create_volume(self, name: str) -> str:

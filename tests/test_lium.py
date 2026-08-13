@@ -27,6 +27,8 @@ class FakeExecutor:
     gpu_count: int
     price_per_hour: float
     docker_in_docker: bool = True
+    effective_download_speed_mbps: float | None = None
+    specs: dict[str, Any] | None = None
 
 
 @dataclass
@@ -207,6 +209,43 @@ def test_search_filters(provider: LiumProvider, client: FakeClient):
     )
     assert [o.instance_id for o in offers] == ["e1"]
     assert offers[0].hourly_price_cents == 150
+
+
+def test_search_prefers_fastest_download(provider: LiumProvider, client: FakeClient):
+    client.executors = [
+        FakeExecutor("slow", "slow", "RTX5090", 8, 1.0, True, 100.0),
+        FakeExecutor("fast", "fast", "RTX5090", 8, 3.0, True, 600.0),
+        FakeExecutor("unknown", "unknown", "RTX5090", 8, 0.5, True),
+        FakeExecutor(
+            "specs",
+            "specs",
+            "RTX5090",
+            8,
+            4.0,
+            True,
+            None,
+            {"network": {"download_speed": 300.0}},
+        ),
+    ]
+    offers = provider.search(
+        PodSpec(gpu_count=8, gpu_type="RTX5090", max_hourly_cents=1000)
+    )
+    assert [o.instance_id for o in offers] == ["fast", "specs", "slow", "unknown"]
+    assert offers[0].raw["download_mbps"] == 600.0
+    assert offers[-1].raw["download_mbps"] == 0.0
+
+
+def test_search_price_cap_still_filters_fast_executor(
+    provider: LiumProvider, client: FakeClient
+):
+    client.executors = [
+        FakeExecutor("fast-pricey", "fast", "H200", 1, 50.0, True, 900.0),
+        FakeExecutor("slow-cheap", "slow", "H200", 1, 1.0, True, 100.0),
+    ]
+    offers = provider.search(
+        PodSpec(gpu_count=1, gpu_type="H200", max_hourly_cents=500)
+    )
+    assert [o.instance_id for o in offers] == ["slow-cheap"]
 
 
 def test_provision_and_destroy(
