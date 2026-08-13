@@ -791,6 +791,28 @@ def test_build_request_wires_quantization(tmp_path: Path):
     assert args[args.index("--max-model-len") + 1] == "4096"
 
 
+def test_sglang_request_omits_vllm_max_model_len(tmp_path: Path):
+    from campaign.engine import SGLANG_ENGINE
+
+    row = _row(
+        engine=SGLANG_ENGINE,
+        bench=_bench_spec(
+            serve_args=["--tp-size", "8", "--context-length", "131072"],
+        ),
+    )
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path,
+    )
+    req = build_bench_request_dict(row, task_id=str(uuid4()), trace_path=str(trace))
+    args = req["engines"]["baseline"]["serve_args"]
+    assert "--max-model-len" not in args
+    assert args[:4] == ["--model", "/model", "--dtype", "bfloat16"]
+    assert "--tp-size" in args
+    assert "--context-length" in args
+
+
 def test_manifest_bench_pin_compat():
     now = datetime.now(timezone.utc)
     kwargs = dict(

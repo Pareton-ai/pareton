@@ -631,6 +631,7 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
                        c.bench, c.sla, c.workload_trace_url, c.workload_trace_sha256,
                        c.gpu_skus, c.manifest_hash,
                        c.workload_pool, c.sampling_rule, c.calibration, c.z_threshold,
+                       c.engine,
                        %s::bigint AS job_id, %s::text AS job_kind
                 FROM submissions s
                 JOIN campaigns c ON c.id = s.campaign_id

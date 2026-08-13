@@ -24,6 +24,7 @@ from bench.validate import (
     validate_report_dict,
 )
 from builder.registry import baseline_engine_image_ref
+from campaign.engine import resolve_engine
 from bench.promote import PromoteError, decide_promotion
 from bench.sampler import (
     SamplerError,
@@ -63,6 +64,12 @@ def _parse_json_field(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def _row_engine_name(row: dict[str, Any]) -> str:
+    raw = _parse_json_field(row.get("engine"))
+    profile = resolve_engine(raw if isinstance(raw, dict) else None)
+    return str(profile["name"])
 
 
 def fetch_trace_bytes(
@@ -191,14 +198,11 @@ def build_bench_request_dict(
     max_model_len = int(model["max_model_len"])
     dtype = str(model.get("dtype") or "bfloat16")
     extra_serve = list(bench.get("serve_args") or [])
-    serve_args = [
-        "--model",
-        "/model",
-        "--max-model-len",
-        str(max_model_len),
-        "--dtype",
-        dtype,
-    ]
+    serve_args = ["--model", "/model"]
+    # SGLang rejects --max-model-len (it uses campaign --context-length).
+    if _row_engine_name(row) != "sglang":
+        serve_args.extend(["--max-model-len", str(max_model_len)])
+    serve_args.extend(["--dtype", dtype])
     quantization = model.get("quantization")
     if quantization is not None and str(quantization).strip() != "":
         serve_args.extend(["--quantization", str(quantization)])

@@ -283,6 +283,8 @@ def prepare_campaign_calibration_request(
             "p99_itl_ms": sla.get("p99_itl_ms") or _CALIB_SLA_P99,
         },
     }
+    if manifest.engine is not None:
+        row["engine"] = manifest.engine
     try:
         req = build_bench_request_dict(
             row,
@@ -977,6 +979,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         )
         row = {
             "workload_trace_sha256": manifest.workload_trace_sha256,
+            "sampling_rule": manifest.sampling_rule,
         }
         fp = campaign_calibration_fingerprint(manifest.bench, row)
         correctness = correctness_dict_from_summary(

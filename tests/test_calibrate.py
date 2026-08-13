@@ -386,3 +386,76 @@ def test_assert_summary_matches_campaign_rejects_mismatch():
     }
     with pytest.raises(CalibrationError, match="model_revision"):
         assert_summary_matches_campaign(bad, bench=bench, trace_sha256=A3A_TRACE_SHA256)
+
+
+def test_cmd_apply_fingerprint_includes_hf_rows_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """apply must store the same sampling_* keys the worker later compares."""
+    from argparse import Namespace
+    from types import SimpleNamespace
+
+    from bench.calibrate import cmd_apply
+    from test_sampling_claim import HF_RULE
+
+    trace_sha = "sha256:" + ("b" * 64)
+    bench = {
+        "baseline_engine_image_digest": DIGEST,
+        "gpu_count": 8,
+        "serve_args": [],
+        "model": {
+            "hf_repo": "org/model",
+            "hf_revision": "abc",
+            "dtype": "auto",
+            "quantization": None,
+            "max_model_len": 128,
+        },
+        "correctness": {"num_prompts": 8, "max_new_tokens": 32},
+    }
+    summary = {
+        "fingerprint": {
+            "engine_digest": DIGEST,
+            "model_repo": "org/model",
+            "model_revision": "abc",
+            "trace_sha256": trace_sha,
+        },
+        "correctness": {
+            "mean_abs_logprob_diff": {"suggested": 0.05},
+            "max_abs_logprob_diff": {"suggested": 0.1},
+            "argmax_mismatch_rate": {"suggested": 0.01},
+        },
+    }
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(json.dumps(summary) + "\n", encoding="utf-8")
+
+    captured: dict = {}
+
+    def _fake_apply(_cid, correctness, approver="x"):
+        captured["fp"] = correctness["calibration"]["fingerprint"]
+        return "sha256:" + ("c" * 64)
+
+    monkeypatch.setattr(
+        "campaign.store.get_campaign",
+        lambda _cid: SimpleNamespace(
+            bench=bench,
+            workload_trace_sha256=trace_sha,
+            sampling_rule=HF_RULE,
+        ),
+    )
+    monkeypatch.setattr(
+        "campaign.store.apply_campaign_correctness_calibration",
+        _fake_apply,
+    )
+    rc = cmd_apply(
+        Namespace(
+            summary=summary_path,
+            campaign_id="unused",
+            approver="test",
+            safety_factor=1.0,
+        )
+    )
+    assert rc == 0
+    assert captured["fp"]["sampling_dataset"] == HF_RULE["dataset"]
+    assert captured["fp"]["sampling_revision"] == HF_RULE["revision"]
+    assert captured["fp"]["sampling_n_prompts"] == HF_RULE["n_prompts"]
+    assert captured["fp"]["sampling_algo_version"] == HF_RULE["algo_version"]

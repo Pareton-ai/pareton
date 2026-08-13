@@ -73,6 +73,13 @@ CORRECTNESS_EXTRA_SERVE_ARGS = [
     "--no-enable-flashinfer-autotune",
 ]
 
+
+def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
+    """vLLM-only correctness flags. SGLang uses --tp-size and rejects these."""
+    if "--tp-size" in serve_args:
+        return []
+    return list(CORRECTNESS_EXTRA_SERVE_ARGS)
+
 EXIT_OK = 0
 EXIT_BAD_REQUEST = 1
 EXIT_ENV = 2
@@ -83,9 +90,10 @@ logger = logging.getLogger("bench")
 
 def correctness_engine_spec(spec: EngineSpec) -> EngineSpec:
     """Copy of ``spec`` with correctness-only serve args appended."""
+    extra = correctness_extra_serve_args(spec.serve_args)
     return EngineSpec(
         image=spec.image,
-        serve_args=list(spec.serve_args) + list(CORRECTNESS_EXTRA_SERVE_ARGS),
+        serve_args=list(spec.serve_args) + extra,
         env=dict(spec.env),
     )
 
@@ -308,7 +316,11 @@ class _EngineProvider:
         with BenchNetwork(run_id=new_run_id(), internal=True) as net:
             try:
                 with self._docker_phase(
-                    net, "baseline", extra_serve_args=CORRECTNESS_EXTRA_SERVE_ARGS
+                    net,
+                    "baseline",
+                    extra_serve_args=correctness_extra_serve_args(
+                        self._req.engines.baseline.serve_args
+                    ),
                 ) as base:
                     phase = collect_baseline_correctness(
                         base.base_url,
@@ -322,7 +334,11 @@ class _EngineProvider:
                 self._reraise_with_role("baseline", exc)
             try:
                 with self._docker_phase(
-                    net, "candidate", extra_serve_args=CORRECTNESS_EXTRA_SERVE_ARGS
+                    net,
+                    "candidate",
+                    extra_serve_args=correctness_extra_serve_args(
+                        self._req.engines.candidate.serve_args
+                    ),
                 ) as cand:
                     report = finish_correctness_with_candidate(
                         cand.base_url, phase, cfg=cfg, evidence_dir=evidence_dir
