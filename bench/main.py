@@ -82,10 +82,25 @@ def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
     return list(CORRECTNESS_EXTRA_SERVE_ARGS)
 
 
+def can_fuse_correctness_perf(req: BenchRequest) -> bool:
+    """Reuse one container per role only when correctness adds no serve args.
+
+    vLLM correctness appends --no-enable-prefix-caching /
+    --no-enable-flashinfer-autotune, so its perf must keep a separate container.
+    SGLang (--tp-size) gets an empty list and can fuse.
+    """
+    return not correctness_extra_serve_args(
+        req.engines.baseline.serve_args
+    ) and not correctness_extra_serve_args(req.engines.candidate.serve_args)
+
+
 EXIT_OK = 0
 EXIT_BAD_REQUEST = 1
 EXIT_ENV = 2
 EXIT_ENGINE = 3
+
+_NOTE_CORRECTNESS_FAILED = "correctness gate failed; perf_screen/sla_bench skipped"
+_NOTE_PERF_FAILED = "perf_screen failed; sla_bench skipped"
 
 logger = logging.getLogger("bench")
 
@@ -386,6 +401,66 @@ class _EngineProvider:
                 self._reraise_with_role("candidate", exc)
         raise AssertionError("unreachable")
 
+    def run_correctness_and_perf(
+        self,
+        *,
+        prompts: list[PromptCase],
+        corr_cfg,
+        task_id: str,
+        corr_dir: Path,
+        requests,
+        perf_cfg,
+        perf_dir: Path,
+    ) -> tuple[CorrectnessReport, PerfScreenReport | None]:
+        """One container per role for correctness then perf. Never share roles."""
+        if self._mock:
+            corr = self.run_correctness(prompts, corr_cfg, task_id, corr_dir)
+            if corr.verdict != "pass":
+                return corr, None
+            return corr, self.run_perf_screen(requests, perf_cfg, perf_dir)
+        with BenchNetwork(run_id=new_run_id(), internal=True) as net:
+            try:
+                with self._docker_phase(net, "baseline") as base:
+                    phase = collect_baseline_correctness(
+                        base.base_url,
+                        prompts=prompts,
+                        cfg=corr_cfg,
+                        task_id=task_id,
+                        evidence_dir=corr_dir,
+                    )
+                    self.baseline_digest = base.image_digest
+                    base_metrics = run_perf_screen_engine(
+                        base.base_url,
+                        role="baseline",
+                        requests=requests,
+                        cfg=perf_cfg,
+                        evidence_dir=perf_dir,
+                    )
+            except EngineError as exc:
+                self._reraise_with_role("baseline", exc)
+            try:
+                with self._docker_phase(net, "candidate") as cand:
+                    corr = finish_correctness_with_candidate(
+                        cand.base_url,
+                        phase,
+                        cfg=corr_cfg,
+                        evidence_dir=corr_dir,
+                    )
+                    self.candidate_digest = cand.image_digest
+                    if corr.verdict != "pass":
+                        (perf_dir / base_metrics["rows_file"]).unlink(missing_ok=True)
+                        return corr, None
+                    return corr, finish_perf_screen(
+                        cand.base_url,
+                        baseline=base_metrics,
+                        requests=requests,
+                        cfg=perf_cfg,
+                        evidence_dir=perf_dir,
+                    )
+            except EngineError as exc:
+                self._reraise_with_role("candidate", exc)
+        raise AssertionError("unreachable")
+
     def run_sla_bench(self, trace, cfg, evidence_dir: Path) -> SlaBenchReport:
         if self._mock:
             base, cand = self._ensure_mocks()
@@ -438,26 +513,36 @@ def run_all_modules(
     sla: SlaBenchReport | None = None
     skipped_note: str | None = None
 
-    if req.mode in ("all", "correctness"):
+    fused = req.mode == "all" and can_fuse_correctness_perf(req)
+    if fused:
+        corr, perf = provider.run_correctness_and_perf(
+            prompts=prompts,
+            corr_cfg=req.correctness,
+            task_id=req.task_id,
+            corr_dir=layout.correctness_dir,
+            requests=trace.requests,
+            perf_cfg=req.perf_screen,
+            perf_dir=layout.perf_screen_dir,
+        )
+        if corr.verdict != "pass":
+            return corr, None, None, _NOTE_CORRECTNESS_FAILED
+        if perf.verdict != "pass":
+            return corr, perf, None, _NOTE_PERF_FAILED
+
+    if not fused and req.mode in ("all", "correctness"):
         corr = provider.run_correctness(
             prompts, req.correctness, req.task_id, layout.correctness_dir
         )
         if corr.verdict != "pass":
-            skipped_note = (
-                "correctness gate failed; perf_screen/sla_bench skipped"
-                if req.mode == "all"
-                else None
-            )
+            skipped_note = _NOTE_CORRECTNESS_FAILED if req.mode == "all" else None
             return corr, None, None, skipped_note
 
-    if req.mode in ("all", "perf_screen"):
+    if not fused and req.mode in ("all", "perf_screen"):
         perf = provider.run_perf_screen(
             trace.requests, req.perf_screen, layout.perf_screen_dir
         )
         if perf.verdict != "pass":
-            skipped_note = (
-                "perf_screen failed; sla_bench skipped" if req.mode == "all" else None
-            )
+            skipped_note = _NOTE_PERF_FAILED if req.mode == "all" else None
             return corr, perf, None, skipped_note
 
     skip_sla = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lower() in (

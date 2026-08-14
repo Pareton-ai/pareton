@@ -344,6 +344,219 @@ def test_docker_engines_run_sequentially(tmp_path: Path, monkeypatch):
     assert live["n"] == 0
 
 
+def _fake_docker_harness(monkeypatch, *, corr_verdict: str = "pass"):
+    """Shared BenchNetwork/EngineContainer fakes for fused vs 4-start tests."""
+    from dataclasses import dataclass
+
+    live = {"n": 0, "max": 0, "starts": 0}
+    order: list[str] = []
+
+    @dataclass
+    class _Handle:
+        base_url: str = "http://127.0.0.1:9"
+        image_digest: str = "sha256:" + ("a" * 64)
+
+    class _FakeNet:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+    class _FakeEngine:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            live["n"] += 1
+            live["starts"] += 1
+            live["max"] = max(live["max"], live["n"])
+            return _Handle()
+
+        def __exit__(self, *exc):
+            live["n"] -= 1
+            return None
+
+    monkeypatch.setattr("bench.main.BenchNetwork", _FakeNet)
+    monkeypatch.setattr("bench.main.EngineContainer", _FakeEngine)
+
+    class _Baseline:
+        prompts = [PromptCase(id="p1", prompt="hi")]
+        scored = []
+
+    def collect(*a, **k):
+        order.append("baseline-correctness")
+        return _Baseline()
+
+    def finish_corr(*a, **k):
+        order.append("candidate-correctness")
+        return type(
+            "R",
+            (),
+            {
+                "verdict": corr_verdict,
+                "num_prompts": 1,
+                "num_positions_compared": 1,
+                "mean_abs_logprob_diff": 0.0,
+                "max_abs_logprob_diff": 0.0,
+                "argmax_mismatch_rate": 0.0,
+                "evidence": "evidence/correctness/logprob_diffs.jsonl",
+            },
+        )()
+
+    def perf_engine(url, *, role, requests, cfg, evidence_dir, **kwargs):
+        order.append(f"{role}-perf")
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        rows_path = evidence_dir / f"{role}_rows.jsonl"
+        rows_path.write_text("{}\n", encoding="utf-8")
+        return {
+            "role": role,
+            "wall_s": 1.0,
+            "completion_tokens": 1,
+            "output_tokens_per_s": 1.0,
+            "num_requests": 1,
+            "rows_file": rows_path.name,
+        }
+
+    def finish_perf(*a, **k):
+        order.append("candidate-perf")
+        return type(
+            "P",
+            (),
+            {
+                "verdict": "pass",
+                "baseline_output_tokens_per_s": 1.0,
+                "candidate_output_tokens_per_s": 1.0,
+                "throughput_ratio": 1.0,
+                "evidence": "evidence/perf_screen/perf_screen.jsonl",
+            },
+        )()
+
+    monkeypatch.setattr("bench.main.collect_baseline_correctness", collect)
+    monkeypatch.setattr("bench.main.finish_correctness_with_candidate", finish_corr)
+    monkeypatch.setattr("bench.main.run_perf_screen_engine", perf_engine)
+    monkeypatch.setattr("bench.main.finish_perf_screen", finish_perf)
+    monkeypatch.setenv("PARETON_BENCH_SKIP_SLA", "1")
+    return live, order
+
+
+def _sglang_engines() -> dict:
+    a = "ghcr.io/example/engine@sha256:" + ("a" * 64)
+    b = "ghcr.io/example/engine@sha256:" + ("b" * 64)
+    return {
+        "baseline": {"image": a, "serve_args": ["--tp-size", "8"], "env": {}},
+        "candidate": {"image": b, "serve_args": ["--tp-size", "8"], "env": {}},
+    }
+
+
+def test_mode_all_fuses_containers_per_role(tmp_path: Path, monkeypatch):
+    from bench.main import _EngineProvider, run_all_modules
+    from bench.output import OutputLayout
+    from bench.validate import load_bench_request, load_workload_trace
+
+    live, order = _fake_docker_harness(monkeypatch)
+    req_path = _write_request(tmp_path, mode="all", engines=_sglang_engines())
+    req, _ = load_bench_request(req_path)
+    trace = load_workload_trace(
+        Path(req.workload_trace.path), expected_sha256=req.workload_trace.sha256
+    )
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
+    corr, perf, sla, note = run_all_modules(
+        req=req,
+        provider=provider,
+        prompts=[PromptCase(id="p1", prompt="hi")],
+        trace=trace,
+        layout=layout,
+    )
+    assert live["starts"] == 2
+    assert live["max"] == 1
+    assert live["n"] == 0
+    assert order == [
+        "baseline-correctness",
+        "baseline-perf",
+        "candidate-correctness",
+        "candidate-perf",
+    ]
+    assert corr is not None and corr.verdict == "pass"
+    assert perf is not None and perf.verdict == "pass"
+    assert sla is None
+    assert note is None
+    assert provider.baseline_digest == "sha256:" + ("a" * 64)
+    assert provider.candidate_digest == "sha256:" + ("a" * 64)
+
+
+def test_fused_correctness_fail_skips_candidate_perf(tmp_path: Path, monkeypatch):
+    from bench.main import _EngineProvider, _NOTE_CORRECTNESS_FAILED, run_all_modules
+    from bench.output import OutputLayout
+    from bench.validate import load_bench_request, load_workload_trace
+
+    live, order = _fake_docker_harness(monkeypatch, corr_verdict="fail_correctness")
+    req_path = _write_request(tmp_path, mode="all", engines=_sglang_engines())
+    req, _ = load_bench_request(req_path)
+    trace = load_workload_trace(
+        Path(req.workload_trace.path), expected_sha256=req.workload_trace.sha256
+    )
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
+    corr, perf, sla, note = run_all_modules(
+        req=req,
+        provider=provider,
+        prompts=[PromptCase(id="p1", prompt="hi")],
+        trace=trace,
+        layout=layout,
+    )
+    assert live["starts"] == 2
+    assert live["max"] == 1
+    assert "candidate-perf" not in order
+    assert corr is not None and corr.verdict == "fail_correctness"
+    assert perf is None
+    assert sla is None
+    assert note == _NOTE_CORRECTNESS_FAILED
+    assert not (layout.perf_screen_dir / "baseline_rows.jsonl").exists()
+
+
+def test_vllm_serve_args_do_not_fuse(tmp_path: Path, monkeypatch):
+    from bench.main import _EngineProvider, run_all_modules
+    from bench.output import OutputLayout
+    from bench.validate import load_bench_request, load_workload_trace
+
+    live, order = _fake_docker_harness(monkeypatch)
+    req_path = _write_request(tmp_path, mode="all")
+    req, _ = load_bench_request(req_path)
+    trace = load_workload_trace(
+        Path(req.workload_trace.path), expected_sha256=req.workload_trace.sha256
+    )
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
+    corr, perf, sla, note = run_all_modules(
+        req=req,
+        provider=provider,
+        prompts=[PromptCase(id="p1", prompt="hi")],
+        trace=trace,
+        layout=layout,
+    )
+    assert live["starts"] == 4
+    assert live["max"] == 1
+    assert live["n"] == 0
+    assert order == [
+        "baseline-correctness",
+        "candidate-correctness",
+        "baseline-perf",
+        "candidate-perf",
+    ]
+    assert corr is not None and corr.verdict == "pass"
+    assert perf is not None and perf.verdict == "pass"
+    assert sla is None
+    assert note is None
+
+
 def test_sku_mismatch_accepts_rtx5090_with_spaces():
     from bench.env import warn_gpu_sku_mismatch
     from bench.schemas import EnvironmentInfo, GpuInfo
