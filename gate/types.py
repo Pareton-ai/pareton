@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
+
+try:
+    from enum import StrEnum
+except ImportError:  # Python 3.10 — enum.StrEnum is 3.11+
+
+    class StrEnum(str, Enum):
+        """Minimal StrEnum backport so CI's 3.10 matrix stays green."""
+
+        def __str__(self) -> str:
+            return str(self.value)
+
+        def __format__(self, format_spec: str) -> str:
+            return str(self.value).__format__(format_spec)
 
 
 class SubmissionState(StrEnum):
