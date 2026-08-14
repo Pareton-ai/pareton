@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -36,6 +37,21 @@ _DEFAULT_HEALTH_POLL_S = 2.0
 _DEFAULT_ENGINE_PORT = 8000
 _DEFAULT_PULL_TIMEOUT_S = 1800.0
 _DEFAULT_CMD_TIMEOUT_S = 120.0
+
+
+def ensure_listen_args(serve_args: Sequence[str], port: int) -> list[str]:
+    """Pin listen address so health checks on the docker network IP succeed.
+
+    SGLang defaults to 127.0.0.1:30000. The harness probes ``{container_ip}:{port}``
+    (default 8000). Without these flags the server comes up and the health loop
+    still sees connection refused until timeout.
+    """
+    args = list(serve_args)
+    if "--host" not in args:
+        args.extend(["--host", "0.0.0.0"])
+    if "--port" not in args:
+        args.extend(["--port", str(int(port))])
+    return args
 
 
 def _defaults_from_config() -> tuple[float, float, int, float, float]:
@@ -556,12 +572,20 @@ class EngineContainer:
             run_cmd.extend(["-p", f"127.0.0.1::{self.port}"])
         if self.gpu_count > 0:
             run_cmd.extend(["--gpus", str(self.gpu_count)])
+            # Default docker /dev/shm is 64MB; NCCL TP>1 dies with
+            # "unhandled system error" without host IPC + a larger shm.
+            run_cmd.extend(["--ipc", "host", "--shm-size", "16g"])
+        engine_cache = os.environ.get("PARETON_BENCH_ENGINE_CACHE_DIR", "").strip()
+        if engine_cache:
+            cache_path = Path(engine_cache)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            run_cmd.extend(["-v", f"{cache_path.resolve()}:/root/.cache/sglang"])
         if self.weights_dir is not None:
             run_cmd.extend(["-v", f"{self.weights_dir.resolve()}:/model:ro"])
         if self._env_file is not None:
             run_cmd.extend(["--env-file", str(self._env_file)])
         run_cmd.append(self.spec.image)
-        run_cmd.extend(self.spec.serve_args)
+        run_cmd.extend(ensure_listen_args(self.spec.serve_args, self.port))
 
         # From docker run onward, any failure — including KeyboardInterrupt —
         # must tear down: __exit__ is NOT called when __enter__ raises.

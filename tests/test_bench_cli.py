@@ -110,7 +110,8 @@ def test_cli_mock_engine_mode_correctness_pass(tmp_path: Path):
     assert evidence.is_file()
 
 
-def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path):
+def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PARETON_BENCH_SKIP_SLA", raising=False)
     req = _write_request(tmp_path, mode="all")
     out = tmp_path / "out"
     code = main(
@@ -142,6 +143,32 @@ def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path):
     assert report["verdict"] in ("pass", "error")
     assert "stub_note" not in report
     assert "skipped_note" not in report
+
+
+def test_cli_mock_engine_skip_sla_omits_sla_bench(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PARETON_BENCH_SKIP_SLA", "1")
+    req = _write_request(tmp_path, mode="all")
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.03",
+            "--mock-candidate-token-latency-s",
+            "0.015",
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    validate_report_dict(report)
+    assert report["correctness"]["verdict"] == "pass"
+    assert report["perf_screen"]["verdict"] == "pass"
+    assert "sla_bench" not in report
+    assert report["verdict"] == "pass"
 
 
 def test_cli_mock_tampered_candidate_fails(tmp_path: Path):
@@ -315,3 +342,21 @@ def test_docker_engines_run_sequentially(tmp_path: Path, monkeypatch):
     )
     assert live["max"] == 1
     assert live["n"] == 0
+
+
+def test_sku_mismatch_accepts_rtx5090_with_spaces():
+    from bench.env import warn_gpu_sku_mismatch
+    from bench.schemas import EnvironmentInfo, GpuInfo
+
+    env = EnvironmentInfo(
+        gpu=[
+            GpuInfo(index=0, name="NVIDIA GeForce RTX 5090", vbios="", memory_mb=32768)
+        ],
+        driver_version="",
+        cuda_version="",
+        docker_version="",
+        harness_version="0",
+        hostname_hash="sha256:" + ("a" * 64),
+    )
+    assert warn_gpu_sku_mismatch(env, "RTX5090") is None
+    assert warn_gpu_sku_mismatch(env, "H200") is not None

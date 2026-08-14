@@ -82,6 +82,18 @@ BENCH_HF_CACHE_DIR: Path = Path(
         str(Path.home() / ".cache" / "pareton" / "hf"),
     )
 ).expanduser()
+# Host dir mounted at /root/.cache/sglang inside the engine container.
+# Empty means no mount (laptop tests). GPU remote env sets /workspace/sglang-cache
+# so FlashInfer autotune survives container restarts.
+BENCH_ENGINE_CACHE_DIR: str = os.environ.get(
+    "PARETON_BENCH_ENGINE_CACHE_DIR", ""
+).strip()
+# Z-calibrate needs correctness + perf_screen only. Skip sla_bench when set.
+BENCH_SKIP_SLA: bool = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # GPU pod orchestration (WS-C)
 TARGON_API_KEY: str = os.environ.get("PARETON_TARGON_API_KEY", "")
@@ -166,6 +178,14 @@ BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS",
 BENCH_SLA_WARMUP_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
 )
+
+# Dynamic workload sampling + z-score promotion calibration.
+CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))
+# Minimum distinct baseline-vs-baseline samples for campaigns.calibration.
+CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "20"))
+# Soft guidance for how many pods / concurrent prepare dirs operators run.
+CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
+CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 # Ordered fallback providers tried after GPU_PROVIDER on no-capacity or
 # provision error. Comma-separated; empty string disables fallback.

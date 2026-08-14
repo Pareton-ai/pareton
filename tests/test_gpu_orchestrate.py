@@ -342,6 +342,7 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
 
     ensure_durable_keypair(tmp_path / "st")
     monkeypatch.setattr("gpu.orchestrate.config.BENCH_HEALTH_TIMEOUT_S", 1800.0)
+    monkeypatch.setattr("gpu.orchestrate.config.BENCH_SKIP_SLA", False)
     pushed: list[str] = []
 
     def capturing_push(pod, local, remote, **kwargs):
@@ -365,6 +366,40 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
     assert pushed
     assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
+    assert "HF_XET_HIGH_PERFORMANCE=1" in pushed[0]
+    assert "PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/sglang-cache" in pushed[0]
+    assert "PARETON_BENCH_SKIP_SLA=" not in pushed[0]
+
+
+def test_write_remote_env_forwards_skip_sla(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import _write_remote_env
+    from gpu.types import Pod, SshTarget
+
+    ensure_durable_keypair(tmp_path / "st")
+    monkeypatch.setattr("gpu.orchestrate.config.BENCH_SKIP_SLA", True)
+    pushed: list[str] = []
+
+    def capturing_push(pod, local, remote, **kwargs):
+        pushed.append(Path(local).read_text(encoding="utf-8"))
+
+    monkeypatch.setattr("gpu.orchestrate.push", capturing_push)
+    monkeypatch.setattr(
+        "gpu.orchestrate.ssh_exec",
+        lambda *a, **k: SshResult(0, "", ""),
+    )
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
+    assert pushed
+    assert "PARETON_BENCH_SKIP_SLA=1" in pushed[0]
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):
@@ -699,6 +734,30 @@ def test_remote_docker_root_vs_nonroot():
     assert remote_docker(user) == "sudo -E docker"
 
 
+def test_exec_parser_timeout_after_pod_name():
+    """REMAINDER used to swallow `--timeout` into the remote string (OpenSSH 9.8)."""
+    from gpu.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "exec",
+            "pt-pod",
+            "--timeout",
+            "3600",
+            "docker pull x && docker run --rm img",
+        ]
+    )
+    assert args.timeout == 3600.0
+    assert args.pod_name == "pt-pod"
+    assert args.cmd == ["docker pull x && docker run --rm img"]
+    dashed = parser.parse_args(
+        ["exec", "pt-pod", "--timeout", "3600", "--", "docker", "run", "--rm", "img"]
+    )
+    assert dashed.timeout == 3600.0
+    assert dashed.cmd == ["docker", "run", "--rm", "img"]
+
+
 def test_cli_help_and_missing_key(monkeypatch):
     from gpu.cli import main
 
@@ -738,6 +797,9 @@ def test_bootstrap_script_verify_first_no_token():
     assert script.index("systemctl restart docker") < script.index(
         "chmod 666 /var/run/docker.sock"
     )
+    assert "stable/deb/nvidia-container-toolkit.list" in script
+    assert "$distribution/libnvidia-container.list" not in script
+    assert "grep -q '^deb '" in script
 
 
 def test_orchestrate_repetitions_one_pod_five_runs(tmp_path: Path, monkeypatch):
@@ -782,7 +844,7 @@ def test_orchestrate_repetitions_one_pod_five_runs(tmp_path: Path, monkeypatch):
     for i, cmd in enumerate(bench_cmds, start=1):
         assert f"/opt/pareton/out/run-{i:03d}" in cmd
         assert (out / f"run-{i:03d}").is_dir()
-    assert (out / "bench_request.remote.json").is_file()
+    assert (out / "run-001" / "bench_request.remote.json").is_file()
 
 
 def test_orchestrate_repetitions_fail_fast_still_destroys(tmp_path: Path, monkeypatch):
@@ -883,6 +945,158 @@ def test_orchestrate_repetitions_invalid(tmp_path: Path):
             provider=FakeProvider(),
             state_dir=tmp_path / "st",
         )
+
+
+def _calib_sample_dir(parent: Path, idx: int) -> Path:
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    d = parent / f"sample-{idx:03d}"
+    d.mkdir(parents=True)
+    (d / "bench_request.json").write_text(json.dumps(req), encoding="utf-8")
+    return d
+
+
+def _stub_remote(monkeypatch) -> tuple[list[str], Any]:
+    bench_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        joined = " ".join(cmd)
+        if "python -m bench" in joined:
+            bench_cmds.append(joined)
+            return SshResult(0, "ok\n", "")
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+    return bench_cmds, runner
+
+
+def test_discover_calib_requests_sorted(tmp_path: Path):
+    from gpu.orchestrate import discover_calib_requests
+
+    _calib_sample_dir(tmp_path, 2)
+    _calib_sample_dir(tmp_path, 0)
+    _calib_sample_dir(tmp_path, 1)
+    paths = discover_calib_requests(tmp_path)
+    assert [p.parent.name for p in paths] == ["sample-000", "sample-001", "sample-002"]
+
+
+def test_requests_dir_runs_distinct_samples_one_pod(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import discover_calib_requests
+
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    bench_cmds, runner = _stub_remote(monkeypatch)
+    pool = tmp_path / "pool"
+    _calib_sample_dir(pool, 0)
+    _calib_sample_dir(pool, 1)
+    out = tmp_path / "runs"
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_paths=discover_calib_requests(pool),
+        output_dir=out,
+        mock_engine=True,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == 0
+    assert provider.provision_calls == 1
+    assert len(provider.destroy_calls) == 1
+    assert len(bench_cmds) == 2
+    assert "/opt/pareton/out/run-001" in bench_cmds[0]
+    assert "/opt/pareton/out/run-002" in bench_cmds[1]
+    assert (out / "run-001").is_dir()
+    assert (out / "run-002").is_dir()
+
+
+def test_requests_dir_skips_pass_and_keep(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import discover_calib_requests
+
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    bench_cmds, runner = _stub_remote(monkeypatch)
+    pool = tmp_path / "pool"
+    _calib_sample_dir(pool, 0)
+    _calib_sample_dir(pool, 1)
+    out = tmp_path / "runs"
+    run1 = out / "run-001"
+    run1.mkdir(parents=True)
+    (run1 / "bench_report.json").write_text(
+        json.dumps({"verdict": "pass"}), encoding="utf-8"
+    )
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_paths=discover_calib_requests(pool),
+        output_dir=out,
+        mock_engine=True,
+        keep=True,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == 0
+    assert len(bench_cmds) == 1
+    assert "/opt/pareton/out/run-002" in bench_cmds[0]
+    assert provider.destroy_calls == []
+
+
+def test_pod_reuses_registry_without_provision(tmp_path: Path, monkeypatch):
+    from gpu.orchestrate import discover_calib_requests
+
+    key_path, _pub = ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    bench_cmds, runner = _stub_remote(monkeypatch)
+    name = encode_pod_name(ttl_hours=2)
+    reg = PodRegistry(tmp_path / "st")
+    reg.add(
+        RegistryEntry(
+            provider="targon",
+            pod_id="wl-1",
+            name=name,
+            deadline="2099-01-01T00:00:00Z",
+            hourly_price_cents=1,
+            state="active",
+            key_path=str(key_path),
+            ssh_host="h",
+            ssh_port=22,
+            ssh_user="root",
+        )
+    )
+    pool = tmp_path / "pool"
+    _calib_sample_dir(pool, 0)
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_paths=discover_calib_requests(pool),
+        output_dir=tmp_path / "runs",
+        mock_engine=True,
+        pod_name=name,
+        keep=True,
+        provider=provider,
+        runner=runner,
+        registry=reg,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert code == 0
+    assert provider.provision_calls == 0
+    assert provider.destroy_calls == []
+    assert len(bench_cmds) == 1
+
+
+def test_cli_bench_requires_request_xor_dir(capsys):
+    from gpu.cli import main
+
+    assert main(["bench", "--output-dir", "/tmp/x"]) == 2
+    assert "--request" in capsys.readouterr().err
 
 
 class CapacityMissProvider(FakeProvider):

@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 REMOTE_REPO = "/opt/pareton"
 REMOTE_VENV = f"{REMOTE_REPO}/.venv"
 REMOTE_HF_CACHE = "/workspace/hf-cache"
+REMOTE_ENGINE_CACHE = "/workspace/sglang-cache"
 
 
 def local_code_sha(repo_root: Path) -> str:
@@ -42,11 +43,13 @@ def bootstrap_script(*, with_nvidia_toolkit_install: bool = True) -> str:
         toolkit = r"""
 if ! $SUDO docker info 2>/dev/null | grep -qi nvidia; then
   echo "nvidia container runtime missing; installing nvidia-container-toolkit"
-  distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | $SUDO gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | \
-    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  tmp_list=$(mktemp)
+  curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list -o "$tmp_list"
+  grep -q '^deb ' "$tmp_list" || { echo "nvidia toolkit list was not a deb source"; cat "$tmp_list"; exit 1; }
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' "$tmp_list" | \
     $SUDO tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+  rm -f "$tmp_list"
   $SUDO apt-get update -y
   $SUDO apt-get install -y nvidia-container-toolkit
   $SUDO nvidia-ctk runtime configure --runtime=docker
@@ -94,8 +97,8 @@ python3 -c "import ensurepip" || {{
   exit 1
 }}
 
-$SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE}
-$SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} || true
+$SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE}
+$SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE} || true
 """
 
 

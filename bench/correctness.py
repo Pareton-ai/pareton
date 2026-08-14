@@ -157,16 +157,46 @@ class _PositionScore:
     top1: str | None
 
 
+def _score_at(
+    i: int,
+    *,
+    tokens: list[Any],
+    token_logprobs: list[Any],
+    top_logprobs: list[Any],
+    text_offset: int,
+) -> _PositionScore | None:
+    raw_lp = token_logprobs[i]
+    if raw_lp is None:
+        return None
+    try:
+        lp_val = float(raw_lp)
+    except (TypeError, ValueError) as exc:
+        raise EngineError(
+            f"malformed logprobs.token_logprobs[{i}]: {raw_lp!r}"
+        ) from exc
+    top = top_logprobs[i]
+    top_dict = top if isinstance(top, dict) else None
+    return _PositionScore(
+        position=i,
+        token=str(tokens[i]),
+        text_offset=text_offset,
+        logprob=lp_val,
+        top1=_top1_token(top_dict),
+    )
+
+
 def extract_output_logprobs(
     resp: dict[str, Any],
     *,
     original_prompt: str,
+    continuation: str,
 ) -> list[_PositionScore]:
-    """Positions in the output portion with non-null logprobs.
+    """Positions in the forced continuation with non-null logprobs.
 
     Alignment rules:
     - Skip null first-prompt-token logprob (vLLM quirk).
-    - Output portion = ``text_offset >= len(original_prompt)``.
+    - Forced span is ``len(P) <= text_offset < len(P+C)``.
+    - Extra tokens from the HTTP max_tokens=0→1 clamp are dropped.
     """
     try:
         lp = resp["choices"][0]["logprobs"]
@@ -189,7 +219,8 @@ def extract_output_logprobs(
             f"top={len(top_logprobs)}, offset={len(text_offset)})"
         )
 
-    prompt_len = len(original_prompt)
+    cut_lo = len(original_prompt)
+    cut_hi = cut_lo + len(continuation)
     out: list[_PositionScore] = []
     for i in range(n):
         try:
@@ -198,28 +229,79 @@ def extract_output_logprobs(
             raise EngineError(
                 f"malformed logprobs.text_offset[{i}]: {text_offset[i]!r}"
             ) from exc
-        if off < prompt_len:
+        if off < cut_lo or off >= cut_hi:
             continue
-        raw_lp = token_logprobs[i]
-        if raw_lp is None:
-            continue
-        try:
-            lp_val = float(raw_lp)
-        except (TypeError, ValueError) as exc:
-            raise EngineError(
-                f"malformed logprobs.token_logprobs[{i}]: {raw_lp!r}"
-            ) from exc
-        top = top_logprobs[i]
-        top_dict = top if isinstance(top, dict) else None
-        out.append(
-            _PositionScore(
-                position=i,
-                token=str(tokens[i]),
-                text_offset=off,
-                logprob=lp_val,
-                top1=_top1_token(top_dict),
-            )
+        scored = _score_at(
+            i,
+            tokens=tokens,
+            token_logprobs=token_logprobs,
+            top_logprobs=top_logprobs,
+            text_offset=off,
         )
+        if scored is not None:
+            out.append(scored)
+    if out:
+        return out
+    # SGLang: offsets are often -1 or 0-based into choices[0].text, so the
+    # char-offset cut yields nothing. Echo arrays are P+C plus the clamp
+    # extra (usage.completion_tokens), or C only. Never treat
+    # completion_tokens as the scored window.
+    usage = resp.get("usage") if isinstance(resp.get("usage"), dict) else {}
+    try:
+        n_comp = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        n_comp = 0
+    n_extra = n_comp if n > n_comp > 0 else 0
+    end = n - n_extra
+    body = [str(tokens[i]) for i in range(end)]
+    joined = "".join(body)
+    if joined == continuation:
+        start = 0
+    elif joined == original_prompt + continuation:
+        acc = 0
+        start = None
+        for i, piece in enumerate(body):
+            if acc == cut_lo:
+                start = i
+                break
+            acc += len(piece)
+        if start is None or "".join(body[start:]) != continuation:
+            raise EngineError(
+                "echo logprobs did not split on the forced continuation "
+                f"(n={n} n_comp={n_comp} prompt_len={cut_lo} "
+                f"cont_len={len(continuation)})"
+            )
+    else:
+        raise EngineError(
+            "echo logprobs did not reconstruct the forced sequence "
+            f"(n={n} n_comp={n_comp} joined_len={len(joined)} "
+            f"prompt_len={cut_lo} cont_len={len(continuation)})"
+        )
+    logger.warning(
+        "logprobs text_offset missed forced span "
+        "(n=%d n_comp=%d n_extra=%d start=%d end=%d prompt_len=%d cont_len=%d)",
+        n,
+        n_comp,
+        n_extra,
+        start,
+        end,
+        cut_lo,
+        len(continuation),
+    )
+    for i in range(start, end):
+        try:
+            off = int(text_offset[i])
+        except (TypeError, ValueError):
+            off = i
+        scored = _score_at(
+            i,
+            tokens=tokens,
+            token_logprobs=token_logprobs,
+            top_logprobs=top_logprobs,
+            text_offset=off,
+        )
+        if scored is not None:
+            out.append(scored)
     return out
 
 
@@ -245,7 +327,7 @@ def collect_baseline_correctness(
     prompts: list[PromptCase],
     cfg: CorrectnessConfig,
     task_id: str,
-    request_timeout_s: float = 60.0,
+    request_timeout_s: float = 300.0,
     evidence_dir: Path | None = None,
 ) -> BaselineCorrectnessPhase:
     """Generate forced continuations and score them on the baseline engine."""
@@ -301,7 +383,9 @@ def collect_baseline_correctness(
             seed=0,
             timeout=request_timeout_s,
         )
-        base_scores = extract_output_logprobs(base_resp, original_prompt=case.prompt)
+        base_scores = extract_output_logprobs(
+            base_resp, original_prompt=case.prompt, continuation=continuation
+        )
         if not base_scores:
             raise EngineError(
                 f"baseline echo scoring produced 0 output positions for {case.id}"
@@ -316,7 +400,7 @@ def finish_correctness_with_candidate(
     *,
     cfg: CorrectnessConfig,
     evidence_dir: Path,
-    request_timeout_s: float = 60.0,
+    request_timeout_s: float = 300.0,
 ) -> CorrectnessReport:
     """Score forced sequences on the candidate and compare to baseline."""
     probe_logprob_capability(candidate_url, timeout=request_timeout_s)
@@ -343,7 +427,9 @@ def finish_correctness_with_candidate(
                 timeout=request_timeout_s,
             )
             cand_scores = extract_output_logprobs(
-                cand_resp, original_prompt=case.prompt
+                cand_resp,
+                original_prompt=case.prompt,
+                continuation=continuation,
             )
             if len(base_scores) != len(cand_scores):
                 raise EngineError(
@@ -443,7 +529,7 @@ def run_correctness(
     cfg: CorrectnessConfig,
     task_id: str,
     evidence_dir: Path,
-    request_timeout_s: float = 60.0,
+    request_timeout_s: float = 300.0,
 ) -> CorrectnessReport:
     """Run Module A when both engines are reachable (e.g. in-process mocks)."""
     baseline = collect_baseline_correctness(

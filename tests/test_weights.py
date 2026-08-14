@@ -142,6 +142,10 @@ def test_download_call_shape_and_token(
     assert call["revision"] == model.hf_revision
     assert call["token"] == "tok-secret-value"
     assert "/.partial/" in call["local_dir"].replace("\\", "/")
+    assert (
+        Path(call["local_dir"]).name
+        == f"{repo_slug(model.hf_repo)}-{model.hf_revision}"
+    )
     assert "local_dir_use_symlinks" not in call["kwargs"]
 
     monkeypatch.delenv("MY_HF_TOKEN", raising=False)
@@ -259,6 +263,51 @@ def test_download_failure_message_hygiene(
     assert secret not in msg
     assert "leak-me" not in msg
     assert "token=" not in msg
+    partial = cache_dir / ".partial" / f"{repo_slug(model.hf_repo)}-{model.hf_revision}"
+    assert not partial.exists()
+
+
+def test_transient_broken_pipe_retries_then_publishes(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    calls = {"n": 0}
+
+    def flaky(**kwargs: Any) -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise BrokenPipeError("hub download")
+        return _fake_snapshot_download(**kwargs)
+
+    monkeypatch.setattr("bench.weights.snapshot_download", flaky)
+    monkeypatch.setattr("bench.weights.time.sleep", lambda _s: None)
+    model = _model()
+    staged = stage_weights(model, cache_dir=cache_dir)
+    assert calls["n"] == 3
+    assert staged.path.is_dir()
+    assert (staged.path / "model.safetensors").is_file()
+
+
+def test_exhausted_transient_keeps_partial_for_resume(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    def boom(**kwargs: Any) -> str:
+        path = Path(kwargs["local_dir"])
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "shard.bin").write_bytes(b"partial-bytes")
+        raise BrokenPipeError("hub download")
+
+    monkeypatch.setattr("bench.weights.snapshot_download", boom)
+    monkeypatch.setattr("bench.weights.time.sleep", lambda _s: None)
+    model = _model()
+    with pytest.raises(WeightsError, match="BrokenPipeError"):
+        stage_weights(model, cache_dir=cache_dir)
+    partial = cache_dir / ".partial" / f"{repo_slug(model.hf_repo)}-{model.hf_revision}"
+    assert (partial / "shard.bin").read_bytes() == b"partial-bytes"
+
+    monkeypatch.setattr("bench.weights.snapshot_download", _fake_snapshot_download)
+    staged = stage_weights(model, cache_dir=cache_dir)
+    assert staged.path.is_dir()
+    assert not partial.exists()
 
 
 # ---------------------------------------------------------------------------

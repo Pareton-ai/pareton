@@ -139,3 +139,63 @@ def fetch_revealed_commitments(
         subtensor, netuid, network=network, attempts=attempts, delay_s=delay_s
     )
     return revealed
+
+
+def fetch_finalized_block_hash(
+    subtensor: Any,
+    block_number: int,
+    *,
+    finality_depth: int = 1,
+    attempts: int = 3,
+    delay_s: float = 30.0,
+) -> str:
+    """Return hex block hash after ``block_number + finality_depth`` is reached.
+
+    Raises ``ChainError`` when the block is not yet finalized, pruned, or
+    the RPC cannot return a hash (caller maps this to BenchInfraError).
+    """
+
+    def _inner() -> str:
+        current = int(subtensor.block)
+        need = int(block_number) + int(finality_depth)
+        if current < need:
+            raise ChainError(
+                f"block {block_number} not finalized (current={current}, need>={need})"
+            )
+        block_hash: str | None = None
+        # Prefer explicit historical lookup; fall back to block_info(block).
+        for attr in ("get_block_hash", "block_hash"):
+            fn = getattr(subtensor, attr, None)
+            if callable(fn):
+                try:
+                    block_hash = fn(int(block_number))
+                    break
+                except Exception:
+                    block_hash = None
+        if block_hash is None:
+            info_fn = getattr(subtensor, "block_info", None)
+            if callable(info_fn):
+                try:
+                    info = info_fn(int(block_number))
+                    block_hash = getattr(info, "hash", None) or (
+                        info.get("hash") if isinstance(info, dict) else None
+                    )
+                except TypeError:
+                    # Some SDKs expose block_info() for the tip only.
+                    raise ChainError(
+                        f"block hash unavailable for block {block_number}"
+                    ) from None
+                except Exception as exc:
+                    raise ChainError(
+                        f"block hash unavailable for block {block_number}: {exc}"
+                    ) from exc
+        if not block_hash:
+            raise ChainError(f"block hash unavailable for block {block_number}")
+        return str(block_hash)
+
+    return _retry(
+        _inner,
+        label=f"fetch_finalized_block_hash({block_number})",
+        attempts=attempts,
+        delay_s=delay_s,
+    )

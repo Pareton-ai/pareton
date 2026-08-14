@@ -32,9 +32,11 @@ def post_completion(
 ) -> dict[str, Any]:
     """Serial non-streaming /v1/completions client (stdlib only)."""
     url = base_url.rstrip("/") + "/v1/completions"
+    # vLLM accepts max_tokens=0 for echo-only scoring. SGLang rejects it.
+    send_max = max_tokens if max_tokens >= 1 else 1
     body: dict[str, Any] = {
         "prompt": prompt,
-        "max_tokens": max_tokens,
+        "max_tokens": send_max,
         "echo": echo,
         "temperature": temperature,
     }

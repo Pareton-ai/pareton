@@ -21,6 +21,7 @@ from bench.lifecycle import (
     EngineError,
     HostEnvironmentError,
     _redact_cmd_for_log,
+    ensure_listen_args,
     extract_digest_from_image_ref,
     normalize_image_id,
     published_host_port,
@@ -162,6 +163,22 @@ def _spec(
 # ---------------------------------------------------------------------------
 # Helpers / pure functions
 # ---------------------------------------------------------------------------
+
+
+def test_ensure_listen_args_injects_host_and_port():
+    assert ensure_listen_args(["--tp-size", "8"], 8000) == [
+        "--tp-size",
+        "8",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+    ]
+
+
+def test_ensure_listen_args_keeps_explicit_host_port():
+    args = ["--host", "127.0.0.1", "--port", "30000"]
+    assert ensure_listen_args(args, 8000) == args
 
 
 def test_redact_env_values_from_logged_commands():
@@ -335,6 +352,8 @@ def test_engine_container_command_construction(tmp_path: Path):
     assert net.name in run
     assert "--gpus" in run
     assert run[run.index("--gpus") + 1] == "1"
+    assert run[run.index("--ipc") + 1] == "host"
+    assert run[run.index("--shm-size") + 1] == "16g"
     assert "all" not in run
     vol = next(a for a in run if a.startswith(str(weights)))
     assert vol.endswith(":/model:ro")
@@ -344,7 +363,7 @@ def test_engine_container_command_construction(tmp_path: Path):
     assert "HF_TOKEN=sekrit" not in run
     # serve_args after image
     img_idx = run.index(spec.image)
-    assert run[img_idx + 1 :] == ["--host", "0.0.0.0"]
+    assert run[img_idx + 1 :] == ["--host", "0.0.0.0", "--port", "8000"]
 
     # teardown: logs then rm
     ops = [c[:2] for c, _ in fake.calls]
@@ -483,6 +502,41 @@ def test_gpu_count_passed_as_docker_count_not_all():
 
     run = next(c for c, _ in fake.calls if c[:2] == ["docker", "run"])
     assert run[run.index("--gpus") + 1] == "2"
+    assert run[run.index("--ipc") + 1] == "host"
+    assert run[run.index("--shm-size") + 1] == "16g"
+
+
+def test_engine_cache_dir_mounted_when_env_set(tmp_path: Path, monkeypatch):
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("9" * 64)
+    cache = tmp_path / "sglang-cache"
+    monkeypatch.setenv("PARETON_BENCH_ENGINE_CACHE_DIR", str(cache))
+
+    import bench.lifecycle as life
+
+    original_wait = life.wait_until_healthy
+    life.wait_until_healthy = lambda *a, **k: None  # type: ignore[assignment]
+    try:
+        with BenchNetwork(run_id="engcache0001", runner=fake, cmd_timeout_s=30) as net:
+            with EngineContainer(
+                spec=spec,
+                network=net,
+                pull=False,
+                gpu_count=1,
+                health_timeout_s=1,
+                health_poll_s=0.05,
+                cmd_timeout_s=30,
+            ):
+                pass
+    finally:
+        life.wait_until_healthy = original_wait  # type: ignore[assignment]
+
+    run = next(c for c, _ in fake.calls if c[:2] == ["docker", "run"])
+    vol = f"{cache.resolve()}:/root/.cache/sglang"
+    assert vol in run
+    assert cache.is_dir()
 
 
 def test_fail_fast_when_container_exits_during_health():

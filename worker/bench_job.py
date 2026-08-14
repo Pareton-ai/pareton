@@ -24,8 +24,15 @@ from bench.validate import (
     validate_report_dict,
 )
 from builder.registry import baseline_engine_image_ref
+from campaign.engine import resolve_engine
+from bench.promote import PromoteError, decide_promotion
+from bench.sampler import (
+    SamplerError,
+    parse_sampling_rule,
+    sample_workload,
+)
 from campaign.cross_env import SPEEDUP_METRIC_KEYS, validate_cross_env
-from campaign.store import finalize_bench_job, set_job_status
+from campaign.store import finalize_bench_job, record_submission_sample, set_job_status
 from gate.types import SubmissionState
 from observability import events as obs
 from observability.events import Timer
@@ -39,7 +46,8 @@ _VERDICT_RANK = {
     "fail_correctness": 0,
     "fail_perf_screen": 1,
     "fail_sla": 2,
-    "pass": 3,
+    "fail_promotion": 3,
+    "pass": 4,
 }
 
 
@@ -56,6 +64,12 @@ def _parse_json_field(value: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def _row_engine_name(row: dict[str, Any]) -> str:
+    raw = _parse_json_field(row.get("engine"))
+    profile = resolve_engine(raw if isinstance(raw, dict) else None)
+    return str(profile["name"])
 
 
 def fetch_trace_bytes(
@@ -113,22 +127,32 @@ def materialize_trace(
 def campaign_calibration_fingerprint(
     bench: dict[str, Any], row: dict[str, Any]
 ) -> dict[str, Any]:
-    """Key fields that must match a stored correctness.calibration fingerprint."""
+    """Key fields that must match a stored correctness.calibration fingerprint.
+
+    Per-submission trace sha256 is not included: sampled campaigns generate a
+    new trace each job. Bind dataset pin fields instead when sampling is on.
+    """
     model = bench.get("model") or {}
     quant = model.get("quantization")
-    return {
+    fp: dict[str, Any] = {
         "model_repo": str(model.get("hf_repo") or ""),
         "model_revision": str(model.get("hf_revision") or ""),
         "baseline_engine_image_digest": str(
             bench.get("baseline_engine_image_digest") or ""
         ).lower(),
-        "trace_sha256": str(row.get("workload_trace_sha256") or "").lower(),
         "serve_args": [str(x) for x in (bench.get("serve_args") or [])],
         "dtype": str(model.get("dtype") or ""),
         "quantization": "" if quant is None else str(quant),
         "max_model_len": int(model.get("max_model_len") or 0),
         "gpu_count": int(bench.get("gpu_count") or 1),
     }
+    rule = _parse_json_field(row.get("sampling_rule"))
+    if isinstance(rule, dict) and str(rule.get("type") or "") == "hf_rows":
+        fp["sampling_dataset"] = str(rule.get("dataset") or "")
+        fp["sampling_revision"] = str(rule.get("revision") or "")
+        fp["sampling_n_prompts"] = int(rule.get("n_prompts") or 0)
+        fp["sampling_algo_version"] = int(rule.get("algo_version") or 0)
+    return fp
 
 
 def build_bench_request_dict(
@@ -174,14 +198,11 @@ def build_bench_request_dict(
     max_model_len = int(model["max_model_len"])
     dtype = str(model.get("dtype") or "bfloat16")
     extra_serve = list(bench.get("serve_args") or [])
-    serve_args = [
-        "--model",
-        "/model",
-        "--max-model-len",
-        str(max_model_len),
-        "--dtype",
-        dtype,
-    ]
+    serve_args = ["--model", "/model"]
+    # SGLang rejects --max-model-len (it uses campaign --context-length).
+    if _row_engine_name(row) != "sglang":
+        serve_args.extend(["--max-model-len", str(max_model_len)])
+    serve_args.extend(["--dtype", dtype])
     quantization = model.get("quantization")
     if quantization is not None and str(quantization).strip() != "":
         serve_args.extend(["--quantization", str(quantization)])
@@ -453,6 +474,15 @@ def _events_for_verdict(
                 {**base, "reason": "fail_cross_env_speedup"},
             ),
         ]
+    if verdict == "fail_promotion":
+        return [
+            (SubmissionState.CORRECT, dict(base)),
+            (SubmissionState.SCREENED, dict(base)),
+            (
+                SubmissionState.REJECTED,
+                {**base, "reason": "fail_promotion"},
+            ),
+        ]
     if verdict == "error":
         if error_role == "candidate":
             return [
@@ -630,6 +660,124 @@ def _event_base_for_results(
     return detail
 
 
+def campaign_uses_dynamic_sampling(row: dict[str, Any]) -> bool:
+    """True when campaign pins an hf_rows sampling_rule."""
+    rule = _parse_json_field(row.get("sampling_rule"))
+    return isinstance(rule, dict) and str(rule.get("type") or "") == "hf_rows"
+
+
+def realize_submission_sample(
+    row: dict[str, Any],
+    *,
+    block_hash_fn: Callable[[int], str] | None = None,
+    record_sample_fn: Callable[..., None] | None = None,
+    row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    upload_trace_fn: Callable[..., str] | None = None,
+) -> dict[str, str]:
+    """Generate a trace from the future-block seed; persist receipt; return url/sha.
+
+    Raises BenchInfraError when the seed block hash is unavailable (job fail,
+    no rejection event). HF fetch failures are infra, never candidate FAIL.
+    """
+    try:
+        rule = parse_sampling_rule(_parse_json_field(row.get("sampling_rule")))
+    except SamplerError as exc:
+        raise BenchInfraError("sampling_config_invalid", str(exc)) from exc
+
+    commit_block = row.get("commit_block")
+    if commit_block is None:
+        raise BenchInfraError("commit_block_missing")
+    seed_block = int(commit_block) + int(rule["seed_block_offset"])
+
+    if block_hash_fn is None:
+        from chain.rpc import ChainError, fetch_finalized_block_hash
+
+        import bittensor as bt
+
+        def _default_hash(block_number: int) -> str:
+            sub = bt.Subtensor(network=config.SUBTENSOR_NETWORK)
+            try:
+                return fetch_finalized_block_hash(
+                    sub,
+                    block_number,
+                    finality_depth=config.CHAIN_FINALITY_DEPTH,
+                    attempts=config.CHAIN_RETRY_ATTEMPTS,
+                    delay_s=float(config.CHAIN_RETRY_DELAY_S),
+                )
+            except ChainError as exc:
+                raise BenchInfraError(
+                    "sample_seed_block_unavailable", str(exc)
+                ) from exc
+
+        block_hash_fn = _default_hash
+
+    try:
+        block_hash = block_hash_fn(seed_block)
+    except BenchInfraError:
+        raise
+    except Exception as exc:
+        raise BenchInfraError("sample_seed_block_unavailable", str(exc)) from exc
+    if not block_hash:
+        raise BenchInfraError("sample_seed_block_unavailable", "empty hash")
+
+    try:
+        sampled = sample_workload(
+            rule=rule,
+            commit_block=int(commit_block),
+            block_hash=str(block_hash),
+            patch_hash=str(row["patch_hash"]),
+            campaign_id=str(row["campaign_id"]),
+            row_fetcher=row_fetcher,
+        )
+    except SamplerError as exc:
+        raise BenchInfraError("sampling_failed", str(exc)) from exc
+
+    if upload_trace_fn is None:
+        from storage.s3 import upload_realized_trace
+
+        def _default_upload(*, campaign_id: str, body: bytes, sha256: str) -> str:
+            try:
+                return upload_realized_trace(
+                    campaign_id=campaign_id, body=body, sha256=sha256
+                )
+            except Exception as exc:
+                raise BenchInfraError("realized_trace_upload_failed", str(exc)) from exc
+
+        upload_trace_fn = _default_upload
+
+    try:
+        url = upload_trace_fn(
+            campaign_id=str(row["campaign_id"]),
+            body=sampled.body,
+            sha256=sampled.sha256,
+        )
+    except BenchInfraError:
+        raise
+    except Exception as exc:
+        raise BenchInfraError("realized_trace_upload_failed", str(exc)) from exc
+
+    receipt = dict(sampled.receipt)
+    receipt["sampled_trace_url"] = url
+    receipt["patch_hash"] = str(row["patch_hash"]).strip().lower()
+    receipt["campaign_id"] = str(row["campaign_id"]).strip().lower()
+
+    writer = record_sample_fn or record_submission_sample
+    writer(
+        submission_id=str(row["id"]),
+        sample_seed_block=sampled.sample_seed_block,
+        sample_seed_block_hash=sampled.sample_seed_block_hash,
+        sampled_trace_sha256=sampled.sha256,
+        sampling_receipt=receipt,
+    )
+    row["workload_trace_url"] = url
+    row["workload_trace_sha256"] = sampled.sha256
+    row["sampled_trace_sha256"] = sampled.sha256
+    row["sample_seed_block"] = sampled.sample_seed_block
+    row["sample_seed_block_hash"] = sampled.sample_seed_block_hash
+    row["sampling_receipt"] = receipt
+    return {"url": url, "sha256": sampled.sha256}
+
+
 def process_bench_job(
     row: dict[str, Any],
     *,
@@ -644,6 +792,10 @@ def process_bench_job(
     trace_fetcher: Callable[[str], bytes] | None = None,
     injected_exit: int | None = None,
     injected_report: dict[str, Any] | None = None,
+    block_hash_fn: Callable[[int], str] | None = None,
+    record_sample_fn: Callable[..., None] | None = None,
+    row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    upload_trace_fn: Callable[..., str] | None = None,
 ) -> str:
     """Run one bench job across all gpu_skus. Returns 'ok' or last_error code."""
     submission_id = str(row["id"])
@@ -670,6 +822,15 @@ def process_bench_job(
         if not isinstance(bench, dict):
             raise BenchInfraError("campaign_bench_missing")
         cross_env = parse_cross_env(bench)
+
+        if campaign_uses_dynamic_sampling(row):
+            realize_submission_sample(
+                row,
+                block_hash_fn=block_hash_fn,
+                record_sample_fn=record_sample_fn,
+                row_fetcher=row_fetcher,
+                upload_trace_fn=upload_trace_fn,
+            )
 
         trace_path = materialize_trace(
             url=str(row["workload_trace_url"]),
@@ -777,14 +938,57 @@ def process_bench_job(
                 base["effective_speedup"] = min(values)
                 base["speedup_metric"] = metric
 
+        all_rows: list[dict[str, Any]] = []
+        for r in results:
+            all_rows.extend(r.rows)
+
+        # Z-score promotion (optional): Module A / engine hard fails stay hard.
+        # When stages pass and campaign has calibration + z_threshold, promote
+        # only if aggregate_z < threshold ("not anomalously worse").
+        calibration = _parse_json_field(row.get("calibration"))
+        z_threshold = row.get("z_threshold")
+        if (
+            agg_verdict == "pass"
+            and isinstance(calibration, dict)
+            and z_threshold is not None
+        ):
+            try:
+                promo = decide_promotion(
+                    report=results[0].report,
+                    calibration=calibration,
+                    z_threshold=float(z_threshold),
+                    hard_error=False,
+                )
+            except PromoteError as exc:
+                raise BenchInfraError("promotion_invalid", str(exc)) from exc
+            all_rows.append(
+                {
+                    "task_id": results[0].task_id,
+                    "stage": "promotion",
+                    "verdict": promo.report["verdict"],
+                    "report": promo.report,
+                    "evidence_s3_url": results[0].evidence_s3_url,
+                    "gpu_sku": results[0].gpu_sku,
+                    "mock": mock_bench,
+                    "z_scores": promo.z_scores,
+                    "aggregate_z": promo.aggregate_z,
+                    "promoted": promo.promoted,
+                }
+            )
+            base = {
+                **base,
+                "aggregate_z": promo.aggregate_z,
+                "z_scores": promo.z_scores,
+                "promoted": promo.promoted,
+            }
+            if not promo.promoted:
+                agg_verdict = "fail_promotion"
+
         if agg_verdict == "error":
             events = _events_for_verdict("error", base=base, error_role=error_role)
         else:
             events = _events_for_verdict(agg_verdict, base=base)
 
-        all_rows = []
-        for r in results:
-            all_rows.extend(r.rows)
         finalize_bench_job(
             submission_id=submission_id,
             job_id=job_id,

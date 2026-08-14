@@ -120,11 +120,79 @@ def test_extract_skips_null_and_prompt_portion():
         temperature=0.0,
         logprobs_requested=1,
     )
-    scores = extract_output_logprobs(resp, original_prompt=prompt)
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=cont)
     assert scores, "expected at least one output position"
     assert all(s.text_offset >= len(prompt) for s in scores)
+    assert all(s.text_offset < len(full) for s in scores)
     # First prompt token null must not appear
     assert all(s.position > 0 for s in scores)
+
+
+def test_extract_sglang_completion_only_offsets():
+    """SGLang echo logprobs offset into choices[0].text, not the prompt."""
+    prompt = "Hello world" * 20
+    resp = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": [" OK"],
+                    "token_logprobs": [-0.2],
+                    "top_logprobs": [{" OK": -0.2}],
+                    "text_offset": [0],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 1},
+    }
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=" OK")
+    assert len(scores) == 1
+    assert scores[0].token == " OK"
+
+
+def test_extract_offset_cut_drops_token_past_continuation():
+    """vLLM-style offsets: keep C, drop the clamp extra after P+C."""
+    prompt = "Hello"
+    cont = " world"
+    extra = " !"
+    tokens = ["Hello", " world", extra]
+    resp = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": tokens,
+                    "token_logprobs": [None, -0.2, -0.9],
+                    "top_logprobs": [None, {" world": -0.2}, {extra: -0.9}],
+                    "text_offset": [0, 5, 11],
+                }
+            }
+        ]
+    }
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=cont)
+    assert [s.token for s in scores] == [" world"]
+
+
+def test_extract_sglang_full_echo_drops_clamp_extra():
+    """Live SGLang shape: echo of P+C plus 1 clamp token, offsets all -1."""
+    prompt = "Hello world"
+    cont = " OK then"
+    extra = " !"
+    tokens = ["Hello", " world", " OK", " then", extra]
+    n = len(tokens)
+    resp = {
+        "choices": [
+            {
+                "logprobs": {
+                    "tokens": tokens,
+                    "token_logprobs": [-0.1] * n,
+                    "top_logprobs": [{t: -0.1} for t in tokens],
+                    "text_offset": [-1] * n,
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+    }
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=cont)
+    assert [s.token for s in scores] == [" OK", " then"]
 
 
 def test_extract_non_numeric_logprobs_is_engine_error():
@@ -141,7 +209,7 @@ def test_extract_non_numeric_logprobs_is_engine_error():
         ]
     }
     with pytest.raises(EngineError, match="malformed logprobs.token_logprobs"):
-        extract_output_logprobs(resp, original_prompt="")
+        extract_output_logprobs(resp, original_prompt="", continuation="ab")
 
 
 def test_empty_baseline_continuation_is_engine_error(
@@ -318,8 +386,10 @@ def test_partial_evidence_left_on_engine_error(
     real_extract = extract_output_logprobs
     calls = {"n": 0}
 
-    def fail_on_candidate(resp, *, original_prompt: str):
-        scores = real_extract(resp, original_prompt=original_prompt)
+    def fail_on_candidate(resp, *, original_prompt: str, continuation: str):
+        scores = real_extract(
+            resp, original_prompt=original_prompt, continuation=continuation
+        )
         calls["n"] += 1
         if calls["n"] > 1:
             raise EngineError("simulated candidate score failure")
@@ -379,8 +449,10 @@ def test_forced_token_mismatch_raises(tmp_path: Path, monkeypatch: pytest.Monkey
     real_extract = extract_output_logprobs
     calls = {"n": 0}
 
-    def mutate_candidate_tokens(resp, *, original_prompt: str):
-        scores = real_extract(resp, original_prompt=original_prompt)
+    def mutate_candidate_tokens(resp, *, original_prompt: str, continuation: str):
+        scores = real_extract(
+            resp, original_prompt=original_prompt, continuation=continuation
+        )
         calls["n"] += 1
         # Baseline phase extracts first; candidate phase extracts afterward.
         if calls["n"] > 1 and scores:

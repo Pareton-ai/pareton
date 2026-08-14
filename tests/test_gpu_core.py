@@ -217,10 +217,36 @@ def test_ssh_exec_argv_and_nonzero(tmp_path: Path):
     with pytest.raises(GpuError, match="boom-stderr-tail"):
         ssh_exec(pod, "true", runner=runner, state_dir=tmp_path / "st")
     argv = calls[0]
+    dest = f"{pod.ssh.user}@{pod.ssh.host}"
     assert argv[0] == "ssh"
     assert "BatchMode=yes" in argv
+    assert "ServerAliveInterval=30" in argv
     assert str(pod.key_path) in argv
     assert any("UserKnownHostsFile=" in a for a in argv)
+    assert argv.index("--") < argv.index(dest)
+    assert argv[-2] == dest
+    assert argv[-1] == "true"
+
+
+def test_ssh_exec_remote_starting_with_dashes(tmp_path: Path):
+    pod = _pod(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        calls.append(list(cmd))
+        return SshResult(0, "ok", "")
+
+    ssh_exec(
+        pod,
+        "--timeout 3600 docker run --rm img",
+        runner=runner,
+        state_dir=tmp_path / "st",
+        check=False,
+    )
+    argv = calls[0]
+    dest = f"{pod.ssh.user}@{pod.ssh.host}"
+    assert argv[argv.index("--") + 1] == dest
+    assert argv[-1] == "--timeout 3600 docker run --rm img"
 
 
 def test_host_key_spec_bracketed_nondefault_port(tmp_path: Path):
