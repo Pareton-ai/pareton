@@ -1,12 +1,22 @@
-"""Gate result types and submission state names."""
+"""Gate result types and the submission state vocabulary."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 
-class SubmissionState:
+class SubmissionState(StrEnum):
+    """The pipeline state vocabulary. This is the only definition.
+
+    `campaign.store.KNOWN_SUBMISSION_STATES`, the OpenAPI schema, and the
+    frontend `SubmissionState` union all derive from these members. Adding a
+    state here is the whole change on the backend. Member order is the pipeline
+    order and is used for `/v1/stats` bucket ordering, so append new states in
+    the position the worker reaches them.
+    """
+
     COMMITTED = "committed"
     PICKED_UP = "picked_up"
     FETCHED = "fetched"
@@ -22,6 +32,9 @@ class SubmissionState:
     SCREENED = "screened"
     BENCHED = "benched"
     REJECTED = "rejected"
+
+
+SUBMISSION_STATES: tuple[str, ...] = tuple(s.value for s in SubmissionState)
 
 
 @dataclass(frozen=True)

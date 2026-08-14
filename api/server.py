@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, RedirectResponse
@@ -26,6 +28,7 @@ from campaign.store import (
     list_submissions,
 )
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
+from gate.types import SubmissionState
 from storage.s3 import create_presigned_patch_upload
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
@@ -103,6 +106,61 @@ class PresignRequest(BaseModel):
     hotkey: str = Field(min_length=8, max_length=128)
 
 
+# `str` fallback is deliberate: submission_events.state is unconstrained TEXT,
+# so a legacy or hand-inserted row outside the enum must not break the
+# documented contract. The named `SubmissionState` component is still emitted,
+# and that is what the frontend union derives from (PAR-46).
+SubmissionStateName = SubmissionState | str
+
+
+class SubmissionSummaryModel(BaseModel):
+    """One row of `GET /v1/campaigns/{campaign_id}/submissions`."""
+
+    id: str
+    campaign_id: str
+    patch_hash: str
+    hotkey: str
+    baseline_commit: str
+    retrieval_url: str
+    commit_block: int | None = None
+    committed_at: str
+    engine_image_ref: str | None = None
+    latest_state: SubmissionStateName | None = None
+    bench_verdict: str | None = None
+
+
+class SubmissionsPageModel(BaseModel):
+    campaign_id: str
+    total: int
+    limit: int
+    offset: int
+    submissions: list[SubmissionSummaryModel]
+
+
+class SubmissionEventModel(BaseModel):
+    state: SubmissionStateName
+    evidence_ref: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class SubmissionJobModel(BaseModel):
+    kind: str
+    status: str
+    last_error: str | None = None
+
+
+class SubmissionDetailModel(BaseModel):
+    """`submission` and `bench_reports` stay loose: no state field, no payoff."""
+
+    submission: dict[str, Any]
+    latest_state: SubmissionStateName | None = None
+    jobs: list[SubmissionJobModel]
+    events: list[SubmissionEventModel]
+    bench_reports: list[dict[str, Any]]
+    bench_verdict: str | None = None
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "pareton", "stage": 0}
@@ -122,7 +180,10 @@ def campaign_detail(campaign_id: str):
     return c.to_public_dict()
 
 
-@app.get("/v1/campaigns/{campaign_id}/submissions")
+@app.get(
+    "/v1/campaigns/{campaign_id}/submissions",
+    responses={200: {"model": SubmissionsPageModel}},
+)
 def campaign_submissions(
     campaign_id: str,
     limit: int = Query(50, ge=1, le=200),
@@ -223,7 +284,10 @@ def _resolve_unambiguous_submission(patch_hash: str) -> dict:
     return row
 
 
-@app.get("/v1/campaigns/{campaign_id}/submissions/{patch_hash}")
+@app.get(
+    "/v1/campaigns/{campaign_id}/submissions/{patch_hash}",
+    responses={200: {"model": SubmissionDetailModel}},
+)
 def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Response):
     row = get_submission_for_campaign(campaign_id, patch_hash)
     if row is None:
@@ -233,7 +297,10 @@ def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Resp
     return payload
 
 
-@app.get("/v1/submissions/{patch_hash}")
+@app.get(
+    "/v1/submissions/{patch_hash}",
+    responses={200: {"model": SubmissionDetailModel}},
+)
 def submission_detail(patch_hash: str, response: Response):
     payload = _submission_detail_payload(_resolve_unambiguous_submission(patch_hash))
     _set_live_submission_cache_control(response, payload.get("latest_state"))

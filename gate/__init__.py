@@ -1,5 +1,5 @@
 """Provenance & build gate (Stage 0)."""
 
-from .types import GateResult, SubmissionState
+from .types import SUBMISSION_STATES, GateResult, SubmissionState
 
-__all__ = ["GateResult", "SubmissionState"]
+__all__ = ["SUBMISSION_STATES", "GateResult", "SubmissionState"]
