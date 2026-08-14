@@ -51,8 +51,6 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         scoring_config_url=row.get("scoring_config_url"),
         allowed_paths=list(row.get("allowed_paths") or []),
         denied_paths=list(row.get("denied_paths") or []),
-        window_opens_at=_parse_ts(row["window_opens_at"]),
-        window_closes_at=_parse_ts(row["window_closes_at"]),
         status=row["status"],
         priority_metric=row["priority_metric"],
         success_threshold=row["success_threshold"],
@@ -63,6 +61,9 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         workload_pool=list(workload_pool) if isinstance(workload_pool, list) else None,
         sampling_rule=dict(sampling_rule) if isinstance(sampling_rule, dict) else None,
         z_threshold=z_threshold,
+        created_at=(
+            _parse_ts(row["created_at"]) if row.get("created_at") is not None else None
+        ),
     )
 
 
@@ -148,8 +149,6 @@ def apply_campaign_correctness_calibration(
                 scoring_config_url=row.get("scoring_config_url"),
                 allowed_paths=list(row.get("allowed_paths") or []),
                 denied_paths=list(row.get("denied_paths") or []),
-                window_opens_at=_parse_ts(row["window_opens_at"]),
-                window_closes_at=_parse_ts(row["window_closes_at"]),
                 priority_metric=row["priority_metric"],
                 success_threshold=row["success_threshold"],
                 bench=bench,
@@ -258,7 +257,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   id, profile_id, baseline_repo, baseline_commit, base_image_digest,
                   gpu_skus, workload_trace_sha256, workload_trace_url, sla,
                   scoring_config_sha256, scoring_config_url,
-                  allowed_paths, denied_paths, window_opens_at, window_closes_at,
+                  allowed_paths, denied_paths,
                   manifest_hash, customer_signoff, status, bench, engine,
                   priority_metric, success_threshold,
                   workload_pool, sampling_rule, z_threshold
@@ -266,7 +265,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s, %s,
+                  %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
                   %s, %s, %s
@@ -287,8 +286,6 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                     manifest.scoring_config_url,
                     Json(manifest.allowed_paths),
                     Json(manifest.denied_paths),
-                    manifest.window_opens_at,
-                    manifest.window_closes_at,
                     manifest.manifest_hash,
                     signoff,
                     manifest.status,
@@ -628,7 +625,6 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
                 SELECT s.*, c.baseline_commit AS campaign_baseline_commit,
                        c.baseline_repo, c.base_image_digest,
                        c.allowed_paths, c.denied_paths, c.status AS campaign_status,
-                       c.window_opens_at, c.window_closes_at,
                        c.bench, c.sla, c.workload_trace_url, c.workload_trace_sha256,
                        c.gpu_skus, c.manifest_hash,
                        c.workload_pool, c.sampling_rule, c.calibration, c.z_threshold,

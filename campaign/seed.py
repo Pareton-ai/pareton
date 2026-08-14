@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -257,8 +257,6 @@ def seed_synthetic_campaign(
 
     campaign_id = uuid4()
     now = datetime.now(timezone.utc)
-    opens = now - timedelta(minutes=1)
-    closes = now + timedelta(days=90)
     # no_bench: intake/build e2e tests must not auto-enqueue real GPU bench jobs.
     bench = (
         None
@@ -313,8 +311,6 @@ def seed_synthetic_campaign(
         scoring_config_url=None,
         allowed_paths=list(config.DEFAULT_ALLOWED_PATHS),
         denied_paths=list(config.DEFAULT_DENIED_PATHS),
-        window_opens_at=opens,
-        window_closes_at=closes,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         status=status,
@@ -349,8 +345,6 @@ def seed_synthetic_campaign(
         scoring_config_url=None,
         allowed_paths=list(config.DEFAULT_ALLOWED_PATHS),
         denied_paths=list(config.DEFAULT_DENIED_PATHS),
-        window_opens_at=opens,
-        window_closes_at=closes,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         status=status,

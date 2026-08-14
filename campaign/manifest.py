@@ -44,8 +44,6 @@ def freeze_manifest_fields(
     scoring_config_url: str | None,
     allowed_paths: list[str],
     denied_paths: list[str],
-    window_opens_at: datetime,
-    window_closes_at: datetime,
     priority_metric: str,
     success_threshold: str,
     bench: dict[str, Any] | None = None,
@@ -61,6 +59,11 @@ def freeze_manifest_fields(
     campaign hashed before engine profiles existed keeps its hash.
     ``workload_pool``, ``sampling_rule``, and ``z_threshold`` use the same
     absent-means-unpinned rule.
+
+    The submission window used to be pinned here as ``window``. It was dropped
+    with the feature, so campaigns hashed before that no longer recompute to
+    their stored hash. Nothing recomputes a stored hash, so those pins stand as
+    written; see docs/technical-decisions.md.
     """
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
     out: dict[str, Any] = {
@@ -79,10 +82,6 @@ def freeze_manifest_fields(
         "scoring_config_url": scoring_config_url,
         "allowed_paths": list(allowed_paths),
         "denied_paths": list(denied_paths),
-        "window": {
-            "opens_at": window_opens_at.isoformat(),
-            "closes_at": window_closes_at.isoformat(),
-        },
         "priority_metric": validate_priority_metric(priority_metric),
         "success_threshold": success_threshold,
     }
@@ -121,8 +120,6 @@ def build_manifest(
     scoring_config_url: str | None,
     allowed_paths: list[str],
     denied_paths: list[str],
-    window_opens_at: datetime,
-    window_closes_at: datetime,
     priority_metric: str,
     success_threshold: str,
     status: str = "draft",
@@ -133,6 +130,7 @@ def build_manifest(
     workload_pool: list[dict[str, Any]] | None = None,
     sampling_rule: dict[str, Any] | None = None,
     z_threshold: float | None = None,
+    created_at: datetime | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
         campaign_id=campaign_id,
@@ -148,8 +146,6 @@ def build_manifest(
         scoring_config_url=scoring_config_url,
         allowed_paths=allowed_paths,
         denied_paths=denied_paths,
-        window_opens_at=window_opens_at,
-        window_closes_at=window_closes_at,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         bench=bench,
@@ -182,8 +178,6 @@ def build_manifest(
         scoring_config_url=scoring_config_url,
         allowed_paths=list(allowed_paths),
         denied_paths=list(denied_paths),
-        window_opens_at=window_opens_at,
-        window_closes_at=window_closes_at,
         manifest_hash=mh,
         customer_signoff=customer_signoff,
         status=status,
@@ -194,4 +188,5 @@ def build_manifest(
         workload_pool=list(pool_obj) if isinstance(pool_obj, list) else None,
         sampling_rule=dict(rule_obj) if isinstance(rule_obj, dict) else None,
         z_threshold=float(z_obj) if z_obj is not None else None,
+        created_at=created_at,
     )

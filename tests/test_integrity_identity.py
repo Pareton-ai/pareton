@@ -7,7 +7,6 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from campaign.manifest import build_manifest
@@ -19,7 +18,6 @@ import config
 
 
 def _campaign(**overrides):
-    now = datetime.now(timezone.utc)
     kwargs = dict(
         campaign_id=uuid4(),
         profile_id=uuid4(),
@@ -34,8 +32,6 @@ def _campaign(**overrides):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -44,7 +40,7 @@ def _campaign(**overrides):
     return build_manifest(**kwargs)
 
 
-def test_identity_accepts_registered_in_window():
+def test_identity_accepts_registered_on_open_campaign():
     c = _campaign()
     res = check_identity(
         hotkey="hk1",
@@ -53,6 +49,20 @@ def test_identity_accepts_registered_in_window():
         baseline_commit="a" * 40,
     )
     assert res.ok
+
+
+@pytest.mark.parametrize("status", ["draft", "closed"])
+def test_identity_rejects_campaign_not_open(status):
+    """Status is the only intake switch now that the window is gone."""
+    c = _campaign(status=status)
+    res = check_identity(
+        hotkey="hk1",
+        registered_hotkeys=["hk1"],
+        campaign=c,
+        baseline_commit="a" * 40,
+    )
+    assert not res.ok
+    assert "expected open" in res.reason
 
 
 def test_identity_rejects_unregistered():

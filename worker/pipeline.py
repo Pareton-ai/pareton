@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -82,7 +81,6 @@ def process_submission(
         registered_hotkeys=registered_hotkeys,
         campaign=campaign,
         baseline_commit=baseline_commit,
-        now=datetime.now(timezone.utc),
     )
     if not id_res.ok:
         obs.gate_failed(

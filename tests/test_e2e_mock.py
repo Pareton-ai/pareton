@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -114,8 +114,6 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -140,8 +138,6 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -292,8 +288,6 @@ def _insert_open_campaign(
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -318,8 +312,6 @@ def _insert_open_campaign(
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -686,8 +678,6 @@ def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -712,8 +702,6 @@ def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
@@ -858,8 +846,6 @@ def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
             scoring_config_url=None,
             allowed_paths=["vllm/**"],
             denied_paths=["tests/**"],
-            window_opens_at=now - timedelta(hours=1),
-            window_closes_at=now + timedelta(days=1),
             priority_metric="throughput",
             success_threshold=">=10% at SLA",
             status="open",
@@ -937,8 +923,6 @@ def _insert_draft_calibration_campaign(*, repo, commit, campaign_id, now, bench)
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="draft",

@@ -107,8 +107,6 @@ class CampaignManifest:
     scoring_config_url: str | None
     allowed_paths: list[str]
     denied_paths: list[str]
-    window_opens_at: datetime
-    window_closes_at: datetime
     manifest_hash: str
     customer_signoff: CustomerSignoff | None
     status: str  # draft | open | closed
@@ -124,6 +122,10 @@ class CampaignManifest:
     workload_pool: list[dict[str, Any]] | None = None
     sampling_rule: dict[str, Any] | None = None
     z_threshold: float | None = None
+    # Row creation time, read from the DB rather than pinned. Campaigns run
+    # open ended, so this is the only date they carry; None for a manifest
+    # built in memory and not yet inserted.
+    created_at: datetime | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -140,10 +142,7 @@ class CampaignManifest:
             "scoring_config_url": self.scoring_config_url,
             "allowed_paths": list(self.allowed_paths),
             "denied_paths": list(self.denied_paths),
-            "window": {
-                "opens_at": self.window_opens_at.isoformat(),
-                "closes_at": self.window_closes_at.isoformat(),
-            },
+            "created_at": (self.created_at.isoformat() if self.created_at else None),
             "manifest_hash": self.manifest_hash,
             "customer_signoff": (
                 self.customer_signoff.to_dict() if self.customer_signoff else None

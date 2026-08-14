@@ -7,7 +7,6 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-from datetime import datetime, timezone
 from uuid import uuid4
 
 from campaign.engine import (
@@ -42,8 +41,6 @@ def _fields_kwargs(**overrides):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        window_closes_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
     )
@@ -76,10 +73,14 @@ def test_absent_engine_leaves_manifest_hash_unchanged():
 
 
 def test_engine_none_matches_known_pre_engine_hash():
-    """Golden hash: locks the pin set against accidental future drift."""
+    """Golden hash: locks the pin set against accidental future drift.
+
+    Rebaselined once, when the submission window left the pin set. Campaigns
+    hashed before that keep their stored hash; nothing recomputes it.
+    """
     fields = freeze_manifest_fields(**_fields_kwargs(campaign_id=None, profile_id=None))
     assert compute_manifest_hash(fields) == (
-        "sha256:c23a3da6faca0ef9b9286172a66f947305d1631e2a085b387cf2a2e1f49d2a48"
+        "sha256:3e2602cb9ce5142cbb150e077d863e642011e0c4f70dbca19940f3c4a934c7d4"
     )
 
 

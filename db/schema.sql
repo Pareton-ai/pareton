@@ -28,8 +28,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   scoring_config_url TEXT,
   allowed_paths JSONB NOT NULL DEFAULT '[]'::jsonb,
   denied_paths JSONB NOT NULL DEFAULT '[]'::jsonb,
-  window_opens_at TIMESTAMPTZ NOT NULL,
-  window_closes_at TIMESTAMPTZ NOT NULL,
+  -- No submission window: campaigns accept patches until status flips to
+  -- 'closed'. Dropped columns: window_opens_at, window_closes_at.
   priority_metric TEXT NOT NULL
     CHECK (priority_metric IN ('throughput', 'gpu_hours', 'latency',
                                'utilization', 'cost_per_request')),

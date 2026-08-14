@@ -9,7 +9,6 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -113,7 +112,6 @@ def _find_open_smoke_campaign() -> str | None:
               AND c.status = 'open'
               AND c.bench IS NULL
               AND c.baseline_commit = %s
-              AND now() BETWEEN c.window_opens_at AND c.window_closes_at
             ORDER BY c.created_at DESC
             LIMIT 1
             """,
@@ -157,8 +155,6 @@ def ensure_campaign() -> str:
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**", ".github/**", "**/Dockerfile*"],
-        window_opens_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        window_closes_at=datetime(2035, 1, 1, tzinfo=timezone.utc),
         priority_metric="throughput",
         success_threshold="mock build reaches built",
         status="open",
