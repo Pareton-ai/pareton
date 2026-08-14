@@ -120,9 +120,7 @@ def test_extract_skips_null_and_prompt_portion():
         temperature=0.0,
         logprobs_requested=1,
     )
-    scores = extract_output_logprobs(
-        resp, original_prompt=prompt, continuation=cont
-    )
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=cont)
     assert scores, "expected at least one output position"
     assert all(s.text_offset >= len(prompt) for s in scores)
     assert all(s.text_offset < len(full) for s in scores)
@@ -146,9 +144,7 @@ def test_extract_sglang_completion_only_offsets():
         ],
         "usage": {"prompt_tokens": 40, "completion_tokens": 1},
     }
-    scores = extract_output_logprobs(
-        resp, original_prompt=prompt, continuation=" OK"
-    )
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=" OK")
     assert len(scores) == 1
     assert scores[0].token == " OK"
 
@@ -171,9 +167,7 @@ def test_extract_offset_cut_drops_token_past_continuation():
             }
         ]
     }
-    scores = extract_output_logprobs(
-        resp, original_prompt=prompt, continuation=cont
-    )
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=cont)
     assert [s.token for s in scores] == [" world"]
 
 
@@ -197,9 +191,7 @@ def test_extract_sglang_full_echo_drops_clamp_extra():
         ],
         "usage": {"prompt_tokens": 4, "completion_tokens": 1},
     }
-    scores = extract_output_logprobs(
-        resp, original_prompt=prompt, continuation=cont
-    )
+    scores = extract_output_logprobs(resp, original_prompt=prompt, continuation=cont)
     assert [s.token for s in scores] == [" OK", " then"]
 
 
