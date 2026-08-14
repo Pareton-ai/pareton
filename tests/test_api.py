@@ -166,6 +166,63 @@ def test_stats_shape(monkeypatch, client: TestClient):
     )
 
 
+def test_openapi_publishes_the_submission_state_vocabulary():
+    """The generated frontend union derives from this enum; keep them bound.
+
+    If this fails, either a model stopped referencing SubmissionState or the
+    class was renamed, and pareton-frontend's `types.ts` import will break at
+    the next `schema.d.ts` regeneration (PAR-46).
+    """
+    from api.server import app
+    from gate.types import SubmissionState
+
+    schema = app.openapi()["components"]["schemas"]["SubmissionState"]
+    assert schema["type"] == "string"
+    assert schema["enum"] == [s.value for s in SubmissionState]
+
+
+def test_submissions_payload_matches_the_documented_model(
+    monkeypatch, client: TestClient
+):
+    """`responses=` documents but does not validate; assert the real payload."""
+    from api import server
+
+    campaign = SimpleNamespace(status="open", to_public_dict=lambda: {"id": "c1"})
+    sid = "11111111-1111-1111-1111-111111111111"
+    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(
+        server,
+        "list_submissions",
+        lambda _cid, *, limit=50, offset=0: {
+            "total": 1,
+            "items": [
+                {
+                    "id": sid,
+                    "campaign_id": "c1",
+                    "patch_hash": "abc",
+                    "hotkey": "hk",
+                    "baseline_commit": "deadbeef",
+                    "retrieval_url": "https://example/p.diff",
+                    "commit_block": 1,
+                    "committed_at": "2026-08-14T00:00:00+00:00",
+                    "engine_image_ref": None,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        server, "list_bench_summaries", lambda _cid, submission_ids=None: {}
+    )
+    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: "sampled"})
+
+    resp = client.get("/v1/campaigns/c1/submissions")
+    assert resp.status_code == 200
+    page = server.SubmissionsPageModel.model_validate(resp.json())
+    assert page.submissions[0].latest_state == "sampled"
+    # The documented contract must not have moved the timestamp format.
+    assert resp.json()["submissions"][0]["committed_at"].endswith("+00:00")
+
+
 def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
     from api import server
 

@@ -10,6 +10,7 @@ from uuid import UUID
 from psycopg2.extras import Json, RealDictCursor
 
 from db.connection import db_connection
+from gate.types import SUBMISSION_STATES, SubmissionState
 
 from .manifest import build_manifest
 from .models import CampaignManifest, CustomerSignoff, SLA
@@ -687,23 +688,8 @@ def count_submission_campaigns(patch_hash: str) -> int:
 
 
 KNOWN_CAMPAIGN_STATUSES: tuple[str, ...] = ("draft", "open", "closed")
-KNOWN_SUBMISSION_STATES: tuple[str, ...] = (
-    "committed",
-    "picked_up",
-    "fetched",
-    "verified",
-    "applied",
-    "surface_ok",
-    "building",
-    "image_pushed",
-    "built",
-    "bench_queued",
-    "sampled",
-    "correct",
-    "screened",
-    "benched",
-    "rejected",
-)
+# Derived, not copied. Add states in gate/types.py only (PAR-46).
+KNOWN_SUBMISSION_STATES: tuple[str, ...] = SUBMISSION_STATES
 
 
 def list_submissions(
@@ -902,9 +888,13 @@ def record_submission_sample(
             cur.execute(
                 """
                 INSERT INTO submission_events (submission_id, state, detail)
-                VALUES (%s, 'sampled', %s)
+                VALUES (%s, %s, %s)
                 """,
-                (str(submission_id), Json(sampling_receipt)),
+                (
+                    str(submission_id),
+                    SubmissionState.SAMPLED.value,
+                    Json(sampling_receipt),
+                ),
             )
 
 
