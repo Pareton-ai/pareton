@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from psycopg2 import OperationalError
 from psycopg2.pool import PoolError
 
 from db.exceptions import DatabaseUnavailable
@@ -113,6 +114,36 @@ def test_closed_connection_is_discarded(conn_mod):
         yielded.closed = 1
 
     assert pool.puts == [(conn, True)]
+
+
+def test_dead_pooled_socket_is_unavailable_not_raw_error(conn_mod):
+    """Server-dropped socket: 503 like a failed connect, and never reused."""
+    conn = FakeConn()
+    pool = FakePool(conn)
+    conn_mod._pool = pool
+
+    with pytest.raises(DatabaseUnavailable, match="database connection failed"):
+        with conn_mod.db_connection(readonly=True) as yielded:
+            # psycopg2 only notices on first use, then marks the conn closed.
+            yielded.closed = 2
+            raise OperationalError("SSL connection has been closed unexpectedly")
+
+    assert conn.rollbacks == 0
+    assert pool.puts == [(conn, True)]
+
+
+def test_query_error_keeps_its_type(conn_mod):
+    """A live connection failing a statement must not be masked as a 503."""
+    conn = FakeConn()
+    pool = FakePool(conn)
+    conn_mod._pool = pool
+
+    with pytest.raises(OperationalError, match="deadlock detected"):
+        with conn_mod.db_connection():
+            raise OperationalError("deadlock detected")
+
+    assert conn.rollbacks == 1
+    assert pool.puts == [(conn, False)]
 
 
 def test_failed_pool_init_does_not_poison(conn_mod, monkeypatch):

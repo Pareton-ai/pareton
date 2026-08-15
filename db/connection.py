@@ -48,9 +48,7 @@ def _get_pool() -> Any:
         if _pool is not None:
             return _pool
         try:
-            created = ThreadedConnectionPool(
-                _POOL_MIN, _POOL_MAX, url, **_KEEPALIVES
-            )
+            created = ThreadedConnectionPool(_POOL_MIN, _POOL_MAX, url, **_KEEPALIVES)
         except Exception as exc:
             raise DatabaseUnavailable("database connection failed") from exc
         _pool = created
@@ -107,12 +105,17 @@ def db_connection(*, readonly: bool = False) -> Iterator[Any]:
         yield conn
         if not readonly:
             conn.commit()
-    except Exception:
+    except Exception as exc:
         if conn is not None and not conn.closed and not readonly:
             try:
                 conn.rollback()
             except Exception:
                 pass
+        # A pooled socket the server dropped (Neon maintenance/compute release)
+        # only surfaces on first use: psycopg2 marks the connection closed and
+        # raises OperationalError. Keep the pre-pool contract of 503, not 500.
+        if conn is not None and conn.closed:
+            raise DatabaseUnavailable("database connection failed") from exc
         raise
     finally:
         if conn is not None:
