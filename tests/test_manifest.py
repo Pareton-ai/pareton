@@ -21,8 +21,6 @@ from campaign.models import SLA
 def test_manifest_hash_stable():
     cid = uuid4()
     pid = uuid4()
-    opens = datetime(2026, 7, 1, tzinfo=timezone.utc)
-    closes = datetime(2026, 10, 1, tzinfo=timezone.utc)
     fields = freeze_manifest_fields(
         campaign_id=cid,
         profile_id=pid,
@@ -37,8 +35,6 @@ def test_manifest_hash_stable():
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=opens,
-        window_closes_at=closes,
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
     )
@@ -64,8 +60,6 @@ def test_build_manifest_normalizes_commit_case():
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=[],
-        window_opens_at=datetime.now(timezone.utc),
-        window_closes_at=datetime.now(timezone.utc),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
     )
@@ -73,7 +67,6 @@ def test_build_manifest_normalizes_commit_case():
 
 
 def _manifest_kwargs(**overrides):
-    now = datetime.now(timezone.utc)
     kwargs = dict(
         campaign_id=uuid4(),
         profile_id=uuid4(),
@@ -88,13 +81,35 @@ def _manifest_kwargs(**overrides):
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now,
-        window_closes_at=now,
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
     )
     kwargs.update(overrides)
     return kwargs
+
+
+def test_window_is_not_in_the_pin_set():
+    """Campaigns have no submission window, so nothing about one is hashed."""
+    fields = freeze_manifest_fields(**_manifest_kwargs())
+    assert "window" not in fields
+
+
+def test_public_dict_reports_created_at_and_no_window():
+    m = build_manifest(
+        **_manifest_kwargs(created_at=datetime(2026, 8, 4, tzinfo=timezone.utc))
+    )
+    out = m.to_public_dict()
+    assert "window" not in out
+    assert out["created_at"] == "2026-08-04T00:00:00+00:00"
+
+
+def test_created_at_is_not_hashed():
+    """created_at is read from the DB row, never pinned."""
+    kwargs = _manifest_kwargs()
+    bare = build_manifest(**kwargs)
+    dated = build_manifest(**kwargs, created_at=datetime.now(timezone.utc))
+    assert bare.manifest_hash == dated.manifest_hash
+    assert bare.to_public_dict()["created_at"] is None
 
 
 def test_priority_metric_rejects_unknown_value():

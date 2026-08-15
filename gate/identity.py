@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Iterable
 
 from campaign.models import CampaignManifest
@@ -15,9 +14,12 @@ def check_identity(
     registered_hotkeys: Iterable[str],
     campaign: CampaignManifest,
     baseline_commit: str,
-    now: datetime | None = None,
 ) -> GateResult:
-    """Validate miner eligibility and campaign window / baseline pin."""
+    """Validate miner eligibility and campaign status / baseline pin.
+
+    Campaigns have no submission window: ``status`` is the only intake switch,
+    so a campaign accepts patches until an operator closes it.
+    """
     registered = set(registered_hotkeys)
     if hotkey not in registered:
         return GateResult.reject(
@@ -28,23 +30,6 @@ def check_identity(
         return GateResult.reject(
             f"campaign status is {campaign.status}, expected open",
             campaign_id=str(campaign.campaign_id),
-        )
-
-    ts = now or datetime.now(timezone.utc)
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    opens = campaign.window_opens_at
-    closes = campaign.window_closes_at
-    if opens.tzinfo is None:
-        opens = opens.replace(tzinfo=timezone.utc)
-    if closes.tzinfo is None:
-        closes = closes.replace(tzinfo=timezone.utc)
-    if ts < opens or ts > closes:
-        return GateResult.reject(
-            "outside campaign window",
-            now=ts.isoformat(),
-            opens_at=opens.isoformat(),
-            closes_at=closes.isoformat(),
         )
 
     if baseline_commit.lower() != campaign.baseline_commit.lower():

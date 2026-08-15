@@ -7,7 +7,6 @@ rows written before engine profiles existed still load.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -37,7 +36,6 @@ def _bind_e2e_database(monkeypatch: pytest.MonkeyPatch):
 
 
 def _insert(engine):
-    now = datetime.now(timezone.utc)
     campaign_id = uuid4()
     profile_id = insert_profile("e2e-engine", {"fixture": True})
     manifest = build_manifest(
@@ -54,8 +52,6 @@ def _insert(engine):
         scoring_config_url=None,
         allowed_paths=["python/sglang/**"],
         denied_paths=["rust/**"],
-        window_opens_at=now - timedelta(hours=1),
-        window_closes_at=now + timedelta(days=1),
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="draft",

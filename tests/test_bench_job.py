@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -814,7 +813,6 @@ def test_sglang_request_omits_vllm_max_model_len(tmp_path: Path):
 
 
 def test_manifest_bench_pin_compat():
-    now = datetime.now(timezone.utc)
     kwargs = dict(
         campaign_id=None,
         profile_id=None,
@@ -829,8 +827,6 @@ def test_manifest_bench_pin_compat():
         scoring_config_url=None,
         allowed_paths=["vllm/**"],
         denied_paths=["tests/**"],
-        window_opens_at=now,
-        window_closes_at=now,
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
     )

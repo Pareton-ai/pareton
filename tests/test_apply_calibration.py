@@ -22,6 +22,7 @@ def _campaign_row(
     now = datetime.now(timezone.utc)
     return {
         "id": CID,
+        "created_at": now,
         "profile_id": None,
         "baseline_repo": "https://github.com/vllm-project/vllm.git",
         "baseline_commit": "ee0da84ab9e04ac7610e28580af62c365e898389",
@@ -34,8 +35,6 @@ def _campaign_row(
         "scoring_config_url": None,
         "allowed_paths": ["vllm/"],
         "denied_paths": [],
-        "window_opens_at": now,
-        "window_closes_at": now,
         "priority_metric": "gpu_hours",
         "success_threshold": ">=10%",
         "status": status,
