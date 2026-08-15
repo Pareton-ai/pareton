@@ -310,7 +310,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
 
 
 def get_campaign(campaign_id: UUID | str) -> CampaignManifest | None:
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM campaigns WHERE id = %s", (str(campaign_id),))
             row = cur.fetchone()
@@ -320,7 +320,7 @@ def get_campaign(campaign_id: UUID | str) -> CampaignManifest | None:
 
 
 def list_campaigns(*, status: str | None = None) -> list[CampaignManifest]:
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if status:
                 cur.execute(
@@ -395,7 +395,7 @@ def insert_submission(
 
 def payment_ref_consumed(payment_block: int, payment_tx: int) -> bool:
     """Whether a fee payment already backs a submission."""
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -487,7 +487,7 @@ def set_engine_image(submission_id: UUID | str, image_ref: str) -> None:
 
 def submission_has_terminal_event(submission_id: UUID | str) -> bool:
     """True if rejected or benched already recorded (blocks rebench)."""
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -641,7 +641,7 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
 
 
 def get_submission(patch_hash: str) -> dict[str, Any] | None:
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -659,7 +659,7 @@ def get_submission(patch_hash: str) -> dict[str, Any] | None:
 def get_submission_for_campaign(
     campaign_id: UUID | str, patch_hash: str
 ) -> dict[str, Any] | None:
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -674,7 +674,7 @@ def get_submission_for_campaign(
 
 def count_submission_campaigns(patch_hash: str) -> int:
     """Campaign count holding patch_hash; >1 means bare-hash lookup is ambiguous."""
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT COUNT(*) AS n FROM submissions WHERE patch_hash = %s",
@@ -699,7 +699,7 @@ def list_submissions(
     Ordered by ``committed_at DESC, id DESC``. Returns
     ``{"total": int, "items": [row, ...]}``.
     """
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT COUNT(*) AS n FROM submissions WHERE campaign_id = %s",
@@ -728,7 +728,7 @@ def list_latest_states(
     if not submission_ids:
         return {}
     ids = [str(s) for s in submission_ids]
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -747,7 +747,7 @@ def list_latest_states(
 
 
 def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -770,7 +770,7 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
 
 def list_submission_jobs(submission_id: UUID | str) -> list[dict[str, Any]]:
     """Job rows (kind, status, last_error) for one submission, ordered by kind."""
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -819,7 +819,7 @@ def insert_bench_report(
 
 
 def list_bench_reports(submission_id: UUID | str) -> list[dict[str, Any]]:
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
@@ -923,7 +923,7 @@ def list_bench_summaries(
 
     When ``submission_ids`` is set, only those rows are loaded (page-scoped).
     """
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             if submission_ids is not None:
                 ids = [str(s) for s in submission_ids]
@@ -969,7 +969,7 @@ def get_public_stats() -> dict[str, Any]:
     """Campaign status counts + submission counts by latest event state."""
     by_status = {s: 0 for s in KNOWN_CAMPAIGN_STATUSES}
     by_latest_state = {s: 0 for s in KNOWN_SUBMISSION_STATES}
-    with db_connection() as conn:
+    with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
