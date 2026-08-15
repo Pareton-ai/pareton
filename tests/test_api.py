@@ -39,6 +39,18 @@ def test_campaigns_cache_control(client: TestClient):
     )
 
 
+def test_campaign_detail_db_unavailable_is_503(monkeypatch, client: TestClient):
+    from api import server
+    from db.exceptions import DatabaseUnavailable
+
+    def boom(_cid):
+        raise DatabaseUnavailable("database connection failed")
+
+    monkeypatch.setattr(server, "get_campaign", boom)
+    resp = client.get("/v1/campaigns/c1")
+    assert resp.status_code == 503
+
+
 def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     from api import server
 

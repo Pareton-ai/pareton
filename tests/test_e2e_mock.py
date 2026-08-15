@@ -33,6 +33,7 @@ def _bind_e2e_database(monkeypatch: pytest.MonkeyPatch):
     import db.connection as conn
 
     monkeypatch.setattr(conn, "DATABASE_URL", url)
+    monkeypatch.setattr(conn, "_pool", None)
     yield
     cleanup_e2e_rows()
 
