@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for new pareton main commits every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Unit=pareton-deploy.service
+
+[Install]
+WantedBy=timers.target

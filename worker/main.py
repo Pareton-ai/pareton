@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
 import threading
-import time
 
 import config
 from campaign.store import claim_next_job
@@ -99,6 +99,14 @@ def run_once(
     return True
 
 
+def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:
+    """Run work cycles until drain is set; idle sleep wakes early on drain."""
+    while not drain.is_set():
+        did = cycle()
+        if not did:
+            drain.wait(poll_interval_s)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Pareton Stage 0 gate + bench worker")
     p.add_argument(
@@ -159,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def _cycle() -> bool:
         nonlocal registered_hotkeys
+        if drain.is_set():
+            return False
         if subtensor is not None:
             try:
                 _created, hotkeys = scan_chain_once(subtensor)
@@ -166,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
                     registered_hotkeys = hotkeys
             except Exception:
                 logger.exception("chain scan failed; will retry next cycle")
+        if drain.is_set():
+            return False
         return run_once(
             mock_build=args.mock_build,
             mock_bench=args.mock_bench,
@@ -173,14 +185,27 @@ def main(argv: list[str] | None = None) -> int:
             registered_hotkeys=registered_hotkeys,
         )
 
+    # A killed worker strands its claimed job in 'running' forever (only
+    # 'pending' jobs are re-claimed) and orphans any rented GPU pod, so on
+    # SIGTERM/SIGINT finish the in-flight job before exiting. systemd allows
+    # this up to TimeoutStopSec, then SIGKILLs. The drain flag is defined
+    # before _cycle so a signal arriving during the chain scan stops the
+    # worker before it claims a fresh job.
+    drain = threading.Event()
+
+    def _request_drain(signum, _frame):
+        logger.info("signal %d received; finishing current job before exit", signum)
+        drain.set()
+
+    signal.signal(signal.SIGTERM, _request_drain)
+    signal.signal(signal.SIGINT, _request_drain)
+
     if args.once:
         _cycle()
         return 0
 
-    while True:
-        did = _cycle()
-        if not did:
-            time.sleep(config.POLL_INTERVAL_S)
+    _run_loop(_cycle, drain, config.POLL_INTERVAL_S)
+    logger.info("drain complete; exiting")
     return 0
 
 

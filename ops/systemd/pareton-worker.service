@@ -15,6 +15,10 @@ EnvironmentFile=/opt/pareton/.env
 ExecStart=/opt/pareton/.venv/bin/python -m worker.main --scan-chain
 Restart=on-failure
 RestartSec=10
+# The worker drains on SIGTERM (finishes the in-flight job before exiting).
+# Worst case is a bench job: provision+bootstrap+pull+bench+teardown can run
+# several hours per GPU SKU, so give a wide margin, then SIGKILL.
+TimeoutStopSec=8h
 
 [Install]
 WantedBy=multi-user.target
