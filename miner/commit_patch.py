@@ -128,10 +128,32 @@ def _payment_ref(result: object) -> tuple[int, int] | None:
     return int(block), int(index)
 
 
+def _say(msg: str, *, file=None) -> None:
+    """Print one line and flush so progress is visible before the next wait."""
+    out = sys.stdout if file is None else file
+    print(msg, file=out)
+    out.flush()
+
+
+def _unlock_coldkey(wallet) -> None:
+    """Prompt for the coldkey password, then show that work has started.
+
+    ``bt.Transfer`` unlocks the key inside ``execute``, so without this the
+    CLI sits silent after the password until the chain returns.
+    """
+    _say("The next prompt unlocks the coldkey so we can pay the submission fee.")
+    _ = wallet.coldkey
+    _say(
+        "⏳ Password accepted. Submitting the transfer now "
+        "(this can take a minute)."
+    )
+
+
 def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int, int]:
     """Send the fee from the coldkey and return the proof reference."""
     import bittensor as bt
 
+    _unlock_coldkey(wallet)
     result = subtensor.execute(
         bt.Transfer(dest_ss58=recipient, amount_tao=str(fee_tao)), wallet
     )
@@ -167,9 +189,9 @@ def _await_visible(
             c = commitments.get(hotkey)
             if c is not None:
                 if (getattr(c, "data", None) or "") == payload:
-                    return f"plaintext visible at block {c.block}"
+                    return f"plaintext commitment is visible at block {c.block}"
                 if any(str(data) == payload for _block, data in (c.revealed or [])):
-                    return f"revealed at block {c.block}"
+                    return f"timelock commitment revealed at block {c.block}"
             await asyncio.sleep(6)
         return None
 
@@ -273,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: upload failed: {exc}", file=sys.stderr)
             return 1
         retrieval_url = presign["retrieval_url"]
-        print(f"uploaded patch to {retrieval_url}")
+        _say(f"📤 Uploaded the patch to {retrieval_url}.")
 
     payload_args: dict[str, object] = {
         "campaign_id": args.campaign_id,
@@ -311,17 +333,17 @@ def main(argv: list[str] | None = None) -> int:
                 payment_block=args.payment_block,
                 payment_tx=args.payment_tx,
             )
-        print(f"commitment payload ({len(payload.encode())} bytes):")
+        _say(f"Commitment payload ({len(payload.encode())} bytes):")
         print(payload)
         if fee_tao > 0:
             if args.payment_block is not None:
-                print(
-                    f"dry-run: would reuse payment "
-                    f"{args.payment_block}-{args.payment_tx}"
+                _say(
+                    f"Dry run: would reuse payment "
+                    f"{args.payment_block}-{args.payment_tx}."
                 )
             else:
-                print(f"dry-run: would transfer {fee_tao} TAO to {recipient}")
-        print("dry-run: not submitting on-chain")
+                _say(f"Dry run: would transfer {fee_tao} TAO to {recipient}.")
+        _say("Dry run: not submitting on chain.")
         return 0
 
     subtensor = bt.Subtensor(network=args.network)
@@ -340,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     if fee_tao > 0:
         if args.payment_block is not None:
             payment_block, payment_tx = args.payment_block, args.payment_tx
-            print(f"reusing payment {payment_block}-{payment_tx}")
+            _say(f"Reusing payment {payment_block}-{payment_tx}.")
         else:
             try:
                 payment_block, payment_tx = _pay_fee(
@@ -349,9 +371,9 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
-            print(
-                f"paid fee {fee_tao} TAO to {recipient} "
-                f"(payment {payment_block}-{payment_tx})"
+            _say(
+                f"💸 Paid {fee_tao} TAO to {recipient} "
+                f"(payment {payment_block}-{payment_tx})."
             )
         payload_args["payment_block"] = payment_block
         payload_args["payment_tx"] = payment_tx
@@ -363,18 +385,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print(f"commitment payload ({len(payload.encode())} bytes):")
+    _say(f"Commitment payload ({len(payload.encode())} bytes):")
     print(payload)
 
     def _reuse_hint() -> None:
         if payment_block is None or payment_tx is None:
             return
         print(
-            f"reuse the fee with --payment-block {payment_block} "
-            f"--payment-tx {payment_tx} (do not pay twice)",
+            f"Reuse the fee with --payment-block {payment_block} "
+            f"--payment-tx {payment_tx} (do not pay twice).",
             file=sys.stderr,
         )
 
+    _say(f"⏳ Submitting the patch commitment on netuid {args.netuid}...")
     try:
         call = bt.calls.Commitments.set_commitment(
             netuid=args.netuid,
@@ -397,27 +420,28 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     commit_ref = getattr(result, "extrinsic_id", None) or "unknown"
-    print(
-        f"committed patch_hash={patch_hash} on netuid {args.netuid} "
-        f"({mode}, commitment {commit_ref})"
+    _say(
+        f"✅ Committed {patch_hash} on netuid {args.netuid} "
+        f"({mode}, commitment {commit_ref})."
     )
 
     # Verify is informational only: the commitment already landed, so a poll
     # failure must not turn a successful commit into a non-zero exit.
+    _say("⏳ Checking that the commitment is visible on chain...")
     try:
         status = _await_visible(args.network, args.netuid, hotkey, payload)
     except Exception as exc:
         print(
-            f"warning: on-chain verify failed ({exc}); commitment is submitted",
+            f"warning: on-chain verify failed ({exc}). The commitment is submitted.",
             file=sys.stderr,
         )
     else:
         if status:
-            print(f"verified on-chain: {status}")
+            _say(f"✅ Verified: {status}.")
         else:
             print(
-                "warning: commitment not visible within 90s; check chain "
-                "propagation before expecting the worker to pick it up",
+                "warning: commitment not visible within 90s. Check chain "
+                "propagation before expecting the worker to pick it up.",
                 file=sys.stderr,
             )
     return 0
