@@ -19,6 +19,7 @@ set -euo pipefail
 
 REPO=/opt/pareton
 PENDING_FLAG="$REPO/.deploy-pending"
+DEPLOYED_FILE="$REPO/.deploy-done"
 LOCK=/run/pareton-deploy.lock
 
 exec 9>"$LOCK"
@@ -46,21 +47,27 @@ except Exception:
 }
 
 git fetch --quiet origin main
-LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
+# Commit of the last deploy whose pull, pip and api restart all succeeded.
+# Gating on this rather than HEAD is what lets a tick that died mid-deploy
+# retry: git pull has already moved HEAD by then, so a HEAD-based check would
+# skip the unfinished pip/api steps forever. Absent on first run, in which
+# case HEAD is treated as already deployed.
+DEPLOYED=$(cat "$DEPLOYED_FILE" 2>/dev/null || git rev-parse HEAD)
 
-if [ "$LOCAL" != "$REMOTE" ]; then
-    # Mark pending BEFORE the steps that can fail. With set -e, a failed pip
-    # install or api restart would otherwise abort after the pull with HEAD
-    # already at origin/main, so no later tick would ever retry the rest.
+if [ "$DEPLOYED" != "$REMOTE" ]; then
+    # Mark the worker restart owed before the steps that can fail. If one does,
+    # set -e aborts here and the pending block below never runs, so the worker
+    # is not restarted onto a half-deployed tree.
     touch "$PENDING_FLAG"
     git pull --ff-only --quiet origin main
-    if git diff --name-only "$LOCAL" HEAD | grep -qx requirements.txt; then
+    if git diff --name-only "$DEPLOYED" HEAD | grep -qx requirements.txt; then
         "$REPO/.venv/bin/pip" install --quiet -r requirements.txt
         echo "deploy: requirements.txt changed, venv updated"
     fi
     systemctl restart pareton-api
-    echo "deploy: $LOCAL -> $(git rev-parse HEAD); pareton-api restarted"
+    git rev-parse HEAD > "$DEPLOYED_FILE"
+    echo "deploy: $DEPLOYED -> $(git rev-parse HEAD); pareton-api restarted"
 fi
 
 if [ -f "$PENDING_FLAG" ]; then
