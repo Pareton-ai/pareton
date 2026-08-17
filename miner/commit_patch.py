@@ -143,10 +143,7 @@ def _unlock_coldkey(wallet) -> None:
     """
     _say("The next prompt unlocks the coldkey so we can pay the submission fee.")
     _ = wallet.coldkey
-    _say(
-        "⏳ Password accepted. Submitting the transfer now "
-        "(this can take a minute)."
-    )
+    _say("⏳ Password accepted. Submitting the transfer now (this can take a minute).")
 
 
 def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int, int]:
