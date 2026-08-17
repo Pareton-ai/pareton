@@ -383,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-correctness-num-prompts",
         type=int,
         default=None,
-        help="Correctness prompts (default: PARETON_BENCH_CORRECTNESS_NUM_PROMPTS)",
+        help="Correctness prompts (default: every request in the workload trace)",
     )
     p.add_argument(
         "--bench-correctness-max-new-tokens",

@@ -124,6 +124,19 @@ def materialize_trace(
     return path
 
 
+def trace_request_count(trace_path: str | Path) -> int:
+    """Number of requests in an already-materialized workload trace."""
+    path = Path(trace_path)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BenchInfraError("trace_unreadable", f"{path}: {exc}") from exc
+    requests = doc.get("requests") if isinstance(doc, dict) else None
+    if not isinstance(requests, list) or not requests:
+        raise BenchInfraError("trace_no_requests", str(path))
+    return len(requests)
+
+
 def campaign_calibration_fingerprint(
     bench: dict[str, Any], row: dict[str, Any]
 ) -> dict[str, Any]:
@@ -168,6 +181,10 @@ def build_bench_request_dict(
 
     ``require_calibration`` is True for real GPU benches. Mock/calibrate paths leave
     it False so unit tests and B7 prepare stay unblocked.
+
+    Sample sizes default to the full workload trace: ``correctness.num_prompts``
+    and ``perf_screen.num_requests`` fall back to the trace request count, so a
+    campaign that pins neither scores every request it pinned.
     """
     del fetcher  # binding happens in materialize_trace before this is called
     bench = _parse_json_field(row.get("bench"))
@@ -225,11 +242,12 @@ def build_bench_request_dict(
                     "campaign_correctness_calibration_stale",
                     f"{key}: {got_fp.get(key)!r} != {expect!r}",
                 )
+    # Absent a campaign pin, score the whole trace instead of a fixed clamp.
+    trace_n = trace_request_count(trace_path)
+
     thresholds = dict(corr_cfg.get("thresholds") or {})
     correctness = {
-        "num_prompts": int(
-            corr_cfg.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS)
-        ),
+        "num_prompts": int(corr_cfg.get("num_prompts", trace_n)),
         "max_new_tokens": int(
             corr_cfg.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
         ),
@@ -263,9 +281,7 @@ def build_bench_request_dict(
 
     perf_cfg = dict(bench.get("perf_screen") or {})
     perf_screen = {
-        "num_requests": int(
-            perf_cfg.get("num_requests", config.BENCH_PERF_NUM_REQUESTS)
-        ),
+        "num_requests": int(perf_cfg.get("num_requests", trace_n)),
         "concurrency": int(perf_cfg.get("concurrency", config.BENCH_PERF_CONCURRENCY)),
         "min_throughput_ratio": float(
             perf_cfg.get("min_throughput_ratio", config.BENCH_PERF_MIN_THROUGHPUT_RATIO)
