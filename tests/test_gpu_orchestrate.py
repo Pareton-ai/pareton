@@ -272,6 +272,156 @@ def test_pull_engine_images_called_when_not_mock(tmp_path: Path, monkeypatch):
     assert any("ghcr.io" in r for r in pull_calls[0]["refs"])
 
 
+def test_orchestrate_reports_phases_it_owns(tmp_path: Path, monkeypatch):
+    """Worker-owned steps report themselves, teardown last."""
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    seen: list[str] = []
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull_engine_images", lambda *a, **k: None)
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=tmp_path / "out",
+        mock_engine=False,
+        provider=provider,
+        runner=lambda cmd, *, timeout, input_text=None: SshResult(0, "ok\n", ""),
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+        on_phase=seen.append,
+    )
+    assert seen == ["provisioning", "bootstrapping", "pulling_image", "teardown"]
+
+
+def test_orchestrate_reports_teardown_even_when_the_bench_fails(
+    tmp_path: Path, monkeypatch
+):
+    ensure_durable_keypair(tmp_path / "st")
+    provider = FakeProvider()
+    seen: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        if "python -m bench" in " ".join(cmd):
+            return SshResult(3, "bench-failed\n", "")
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate.pull", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+
+    req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_path = tmp_path / "req.json"
+    req_path.write_text(json.dumps(req), encoding="utf-8")
+
+    code = run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=req_path,
+        output_dir=tmp_path / "out",
+        mock_engine=True,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+        on_phase=seen.append,
+    )
+    assert code == 3
+    assert seen[-1] == "teardown"
+
+
+def _fake_pod(tmp_path: Path) -> Pod:
+    return Pod(
+        provider="targon",
+        pod_id="wl-1",
+        name=encode_pod_name(ttl_hours=1.0),
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "key",
+        hourly_price_cents=100,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1.0,
+    )
+
+
+def test_read_pod_phase_accepts_only_the_fixed_vocabulary(tmp_path: Path):
+    """Untrusted marker: only the pod-reportable vocabulary is accepted."""
+    from gpu.orchestrate import read_pod_phase
+
+    pod = _fake_pod(tmp_path)
+    payloads: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, payloads.pop(0), "")
+
+    payloads.append(json.dumps({"phase": "downloading_model"}) + "\n")
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == "downloading_model"
+
+    # A pod does not rent or destroy itself; claiming otherwise is dropped.
+    payloads.append(json.dumps({"phase": "provisioning"}))
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+
+    payloads.append(json.dumps({"phase": "rm -rf /"}))
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+
+    payloads.append("not json at all")
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+
+    payloads.append("")
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+
+
+def test_read_pod_phase_caps_the_bytes_it_reads(tmp_path: Path):
+    from gpu.orchestrate import read_pod_phase
+
+    pod = _fake_pod(tmp_path)
+    commands: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        commands.append(cmd[-1])
+        return SshResult(0, "{}", "")
+
+    read_pod_phase(pod, remote_out="/opt/pareton/out", runner=runner)
+    assert commands[0].startswith("head -c 4096 ")
+    assert "/opt/pareton/out/phase.json" in commands[0]
+
+
+def test_pod_phase_poller_relays_and_survives_ssh_failure(tmp_path: Path):
+    from gpu.errors import GpuError
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[str] = []
+    outcomes: list[Any] = [
+        SshResult(0, json.dumps({"phase": "correctness"}), ""),
+        GpuError("ssh timed out"),
+    ]
+
+    def runner(cmd, *, timeout, input_text=None):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    poller = _PodPhasePoller(
+        pod, remote_out="/o", on_phase=seen.append, runner=runner, interval_s=0.01
+    )
+    poller.poll_once()
+    poller.poll_once()
+    assert seen == ["correctness"], "a failed poll leaves the last phase in place"
+
+
 def test_bootstrap_error_with_destroy_failure_returns_75(tmp_path: Path, monkeypatch):
     """Destroy-failure exit must win even when the main try raised."""
     from gpu.errors import GpuError

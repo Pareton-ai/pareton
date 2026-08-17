@@ -15,6 +15,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from bench import __version__
 from bench.correctness import (
@@ -39,6 +40,7 @@ from bench.lifecycle import (
 )
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.output import JsonlFileHandler, OutputLayout
+from bench.phases import BenchPhase
 from bench.perf_screen import (
     finish_perf_screen,
     run_perf_screen,
@@ -240,6 +242,7 @@ class _EngineProvider:
         candidate_token_latency_s: float = 0.0,
         logs_dir: Path | None = None,
         weights_dir: Path | None = None,
+        phase_sink: Callable[[str], None] | None = None,
     ) -> None:
         self._req = req
         self._mock = mock
@@ -248,9 +251,20 @@ class _EngineProvider:
         self._cand_latency = candidate_token_latency_s
         self._logs_dir = logs_dir or Path(".")
         self.weights_dir = weights_dir
+        self._phase_sink = phase_sink
+        self._module_phase: BenchPhase | None = None
         self.baseline_digest = extract_image_digest(req.engines.baseline.image)
         self.candidate_digest = extract_image_digest(req.engines.candidate.image)
         self._mocks: tuple[MockEngine, MockEngine] | None = None
+
+    def _write_phase(self, phase: BenchPhase) -> None:
+        if self._phase_sink is not None:
+            self._phase_sink(phase.value)
+
+    def _enter_module(self, phase: BenchPhase) -> None:
+        """Set the module phase; engine restarts report starting_engine then restore this."""
+        self._module_phase = phase
+        self._write_phase(phase)
 
     def _ensure_mocks(self) -> tuple[MockEngine, MockEngine]:
         if self._mocks is None:
@@ -300,6 +314,9 @@ class _EngineProvider:
                 serve_args=list(spec.serve_args) + list(extra_serve_args),
                 env=dict(spec.env),
             )
+        # Engine load can take minutes; report starting_engine then restore the module.
+        self._write_phase(BenchPhase.STARTING_ENGINE)
+        module_phase = self._module_phase
         return EngineContainer(
             spec=spec,
             network=net,
@@ -309,6 +326,11 @@ class _EngineProvider:
             publish_port=False,
             pull=_should_pull_image(spec.image),
             logs_dir=self._logs_dir,
+            on_ready=(
+                (lambda: self._write_phase(module_phase))
+                if module_phase is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -320,6 +342,7 @@ class _EngineProvider:
     def run_correctness(
         self, prompts: list[PromptCase], cfg, task_id: str, evidence_dir: Path
     ) -> CorrectnessReport:
+        self._enter_module(BenchPhase.CORRECTNESS)
         if self._mock:
             base, cand = self._ensure_mocks()
             return run_correctness(
@@ -367,6 +390,7 @@ class _EngineProvider:
         raise AssertionError("unreachable")
 
     def run_perf_screen(self, requests, cfg, evidence_dir: Path) -> PerfScreenReport:
+        self._enter_module(BenchPhase.PERF_SCREEN)
         if self._mock:
             base, cand = self._ensure_mocks()
             return run_perf_screen(
@@ -413,6 +437,7 @@ class _EngineProvider:
         perf_dir: Path,
     ) -> tuple[CorrectnessReport, PerfScreenReport | None]:
         """One container per role for correctness then perf. Never share roles."""
+        self._enter_module(BenchPhase.CORRECTNESS)
         if self._mock:
             corr = self.run_correctness(prompts, corr_cfg, task_id, corr_dir)
             if corr.verdict != "pass":
@@ -429,6 +454,7 @@ class _EngineProvider:
                         evidence_dir=corr_dir,
                     )
                     self.baseline_digest = base.image_digest
+                    self._enter_module(BenchPhase.PERF_SCREEN)
                     base_metrics = run_perf_screen_engine(
                         base.base_url,
                         role="baseline",
@@ -438,6 +464,7 @@ class _EngineProvider:
                     )
             except EngineError as exc:
                 self._reraise_with_role("baseline", exc)
+            self._module_phase = BenchPhase.CORRECTNESS
             try:
                 with self._docker_phase(net, "candidate") as cand:
                     corr = finish_correctness_with_candidate(
@@ -450,6 +477,7 @@ class _EngineProvider:
                     if corr.verdict != "pass":
                         (perf_dir / base_metrics["rows_file"]).unlink(missing_ok=True)
                         return corr, None
+                    self._enter_module(BenchPhase.PERF_SCREEN)
                     return corr, finish_perf_screen(
                         cand.base_url,
                         baseline=base_metrics,
@@ -462,6 +490,7 @@ class _EngineProvider:
         raise AssertionError("unreachable")
 
     def run_sla_bench(self, trace, cfg, evidence_dir: Path) -> SlaBenchReport:
+        self._enter_module(BenchPhase.SLA_BENCH)
         if self._mock:
             base, cand = self._ensure_mocks()
             return run_sla_bench(
@@ -698,10 +727,13 @@ def run_bench(
             candidate_token_latency_s=mock_candidate_token_latency_s,
             logs_dir=layout.correctness_dir / "engine_logs",
             weights_dir=None,
+            phase_sink=layout.write_phase,
         )
 
         try:
             if not mock_engine:
+                # First real wait of a cold run: hundreds of GB of weights.
+                layout.write_phase(BenchPhase.DOWNLOADING_MODEL.value)
                 staged = stage_weights(req.model, token_env=req.hf_token_env)
                 provider.weights_dir = staged.path
                 model_weights_sha256 = staged.weights_sha256

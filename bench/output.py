@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +13,19 @@ from bench.schemas import BenchReport
 logger = logging.getLogger(__name__)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+PHASE_FILENAME = "phase.json"
+
+
 class OutputLayout:
     """
     output/
     ├── bench_report.json
     ├── harness.log
+    ├── phase.json
     └── evidence/
         ├── env/
         ├── weights/
@@ -35,6 +44,7 @@ class OutputLayout:
         self.sla_bench_dir = self.evidence / "sla_bench"
         self.report_path = self.root / "bench_report.json"
         self.log_path = self.root / "harness.log"
+        self.phase_path = self.root / PHASE_FILENAME
 
     def prepare(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -81,6 +91,20 @@ class OutputLayout:
     def append_log(self, record: dict[str, Any]) -> None:
         with self.log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
+
+    def write_phase(self, phase: str, **progress: Any) -> None:
+        """Atomic status beacon for the worker to poll. Failures are logged, never raised."""
+        record: dict[str, Any] = {"phase": phase, "at": _utc_now_iso()}
+        if progress:
+            record["progress"] = progress
+        try:
+            tmp = self.phase_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(record, default=str) + "\n", encoding="utf-8")
+            tmp.replace(
+                self.phase_path
+            )  # atomic: a poll never reads a half-written file
+        except OSError as exc:
+            logger.warning("failed to write phase marker %s: %s", phase, exc)
 
 
 class JsonlFileHandler(logging.Handler):

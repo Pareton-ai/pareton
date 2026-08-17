@@ -36,6 +36,7 @@ from campaign.store import finalize_bench_job, record_submission_sample, set_job
 from gate.types import SubmissionState
 from observability import events as obs
 from observability.events import Timer
+from worker.phase_reporter import PhaseSink, reporter_for_job
 
 logger = logging.getLogger(__name__)
 
@@ -812,6 +813,7 @@ def process_bench_job(
     record_sample_fn: Callable[..., None] | None = None,
     row_fetcher: Callable[[int], dict[str, Any]] | None = None,
     upload_trace_fn: Callable[..., str] | None = None,
+    phase_reporter: PhaseSink | None = None,
 ) -> str:
     """Run one bench job across all gpu_skus. Returns 'ok' or last_error code."""
     submission_id = str(row["id"])
@@ -823,6 +825,8 @@ def process_bench_job(
     bench_timer = Timer()
     patch_sha256 = str(row.get("patch_hash", ""))
     image_digest = str(row.get("engine_image_ref", ""))
+    reporter = phase_reporter if phase_reporter is not None else reporter_for_job(row)
+    reporter.start()
 
     obs.bench_started(
         submission_id=submission_id,
@@ -878,6 +882,7 @@ def process_bench_job(
                 upload_evidence_fn=upload_evidence_fn,
                 injected_exit=injected_exit,
                 injected_report=injected_report,
+                phase_reporter=reporter,
             )
             results.append(result)
 
@@ -1069,6 +1074,8 @@ def process_bench_job(
             error=error_code,
         )
         return _fail_job(row, error_code)
+    finally:
+        reporter.stop()
 
 
 def _run_one_sku(
@@ -1087,6 +1094,7 @@ def _run_one_sku(
     upload_evidence_fn: Callable[..., tuple[str, str, int]] | None,
     injected_exit: int | None,
     injected_report: dict[str, Any] | None,
+    phase_reporter: PhaseSink | None = None,
 ) -> SkuRunResult:
     """Provision/bench/bind one SKU. Raises BenchInfraError on infra failure."""
     submission_id = str(row["id"])
@@ -1154,6 +1162,7 @@ def _run_one_sku(
                 spec,
                 request_path=request_path,
                 output_dir=output_dir,
+                on_phase=(phase_reporter.set if phase_reporter is not None else None),
             )
         except Exception as exc:
             logger.exception("gpu orchestrate failed sku=%s", gpu_sku)

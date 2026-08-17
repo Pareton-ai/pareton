@@ -111,6 +111,16 @@ CREATE TABLE IF NOT EXISTS submission_jobs (
     CHECK (status IN ('pending', 'running', 'done', 'failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
+  -- Live activity of the current attempt; cleared when the job ends.
+  -- Keep the CHECK list in sync with bench/phases.py.
+  phase TEXT
+    CHECK (phase IS NULL OR phase IN ('provisioning', 'bootstrapping',
+                                      'pulling_image', 'downloading_model',
+                                      'starting_engine', 'correctness',
+                                      'perf_screen', 'sla_bench', 'teardown')),
+  phase_started_at TIMESTAMPTZ,
+  heartbeat_at TIMESTAMPTZ,
+  progress JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (submission_id, kind)

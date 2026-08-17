@@ -441,6 +441,8 @@ class EngineContainer:
     runner: DockerRunner | None = None
     pull_timeout_s: float | None = None
     cmd_timeout_s: float | None = None
+    # Progress only; a raising hook must not fail a healthy engine.
+    on_ready: Callable[[], None] | None = None
 
     _container_id: str | None = field(default=None, init=False, repr=False)
     _container_name: str = field(default="", init=False, repr=False)
@@ -663,6 +665,11 @@ class EngineContainer:
             image_digest,
             base_url,
         )
+        if self.on_ready is not None:
+            try:
+                self.on_ready()
+            except Exception as exc:  # noqa: BLE001 - progress must not fail a run
+                logger.warning("on_ready hook failed: %s", exc)
         return self._handle
 
     def __exit__(self, *exc: Any) -> None:

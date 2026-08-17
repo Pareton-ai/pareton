@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
+from bench.phases import BenchPhase, coerce_phase, coerce_progress
 from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
     count_submission_campaigns,
@@ -111,6 +112,7 @@ class PresignRequest(BaseModel):
 # documented contract. The named `SubmissionState` component is still emitted,
 # and that is what the frontend union derives from (PAR-46).
 SubmissionStateName = SubmissionState | str
+BenchPhaseName = BenchPhase | str
 
 
 class SubmissionSummaryModel(BaseModel):
@@ -148,6 +150,10 @@ class SubmissionJobModel(BaseModel):
     kind: str
     status: str
     last_error: str | None = None
+    phase: BenchPhaseName | None = None
+    phase_started_at: str | None = None
+    heartbeat_at: str | None = None  # stale after ~60s means the worker is gone
+    progress: dict[str, Any] | None = None
 
 
 class SubmissionDetailModel(BaseModel):
@@ -221,6 +227,13 @@ def stats():
     return get_public_stats()
 
 
+def _iso_or_none(value: Any) -> str | None:
+    """Timestamp as ISO-8601, or None. Nullable columns arrive as None."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _submission_detail_payload(row: dict) -> dict:
     events = list_events(row["id"])
     reports = list_bench_reports(row["id"])
@@ -236,6 +249,10 @@ def _submission_detail_payload(row: dict) -> dict:
                 "kind": j["kind"],
                 "status": j["status"],
                 "last_error": j.get("last_error"),
+                "phase": coerce_phase(j.get("phase")),
+                "phase_started_at": _iso_or_none(j.get("phase_started_at")),
+                "heartbeat_at": _iso_or_none(j.get("heartbeat_at")),
+                "progress": coerce_progress(j.get("progress")),
             }
             for j in jobs
         ],

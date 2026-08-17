@@ -17,6 +17,12 @@ POLL_INTERVAL_S: int = int(os.environ.get("PARETON_POLL_INTERVAL_S", "30"))
 CHAIN_RETRY_ATTEMPTS: int = int(os.environ.get("PARETON_CHAIN_RETRY_ATTEMPTS", "3"))
 CHAIN_RETRY_DELAY_S: int = int(os.environ.get("PARETON_CHAIN_RETRY_DELAY_S", "30"))
 
+# Must stay well under the dashboard stale window (~60s) and PAR-48 reclaim.
+JOB_HEARTBEAT_INTERVAL_S: float = float(
+    os.environ.get("PARETON_JOB_HEARTBEAT_INTERVAL_S", "12")
+)
+BENCH_PHASE_POLL_S: float = float(os.environ.get("PARETON_BENCH_PHASE_POLL_S", "20"))
+
 # S3 (presigned patch uploads). AWS S3: leave PARETON_S3_ENDPOINT_URL empty.
 S3_ENDPOINT_URL: str = os.environ.get("PARETON_S3_ENDPOINT_URL", "")
 S3_ACCESS_KEY: str = os.environ.get("PARETON_S3_ACCESS_KEY", "")
