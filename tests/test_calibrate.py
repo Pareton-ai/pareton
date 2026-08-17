@@ -65,6 +65,7 @@ def _report(
     p99_ttft: float = 100.0,
     inner_rel: float = 0.02,
     digest: str = DIGEST,
+    num_prompts: int = 1,
 ) -> dict:
     return {
         "schema_version": 1,
@@ -84,7 +85,7 @@ def _report(
         },
         "correctness": {
             "verdict": "pass",
-            "num_prompts": 1,
+            "num_prompts": num_prompts,
             "num_positions_compared": 1,
             "mean_abs_logprob_diff": mean,
             "max_abs_logprob_diff": max_d,
@@ -318,6 +319,7 @@ def test_correctness_dict_from_summary_sets_calibration_blob():
             "trace_sha256": A3A_TRACE_SHA256,
         },
         "correctness": {
+            "num_prompts": 16,
             "mean_abs_logprob_diff": {"suggested": 0.05},
             "max_abs_logprob_diff": {"suggested": 0.1},
             "argmax_mismatch_rate": {"suggested": 0.01},
@@ -333,10 +335,59 @@ def test_correctness_dict_from_summary_sets_calibration_blob():
     }
     out = correctness_dict_from_summary(summary, campaign_fingerprint=fp)
     assert out["thresholds"]["mean_abs_logprob_diff"] == 0.05
+    assert out["num_prompts"] == 16
     planned = out["num_prompts"] * out["max_new_tokens"]
     assert out["min_positions_compared"] == min(APPLY_DEFAULT_MIN_POSITIONS, planned)
     assert out["calibration"]["thresholds"] == out["thresholds"]
     assert out["calibration"]["fingerprint"] == fp
+
+
+def test_analyze_reports_carries_measured_num_prompts(tmp_path: Path):
+    """apply needs the sample size the thresholds were measured on."""
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps(_report(num_prompts=16)), encoding="utf-8")
+    summary = analyze_reports([p], safety_factor=2.0)
+    assert summary["correctness"]["num_prompts"] == 16
+
+
+def test_analyze_reports_rejects_disagreeing_num_prompts(tmp_path: Path):
+    paths = []
+    for i, n in enumerate((16, 8)):
+        p = tmp_path / f"r{i}.json"
+        p.write_text(json.dumps(_report(num_prompts=n)), encoding="utf-8")
+        paths.append(p)
+    with pytest.raises(CalibrationError, match="num_prompts"):
+        analyze_reports(paths, safety_factor=2.0)
+
+
+def test_correctness_dict_from_summary_prefers_measured_over_pin():
+    """A stale campaign pin must not re-clamp scoring below what was measured."""
+    summary = {
+        "correctness": {
+            "num_prompts": 16,
+            "mean_abs_logprob_diff": {"suggested": 0.05},
+            "max_abs_logprob_diff": {"suggested": 0.1},
+            "argmax_mismatch_rate": {"suggested": 0.01},
+        },
+    }
+    out = correctness_dict_from_summary(
+        summary,
+        existing_correctness={"num_prompts": 8, "max_new_tokens": 32},
+        campaign_fingerprint={"model_repo": "x"},
+    )
+    assert out["num_prompts"] == 16
+
+
+def test_correctness_dict_from_summary_requires_a_sample_size():
+    summary = {
+        "correctness": {
+            "mean_abs_logprob_diff": {"suggested": 0.05},
+            "max_abs_logprob_diff": {"suggested": 0.1},
+            "argmax_mismatch_rate": {"suggested": 0.01},
+        },
+    }
+    with pytest.raises(CalibrationError, match="num_prompts missing"):
+        correctness_dict_from_summary(summary, campaign_fingerprint={"model_repo": "x"})
 
 
 def test_correctness_dict_from_summary_caps_min_positions_to_planned():

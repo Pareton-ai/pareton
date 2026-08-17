@@ -319,6 +319,20 @@ def test_build_request_valid_and_sla_from_manifest(tmp_path: Path):
     assert req["engines"]["candidate"]["env"] == {}
 
 
+def test_sample_sizes_default_to_the_full_trace(tmp_path: Path):
+    """No campaign pin scores every request in the trace, not a fixed 8 (PAR-65)."""
+    row = _row()
+    trace = materialize_trace(
+        url=row["workload_trace_url"],
+        expected_sha256=TRACE_SHA,
+        dest_dir=tmp_path,
+    )
+    trace_n = len(json.loads(trace.read_text(encoding="utf-8"))["requests"])
+    req = build_bench_request_dict(row, task_id=str(uuid4()), trace_path=str(trace))
+    assert req["correctness"]["num_prompts"] == trace_n
+    assert req["perf_screen"]["num_requests"] == trace_n
+
+
 def test_campaign_bench_overrides(tmp_path: Path):
     row = _row(
         bench=_bench_spec(

@@ -318,7 +318,21 @@ def correctness_dict_from_summary(
         thresholds[key] = float(block["suggested"])
 
     existing = dict(existing_correctness or {})
-    num_prompts = int(existing.get("num_prompts", config.BENCH_CORRECTNESS_NUM_PROMPTS))
+    # Write back the sample size the thresholds were measured on. Calibration
+    # prepare always runs the full trace, so this is the trace request count;
+    # falling back to a fixed default would re-clamp scoring below what was
+    # measured (PAR-65).
+    measured = corr.get("num_prompts")
+    if measured is not None:
+        num_prompts = _require_prompt_count(measured)
+    elif existing.get("num_prompts") is not None:
+        num_prompts = int(existing["num_prompts"])
+    else:
+        raise CalibrationError(
+            "summary correctness.num_prompts missing: re-run "
+            "'bench.calibrate analyze' on the run reports, or pin "
+            "campaigns.bench.correctness.num_prompts before apply"
+        )
     max_new_tokens = int(
         existing.get("max_new_tokens", config.BENCH_CORRECTNESS_MAX_NEW_TOKENS)
     )
@@ -373,6 +387,15 @@ def _require_finite(name: str, value: float) -> float:
     if not math.isfinite(f) or f < 0:
         raise CalibrationError(f"{name} must be finite and >= 0, got {value!r}")
     return f
+
+
+def _require_prompt_count(value: Any) -> int:
+    """Measured correctness.num_prompts; apply writes it back to the campaign."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CalibrationError(f"correctness.num_prompts must be an int, got {value!r}")
+    if value < 1:
+        raise CalibrationError(f"correctness.num_prompts must be >= 1, got {value}")
+    return value
 
 
 def _load_report(path: Path) -> dict[str, Any]:
@@ -527,6 +550,7 @@ def analyze_reports(
     means: list[float] = []
     maxes: list[float] = []
     argmaxes: list[float] = []
+    prompt_counts: list[int] = []
     inner_rel: list[float] = []
     cand_p99_ttft: list[float] = []
     has_sla = False
@@ -545,6 +569,7 @@ def analyze_reports(
         argmaxes.append(
             _require_finite("argmax_mismatch_rate", corr["argmax_mismatch_rate"])
         )
+        prompt_counts.append(_require_prompt_count(corr.get("num_prompts")))
         sla = r.get("sla_bench")
         if not isinstance(sla, dict):
             continue
@@ -562,6 +587,12 @@ def analyze_reports(
         if ttft is None:
             raise CalibrationError("sla_bench.candidate.ttft_ms.p99 missing")
         cand_p99_ttft.append(_require_finite("candidate.ttft_ms.p99", ttft))
+
+    if len(set(prompt_counts)) != 1:
+        raise CalibrationError(
+            "reports disagree on correctness.num_prompts: "
+            + ", ".join(str(n) for n in sorted(set(prompt_counts)))
+        )
 
     mean_s = suggest_threshold(
         max(means),
@@ -635,6 +666,7 @@ def analyze_reports(
             "trace_sha256": trace_sha,
         },
         "correctness": {
+            "num_prompts": prompt_counts[0],
             "mean_abs_logprob_diff": mean_s,
             "max_abs_logprob_diff": max_s,
             "argmax_mismatch_rate": arg_s,

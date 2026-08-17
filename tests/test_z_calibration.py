@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import config
 from bench.calibrate import CalibrationError, analyze_z_calibration
 from bench.promote import PROMOTION_METRICS
 
@@ -175,7 +176,8 @@ def test_analyze_z_accepts_varied_traces(tmp_path: Path):
     assert "p99_ttft_ms" not in summary["metrics"]
 
 
-def test_analyze_z_default_floor_is_twenty(tmp_path: Path):
+def test_analyze_z_default_floor_is_config_min_samples(tmp_path: Path):
+    """No --min-samples falls back to PARETON_CALIB_MIN_SAMPLES."""
     paths = [
         _report(
             tmp_path / f"{i}.json",
@@ -187,9 +189,11 @@ def test_analyze_z_default_floor_is_twenty(tmp_path: Path):
             itl=10.0 + i,
             throughput=1.0 + 0.01 * i,
         )
-        for i in range(3)
+        for i in range(config.CALIB_MIN_SAMPLES - 1)
     ]
-    with pytest.raises(CalibrationError, match="need at least 20"):
+    with pytest.raises(
+        CalibrationError, match=f"need at least {config.CALIB_MIN_SAMPLES}"
+    ):
         analyze_z_calibration(paths)
 
 

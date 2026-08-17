@@ -147,9 +147,9 @@ TRACE_MAX_BYTES: int = int(
 )
 BENCH_TIMEOUT_S: float = float(os.environ.get("PARETON_BENCH_TIMEOUT_S", "10800"))
 ALLOW_MOCK_BENCH: bool = os.environ.get("PARETON_ALLOW_MOCK_BENCH", "") == "1"
-BENCH_CORRECTNESS_NUM_PROMPTS: int = int(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_NUM_PROMPTS", "8")
-)
+# Correctness prompts and perf_screen requests have no env default on purpose:
+# campaigns pin bench.correctness.num_prompts / bench.perf_screen.num_requests,
+# and absent a pin the worker scores every request in the trace (PAR-65).
 BENCH_CORRECTNESS_MAX_NEW_TOKENS: int = int(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_NEW_TOKENS", "32")
 )
@@ -162,9 +162,6 @@ BENCH_CORRECTNESS_MAX_ABS_LOGPROB_DIFF: float = float(
 )
 BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE", "0.001")
-)
-BENCH_PERF_NUM_REQUESTS: int = int(
-    os.environ.get("PARETON_BENCH_PERF_NUM_REQUESTS", "8")
 )
 BENCH_PERF_CONCURRENCY: int = int(os.environ.get("PARETON_BENCH_PERF_CONCURRENCY", "2"))
 # Screen-only smoke gate: single unrepeated measurement, so identical engines
@@ -182,7 +179,7 @@ BENCH_SLA_WARMUP_REQUESTS: int = int(
 # Dynamic workload sampling + z-score promotion calibration.
 CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))
 # Minimum distinct baseline-vs-baseline samples for campaigns.calibration.
-CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "20"))
+CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "3"))
 # Soft guidance for how many pods / concurrent prepare dirs operators run.
 CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
 CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))
