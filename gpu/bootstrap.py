@@ -222,6 +222,14 @@ def pull_engine_images(
         'if [ -n "${PARETON_GHCR_TOKEN:-}" ]; then '
         f'echo "$PARETON_GHCR_TOKEN" | {docker} login ghcr.io '
         '-u "${PARETON_GHCR_USER:-${PARETON_GHCR_USERNAME:-}}" --password-stdin; '
+        # On a non-root pod the login runs under sudo, so docker writes
+        # $HOME/.docker/config.json owned by root. bench/lifecycle.py then runs
+        # bare docker as the pod user, cannot read those credentials, and falls
+        # back to an anonymous pull that GHCR refuses. Hand the file back, the
+        # same way bootstrap_script does for the repo and cache dirs.
+        'if [ "$(id -u)" -ne 0 ]; then '
+        'sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker" 2>/dev/null || true; '
+        "fi; "
         "fi && "
         f"{pulls}"
     )

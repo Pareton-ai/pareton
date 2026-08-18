@@ -1523,3 +1523,58 @@ def test_parse_pubkeys_rejects_malformed():
     ):
         with pytest.raises(ValueError):
             _parse_pubkeys(bad)
+
+
+def _pull_command(user: str) -> str:
+    """Remote script pull_engine_images would run on a pod with this ssh user."""
+    from gpu.bootstrap import pull_engine_images
+
+    captured: list[Any] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        captured.append(cmd)
+        return SshResult(0, "", "")
+
+    pod = Pod(
+        provider="shadeform",
+        pod_id="i-1",
+        name="n",
+        ssh=SshTarget(host="1.2.3.4", port=22, user=user),
+        key_path=None,
+        hourly_price_cents=0,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=0.0,
+        raw={},
+    )
+    pull_engine_images(
+        pod, ["ghcr.io/x/y@sha256:abc"], env_file="/tmp/e.env", runner=runner
+    )
+    cmd = captured[-1]
+    return cmd[-1] if isinstance(cmd, list) else str(cmd)
+
+
+def test_pull_hands_docker_credentials_back_to_the_pod_user():
+    """Non-root pods log in under sudo, so the config lands owned by root.
+
+    bench/lifecycle.py runs bare docker as the pod user and must be able to read
+    it, otherwise the pull falls back to anonymous and GHCR refuses the private
+    image. The chown has to sit between the login and the pulls.
+    """
+    remote = _pull_command("shadeform")
+    assert "sudo -E docker login" in remote
+    assert 'chown -R "$(id -u):$(id -g)" "$HOME/.docker"' in remote
+    assert (
+        remote.index("login ghcr.io")
+        < remote.index("chown -R")
+        < remote.index("docker pull")
+    )
+
+
+def test_pull_credential_chown_is_a_noop_for_root_pods():
+    """Root pods (lium, targon) already own the file; the guard must skip them."""
+    remote = _pull_command("root")
+    assert "sudo -E docker" not in remote
+    # Guarded at runtime by id -u, and || true so a missing sudo cannot break
+    # a root image that never needed the fixup.
+    assert 'if [ "$(id -u)" -ne 0 ]; then' in remote
+    assert "|| true" in remote
