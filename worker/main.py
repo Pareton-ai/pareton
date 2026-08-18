@@ -17,7 +17,7 @@ import sys
 import threading
 
 import config
-from campaign.store import claim_next_job
+from campaign.store import claim_next_job, count_pending_jobs
 from observability.events import heartbeat as _heartbeat
 from worker.bench_job import process_bench_job
 from worker.pipeline import process_submission
@@ -29,11 +29,25 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_S = 300.0
 
 
+def _queue_depth() -> int | None:
+    """Pending job count, or None if the read fails.
+
+    A database hiccup must not stop the beat: losing one field is cheap,
+    whereas a dead heartbeat thread pages heartbeat-absent as though the
+    whole worker had died.
+    """
+    try:
+        return count_pending_jobs()
+    except Exception:
+        logger.warning("queue depth unavailable; heartbeat omits it", exc_info=True)
+        return None
+
+
 def _heartbeat_loop(
     stop: threading.Event, interval_s: float = HEARTBEAT_INTERVAL_S
 ) -> None:
     while not stop.is_set():
-        _heartbeat()
+        _heartbeat(queue_depth=_queue_depth())
         stop.wait(interval_s)
 
 

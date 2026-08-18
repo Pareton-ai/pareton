@@ -56,6 +56,26 @@ def heartbeat(*, queue_depth: int | None = None) -> dict[str, Any]:
 # -- Chain / ingestion -------------------------------------------------------
 
 
+def chain_scanned(
+    *,
+    block: int,
+    commitments_seen: int,
+    ingested: int,
+) -> dict[str, Any]:
+    """One completed chain read.
+
+    Emitted on every successful scan, including scans that ingest nothing:
+    a quiet chain and a stalled scanner are indistinguishable from
+    ``submission_ingested`` alone, so absence of this event is the signal.
+    """
+    return _emit(
+        "chain_scanned",
+        block=block,
+        commitments_seen=commitments_seen,
+        ingested=ingested,
+    )
+
+
 def submission_ingested(
     *,
     submission_id: str,

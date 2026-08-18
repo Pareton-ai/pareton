@@ -28,8 +28,10 @@ def scan_cycle(subtensor, drain: threading.Event):
     """One watch cycle. Returns the live subtensor, or None to reconnect.
 
     Always safe to call while a worker job is running: this process never
-    claims jobs. A failed scan drops the client so the next cycle reconnects
-    instead of retrying a dead websocket forever.
+    claims jobs. Successful scans emit ``chain_scanned`` here, so a long
+    build on ``pareton-worker`` does not look like a stalled scanner. A
+    failed scan drops the client so the next cycle reconnects instead of
+    retrying a dead websocket forever.
     """
     if drain.is_set():
         return subtensor
