@@ -826,6 +826,45 @@ def list_latest_states(
     return out
 
 
+def list_live_bench_phases(
+    submission_ids: list[UUID | str],
+    *,
+    stale_after_s: int = 120,
+) -> dict[str, str | None]:
+    """Map submission_id -> phase of a bench job that is running *right now*.
+
+    The event trail has nothing between ``sampled`` and a result, and an infra
+    failure appends no event at all, so the latest state cannot distinguish a
+    bench in progress from one that died hours ago. This is read live and never
+    stored: when the worker stops writing heartbeats the entry disappears and
+    callers fall back to the event state, so a killed worker cannot strand the
+    UI on a phantom "benching".
+    """
+    if not submission_ids:
+        return {}
+    ids = [str(s) for s in submission_ids]
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT submission_id, phase
+                FROM submission_jobs
+                WHERE submission_id = ANY(%s::uuid[])
+                  AND kind = 'bench'
+                  AND status = 'running'
+                  AND heartbeat_at > now() - make_interval(secs => %s)
+                """,
+                (ids, stale_after_s),
+            )
+            rows = cur.fetchall()
+    out: dict[str, str | None] = {sid: None for sid in ids}
+    for r in rows:
+        out[str(r["submission_id"])] = (
+            str(r["phase"]) if r["phase"] is not None else None
+        )
+    return out
+
+
 def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

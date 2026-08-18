@@ -25,6 +25,7 @@ from campaign.store import (
     list_campaigns,
     list_events,
     list_latest_states,
+    list_live_bench_phases,
     list_submission_jobs,
     list_submissions,
 )
@@ -129,6 +130,9 @@ class SubmissionSummaryModel(BaseModel):
     engine_image_ref: str | None = None
     latest_state: SubmissionStateName | None = None
     bench_verdict: str | None = None
+    # Live phase of a bench running right now; None otherwise. Read from the
+    # job row, not the event trail, so it clears on its own when work stops.
+    bench_phase: BenchPhaseName | None = None
 
 
 class SubmissionsPageModel(BaseModel):
@@ -203,6 +207,7 @@ def campaign_submissions(
     ids = [r["id"] for r in rows]
     summaries = list_bench_summaries(campaign_id, submission_ids=ids)
     states = list_latest_states(ids)
+    phases = list_live_bench_phases(ids)
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -216,6 +221,7 @@ def campaign_submissions(
                 },
                 "latest_state": states.get(str(r["id"])),
                 "bench_verdict": summaries.get(str(r["id"])),
+                "bench_phase": phases.get(str(r["id"])),
             }
             for r in rows
         ],
