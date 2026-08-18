@@ -27,7 +27,7 @@ debugging, and alerts. Nothing is installed on GPU pods.
 | journald               | VPS, automatic                                                                           | Systemd log store. `journalctl -u pareton-worker` reads it.                                                                                  |
 | Vector                 | VPS, systemd unit `vector`                                                               | Ships journald lines to Axiom. Config: `/etc/vector/vector.toml` (copy in repo: `ops/vector/vector.toml`). Buffers to disk if Axiom is down. |
 | Dataset `pareton-prod` | Axiom console                                                                            | Where logs land. Keeps 30 days.                                                                                                              |
-| Ingest token           | `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN`, and hardcoded in `/etc/vector/vector.toml` | Password that lets Vector write to the dataset.                                                                                              |
+| Ingest token           | `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN`                                             | Password that lets Vector write to the dataset. `vector.toml` refers to it as `${PARETON_AXIOM_TOKEN}`; Vector reads the real value from the environment. |
 | Monitors               | Axiom console                                                                            | Alert rules. See "When an alert email arrives".                                                                                              |
 | Axiom MCP              | Cursor settings                                                                          | Lets an agent query logs without SSH. Server `https://mcp.axiom.co/mcp`, browser OAuth sign-in.                                              |
 
@@ -76,22 +76,31 @@ approval.
 3. Run `vector validate /etc/vector/vector.toml`. Do not skip this.
 4. Run `systemctl restart vector`.
 
-The token line is the exception: keep the real token value in
-`/etc/vector/vector.toml` on the VPS and keep `${PARETON_AXIOM_TOKEN}` in the
-repo copy. The repo must not contain the token.
+The repo copy and the live file are identical, token line included: both
+carry `${PARETON_AXIOM_TOKEN}`, never the real value. The repo must not
+contain the token, and neither must `/etc/vector/vector.toml`.
 
 ## Rotate the Axiom token
 
 1. Axiom console: Settings, API tokens, create a new ingest token for
    `pareton-prod`.
-2. On the VPS: put it in `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN=xaat-...`
-   and on the `token = "xaat-..."` line in `/etc/vector/vector.toml`.
+2. On the VPS: put it in `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN=xaat-...`.
+   That is the only place the real value lives; do not edit
+   `/etc/vector/vector.toml`.
 3. Run `vector validate /etc/vector/vector.toml`, then `systemctl restart vector`.
 4. Revoke the old token in the Axiom console.
 
-Why the token is hardcoded: Vector did not expand `${PARETON_AXIOM_TOKEN}`
-under systemd and got 401 Unauthorized from Axiom even with the variable set.
-Hardcoding plus `chmod 600 /etc/vector/vector.toml` is the working setup.
+How the token reaches Vector: `ops/vector/vector.service` sets
+`EnvironmentFile=-/opt/pareton/.env`, so `PARETON_AXIOM_TOKEN` is in Vector's
+process environment and Vector interpolates `${PARETON_AXIOM_TOKEN}` in the
+config itself. Verified working on 2026-08-18: the live
+`/etc/vector/vector.toml` holds the placeholder and Axiom is receiving events.
+
+An earlier version of this page said the token had to be hardcoded because
+interpolation failed under systemd. That is no longer true and copying the
+real value into `/etc/vector/vector.toml` is now a way to leak it. If Vector
+returns 401, check that `PARETON_AXIOM_TOKEN` is set in `/opt/pareton/.env`
+and that `vector.service` still has the `EnvironmentFile` line.
 
 ## When an alert email arrives
 
@@ -131,8 +140,9 @@ Kept for reference if you rebuild the VPS.
 2. VPS: install Vector from https://vector.dev/docs/setup/installation/
 3. Copy `ops/vector/vector.toml` to `/etc/vector/vector.toml` and
    `ops/vector/vector.service` to `/etc/systemd/system/vector.service`.
-4. Put the token in `/etc/vector/vector.toml` (see "Task: rotate the Axiom
-   token") and run `chmod 600 /etc/vector/vector.toml`.
+4. Put the token in `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN=xaat-...`
+   (see "Rotate the Axiom token"). Leave `${PARETON_AXIOM_TOKEN}` in
+   `/etc/vector/vector.toml` as shipped.
 5. Run `sudo mkdir -p /var/lib/vector` (disk buffer).
 6. Run `vector validate /etc/vector/vector.toml`, then
    `sudo systemctl daemon-reload && sudo systemctl enable --now vector`.
