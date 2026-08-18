@@ -7,6 +7,7 @@ Usage:
     --base-image ghcr.io/pareton-ai/pareton-baseline@sha256:... \\
     --image-ref ghcr.io/pareton-ai/pareton-engine:baseline \\
     --empty-patch \\
+    --torch-cuda-arch-list 9.0 \\
     --push
 
 Add --engine sglang to build against an SGLang baseline image; the default is
@@ -54,6 +55,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Engine profile (default: vllm). Must match the campaign's engine.",
     )
+    p.add_argument(
+        "--torch-cuda-arch-list",
+        default=None,
+        help=(
+            "Bake TORCH_CUDA_ARCH_LIST into the image (A2b). "
+            "Omit on miner builds: they inherit the pinned base image value."
+        ),
+    )
     args = p.parse_args(argv)
 
     if args.empty_patch and args.patch_file is not None:
@@ -76,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_empty_patch=bool(args.empty_patch),
         image_ref_override=args.image_ref,
         engine=None if args.engine is None else preset(args.engine),
+        torch_cuda_arch_list=args.torch_cuda_arch_list,
     )
     if not result.ok:
         print(f"FAIL {result.reason}: {result.evidence}", file=sys.stderr)

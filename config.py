@@ -53,8 +53,6 @@ BASE_IMAGE: str = os.environ.get(
 BUILD_TIMEOUT_S: int = int(os.environ.get("PARETON_BUILD_TIMEOUT_S", "7200"))
 # Compile parallelism (OOM-safe default). Scale ≤ vCPUs and ≤ RAM/3GB on bigger hosts.
 BUILD_MAX_JOBS: int = int(os.environ.get("PARETON_BUILD_MAX_JOBS", "1"))
-# Optional CUDA arch list (e.g. "9.0"). Empty → omit; vLLM/torch defaults apply.
-TORCH_CUDA_ARCH_LIST: str = os.environ.get("PARETON_TORCH_CUDA_ARCH_LIST", "").strip()
 WORK_DIR: Path = Path(
     os.environ.get("PARETON_WORK_DIR", str(REPO_ROOT / ".pareton-work"))
 ).resolve()
