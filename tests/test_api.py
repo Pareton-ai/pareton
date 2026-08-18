@@ -89,6 +89,7 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
         "list_latest_states",
         lambda ids: {str(ids[0]): "benched"},
     )
+    monkeypatch.setattr(server, "list_live_bench_phases", lambda _ids: {})
 
     resp = client.get("/v1/campaigns/c1/submissions")
     assert resp.status_code == 200
@@ -314,11 +315,17 @@ def test_submissions_payload_matches_the_documented_model(
         server, "list_bench_summaries", lambda _cid, submission_ids=None: {}
     )
     monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: "sampled"})
+    monkeypatch.setattr(
+        server, "list_live_bench_phases", lambda _ids: {sid: "downloading_model"}
+    )
 
     resp = client.get("/v1/campaigns/c1/submissions")
     assert resp.status_code == 200
     page = server.SubmissionsPageModel.model_validate(resp.json())
     assert page.submissions[0].latest_state == "sampled"
+    # A bench in progress and one that died hours ago share latest_state, so the
+    # live phase is the only thing on the row that separates them.
+    assert page.submissions[0].bench_phase == "downloading_model"
     # The documented contract must not have moved the timestamp format.
     assert resp.json()["submissions"][0]["committed_at"].endswith("+00:00")
 
