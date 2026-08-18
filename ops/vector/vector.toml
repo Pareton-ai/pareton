@@ -7,7 +7,7 @@
 
 [sources.journald]
 type = "journald"
-include_units = ["pareton-worker", "pareton-api", "pareton-gpu-reap"]
+include_units = ["pareton-worker", "pareton-watcher", "pareton-api", "pareton-gpu-reap"]
 
 [transforms.drop_noise]
 type = "filter"

@@ -138,11 +138,3 @@ CREATE TABLE IF NOT EXISTS bench_reports (
 
 CREATE INDEX IF NOT EXISTS bench_reports_submission_id_idx
   ON bench_reports (submission_id);
-
-CREATE TABLE IF NOT EXISTS watcher_meta (
-  id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-  last_scan_block INTEGER NOT NULL DEFAULT 0,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-INSERT INTO watcher_meta (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

@@ -9,7 +9,8 @@ re-install it on the box, so the two never drift.
 | Path | Installed to | Notes |
 |---|---|---|
 | `systemd/pareton-api.service` | `/etc/systemd/system/` | uvicorn on `0.0.0.0:8000` |
-| `systemd/pareton-worker.service` | `/etc/systemd/system/` | Gate + bench worker, `--scan-chain` |
+| `systemd/pareton-worker.service` | `/etc/systemd/system/` | Gate + bench worker |
+| `systemd/pareton-watcher.service` | `/etc/systemd/system/` | Chain ingest, `python -m worker.watcher` |
 | `systemd/pareton-deploy.service` | `/etc/systemd/system/` | Oneshot, invoked by the timer |
 | `systemd/pareton-deploy.timer` | `/etc/systemd/system/` | **Fires every 60s** |
 | `deploy.sh` | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself |
@@ -26,9 +27,9 @@ That is also why it needs re-installing by hand after a change here.
 ## A merge to `main` is a production deploy
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
-separate promote step. Any merge restarts `pareton-api` within a minute, and
-restarts `pareton-worker` on the next tick where no `submission_jobs` row is
-`running`.
+separate promote step. Any merge restarts `pareton-api` and `pareton-watcher`
+within a minute, and restarts `pareton-worker` on the next tick where no
+`submission_jobs` row is `running`.
 
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.
