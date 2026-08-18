@@ -43,37 +43,12 @@ def test_busy_cycles_run_until_drained():
     _run_loop(cycle, drain, poll_interval_s=60.0)
     assert len(calls) == 3
 
+    _run_loop(cycle, drain, poll_interval_s=60.0)
 
-def test_drained_cycle_claims_no_new_job(monkeypatch):
-    """A SIGTERM during the chain scan must stop the worker before claim."""
+
+def test_scan_chain_flag_is_accepted_noop(monkeypatch):
+    """Old systemd units still pass --scan-chain; it must not crash argparse."""
     import worker.main as wm
 
-    drain = threading.Event()
-
-    def fake_scan(_subtensor):
-        drain.set()  # signal arrives mid-scan
-        return [], []
-
-    monkeypatch.setattr(wm, "scan_chain_once", fake_scan)
-    monkeypatch.setattr(
-        wm,
-        "claim_next_job",
-        lambda **_: (_ for _ in ()).throw(AssertionError("claimed after drain")),
-    )
-
-    def cycle():
-        # Mirrors worker.main._cycle: bail before scanning/claiming once
-        # drain is set, so a signal mid-scan never claims a fresh job.
-        if drain.is_set():
-            return False
-        wm.scan_chain_once(object())
-        if drain.is_set():
-            return False
-        return wm.run_once(
-            mock_build=True,
-            mock_bench=False,
-            mock_tampered_candidate=False,
-            registered_hotkeys=None,
-        )
-
-    _run_loop(cycle, drain, poll_interval_s=60.0)
+    monkeypatch.setattr(wm, "run_once", lambda **_: False)
+    assert wm.main(["--scan-chain", "--once"]) == 0

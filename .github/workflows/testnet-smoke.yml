@@ -63,7 +63,7 @@ jobs:
             --hotkey "$CI_TESTNET_HOTKEY" \
             --http-root "$RUNNER_TEMP/pareton-http"
 
-      - name: Start API, patch server, and watcher
+      - name: Start API, patch server, watcher, and worker
         run: |
           mkdir -p "$RUNNER_TEMP/pareton-logs"
 
@@ -76,7 +76,11 @@ jobs:
           python -m api >"$RUNNER_TEMP/pareton-logs/api.log" 2>&1 &
           echo $! >> "$RUNNER_TEMP/pareton-pids"
 
-          python -m worker.main --scan-chain --mock-build \
+          python -m worker.watcher \
+            >"$RUNNER_TEMP/pareton-logs/watcher.log" 2>&1 &
+          echo $! >> "$RUNNER_TEMP/pareton-pids"
+
+          python -m worker.main --mock-build \
             >"$RUNNER_TEMP/pareton-logs/worker.log" 2>&1 &
           echo $! >> "$RUNNER_TEMP/pareton-pids"
 
@@ -118,6 +122,8 @@ jobs:
         run: |
           echo "===== API log (last 200 lines) ====="
           tail -n 200 "$RUNNER_TEMP/pareton-logs/api.log" 2>/dev/null || true
+          echo "===== Watcher log (last 200 lines) ====="
+          tail -n 200 "$RUNNER_TEMP/pareton-logs/watcher.log" 2>/dev/null || true
           echo "===== Worker log (last 200 lines) ====="
           tail -n 200 "$RUNNER_TEMP/pareton-logs/worker.log" 2>/dev/null || true
           echo "===== Patch server log (last 200 lines) ====="

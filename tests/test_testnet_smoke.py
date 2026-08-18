@@ -188,7 +188,9 @@ def test_workflow_contract_uses_testnet_and_mock_build():
     assert "--retrieval-url" in workflow
     assert "--network test" in workflow
     assert "--netuid 543" in workflow
-    assert "--scan-chain --mock-build" in workflow
+    assert "python -m worker.watcher" in workflow
+    assert "python -m worker.main --mock-build" in workflow
+    assert "--scan-chain" not in workflow
     assert "PARETON_GHCR_TOKEN" not in workflow
     assert "PARETON_S3_ACCESS_KEY" not in workflow
     assert "pull_request:" not in workflow

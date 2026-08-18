@@ -1,10 +1,11 @@
-"""Single-process Stage 0 worker: optional chain scan + gate + bench pipeline.
+"""Stage 0 worker: claim jobs and run the gate + bench pipeline.
+
+Chain ingest is a separate process: ``python -m worker.watcher``.
 
 Usage:
     PARETON_DATABASE_URL=... python -m worker.main --mock-build
     PARETON_ALLOW_MOCK_BENCH=1 PARETON_DATABASE_URL=... python -m worker.main --mock-bench
     PARETON_DATABASE_URL=... python -m worker.main --once
-    PARETON_DATABASE_URL=... python -m worker.main --scan-chain
 """
 
 from __future__ import annotations
@@ -36,24 +37,6 @@ def _heartbeat_loop(
         stop.wait(interval_s)
 
 
-def _connect_subtensor():
-    import bittensor as bt
-
-    return bt.Subtensor(network=config.SUBTENSOR_NETWORK)
-
-
-def scan_chain_once(subtensor) -> tuple[list[str], list[str]]:
-    """One chain scan: enqueue new submissions, return (submission_ids, registered_hotkeys)."""
-    from chain.watcher import scan_chain
-
-    created, hotkeys = scan_chain(
-        subtensor, config.NETUID, network=config.SUBTENSOR_NETWORK
-    )
-    if created:
-        logger.info("chain scan enqueued %d new submission(s)", len(created))
-    return created, hotkeys
-
-
 def _configure_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
@@ -70,6 +53,10 @@ def run_once(
 ) -> bool:
     row = claim_next_job(kind="gates")
     if row is not None:
+        # Ingest already filtered to metagraph members (chain.watcher).
+        # A row in submissions is the registration proof; re-reading the
+        # metagraph hours later would reject a paid submit that later
+        # deregistered. --registered-hotkey remains for local/tests.
         keys = registered_hotkeys if registered_hotkeys is not None else [row["hotkey"]]
         logger.info(
             "processing gates job submission %s patch=%s", row["id"], row["patch_hash"]
@@ -136,8 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--scan-chain",
         action="store_true",
-        help="Poll SN10 revealed commitments each cycle and enqueue new submissions. "
-        "Registered hotkeys come from the live metagraph.",
+        help="Deprecated no-op. Chain ingest is python -m worker.watcher.",
     )
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
@@ -151,31 +137,24 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    subtensor = None
-    registered_hotkeys = args.registered_hotkey
     if args.scan_chain:
-        logger.info(
-            "connecting to subtensor network=%s netuid=%d",
-            config.SUBTENSOR_NETWORK,
-            config.NETUID,
-        )
-        subtensor = _connect_subtensor()
+        logger.warning("--scan-chain is ignored; run python -m worker.watcher")
+
+    registered_hotkeys = args.registered_hotkey
 
     threading.Thread(
         target=_heartbeat_loop, args=(threading.Event(),), daemon=True
     ).start()
 
+    # A killed worker strands its claimed job in 'running' forever (only
+    # 'pending' jobs are re-claimed) and orphans any rented GPU pod, so on
+    # SIGTERM/SIGINT finish the in-flight job before exiting. systemd allows
+    # this up to TimeoutStopSec, then SIGKILLs. The drain flag is defined
+    # before _cycle so a signal arriving mid-job stops the worker before it
+    # claims a fresh one.
+    drain = threading.Event()
+
     def _cycle() -> bool:
-        nonlocal registered_hotkeys
-        if drain.is_set():
-            return False
-        if subtensor is not None:
-            try:
-                _created, hotkeys = scan_chain_once(subtensor)
-                if hotkeys:
-                    registered_hotkeys = hotkeys
-            except Exception:
-                logger.exception("chain scan failed; will retry next cycle")
         if drain.is_set():
             return False
         return run_once(
@@ -184,14 +163,6 @@ def main(argv: list[str] | None = None) -> int:
             mock_tampered_candidate=args.mock_tampered_candidate,
             registered_hotkeys=registered_hotkeys,
         )
-
-    # A killed worker strands its claimed job in 'running' forever (only
-    # 'pending' jobs are re-claimed) and orphans any rented GPU pod, so on
-    # SIGTERM/SIGINT finish the in-flight job before exiting. systemd allows
-    # this up to TimeoutStopSec, then SIGKILLs. The drain flag is defined
-    # before _cycle so a signal arriving during the chain scan stops the
-    # worker before it claims a fresh job.
-    drain = threading.Event()
 
     def _request_drain(signum, _frame):
         logger.info("signal %d received; finishing current job before exit", signum)
