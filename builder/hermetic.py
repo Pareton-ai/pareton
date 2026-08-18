@@ -347,7 +347,7 @@ def build_engine_image(
     ``engine`` is the campaign's engine profile; ``None`` means vLLM. An invalid
     profile is rejected as ``build_config_invalid`` alongside a bad max_jobs.
 
-    ``torch_cuda_arch_list`` is ops-only (A2b). Miner builds leave it unset and
+    ``torch_cuda_arch_list`` is ops-only. Miner builds leave it unset and
     inherit ``TORCH_CUDA_ARCH_LIST`` from the pinned base image. vLLM rejects
     when that image declares none; SGLang may omit it.
     """

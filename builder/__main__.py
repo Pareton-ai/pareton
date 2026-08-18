@@ -59,8 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         "--torch-cuda-arch-list",
         default=None,
         help=(
-            "Bake TORCH_CUDA_ARCH_LIST into the image (A2b). "
-            "Omit on miner builds: they inherit the pinned base image value."
+            "Set TORCH_CUDA_ARCH_LIST on the image. "
+            "Omit to inherit the value from the base image."
         ),
     )
     args = p.parse_args(argv)
