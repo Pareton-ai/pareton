@@ -98,11 +98,13 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
 
     import bittensor as bt
 
+    import config
     import miner.commit_patch as cp
 
     patch = tmp_path / "p.diff"
     patch.write_bytes(b"diff --git a/x b/x\n")
 
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0.0)
     monkeypatch.setattr(
         cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
     )
@@ -114,7 +116,10 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bt,
         "Wallet",
-        lambda **_k: SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk")),
+        lambda **_k: SimpleNamespace(
+            hotkey=SimpleNamespace(ss58_address="hk"),
+            coldkey=object(),
+        ),
     )
     monkeypatch.setattr(
         bt,
@@ -161,7 +166,10 @@ def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bt,
         "Wallet",
-        lambda **_k: SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk")),
+        lambda **_k: SimpleNamespace(
+            hotkey=SimpleNamespace(ss58_address="hk"),
+            coldkey=object(),
+        ),
     )
     # Force a payload that exceeds MaxFields=3 after encode.
     monkeypatch.setattr(
@@ -211,7 +219,10 @@ def _fee_cli_stubs(monkeypatch, tmp_path, *, execute, submit=None):
     monkeypatch.setattr(
         bt,
         "Wallet",
-        lambda **_k: SimpleNamespace(hotkey=SimpleNamespace(ss58_address="hk")),
+        lambda **_k: SimpleNamespace(
+            hotkey=SimpleNamespace(ss58_address="hk"),
+            coldkey=object(),
+        ),
     )
     monkeypatch.setattr(cp, "_await_visible", lambda *_a, **_k: "visible")
     monkeypatch.setattr(bt.calls.Commitments, "set_commitment", lambda **_k: object())
@@ -249,7 +260,9 @@ def _fee_cli_argv(patch) -> list[str]:
     ]
 
 
-def test_fee_is_paid_before_commit_and_referenced_in_payload(monkeypatch, tmp_path):
+def test_fee_is_paid_before_commit_and_referenced_in_payload(
+    monkeypatch, tmp_path, capsys
+):
     """Transfer lands first; the commitment then carries its (block, index)."""
     from types import SimpleNamespace
 
@@ -273,6 +286,10 @@ def test_fee_is_paid_before_commit_and_referenced_in_payload(monkeypatch, tmp_pa
     assert paid[0].dest_ss58 == "5Recipient"
     # Last encode is the committed one; the earlier call is the size pre-flight.
     assert committed[-1].endswith("|900|2")
+    out = capsys.readouterr().out
+    assert "Password accepted. Submitting the transfer now" in out
+    assert "💸 Paid 0.05 TAO" in out
+    assert "✅ Committed" in out
 
 
 def test_commit_aborts_when_the_fee_transfer_fails(monkeypatch, tmp_path):

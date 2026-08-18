@@ -12,7 +12,7 @@
 #     ghcr.io/pareton-ai/pareton-baseline:v0)"
 #   # Real-box defaults (arch pin does most of the speedup; keep jobs modest):
 #   export PARETON_BUILD_MAX_JOBS=2          # ≤ vCPUs and ≤ RAM/3GB on bigger hosts
-#   export PARETON_TORCH_CUDA_ARCH_LIST=9.0  # match bench SKU
+#   export TORCH_CUDA_ARCH_LIST=9.0          # Hopper; use 12.0 for RTX PRO 6000
 #   # optional if repo is private:
 #   export PARETON_GIT_URL='https://x-access-token:${PARETON_GHCR_TOKEN}@github.com/Pareton-ai/pareton.git'
 #   curl -fsSL https://raw.githubusercontent.com/Pareton-ai/pareton/main/ops/a2b-build.sh -o a2b-build.sh
@@ -35,7 +35,6 @@ VLLM_COMMIT="${VLLM_COMMIT:-ee0da84ab9e04ac7610e28580af62c365e898389}"
 # 32GB + modest jobs often needs several hours; default CLI timeout is 7200s.
 export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-28800}"
 export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-2}"
-export PARETON_TORCH_CUDA_ARCH_LIST="${PARETON_TORCH_CUDA_ARCH_LIST:-9.0}"
 
 need_env() {
   local name="$1"
@@ -48,6 +47,7 @@ need_env() {
 need_env PARETON_GHCR_USERNAME
 need_env PARETON_GHCR_TOKEN
 need_env BASE
+need_env TORCH_CUDA_ARCH_LIST
 
 if [[ "$BASE" != *@sha256:* ]]; then
   echo "error: BASE must be a RepoDigest (...@sha256:...), got: $BASE" >&2
@@ -102,7 +102,7 @@ with_docker_group docker run --rm --entrypoint python "$BASE" -c \
 
 echo "==> A2b build (timeout=${PARETON_BUILD_TIMEOUT_S}s" \
   "max_jobs=${PARETON_BUILD_MAX_JOBS}" \
-  "cuda_arch=${PARETON_TORCH_CUDA_ARCH_LIST}). Walk away."
+  "cuda_arch=${TORCH_CUDA_ARCH_LIST}). Walk away."
 echo "    progress: ls -lt /tmp/pareton-build-*/build.log | head -1"
 with_docker_group python -m builder \
   --baseline-repo "$VLLM_REPO" \
@@ -110,6 +110,7 @@ with_docker_group python -m builder \
   --base-image "$BASE" \
   --image-ref "$ENGINE_REF" \
   --empty-patch \
+  --torch-cuda-arch-list "$TORCH_CUDA_ARCH_LIST" \
   --push
 
 echo "==> engine smoke (CPU; does not replace Hopper B7-lite)"

@@ -4,7 +4,9 @@
 # Behavior:
 #   - git pull --ff-only when origin/main has new commits.
 #   - pip install only when requirements.txt changed in the pull.
-#   - pareton-api restarts on every new commit (stateless, always safe).
+#   - pareton-api and pareton-watcher restart on every new commit
+#     (stateless, always safe). Watcher restart is skipped if the unit
+#     is not installed yet so a first-ship tick cannot abort the deploy.
 #   - pareton-worker restarts only when no submission_jobs are 'running'.
 #     A running job killed mid-bench is never requeued (claim_next_job only
 #     claims 'pending'), and its GPU pod burns money until the TTL reaper.
@@ -66,8 +68,13 @@ if [ "$DEPLOYED" != "$REMOTE" ]; then
         echo "deploy: requirements.txt changed, venv updated"
     fi
     systemctl restart pareton-api
+    if systemctl cat pareton-watcher >/dev/null 2>&1; then
+        systemctl restart pareton-watcher
+        echo "deploy: $DEPLOYED -> $(git rev-parse HEAD); pareton-api and pareton-watcher restarted"
+    else
+        echo "deploy: $DEPLOYED -> $(git rev-parse HEAD); pareton-api restarted (pareton-watcher unit not installed)"
+    fi
     git rev-parse HEAD > "$DEPLOYED_FILE"
-    echo "deploy: $DEPLOYED -> $(git rev-parse HEAD); pareton-api restarted"
 fi
 
 if [ -f "$PENDING_FLAG" ]; then
