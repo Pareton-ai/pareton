@@ -559,6 +559,7 @@ class _PodPhasePoller:
             config.BENCH_PHASE_POLL_S if interval_s is None else interval_s
         )
         self._stop = threading.Event()
+        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def poll_once(self) -> None:
@@ -572,10 +573,17 @@ class _PodPhasePoller:
         except Exception as exc:  # noqa: BLE001 - progress must not fail a bench
             logger.debug("pod phase poll failed: %s", exc)
             return
-        if phase is not None:
+        if phase is None:
+            return
+        with self._lock:
+            # Join can time out while SSH is still in flight; never overwrite
+            # a later worker-owned phase such as teardown.
+            if self._stop.is_set():
+                return
             self._on_phase(phase)
 
     def _loop(self) -> None:
+        self.poll_once()
         while not self._stop.wait(self._interval_s):
             self.poll_once()
 
@@ -587,7 +595,8 @@ class _PodPhasePoller:
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=5.0)

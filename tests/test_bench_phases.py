@@ -289,13 +289,19 @@ def test_job_listing_exposes_live_activity(monkeypatch):
 class _Writer:
     """Phase/heartbeat writer that records calls and can reject them."""
 
-    def __init__(self, *, landed: bool = True, raises: bool = False) -> None:
+    def __init__(
+        self, *, landed: bool = True, raises: bool = False, fail_times: int = 0
+    ) -> None:
         self.phases: list[tuple[str, dict[str, Any] | None]] = []
         self.beats = 0
         self._landed = landed
         self._raises = raises
+        self._fail_times = fail_times
 
     def write_phase(self, *, job_id, attempt, phase, progress=None) -> bool:
+        if self._fail_times > 0:
+            self._fail_times -= 1
+            raise RuntimeError("neon is down")
         if self._raises:
             raise RuntimeError("neon is down")
         self.phases.append((phase, progress))
@@ -365,6 +371,15 @@ def test_reporter_swallows_write_failures():
     reporter.set(BenchPhase.SLA_BENCH)
     reporter._beat()
     reporter.stop()
+
+
+def test_reporter_retries_phase_after_transient_write_failure():
+    """A swallowed write must not mark the phase current, or polls never retry."""
+    writer = _Writer(fail_times=1)
+    reporter = _reporter(writer)
+    reporter.set(BenchPhase.SLA_BENCH)
+    reporter.set(BenchPhase.SLA_BENCH)
+    assert [p for p, _ in writer.phases] == ["sla_bench"]
 
 
 def test_reporter_heartbeats_in_the_background():

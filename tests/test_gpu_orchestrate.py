@@ -422,6 +422,46 @@ def test_pod_phase_poller_relays_and_survives_ssh_failure(tmp_path: Path):
     assert seen == ["correctness"], "a failed poll leaves the last phase in place"
 
 
+def test_pod_phase_poller_does_not_relay_after_stop(tmp_path: Path):
+    """A late SSH return must not overwrite teardown after the poller exits."""
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, json.dumps({"phase": "correctness"}), "")
+
+    poller = _PodPhasePoller(
+        pod, remote_out="/o", on_phase=seen.append, runner=runner, interval_s=60.0
+    )
+    poller.__exit__(None, None, None)
+    poller.poll_once()
+    assert seen == []
+
+
+def test_pod_phase_poller_polls_immediately(tmp_path: Path):
+    """First read must not wait a full BENCH_PHASE_POLL_S."""
+    import threading
+
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[str] = []
+    polled = threading.Event()
+
+    def runner(cmd, *, timeout, input_text=None):
+        polled.set()
+        return SshResult(0, json.dumps({"phase": "downloading_model"}), "")
+
+    poller = _PodPhasePoller(
+        pod, remote_out="/o", on_phase=seen.append, runner=runner, interval_s=60.0
+    )
+    with poller:
+        assert polled.wait(2.0), "must poll as soon as the SSH bench starts"
+        assert seen == ["downloading_model"]
+
+
 def test_bootstrap_error_with_destroy_failure_returns_75(tmp_path: Path, monkeypatch):
     """Destroy-failure exit must win even when the main try raised."""
     from gpu.errors import GpuError

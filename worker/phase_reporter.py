@@ -97,7 +97,6 @@ class PhaseReporter:
             # Same phase, no new detail: heartbeat already covers liveness.
             if name == self._current and not detail:
                 return
-            self._current = name
         try:
             landed = self._resolve_phase_writer()(
                 job_id=self.job_id,
@@ -111,6 +110,9 @@ class PhaseReporter:
         if not landed:
             self._mark_orphaned("phase")
             return
+        with self._lock:
+            if not self._orphaned:
+                self._current = name
         logger.info("bench phase job=%s attempt=%s %s", self.job_id, self.attempt, name)
 
     def _mark_orphaned(self, source: str) -> None:
