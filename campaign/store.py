@@ -624,6 +624,25 @@ def complete_gates_job(
             return cur.fetchone() is not None
 
 
+def count_pending_jobs(*, kind: str | None = None) -> int:
+    """How many jobs are waiting to be claimed. Read-only, for observability."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            if kind is None:
+                cur.execute(
+                    "SELECT count(*) FROM submission_jobs WHERE status = 'pending'"
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT count(*) FROM submission_jobs
+                    WHERE status = 'pending' AND kind = %s
+                    """,
+                    (kind,),
+                )
+            return int(cur.fetchone()[0])
+
+
 def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
     """Atomically claim the oldest pending job of ``kind``."""
     with db_connection() as conn:

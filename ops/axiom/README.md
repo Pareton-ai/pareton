@@ -98,9 +98,26 @@ Alerts go to bohdan@pareton.ai and xavier@pareton.ai.
 
 | Monitor                   | Fires when                                                                     | First check                                                                                                       | Usual fix                                                                                                                                                      |
 | ------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck.                  | `systemctl status pareton-worker` on the VPS.                                                                     | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                  |
+| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck. A green heartbeat does not mean the chain is being read: the heartbeat runs on its own thread and keeps beating through a 6-hour build. Use `chain-scan-stalled` for chain reads. | `systemctl status pareton-worker` on the VPS.                                                                     | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                  |
+| `chain-scan-stalled`      | Fewer than 1 `chain_scanned` event in 10 min. We stopped reading the chain.     | Axiom: `['pareton-prod'] \| where event == "chain_scanned" \| sort by _time desc` for the last scan and its block. Then `journalctl -u pareton-worker -n 100` for `chain scan failed`. | A dead subtensor websocket or an RPC outage. Restart the scanning service. New submissions stay on chain, so they are ingested on the next good scan.          |
 | `lifecycle-failures`      | A `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low` event.       | Search Axiom for the event; it carries `pod`, `provider`, and `error`.                                            | `destroy_failed`: a GPU pod may still be running and billing; destroy it by hand in the provider console. `provider_balance_low`: top up the provider balance. |
 | `job-failure-spike`       | More than 5 `job_failed` in 1 hour. Systemic breakage, not one bad submission. | Axiom: `['pareton-prod'] \| where event == "job_failed" \| summarize count() by stage` to find the failing stage. | Usually a bad deploy or a provider outage. Roll back or wait, then watch the monitor resolve.                                                                  |
+
+### Is the worker alive, or is it working?
+
+Two events answer two different questions. Read both before you restart anything.
+
+| Event           | Cadence            | What it proves                                                                    |
+| --------------- | ------------------ | --------------------------------------------------------------------------------- |
+| `heartbeat`     | Every 5 min        | The worker process is alive. It carries `queue_depth`, the number of jobs waiting. |
+| `chain_scanned` | Every 30 s         | We read the chain. It carries `block`, `commitments_seen`, and `ingested`.         |
+
+`chain_scanned` fires on every successful scan, including a scan that finds
+nothing. That is why its absence is an alert. `submission_ingested` cannot do
+this job, because a quiet chain and a broken scanner both emit nothing.
+
+A rising `queue_depth` is not an alert on its own. The worker builds one
+submission at a time, and a build can take 6 hours, so a real queue is normal.
 
 ## First-time setup (already done 2026-08-05)
 

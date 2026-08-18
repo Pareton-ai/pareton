@@ -6,6 +6,8 @@ Offline (no network). Run after any bittensor bump — failures here mean
 
 from __future__ import annotations
 
+import pytest
+
 import chain.rpc as rpc
 
 
@@ -407,6 +409,92 @@ def test_scan_chain_folds_commitments(monkeypatch):
     created, hotkeys = watcher.scan_chain(object(), 10, ingest=lambda _com: "sid-1")
     assert created == ["sid-1"]
     assert hotkeys == ["hk1", "hk2"]
+
+
+def _scanned_events(records) -> list[dict]:
+    import json
+
+    payloads = [json.loads(r.message) for r in records]
+    return [p for p in payloads if p.get("event") == "chain_scanned"]
+
+
+def test_scan_chain_emits_chain_scanned(monkeypatch, caplog):
+    import logging
+
+    from chain import watcher
+    from chain.commitment import encode_patch_commitment
+
+    payload = encode_patch_commitment(
+        campaign_id="11111111-1111-4111-8111-111111111111",
+        baseline_commit="a" * 40,
+        patch_hash="sha256:" + "b" * 64,
+        retrieval_url="https://example.com/stage0/campaigns/c/patches/hk2/p.patch",
+    )
+
+    class Meta:
+        hotkeys = ["hk1", "hk2"]
+        coldkeys = ["ck1", "ck2"]
+
+    monkeypatch.setattr(
+        watcher,
+        "fetch_chain_view",
+        lambda *_a, **_k: (Meta(), {"hk2": [(7, payload)]}, 4242, None),
+    )
+    with caplog.at_level(logging.INFO, logger="pareton.lifecycle"):
+        watcher.scan_chain(object(), 10, ingest=lambda _com: "sid-1")
+
+    events = _scanned_events(caplog.records)
+    assert len(events) == 1
+    assert events[0] == {
+        "event": "chain_scanned",
+        "block": 4242,
+        "commitments_seen": 1,
+        "ingested": 1,
+    }
+
+
+def test_scan_chain_emits_chain_scanned_when_nothing_new(monkeypatch, caplog):
+    """An empty scan is still proof we are reading the chain, so it must emit."""
+    import logging
+
+    from chain import watcher
+
+    class Meta:
+        hotkeys = ["hk1"]
+        coldkeys = ["ck1"]
+
+    monkeypatch.setattr(
+        watcher,
+        "fetch_chain_view",
+        lambda *_a, **_k: (Meta(), {}, 99, None),
+    )
+    with caplog.at_level(logging.INFO, logger="pareton.lifecycle"):
+        watcher.scan_chain(object(), 10, ingest=lambda _com: None)
+
+    events = _scanned_events(caplog.records)
+    assert len(events) == 1
+    # Zero counts must survive the emitter's empty-value filter.
+    assert events[0]["commitments_seen"] == 0
+    assert events[0]["ingested"] == 0
+
+
+def test_scan_chain_emits_nothing_when_chain_read_fails(monkeypatch, caplog):
+    """A failed scan must stay silent, otherwise the stall alert never fires."""
+    import logging
+
+    from chain import watcher
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("websocket dead")
+
+    monkeypatch.setattr(watcher, "fetch_chain_view", _boom)
+    with (
+        caplog.at_level(logging.INFO, logger="pareton.lifecycle"),
+        pytest.raises(RuntimeError),
+    ):
+        watcher.scan_chain(object(), 10, ingest=lambda _com: None)
+
+    assert _scanned_events(caplog.records) == []
 
 
 def test_scan_chain_orders_by_commit_block(monkeypatch):
