@@ -41,6 +41,22 @@ def test_scan_cycle_always_ready_to_sleep(monkeypatch):
     assert cycles == [client, client]
 
 
+def test_failed_scan_closes_client_before_reconnect(monkeypatch):
+    closed = []
+
+    class FakeClient:
+        def close(self):
+            closed.append(1)
+
+    monkeypatch.setattr(
+        "worker.watcher.scan_chain",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("websocket dead")),
+    )
+    drain = threading.Event()
+    assert scan_cycle(FakeClient(), drain) is None
+    assert closed == [1]
+
+
 def test_failed_scan_drops_client_so_next_cycle_reconnects(monkeypatch):
     live = object()
     connects = []

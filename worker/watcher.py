@@ -49,6 +49,12 @@ def scan_cycle(subtensor, drain: threading.Event):
         return subtensor
     except Exception:
         logger.exception("chain scan failed; will reconnect next cycle")
+        # Each bt.Subtensor holds a websocket; GC does not reliably reap it.
+        try:
+            if subtensor is not None:
+                subtensor.close()
+        except Exception:
+            pass
         return None
 
 
