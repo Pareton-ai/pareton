@@ -53,6 +53,7 @@ class FakeTransport:
         self.volume_delete_codes: list[int] = [200]
         self.deleted: list[str] = []
         self.create_fail = False
+        self.volume_create_error: tuple[int, str] | None = None
 
     def __call__(
         self, method, url, *, headers=None, json=None, params=None, timeout=60
@@ -74,13 +75,17 @@ class FakeTransport:
             assert json is not None
             assert json["name"]
             assert json["size_in_gb"] == 250
+            if self.volume_create_error is not None:
+                code, text = self.volume_create_error
+                return FakeResp(code, text=text)
             return FakeResp(200, _json={"id": "vol-1"})
 
         if method == "POST" and path == "/instances/create":
             if self.create_fail:
                 return FakeResp(400, text="create failed")
             assert json is not None
-            assert json["volume_ids"] == ["vol-1"]
+            if "volume_ids" in json:
+                assert json["volume_ids"] == ["vol-1"]
             assert json["ssh_key_id"] == "ssh-1"
             assert json["name"]
             return FakeResp(200, _json={"id": "inst-1"})
@@ -206,6 +211,75 @@ def test_mount_script_refuses_mkfs():
     assert "mkfs.ext4" not in script
     assert "refusing raw mkfs" in script
     assert "bind-mounted" in script
+
+
+def test_mount_script_local_disk_fallback_is_opt_in():
+    from gpu.providers.shadeform import _mount_workspace_script
+
+    with_volume = _mount_workspace_script(volume_gib=250)
+    assert "ALLOW_LOCAL_DISK=0" in with_volume
+
+    local = _mount_workspace_script(volume_gib=250, allow_local_disk=True)
+    assert "ALLOW_LOCAL_DISK=1" in local
+    assert "no volume attached" in local
+    # The size bar is unchanged: a disk too small still fails here, not mid-bench.
+    assert "MIN_KB=235929600" in local
+    assert "mkfs.ext4" not in local
+
+
+def _offer() -> Offer:
+    return Offer(
+        provider="shadeform",
+        instance_id="massedcompute:us-central-9:RTXPro6000x4",
+        description="RTX PRO 6000",
+        hourly_price_cents=876,
+        gpu_count=4,
+        gpu_type="RTXPRO6000",
+        raw={
+            "cloud": "massedcompute",
+            "region": "us-central-9",
+            "shade_instance_type": "RTXPro6000x4",
+            "os_options": ["ubuntu22.04"],
+        },
+    )
+
+
+def test_provision_without_volume_when_cloud_has_none(state_dir: Path, monkeypatch):
+    """massedcompute has no volumes; fall back to the instance local disk."""
+    tr = FakeTransport()
+    tr.volume_create_error = (
+        409,
+        '{"error_code":"NOT_SUPPORTED","error":"No volumes available for '
+        'cloud [massedcompute] in region [us-central-9]"}',
+    )
+    p = ShadeformProvider("k", state_dir=state_dir, transport=tr, sleep=lambda _s: None)
+    monkeypatch.setattr(p, "_mount_workspace", lambda _pod: True)
+    pub = (state_dir / "keys" / "pareton-gpu-ed25519.pub").read_text().strip()
+
+    pod = p.provision(_offer(), name=encode_pod_name(ttl_hours=1.0), ssh_public_key=pub)
+
+    assert pod.pod_id == "inst-1"
+    assert pod.raw.get("volume_uid") == ""
+    body = next(
+        c[2]["json"]
+        for c in tr.calls
+        if c[0] == "POST" and c[1].endswith("/instances/create")
+    )
+    assert "volume_ids" not in body
+    assert "volume_mount" not in body
+    # Nothing was created, so nothing must be torn down.
+    assert tr.deleted == []
+
+
+def test_provision_aborts_when_volume_fails_for_another_reason(state_dir: Path):
+    """A quota or auth error must not silently downgrade the pod's storage."""
+    tr = FakeTransport()
+    tr.volume_create_error = (403, '{"error_code":"QUOTA_EXCEEDED"}')
+    p = ShadeformProvider("k", state_dir=state_dir, transport=tr, sleep=lambda _s: None)
+    pub = (state_dir / "keys" / "pareton-gpu-ed25519.pub").read_text().strip()
+
+    with pytest.raises(ProvisionError, match="failed HTTP 403"):
+        p.provision(_offer(), name=encode_pod_name(ttl_hours=1.0), ssh_public_key=pub)
 
 
 def test_provision_wait_mount_and_abort(state_dir: Path, monkeypatch):

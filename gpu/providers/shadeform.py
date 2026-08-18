@@ -88,11 +88,17 @@ def _default_transport(
     )
 
 
-def _mount_workspace_script(*, volume_gib: int) -> str:
-    """Bind/mount block storage at /workspace."""
+def _mount_workspace_script(*, volume_gib: int, allow_local_disk: bool = False) -> str:
+    """Bind/mount block storage at /workspace.
+
+    ``allow_local_disk`` is for instances provisioned without a volume, where
+    the local disk is the only storage. It still demands MIN_KB, so a disk too
+    small for the model fails here instead of part-way through a bench.
+    """
     min_kb = int(volume_gib * 1024 * 1024 * 0.9)
     return f"""set -euo pipefail
 MIN_KB={min_kb}
+ALLOW_LOCAL_DISK={1 if allow_local_disk else 0}
 
 workspace_kb() {{
   df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $2}}'
@@ -150,6 +156,20 @@ done < <(df -Pk | awk 'NR>1 {{print $6, $2}}')
 if [ -n "$best_mp" ]; then
   bind_to_workspace "$best_mp"
   exit 0
+fi
+
+if [ "$ALLOW_LOCAL_DISK" = "1" ]; then
+  avail_kb="$(df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $4}}')"
+  if [ -n "$avail_kb" ] && [ "$avail_kb" -ge "$MIN_KB" ]; then
+    sudo chmod 1777 /workspace
+    echo "OK: /workspace on local disk (${{avail_kb}}KB available, no volume attached)"
+    df -h /workspace
+    exit 0
+  fi
+  echo "ERROR: no volume attached and /workspace local disk has ${{avail_kb:-0}}KB available, need ${{MIN_KB}}KB"
+  lsblk
+  df -h
+  exit 1
 fi
 
 echo "ERROR: /workspace not ready and no mountable volume >= ${{MIN_KB}}KB"
@@ -306,17 +326,36 @@ class ShadeformProvider:
         out.sort(key=lambda o: (o.hourly_price_cents, o.gpu_count))
         return out
 
-    def _create_volume(self, *, cloud: str, region: str, name: str) -> str:
+    def _create_volume(self, *, cloud: str, region: str, name: str) -> str | None:
+        """Create the /workspace volume, or None when the cloud has no volumes.
+
+        Some clouds (massedcompute, the only 4x RTXPRO6000 supplier) answer
+        ``NOT_SUPPORTED``. Falling back to the instance local disk is the only
+        way to reach that capacity. Any other failure still aborts: a quota or
+        auth error must not silently downgrade the pod's storage.
+        """
         size_gib = _volume_gib()
-        resp = self._post(
-            "/volumes/create",
-            json={
-                "cloud": cloud,
-                "region": region,
-                "size_in_gb": size_gib,
-                "name": name,
-            },
-        )
+        try:
+            resp = self._post(
+                "/volumes/create",
+                json={
+                    "cloud": cloud,
+                    "region": region,
+                    "size_in_gb": size_gib,
+                    "name": name,
+                },
+            )
+        except ProvisionError as exc:
+            if "NOT_SUPPORTED" not in str(exc):
+                raise
+            logger.warning(
+                "Shadeform cloud=%s region=%s has no volumes; /workspace will use "
+                "the instance local disk (needs %d GiB free)",
+                cloud,
+                region,
+                int(size_gib * 0.9),
+            )
+            return None
         volume_id = str(resp["id"])
         logger.info(
             "Created Shadeform volume %s (%d GiB, name=%s cloud=%s region=%s)",
@@ -333,16 +372,17 @@ class ShadeformProvider:
         )
         return volume_id
 
-    def _abort_rent(self, instance_id: str | None, volume_id: str) -> None:
+    def _abort_rent(self, instance_id: str | None, volume_id: str | None) -> None:
         if instance_id:
             try:
                 self._teardown_instance(instance_id)
             except Exception:  # noqa: BLE001
                 logger.exception("abort instance cleanup failed for %s", instance_id)
-        try:
-            self._teardown_volume(volume_id, raise_on_fail=False)
-        except Exception:  # noqa: BLE001
-            logger.exception("abort volume cleanup failed for %s", volume_id)
+        if volume_id:
+            try:
+                self._teardown_volume(volume_id, raise_on_fail=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("abort volume cleanup failed for %s", volume_id)
 
     def provision(self, offer: Offer, *, name: str, ssh_public_key: str) -> Pod:
         raw = offer.raw or {}
@@ -363,10 +403,11 @@ class ShadeformProvider:
                 "shade_instance_type": shade_type,
                 "shade_cloud": True,
                 "name": name,
-                "volume_ids": [volume_id],
                 "ssh_key_id": ssh_key_id,
-                "volume_mount": {"auto": True},
             }
+            if volume_id:
+                body["volume_ids"] = [volume_id]
+                body["volume_mount"] = {"auto": True}
             if os_name:
                 body["os"] = os_name
             created = self._post("/instances/create", json=body)
@@ -377,7 +418,7 @@ class ShadeformProvider:
                 cloud,
                 region,
                 shade_type,
-                volume_id,
+                volume_id or "(local disk)",
             )
             logger.info("Dashboard: %s/%s", SHADEFORM_DASHBOARD, instance_id)
             pod = Pod(
@@ -390,7 +431,7 @@ class ShadeformProvider:
                 created_utc=datetime.now(timezone.utc),
                 ttl_hours=0.0,
                 raw={
-                    "volume_uid": volume_id,
+                    "volume_uid": volume_id or "",
                     "volume_name": name,
                     "cloud": cloud,
                     "region": region,
@@ -467,7 +508,10 @@ class ShadeformProvider:
 
     def _mount_workspace(self, pod: Pod) -> bool:
         logger.info("Mounting /workspace on Shadeform instance %s", pod.pod_id)
-        script = _mount_workspace_script(volume_gib=_volume_gib())
+        script = _mount_workspace_script(
+            volume_gib=_volume_gib(),
+            allow_local_disk=not str((pod.raw or {}).get("volume_uid") or ""),
+        )
         result = ssh_exec(
             pod,
             f"bash -s <<'PARETON_MOUNT'\n{script}\nPARETON_MOUNT",
