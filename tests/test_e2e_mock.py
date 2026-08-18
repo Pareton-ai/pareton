@@ -903,6 +903,107 @@ def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
     assert client.get(f"/v1/submissions/{patch_hash}/build-log").status_code == 409
 
 
+def test_e2e_live_bench_phase_is_attempt_scoped_and_cleared_on_settle(tmp_path):
+    """Live phase is attempt-scoped and cleared when the job settles."""
+    from bench.phases import BenchPhase
+    from campaign.store import (
+        claim_next_job,
+        enqueue_bench_job,
+        finalize_bench_job,
+        list_submission_jobs,
+        set_job_phase,
+        set_job_status,
+        touch_job_heartbeat,
+    )
+    from worker.phase_reporter import reporter_for_job
+
+    repo, _patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
+    sample_trace = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
+    )
+    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
+    campaign_id = uuid4()
+    hotkey = "5FakesHotkeyForE2ETesting000000000000000000009"
+    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/{hotkey}/e2e.diff"
+    _insert_open_campaign(
+        repo=repo,
+        commit=commit,
+        campaign_id=campaign_id,
+        url=url,
+        now=datetime.now(timezone.utc),
+        bench=_bench_campaign_spec(sample_trace, trace_sha),
+        trace_sha=trace_sha,
+        trace_url=f"file://{sample_trace.resolve()}",
+    )
+    sid = insert_submission(
+        campaign_id=campaign_id,
+        patch_hash=patch_hash,
+        hotkey=hotkey,
+        baseline_commit=commit,
+        retrieval_url=url,
+        commit_block=1,
+    )
+    assert enqueue_bench_job(sid) is True
+
+    def bench_job() -> dict:
+        return next(j for j in list_submission_jobs(sid) if j["kind"] == "bench")
+
+    first = claim_next_job(kind="bench")
+    assert first is not None
+    assert first["job_attempt"] == 1
+    job_id = int(first["job_id"])
+    assert bench_job()["phase"] is None
+
+    reporter = reporter_for_job(first)
+    reporter.set(BenchPhase.DOWNLOADING_MODEL, gpu_sku="H200")
+    row = bench_job()
+    assert row["phase"] == "downloading_model"
+    assert row["progress"] == {"gpu_sku": "H200"}
+    started = row["phase_started_at"]
+    assert started is not None
+    beat = row["heartbeat_at"]
+    assert beat is not None
+    assert (datetime.now(timezone.utc) - beat).total_seconds() < 60
+
+    # Re-reporting the same phase must not restart the clock on it.
+    reporter.set(BenchPhase.DOWNLOADING_MODEL)
+    assert touch_job_heartbeat(job_id=job_id, attempt=1) is True
+    row = bench_job()
+    assert row["phase_started_at"] == started
+    assert row["heartbeat_at"] >= beat
+
+    # Worker dies, job is requeued, then claimed again.
+    set_job_status(sid, "pending", kind="bench")
+    assert bench_job()["phase"] is None
+    second = claim_next_job(kind="bench")
+    assert second is not None
+    assert second["job_attempt"] == 2
+    reporter_for_job(second).set(BenchPhase.PROVISIONING)
+
+    # Dead attempt still running; its writes must not land.
+    assert set_job_phase(job_id=job_id, attempt=1, phase="sla_bench") is False
+    assert touch_job_heartbeat(job_id=job_id, attempt=1) is False
+    assert bench_job()["phase"] == "provisioning"
+
+    finalize_bench_job(
+        submission_id=sid,
+        job_id=job_id,
+        task_id=str(uuid4()),
+        report_rows=[],
+        events=[],
+        job_status="done",
+    )
+    row = bench_job()
+    assert row["status"] == "done"
+    assert (row["phase"], row["phase_started_at"], row["heartbeat_at"]) == (
+        None,
+        None,
+        None,
+    )
+    # A settled job must not be resurrectable by a late write.
+    assert set_job_phase(job_id=job_id, attempt=2, phase="teardown") is False
+
+
 def _insert_draft_calibration_campaign(*, repo, commit, campaign_id, now, bench):
     """Draft campaign with zero submissions: the only state `apply` accepts."""
     profile_id = insert_profile("e2e-calib", {"fixture": True})

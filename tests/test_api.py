@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -193,6 +194,93 @@ def test_openapi_publishes_the_submission_state_vocabulary():
     assert schema["enum"] == [s.value for s in SubmissionState]
 
 
+def test_openapi_publishes_the_bench_phase_vocabulary():
+    """BenchPhase is a named OpenAPI enum."""
+    from api.server import app
+    from bench.phases import BenchPhase
+
+    schema = app.openapi()["components"]["schemas"]["BenchPhase"]
+    assert schema["type"] == "string"
+    assert schema["enum"] == [p.value for p in BenchPhase]
+
+
+def test_detail_exposes_live_phase_of_a_running_job(monkeypatch, client: TestClient):
+    from api import server
+
+    sid = "77777777-7777-7777-7777-777777777777"
+    monkeypatch.setattr(
+        server,
+        "get_submission_for_campaign",
+        lambda _c, _h: _detail_row(sid, "c1", "sha256:live"),
+    )
+    monkeypatch.setattr(server, "list_events", lambda _id: [])
+    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
+    monkeypatch.setattr(
+        server, "list_latest_states", lambda _ids: {sid: "bench_queued"}
+    )
+    monkeypatch.setattr(
+        server,
+        "list_submission_jobs",
+        lambda _id: [
+            {
+                "kind": "bench",
+                "status": "running",
+                "last_error": None,
+                "phase": "downloading_model",
+                "phase_started_at": datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc),
+                "heartbeat_at": datetime(2026, 8, 17, 12, 4, tzinfo=timezone.utc),
+                "progress": {"gpu_sku": "H200-SXM-141GB"},
+            }
+        ],
+    )
+
+    body = client.get("/v1/campaigns/c1/submissions/sha256:live").json()
+    job = body["jobs"][0]
+    assert job["phase"] == "downloading_model"
+    assert job["phase_started_at"] == "2026-08-17T12:00:00+00:00"
+    assert job["heartbeat_at"] == "2026-08-17T12:04:00+00:00"
+    assert job["progress"] == {"gpu_sku": "H200-SXM-141GB"}
+    server.SubmissionDetailModel.model_validate(body)
+
+
+def test_detail_drops_phase_text_outside_the_vocabulary(
+    monkeypatch, client: TestClient
+):
+    """A hand-edited row must not put arbitrary phase text on a public endpoint."""
+    from api import server
+
+    sid = "88888888-8888-8888-8888-888888888888"
+    monkeypatch.setattr(
+        server,
+        "get_submission_for_campaign",
+        lambda _c, _h: _detail_row(sid, "c1", "sha256:junk"),
+    )
+    monkeypatch.setattr(server, "list_events", lambda _id: [])
+    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
+    monkeypatch.setattr(
+        server, "list_latest_states", lambda _ids: {sid: "bench_queued"}
+    )
+    monkeypatch.setattr(
+        server,
+        "list_submission_jobs",
+        lambda _id: [
+            {
+                "kind": "bench",
+                "status": "running",
+                "last_error": None,
+                "phase": "<script>alert(1)</script>",
+                "phase_started_at": None,
+                "heartbeat_at": None,
+                "progress": {"deep": {"nope": 1}},
+            }
+        ],
+    )
+
+    job = client.get("/v1/campaigns/c1/submissions/sha256:junk").json()["jobs"][0]
+    assert job["phase"] is None
+    assert job["progress"] is None
+
+
 def test_submissions_payload_matches_the_documented_model(
     monkeypatch, client: TestClient
 ):
@@ -327,8 +415,24 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     assert body["bench_verdict"] is None
     assert body["latest_state"] == "bench_queued"
     assert body["jobs"] == [
-        {"kind": "bench", "status": "failed", "last_error": "bench_exit_bad_request"},
-        {"kind": "gates", "status": "done", "last_error": None},
+        {
+            "kind": "bench",
+            "status": "failed",
+            "last_error": "bench_exit_bad_request",
+            "phase": None,
+            "phase_started_at": None,
+            "heartbeat_at": None,
+            "progress": None,
+        },
+        {
+            "kind": "gates",
+            "status": "done",
+            "last_error": None,
+            "phase": None,
+            "phase_started_at": None,
+            "heartbeat_at": None,
+            "progress": None,
+        },
     ]
 
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: None)
