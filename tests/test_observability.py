@@ -23,6 +23,7 @@ from observability.events import Timer
 
 _ALL_EVENTS = [
     "heartbeat",
+    "chain_scanned",
     "submission_ingested",
     "gate_passed",
     "gate_failed",
@@ -61,6 +62,8 @@ def _call_event(name: str) -> dict:
     kwargs: dict = {}
     if name == "heartbeat":
         kwargs = {}
+    elif name == "chain_scanned":
+        kwargs = {"block": 1234, "commitments_seen": 3, "ingested": 1}
     elif name == "submission_ingested":
         kwargs = {
             "submission_id": "sub-1",
@@ -195,6 +198,47 @@ class TestEventEmitter:
         assert payload["duration_s"] == 123.5
 
 
+class TestChainScanned:
+    """The scan event that makes a stalled chain read alertable."""
+
+    def test_zero_counts_survive_the_empty_value_filter(self) -> None:
+        # A quiet scan is the case the alert depends on, so 0 must be emitted
+        # rather than dropped as an empty value.
+        payload = obs.chain_scanned(block=88, commitments_seen=0, ingested=0)
+        assert payload["commitments_seen"] == 0
+        assert payload["ingested"] == 0
+        assert payload["block"] == 88
+
+
+class TestHeartbeatQueueDepth:
+    """queue_depth on the heartbeat: real number, and no beat lost on DB error."""
+
+    def test_reports_pending_job_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from worker import main as worker_main
+
+        monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 4)
+        assert worker_main._queue_depth() == 4
+
+    def test_zero_pending_is_reported_not_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from worker import main as worker_main
+
+        monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 0)
+        payload = obs.heartbeat(queue_depth=worker_main._queue_depth())
+        assert payload["queue_depth"] == 0
+
+    def test_database_error_still_beats(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from worker import main as worker_main
+
+        def _boom() -> int:
+            raise RuntimeError("no database")
+
+        monkeypatch.setattr(worker_main, "count_pending_jobs", _boom)
+        assert worker_main._queue_depth() is None
+        assert "queue_depth" not in obs.heartbeat(queue_depth=None)
+
+
 class TestLogger:
     """Verify events go through the logging system."""
 
@@ -235,12 +279,13 @@ class TestHeartbeatLoop:
     """Background heartbeat thread: keeps emitting while jobs block the loop."""
 
     def test_emits_repeatedly_until_stopped(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import threading
 
         from worker import main as worker_main
 
+        monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 2)
         stop = threading.Event()
         thread = threading.Thread(
             target=worker_main._heartbeat_loop,
@@ -255,3 +300,4 @@ class TestHeartbeatLoop:
             thread.join(timeout=2)
         beats = [r for r in caplog.records if '"heartbeat"' in r.message]
         assert len(beats) >= 2
+        assert all(json.loads(r.message)["queue_depth"] == 2 for r in beats)

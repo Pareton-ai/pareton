@@ -440,7 +440,10 @@ def set_job_status(
     last_error: str | None = None,
     bump_attempts: bool = False,
 ) -> None:
-    """Update one job row. Prefer job_id; else (submission_id, kind)."""
+    """Update one job row. Prefer job_id; else (submission_id, kind).
+
+    Also clears live activity so a settled job cannot look like it is still running.
+    """
     with db_connection() as conn:
         with conn.cursor() as cur:
             if job_id is not None:
@@ -449,27 +452,75 @@ def set_job_status(
             else:
                 where = "WHERE submission_id = %s AND kind = %s"
                 where_args = (str(submission_id), kind)
-            if bump_attempts:
-                cur.execute(
-                    f"""
-                    UPDATE submission_jobs
-                    SET status = %s,
-                        last_error = %s,
-                        attempts = attempts + 1,
-                        updated_at = now()
-                    {where}
-                    """,
-                    (status, last_error, *where_args),
-                )
-            else:
-                cur.execute(
-                    f"""
-                    UPDATE submission_jobs
-                    SET status = %s, last_error = %s, updated_at = now()
-                    {where}
-                    """,
-                    (status, last_error, *where_args),
-                )
+            attempts_set = "attempts = attempts + 1," if bump_attempts else ""
+            cur.execute(
+                f"""
+                UPDATE submission_jobs
+                SET status = %s,
+                    last_error = %s,
+                    {attempts_set}
+                    phase = NULL,
+                    phase_started_at = NULL,
+                    heartbeat_at = NULL,
+                    progress = NULL,
+                    updated_at = now()
+                {where}
+                """,
+                (status, last_error, *where_args),
+            )
+
+
+def set_job_phase(
+    *,
+    job_id: int,
+    attempt: int,
+    phase: str,
+    progress: dict[str, Any] | None = None,
+) -> bool:
+    """Record what a running attempt is doing now. Returns whether it landed.
+
+    Matches (job_id, attempt, status=running) so a superseded attempt updates zero rows.
+    `phase_started_at` moves only when the phase actually changes.
+    """
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE submission_jobs
+                SET phase = %s,
+                    phase_started_at = CASE
+                      WHEN phase IS DISTINCT FROM %s THEN now()
+                      ELSE phase_started_at
+                    END,
+                    heartbeat_at = now(),
+                    progress = %s,
+                    updated_at = now()
+                WHERE id = %s AND attempts = %s AND status = 'running'
+                """,
+                (
+                    phase,
+                    phase,
+                    Json(progress) if progress else None,
+                    job_id,
+                    attempt,
+                ),
+            )
+            return cur.rowcount > 0
+
+
+def touch_job_heartbeat(*, job_id: int, attempt: int) -> bool:
+    """Confirm the attempt is still alive. Returns whether it landed."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE submission_jobs
+                SET heartbeat_at = now(), updated_at = now()
+                WHERE id = %s AND attempts = %s AND status = 'running'
+                """,
+                (job_id, attempt),
+            )
+            return cur.rowcount > 0
 
 
 def set_engine_image(submission_id: UUID | str, image_ref: str) -> None:
@@ -573,6 +624,25 @@ def complete_gates_job(
             return cur.fetchone() is not None
 
 
+def count_pending_jobs(*, kind: str | None = None) -> int:
+    """How many jobs are waiting to be claimed. Read-only, for observability."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            if kind is None:
+                cur.execute(
+                    "SELECT count(*) FROM submission_jobs WHERE status = 'pending'"
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT count(*) FROM submission_jobs
+                    WHERE status = 'pending' AND kind = %s
+                    """,
+                    (kind,),
+                )
+            return int(cur.fetchone()[0])
+
+
 def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
     """Atomically claim the oldest pending job of ``kind``."""
     with db_connection() as conn:
@@ -612,14 +682,23 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
                         (job["job_id"],),
                     )
                     return None
+            # New attempt: drop the previous phase so it cannot look current.
             cur.execute(
                 """
                 UPDATE submission_jobs
-                SET status = 'running', attempts = attempts + 1, updated_at = now()
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    phase = NULL,
+                    phase_started_at = NULL,
+                    heartbeat_at = now(),
+                    progress = NULL,
+                    updated_at = now()
                 WHERE id = %s
+                RETURNING attempts
                 """,
                 (job["job_id"],),
             )
+            attempt = int(cur.fetchone()["attempts"])
             cur.execute(
                 """
                 SELECT s.*, c.baseline_commit AS campaign_baseline_commit,
@@ -629,12 +708,13 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
                        c.gpu_skus, c.manifest_hash,
                        c.workload_pool, c.sampling_rule, c.calibration, c.z_threshold,
                        c.engine,
-                       %s::bigint AS job_id, %s::text AS job_kind
+                       %s::bigint AS job_id, %s::text AS job_kind,
+                       %s::int AS job_attempt
                 FROM submissions s
                 JOIN campaigns c ON c.id = s.campaign_id
                 WHERE s.id = %s
                 """,
-                (job["job_id"], job["kind"], str(job["submission_id"])),
+                (job["job_id"], job["kind"], attempt, str(job["submission_id"])),
             )
             row = cur.fetchone()
     return dict(row) if row else None
@@ -769,12 +849,13 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
 
 
 def list_submission_jobs(submission_id: UUID | str) -> list[dict[str, Any]]:
-    """Job rows (kind, status, last_error) for one submission, ordered by kind."""
+    """Job rows for one submission, ordered by kind."""
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT kind, status, last_error
+                SELECT kind, status, last_error,
+                       phase, phase_started_at, heartbeat_at, progress
                 FROM submission_jobs
                 WHERE submission_id = %s
                 ORDER BY kind ASC
@@ -1095,7 +1176,13 @@ def finalize_bench_job(
             cur.execute(
                 """
                 UPDATE submission_jobs
-                SET status = %s, last_error = %s, updated_at = now()
+                SET status = %s,
+                    last_error = %s,
+                    phase = NULL,
+                    phase_started_at = NULL,
+                    heartbeat_at = NULL,
+                    progress = NULL,
+                    updated_at = now()
                 WHERE id = %s
                 """,
                 (job_status, last_error, job_id),

@@ -97,11 +97,31 @@ Hardcoding plus `chmod 600 /etc/vector/vector.toml` is the working setup.
 
 Alerts go to bohdan@pareton.ai and xavier@pareton.ai.
 
-| Monitor                   | Fires when                                                                                                 | First check                                                                                                       | Usual fix                                                                                                                                                      |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck. `pareton-watcher` does not emit `heartbeat`. | `systemctl status pareton-worker` on the VPS.                                                                     | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                  |
-| `lifecycle-failures`      | A `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low` event.                                   | Search Axiom for the event; it carries `pod`, `provider`, and `error`.                                            | `destroy_failed`: a GPU pod may still be running and billing; destroy it by hand in the provider console. `provider_balance_low`: top up the provider balance. |
-| `job-failure-spike`       | More than 5 `job_failed` in 1 hour. Systemic breakage, not one bad submission.                             | Axiom: `['pareton-prod'] \| where event == "job_failed" \| summarize count() by stage` to find the failing stage. | Usually a bad deploy or a provider outage. Roll back or wait, then watch the monitor resolve.                                                                  |
+| Monitor                   | Fires when                                                                     | First check                                                                                                       | Usual fix                                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck. `pareton-watcher` does not emit `heartbeat`. A green heartbeat does not mean the chain is being read. Use `chain-scan-stalled` for chain reads. | `systemctl status pareton-worker` on the VPS.                                                                     | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                  |
+| `chain-scan-stalled`      | Fewer than 1 `chain_scanned` event in 10 min. The watcher stopped reading the chain. A long worker build does not fire this: `pareton-watcher` is a separate process. | Axiom: `['pareton-prod'] \| where event == "chain_scanned" \| sort by _time desc` for the last scan and its block. Then `journalctl -u pareton-watcher -n 100` for `chain scan failed`. | A dead subtensor websocket or an RPC outage. Restart `pareton-watcher` only. Do not restart `pareton-worker`: that strands the in-flight job and can orphan a GPU pod. New submissions stay on chain, so they are ingested on the next good scan. |
+| `lifecycle-failures`      | A `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low` event.       | Search Axiom for the event; it carries `pod`, `provider`, and `error`.                                            | `destroy_failed`: a GPU pod may still be running and billing; destroy it by hand in the provider console. `provider_balance_low`: top up the provider balance. |
+| `job-failure-spike`       | More than 5 `job_failed` in 1 hour. Systemic breakage, not one bad submission. | Axiom: `['pareton-prod'] \| where event == "job_failed" \| summarize count() by stage` to find the failing stage. | Usually a bad deploy or a provider outage. Roll back or wait, then watch the monitor resolve.                                                                  |
+
+### Is the worker alive, or is the chain being read?
+
+Two processes, two events. Read both before you restart anything.
+
+| Event           | Process            | Cadence     | What it proves                                                                     |
+| --------------- | ------------------ | ----------- | ---------------------------------------------------------------------------------- |
+| `heartbeat`     | `pareton-worker`   | Every 5 min | The worker process is alive. It carries `queue_depth`, the number of jobs waiting. |
+| `chain_scanned` | `pareton-watcher`  | Every 30 s  | We read the chain. It carries `block`, `commitments_seen`, and `ingested`.         |
+
+`chain_scanned` fires on every successful scan, including a scan that finds
+nothing. That is why its absence is an alert. `submission_ingested` cannot do
+this job, because a quiet chain and a broken scanner both emit nothing.
+
+A long gates/build/bench job on `pareton-worker` does not pause `chain_scanned`.
+Restart `pareton-watcher` for a stalled scanner. Leave the worker alone.
+
+A rising `queue_depth` is not an alert on its own. The worker builds one
+submission at a time, and a build can take 6 hours, so a real queue is normal.
 
 ## First-time setup (already done 2026-08-05)
 

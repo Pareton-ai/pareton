@@ -155,7 +155,7 @@ def scan_chain(
             ingest_commitment,
             fetch_block=partial(fetch_block_payment_view, subtensor),
         )
-    meta, revealed, _block, _block_hash = fetch_chain_view(
+    meta, revealed, block, _block_hash = fetch_chain_view(
         subtensor, netuid, network=network
     )
     commitments = build_patch_commitments(meta, revealed)
@@ -168,6 +168,11 @@ def scan_chain(
         if sid:
             created.append(sid)
     hotkeys = [str(hk) for hk in getattr(meta, "hotkeys", [])]
+    obs.chain_scanned(
+        block=block,
+        commitments_seen=len(ordered),
+        ingested=len(created),
+    )
     return created, hotkeys
 
 

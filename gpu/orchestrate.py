@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import config
 from bench.correctness import resolve_trace_path
+from bench.output import PHASE_FILENAME
+from bench.phases import POD_REPORTABLE_PHASES, BenchPhase, coerce_phase
 from bench.validate import (
     RequestValidationError,
     load_bench_request,
@@ -46,6 +50,13 @@ logger = logging.getLogger(__name__)
 
 class RegistryAddError(GpuError):
     """registry.add failed after a successful rent; not a provider failure."""
+
+
+PhaseSink = Callable[[str], None]
+
+
+def _noop_phase(_phase: str) -> None:
+    return None
 
 
 # Under /opt/pareton so the (often non-root) Targon SSH user can write/source it.
@@ -497,6 +508,100 @@ def _push_remote_request(
     )
 
 
+def read_pod_phase(
+    pod: Pod,
+    *,
+    remote_out: str,
+    runner: SshRunner | None = None,
+    state_dir: Path | None = None,
+    max_bytes: int = 4096,
+) -> str | None:
+    """Harness phase on the pod, or None. Untrusted: byte-capped and vocabulary-checked."""
+    path = shlex.quote(f"{remote_out}/{PHASE_FILENAME}")
+    result = ssh_exec(
+        pod,
+        f"head -c {int(max_bytes)} {path} 2>/dev/null || true",
+        timeout_s=30.0,
+        runner=runner,
+        state_dir=state_dir,
+        check=False,
+    )
+    if result.exit_code != 0:
+        return None
+    try:
+        record = json.loads((result.stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    return coerce_phase(record.get("phase"), allowed=POD_REPORTABLE_PHASES)
+
+
+class _PodPhasePoller:
+    """Poll remote phase.json while ssh exec blocks. Failures leave the last phase in place."""
+
+    def __init__(
+        self,
+        pod: Pod,
+        *,
+        remote_out: str,
+        on_phase: PhaseSink,
+        runner: SshRunner | None = None,
+        state_dir: Path | None = None,
+        interval_s: float | None = None,
+    ) -> None:
+        self._pod = pod
+        self._remote_out = remote_out
+        self._on_phase = on_phase
+        self._runner = runner
+        self._state_dir = state_dir
+        self._interval_s = (
+            config.BENCH_PHASE_POLL_S if interval_s is None else interval_s
+        )
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def poll_once(self) -> None:
+        try:
+            phase = read_pod_phase(
+                self._pod,
+                remote_out=self._remote_out,
+                runner=self._runner,
+                state_dir=self._state_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - progress must not fail a bench
+            logger.debug("pod phase poll failed: %s", exc)
+            return
+        if phase is None:
+            return
+        with self._lock:
+            # Join can time out while SSH is still in flight; never overwrite
+            # a later worker-owned phase such as teardown.
+            if self._stop.is_set():
+                return
+            self._on_phase(phase)
+
+    def _loop(self) -> None:
+        self.poll_once()
+        while not self._stop.wait(self._interval_s):
+            self.poll_once()
+
+    def __enter__(self) -> _PodPhasePoller:
+        self._thread = threading.Thread(
+            target=self._loop, name="pod-phase-poll", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        with self._lock:
+            self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=5.0)
+
+
 def run_bench_on_pod(
     spec: PodSpec,
     *,
@@ -512,6 +617,7 @@ def run_bench_on_pod(
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
     repo_root: Path | None = None,
+    on_phase: PhaseSink | None = None,
 ) -> int:
     """Run bench request(s) on a GPU pod.
 
@@ -521,11 +627,14 @@ def run_bench_on_pod(
 
     ``--repetitions`` still replays one request N times (not a sample pool).
 
+    ``on_phase`` is called as the run moves through provisioning, bootstrap, pull, harness, teardown.
+
     Returns the last bench exit code, or EXIT_DESTROY_FAILED (75) if teardown
     failed (pod/volume may still be billing; takes precedence).
     """
     if repetitions < 1:
         raise ProvisionError(f"repetitions must be >= 1, got {repetitions}")
+    phase = on_phase or _noop_phase
 
     registry = registry or PodRegistry(state_dir)
     repo_root = (repo_root or _repo_root()).resolve()
@@ -571,12 +680,14 @@ def run_bench_on_pod(
         else:
             # provider=None: provision_pod walks the configured fallback order
             # and destroy_pod later resolves the real provider from pod.provider.
+            phase(BenchPhase.PROVISIONING.value)
             pod = provision_pod(
                 spec,
                 registry=registry,
                 provider=provider,
                 state_dir=registry.state_dir,
             )
+        phase(BenchPhase.BOOTSTRAPPING.value)
         code_sha = bootstrap_pod(
             pod,
             repo_root=repo_root,
@@ -591,6 +702,7 @@ def run_bench_on_pod(
                 for ref in _engine_image_refs(req):
                     if ref not in refs:
                         refs.append(ref)
+            phase(BenchPhase.PULLING_IMAGE.value)
             pull_engine_images(
                 pod,
                 refs,
@@ -625,14 +737,22 @@ def run_bench_on_pod(
                 f"{REMOTE_VENV}/bin/python -m bench "
                 f"--request {REMOTE_REQUEST} --output-dir {remote_out}{mock_flag}"
             )
-            result = ssh_exec(
+            # ssh exec does not stream; poll the harness marker while it blocks.
+            with _PodPhasePoller(
                 pod,
-                bench_cmd,
-                timeout_s=float(config.BENCH_TIMEOUT_S),
+                remote_out=remote_out,
+                on_phase=phase,
                 runner=runner,
                 state_dir=registry.state_dir,
-                check=False,
-            )
+            ):
+                result = ssh_exec(
+                    pod,
+                    bench_cmd,
+                    timeout_s=float(config.BENCH_TIMEOUT_S),
+                    runner=runner,
+                    state_dir=registry.state_dir,
+                    check=False,
+                )
             if result.stdout:
                 print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
             if result.stderr:
@@ -659,6 +779,7 @@ def run_bench_on_pod(
             if keep:
                 print(f"keep pod={pod.name}", flush=True)
             else:
+                phase(BenchPhase.TEARDOWN.value)
                 _delete_remote_env(pod, runner=runner, state_dir=registry.state_dir)
                 try:
                     destroy_pod(
