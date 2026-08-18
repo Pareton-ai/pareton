@@ -44,6 +44,73 @@ def _ccache_mount_id(baseline_commit: str) -> str:
     return f"pareton-ccache-{cleaned or 'unknown'}"
 
 
+def _env_value(env: list[Any], key: str) -> str | None:
+    """Last KEY=value in a Docker Config.Env list. Blank becomes None."""
+    found: str | None = None
+    for item in env:
+        if not isinstance(item, str):
+            continue
+        name, sep, value = item.partition("=")
+        if sep and name == key:
+            found = value.strip() or None
+    return found
+
+
+def _docker_image_env(image: str) -> list[Any] | None:
+    """Return image Config.Env, or None if inspect failed."""
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Config.Env}}", image],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        env = json.loads(proc.stdout.strip() or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(env, list):
+        return None
+    return env
+
+
+def _base_image_torch_arch(base_image: str) -> str | None:
+    """TORCH_CUDA_ARCH_LIST from the base image Config.Env.
+
+    None means the image is readable but the var is absent or blank.
+    Raises RuntimeError if the image cannot be inspected even after a pull.
+    The worker does not pull before ``docker build``; inspect-without-pull
+    would reject the first miner build on a fresh box.
+    """
+    env = _docker_image_env(base_image)
+    if env is None:
+        _docker_login_ghcr()
+        try:
+            pull = subprocess.run(
+                ["docker", "pull", base_image],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"docker pull failed for {base_image}: {exc}") from exc
+        if pull.returncode != 0:
+            raise RuntimeError(
+                f"docker pull failed for {base_image}: "
+                f"{(pull.stderr or pull.stdout)[:500]}"
+            )
+        env = _docker_image_env(base_image)
+        if env is None:
+            raise RuntimeError(f"docker inspect failed for {base_image} after pull")
+    return _env_value(env, "TORCH_CUDA_ARCH_LIST")
+
+
 def dockerfile_for_patch(
     *,
     allow_empty_patch: bool = False,
@@ -73,11 +140,7 @@ def dockerfile_for_patch(
     # characters, so a malformed profile fails here rather than injecting extra
     # directives into the generated Dockerfile.
     profile = resolve_engine(engine)
-    arch = (
-        config.TORCH_CUDA_ARCH_LIST
-        if torch_cuda_arch_list is None
-        else str(torch_cuda_arch_list).strip()
-    )
+    arch = "" if torch_cuda_arch_list is None else str(torch_cuda_arch_list).strip()
 
     empty = patch_bytes is not None and _patch_is_empty(patch_bytes)
     skip_apply = bool(allow_empty_patch and empty)
@@ -270,6 +333,7 @@ def build_engine_image(
     allow_empty_patch: bool = False,
     image_ref_override: str | None = None,
     engine: dict[str, Any] | None = None,
+    torch_cuda_arch_list: str | None = None,
 ) -> GateResult:
     """Build and optionally push an engine image tagged by patch_hash.
 
@@ -282,6 +346,10 @@ def build_engine_image(
 
     ``engine`` is the campaign's engine profile; ``None`` means vLLM. An invalid
     profile is rejected as ``build_config_invalid`` alongside a bad max_jobs.
+
+    ``torch_cuda_arch_list`` is ops-only. Miner builds leave it unset and
+    inherit ``TORCH_CUDA_ARCH_LIST`` from the pinned base image. vLLM rejects
+    when that image declares none; SGLang may omit it.
     """
     if _patch_is_empty(patch_bytes) and not allow_empty_patch:
         return GateResult.reject("empty_patch_not_allowed")
@@ -299,11 +367,42 @@ def build_engine_image(
     repo_dir = ctx / "baseline"
     (ctx / "submission.diff").write_bytes(patch_bytes)
     try:
+        profile = resolve_engine(engine)
+    except ValueError as exc:
+        return GateResult.reject("build_config_invalid", error=str(exc))
+
+    explicit = (torch_cuda_arch_list or "").strip() or None
+    if explicit:
+        df_arch = explicit
+        arch_note = f"{explicit} (explicit)"
+    elif profile["name"] == "sglang":
+        df_arch = None
+        arch_note = "(unset) (sglang)"
+    else:
+        try:
+            inherited = _base_image_torch_arch(base_image)
+        except RuntimeError as exc:
+            return GateResult.reject(
+                "base_image_inspect_failed",
+                base_image=base_image,
+                error=str(exc),
+            )
+        if inherited is None:
+            return GateResult.reject(
+                "base_image_arch_unset",
+                base_image=base_image,
+                engine="vllm",
+            )
+        df_arch = None
+        arch_note = f"{inherited} (inherited-from-image)"
+
+    try:
         dockerfile = dockerfile_for_patch(
             allow_empty_patch=allow_empty_patch,
             patch_bytes=patch_bytes,
             baseline_commit=baseline_commit,
             engine=engine,
+            torch_cuda_arch_list=df_arch,
         )
     except ValueError as exc:
         return GateResult.reject("build_config_invalid", error=str(exc))
@@ -316,12 +415,11 @@ def build_engine_image(
     _progress(f"build_log={log_path}")
     _progress(f"image_ref={image_ref} base_image={base_image}")
     _progress(
-        f"build_max_jobs={config.BUILD_MAX_JOBS} "
-        f"torch_cuda_arch_list={config.TORCH_CUDA_ARCH_LIST or '(default)'}"
+        f"build_max_jobs={config.BUILD_MAX_JOBS} torch_cuda_arch_list={arch_note}"
     )
     # Which recipe ran is the first thing to check when an image starts the
     # wrong server, so surface it next to the other build knobs.
-    _progress(f"engine={resolve_engine(engine)['name']}")
+    _progress(f"engine={profile['name']}")
 
     try:
         _progress("step 1/5 clone baseline repo")

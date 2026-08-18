@@ -5,6 +5,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME = _ROOT / "images" / "baseline" / "requirements-runtime.txt"
 _A2B = _ROOT / "ops" / "a2b-build.sh"
+_GHA_A2B = _ROOT / ".github" / "workflows" / "build-baseline-images.yml"
 
 # From https://github.com/vllm-project/vllm/blob/ee0da84ab9e04ac7610e28580af62c365e898389/requirements/cuda.txt
 # torch is installed in the Dockerfile; common.txt is vendored separately.
@@ -39,3 +40,9 @@ def test_a2b_build_requires_explicit_base_digest() -> None:
     assert (
         "72b601e4314fa3c5e522e814305fad3a10f06eb174a5785e2729e655cb490986" not in text
     )
+    assert "--torch-cuda-arch-list" in text
+
+
+def test_gha_a2b_passes_torch_cuda_arch_list() -> None:
+    text = _GHA_A2B.read_text(encoding="utf-8")
+    assert "--torch-cuda-arch-list" in text
