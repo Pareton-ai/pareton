@@ -92,8 +92,9 @@ def _mount_workspace_script(*, volume_gib: int, allow_local_disk: bool = False) 
     """Bind/mount block storage at /workspace.
 
     ``allow_local_disk`` is for instances provisioned without a volume, where
-    the local disk is the only storage. It still demands MIN_KB, so a disk too
-    small for the model fails here instead of part-way through a bench.
+    the local disk is the only storage. It still demands MIN_KB, but of *free*
+    space rather than filesystem size: a local disk may already be in use, and
+    a large-but-full one must fail here instead of part-way through a bench.
     """
     min_kb = int(volume_gib * 1024 * 1024 * 0.9)
     return f"""set -euo pipefail
@@ -101,7 +102,13 @@ MIN_KB={min_kb}
 ALLOW_LOCAL_DISK={1 if allow_local_disk else 0}
 
 workspace_kb() {{
-  df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $2}}'
+  # A fresh volume is empty, so its size is what matters. A local disk may
+  # already be in use, so measure what is actually free.
+  if [ "$ALLOW_LOCAL_DISK" = "1" ]; then
+    df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $4}}'
+  else
+    df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $2}}'
+  fi
 }}
 
 workspace_ready() {{
@@ -159,14 +166,7 @@ if [ -n "$best_mp" ]; then
 fi
 
 if [ "$ALLOW_LOCAL_DISK" = "1" ]; then
-  avail_kb="$(df -Pk /workspace 2>/dev/null | awk 'NR==2 {{print $4}}')"
-  if [ -n "$avail_kb" ] && [ "$avail_kb" -ge "$MIN_KB" ]; then
-    sudo chmod 1777 /workspace
-    echo "OK: /workspace on local disk (${{avail_kb}}KB available, no volume attached)"
-    df -h /workspace
-    exit 0
-  fi
-  echo "ERROR: no volume attached and /workspace local disk has ${{avail_kb:-0}}KB available, need ${{MIN_KB}}KB"
+  echo "ERROR: no volume attached and /workspace has $(workspace_kb)KB available, need ${{MIN_KB}}KB"
   lsblk
   df -h
   exit 1

@@ -227,6 +227,25 @@ def test_mount_script_local_disk_fallback_is_opt_in():
     assert "mkfs.ext4" not in local
 
 
+def test_mount_script_measures_free_space_on_local_disk():
+    """A large but nearly full local disk must fail, not pass on total size.
+
+    df -Pk column $2 is the filesystem size and $4 is what is free. A fresh
+    volume is empty so $2 is right for it, but a local disk may already be in
+    use, and the accept decision has to be made on free space.
+    """
+    from gpu.providers.shadeform import _mount_workspace_script
+
+    local = _mount_workspace_script(volume_gib=250, allow_local_disk=True)
+
+    # The gate that admits a pod is workspace_ready, so the free-space read has
+    # to happen before it. A free-space check placed after that gate can never
+    # accept anything: it only runs when size < MIN_KB, and free space cannot
+    # exceed size, so the pod is admitted on size alone and a large-but-full
+    # disk slips through.
+    assert local.index("print $4") < local.index("if workspace_ready")
+
+
 def _offer() -> Offer:
     return Offer(
         provider="shadeform",
