@@ -1,0 +1,20 @@
+# Chain watcher: polls SN10 commitments and enqueues submissions.
+# Safe to restart at any time; it never holds a claimed job.
+[Unit]
+Description=Pareton chain watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pareton
+EnvironmentFile=/opt/pareton/.env
+ExecStart=/opt/pareton/.venv/bin/python -m worker.watcher
+Restart=always
+RestartSec=10
+# No job drain; a scan finishes in seconds.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

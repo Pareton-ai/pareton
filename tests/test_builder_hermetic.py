@@ -6,7 +6,12 @@ import subprocess
 
 import pytest
 
-from builder.hermetic import build_engine_image, dockerfile_for_patch
+from builder.hermetic import (
+    _base_image_torch_arch,
+    _env_value,
+    build_engine_image,
+    dockerfile_for_patch,
+)
 from campaign.engine import preset
 from gate.types import GateResult, SubmissionState
 from builder.registry import (
@@ -22,7 +27,6 @@ COMMIT = "ee0da84ab9e04ac7610e28580af62c365e898389"
 def test_dockerfile_nonempty_has_apply_and_entrypoint(monkeypatch):
     # .env (loaded by conftest) may set build vars; pin defaults for this test.
     monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
-    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     text = dockerfile_for_patch(
         allow_empty_patch=False,
         patch_bytes=b"diff --git a/x b/x\n",
@@ -54,7 +58,6 @@ def test_dockerfile_nonempty_has_apply_and_entrypoint(monkeypatch):
 @pytest.mark.unit
 def test_dockerfile_empty_allowed_skips_apply(monkeypatch):
     monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
-    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     text = dockerfile_for_patch(
         allow_empty_patch=True, patch_bytes=b"", baseline_commit=COMMIT
     )
@@ -171,6 +174,7 @@ def test_build_timeout_appends_fail_line(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(cmd=["docker", "build"], timeout=12)
 
     monkeypatch.setattr(hermetic, "_run_logged", boom)
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", lambda *_a, **_k: "9.0")
     monkeypatch.setattr(hermetic.config, "BUILD_TIMEOUT_S", 12)
 
     log_dir = tmp_path / "logs"
@@ -203,6 +207,7 @@ def test_build_deletes_work_root_keeps_log(tmp_path, monkeypatch):
             args=[], returncode=1, stdout="", stderr="boom"
         ),
     )
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", lambda *_a, **_k: "9.0")
 
     log_dir = tmp_path / "logs"
     work_root = tmp_path / "work"
@@ -321,7 +326,6 @@ def test_build_base_image_falls_back_to_base():
 def test_dockerfile_sglang_profile_swaps_install_and_entrypoint(monkeypatch):
     """SGLang differs from vLLM in exactly two lines (PAR-54, verified on B300)."""
     monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
-    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     kw = dict(
         allow_empty_patch=False,
         patch_bytes=b"diff --git a/x b/x\n",
@@ -346,7 +350,6 @@ def test_dockerfile_sglang_profile_swaps_install_and_entrypoint(monkeypatch):
 def test_dockerfile_explicit_vllm_matches_no_engine(monkeypatch):
     """A campaign pinned before engine profiles must emit identical bytes."""
     monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
-    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     kw = dict(
         allow_empty_patch=False,
         patch_bytes=b"diff --git a/x b/x\n",
@@ -362,7 +365,6 @@ def test_dockerfile_explicit_vllm_matches_no_engine(monkeypatch):
 def test_dockerfile_sglang_keeps_miner_build_security(monkeypatch):
     """A non-default engine must not relax the read-only ccache mount."""
     monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
-    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     text = dockerfile_for_patch(
         allow_empty_patch=False,
         patch_bytes=b"diff --git a/x b/x\n",
@@ -379,7 +381,6 @@ def test_dockerfile_sglang_keeps_miner_build_security(monkeypatch):
 @pytest.mark.unit
 def test_dockerfile_sglang_empty_patch_skips_apply(monkeypatch):
     monkeypatch.setattr("config.BUILD_MAX_JOBS", 1)
-    monkeypatch.setattr("config.TORCH_CUDA_ARCH_LIST", "")
     text = dockerfile_for_patch(
         allow_empty_patch=True,
         patch_bytes=b"",
@@ -475,3 +476,261 @@ def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path):
         ]
     )
     assert seen["engine"] is None
+    assert seen["torch_cuda_arch_list"] is None
+
+
+# --- PAR-71: inherit TORCH_CUDA_ARCH_LIST from the base image -----------------
+
+
+_BASE = "ghcr.io/pareton-ai/pareton-baseline@sha256:" + ("b" * 64)
+
+
+def _ok_run(*_a, **_k):
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+
+@pytest.mark.unit
+def test_env_value_last_wins():
+    assert (
+        _env_value(
+            [
+                "PATH=/usr/bin",
+                "TORCH_CUDA_ARCH_LIST=9.0",
+                "TORCH_CUDA_ARCH_LIST=12.0",
+            ],
+            "TORCH_CUDA_ARCH_LIST",
+        )
+        == "12.0"
+    )
+    assert _env_value(["PATH=/usr/bin"], "TORCH_CUDA_ARCH_LIST") is None
+    assert _env_value(["TORCH_CUDA_ARCH_LIST="], "TORCH_CUDA_ARCH_LIST") is None
+    assert _env_value(["TORCH_CUDA_ARCH_LIST=  "], "TORCH_CUDA_ARCH_LIST") is None
+    assert _env_value(["FOO=bar=baz"], "FOO") == "bar=baz"
+
+
+@pytest.mark.unit
+def test_base_image_arch_pulls_on_missing(monkeypatch):
+    import builder.hermetic as hermetic
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_k):
+        calls.append(list(cmd))
+        if cmd[:2] == ["docker", "inspect"]:
+            if any(c[:2] == ["docker", "pull"] for c in calls):
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout='["PATH=/bin","TORCH_CUDA_ARCH_LIST=12.0"]\n',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                cmd, 1, stdout="", stderr="No such image"
+            )
+        if cmd[:2] == ["docker", "pull"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(hermetic.subprocess, "run", fake_run)
+    monkeypatch.setattr(hermetic, "_docker_login_ghcr", lambda: None)
+    assert _base_image_torch_arch("img") == "12.0"
+    assert ["docker", "pull", "img"] in calls
+
+
+@pytest.mark.unit
+def test_build_vllm_inherits_arch(tmp_path, monkeypatch, capsys):
+    import builder.hermetic as hermetic
+
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", lambda *_a, **_k: "12.0")
+    monkeypatch.setattr(hermetic.subprocess, "run", _ok_run)
+    monkeypatch.setattr(hermetic, "_run_logged", lambda *_a, **_k: 0)
+
+    captured: dict = {}
+    orig = hermetic.dockerfile_for_patch
+
+    def wrap(**kwargs):
+        text = orig(**kwargs)
+        captured["text"] = text
+        captured["arch"] = kwargs.get("torch_cuda_arch_list")
+        return text
+
+    monkeypatch.setattr(hermetic, "dockerfile_for_patch", wrap)
+
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+    )
+    assert result.ok
+    assert captured["arch"] is None
+    assert "TORCH_CUDA_ARCH_LIST" not in captured["text"]
+    err = capsys.readouterr().err
+    assert "12.0 (inherited-from-image)" in err
+
+
+@pytest.mark.unit
+def test_build_vllm_rejects_base_arch_unset(tmp_path, monkeypatch):
+    import builder.hermetic as hermetic
+
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", lambda *_a, **_k: None)
+    ran = {"logged": False}
+
+    def no_log(*_a, **_k):
+        ran["logged"] = True
+        return 0
+
+    monkeypatch.setattr(hermetic, "_run_logged", no_log)
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+    )
+    assert not result.ok
+    assert result.reason == "base_image_arch_unset"
+    assert result.evidence["base_image"] == _BASE
+    assert ran["logged"] is False
+
+
+@pytest.mark.unit
+def test_build_vllm_rejects_base_inspect_failed(tmp_path, monkeypatch):
+    import builder.hermetic as hermetic
+
+    def boom(*_a, **_k):
+        raise RuntimeError("docker inspect failed")
+
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", boom)
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+    )
+    assert not result.ok
+    assert result.reason == "base_image_inspect_failed"
+    assert result.evidence["base_image"] == _BASE
+
+
+@pytest.mark.unit
+def test_build_sglang_skips_arch_inspect(tmp_path, monkeypatch, capsys):
+    import builder.hermetic as hermetic
+
+    def boom(*_a, **_k):
+        raise AssertionError("inspect must not run for sglang")
+
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", boom)
+    monkeypatch.setattr(hermetic.subprocess, "run", _ok_run)
+    monkeypatch.setattr(hermetic, "_run_logged", lambda *_a, **_k: 0)
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+        engine=preset("sglang"),
+    )
+    assert result.ok
+    assert "(unset) (sglang)" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_build_explicit_arch_skips_inspect(tmp_path, monkeypatch, capsys):
+    import builder.hermetic as hermetic
+
+    def boom(*_a, **_k):
+        raise AssertionError("inspect must not run when arch is explicit")
+
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", boom)
+    monkeypatch.setattr(hermetic.subprocess, "run", _ok_run)
+    monkeypatch.setattr(hermetic, "_run_logged", lambda *_a, **_k: 0)
+
+    captured: dict = {}
+    orig = hermetic.dockerfile_for_patch
+
+    def wrap(**kwargs):
+        text = orig(**kwargs)
+        captured["text"] = text
+        return text
+
+    monkeypatch.setattr(hermetic, "dockerfile_for_patch", wrap)
+
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+        torch_cuda_arch_list="9.0",
+    )
+    assert result.ok
+    assert 'ENV TORCH_CUDA_ARCH_LIST="9.0"' in captured["text"]
+    assert "9.0 (explicit)" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_build_blank_explicit_arch_treated_as_unset(tmp_path, monkeypatch):
+    import builder.hermetic as hermetic
+
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", lambda *_a, **_k: None)
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+        torch_cuda_arch_list="  ",
+    )
+    assert not result.ok
+    assert result.reason == "base_image_arch_unset"
+
+
+@pytest.mark.unit
+def test_cli_torch_cuda_arch_list_flag_passes_through(monkeypatch):
+    import builder.__main__ as cli
+
+    seen: dict = {}
+
+    def fake_build(**kwargs):
+        seen.update(kwargs)
+        return GateResult.success(SubmissionState.BUILT, image_ref="img")
+
+    monkeypatch.setattr(cli, "build_engine_image", fake_build)
+    rc = cli.main(
+        [
+            "--baseline-repo",
+            "https://example.invalid/repo.git",
+            "--baseline-commit",
+            COMMIT,
+            "--base-image",
+            _BASE,
+            "--image-ref",
+            "ghcr.io/pareton-ai/pareton-engine:baseline",
+            "--empty-patch",
+            "--torch-cuda-arch-list",
+            "12.0",
+        ]
+    )
+    assert rc == 0
+    assert seen["torch_cuda_arch_list"] == "12.0"

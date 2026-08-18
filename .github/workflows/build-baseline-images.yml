@@ -107,6 +107,7 @@ jobs:
             --base-image "$BASE_REF" \
             --image-ref "$ENGINE_TAG" \
             --empty-patch \
+            --torch-cuda-arch-list 9.0 \
             --push
           df -h
 
