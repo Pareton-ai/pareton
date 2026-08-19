@@ -506,7 +506,7 @@ def test_gpu_count_passed_as_docker_count_not_all():
     assert run[run.index("--shm-size") + 1] == "16g"
 
 
-def test_engine_cache_dir_mounted_when_env_set(tmp_path: Path, monkeypatch):
+def test_engine_cache_dir_mounted_only_when_opted_in(tmp_path: Path, monkeypatch):
     fake = FakeDocker()
     spec = _spec(image="local:img")
     fake.image_digests[spec.image] = []
@@ -520,22 +520,28 @@ def test_engine_cache_dir_mounted_when_env_set(tmp_path: Path, monkeypatch):
     life.wait_until_healthy = lambda *a, **k: None  # type: ignore[assignment]
     try:
         with BenchNetwork(run_id="engcache0001", runner=fake, cmd_timeout_s=30) as net:
-            with EngineContainer(
-                spec=spec,
-                network=net,
-                pull=False,
-                gpu_count=1,
-                health_timeout_s=1,
-                health_poll_s=0.05,
-                cmd_timeout_s=30,
-            ):
-                pass
+            for opt_in in (False, True):
+                with EngineContainer(
+                    spec=spec,
+                    network=net,
+                    role="opt-in" if opt_in else "no-mount",
+                    pull=False,
+                    gpu_count=1,
+                    health_timeout_s=1,
+                    health_poll_s=0.05,
+                    cmd_timeout_s=30,
+                    mount_engine_cache=opt_in,
+                ):
+                    pass
     finally:
         life.wait_until_healthy = original_wait  # type: ignore[assignment]
 
-    run = next(c for c, _ in fake.calls if c[:2] == ["docker", "run"])
+    runs = [c for c, _ in fake.calls if c[:2] == ["docker", "run"]]
     vol = f"{cache.resolve()}:/root/.cache/sglang"
-    assert vol in run
+    # Default is no mount even with the env var set, so a candidate cannot
+    # inherit the warm compile cache the baseline left behind.
+    assert vol not in runs[0]
+    assert vol in runs[1]
     assert cache.is_dir()
 
 

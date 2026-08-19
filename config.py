@@ -147,17 +147,21 @@ ALLOW_MOCK_BENCH: bool = os.environ.get("PARETON_ALLOW_MOCK_BENCH", "") == "1"
 # Correctness prompts have no env default on purpose: campaigns pin
 # bench.correctness.num_prompts, and absent a pin the worker scores every
 # request in the trace (PAR-65).
-BENCH_CORRECTNESS_MAX_NEW_TOKENS: int = int(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_NEW_TOKENS", "32")
+#
+# The bars below are absolute logprobs the shared scorer grades a captured
+# output against. They are seed-time defaults only: campaign/seed.py copies
+# them onto campaigns.bench.correctness.thresholds, and the harness reads them
+# from the campaign, so editing these on a pod cannot move a live campaign.
+BENCH_CORRECTNESS_MIN_MEAN_LOGPROB: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_MEAN_LOGPROB", "-4.0")
 )
-BENCH_CORRECTNESS_MEAN_ABS_LOGPROB_DIFF: float = float(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_MEAN_ABS_LOGPROB_DIFF", "0.0246")
+BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB", "-12.0")
 )
-BENCH_CORRECTNESS_MAX_ABS_LOGPROB_DIFF: float = float(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_ABS_LOGPROB_DIFF", "0.164")
-)
-BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE: float = float(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE", "0.001")
+# Below this fraction of the candidate's streamed tokens, the scorer never saw
+# the output: infrastructure, not a wrong answer.
+BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_COVERAGE_RATIO", "0.5")
 )
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 BENCH_SLA_WARMUP_REQUESTS: int = int(

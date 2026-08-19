@@ -1,4 +1,4 @@
-"""Module C SLA bench: percentile helper, aggregation, recompute consistency."""
+"""SLA bench: percentile helper, aggregation, recompute, per-request capture."""
 
 from __future__ import annotations
 
@@ -12,8 +12,9 @@ from bench.sla_bench import (
     aggregate_rep_metrics,
     percentile,
     recompute_sla_metrics,
-    run_sla_bench,
+    run_sla_engine,
     _engine_metrics_from_reps,
+    _median_rep_row,
 )
 from bench.schemas import (
     SlaBenchConfig,
@@ -138,10 +139,10 @@ def test_rejects_token_ids_only(tmp_path: Path):
         thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
     )
     with pytest.raises(RequestValidationError, match="text prompt"):
-        run_sla_bench(
+        run_sla_engine(
             "http://baseline",
-            "http://candidate",
-            trace=trace,
+            role="baseline",
+            requests=list(trace.requests),
             cfg=cfg,
             evidence_dir=tmp_path,
         )
@@ -176,24 +177,35 @@ def test_recompute_matches_report(tmp_path: Path):
         warmup_requests=0,
         thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
     )
-    with (
-        MockEngine(MockEngineConfig(model="b", token_latency_s=0.01)) as b,
-        MockEngine(MockEngineConfig(model="c", token_latency_s=0.005)) as c,
-    ):
-        rep = run_sla_bench(
-            b.base_url, c.base_url, trace=trace, cfg=cfg, evidence_dir=tmp_path
+    with MockEngine(MockEngineConfig(model="c", token_latency_s=0.005)) as c:
+        replay = run_sla_engine(
+            c.base_url,
+            role="candidate-0",
+            requests=list(trace.requests),
+            cfg=cfg,
+            evidence_dir=tmp_path,
         )
 
+    metrics = replay.result.metrics
     recomputed = recompute_sla_metrics(
-        tmp_path / "candidate",
+        tmp_path / "candidate-0",
         p99_ttft_ms=cfg.thresholds.p99_ttft_ms,
         p99_itl_ms=cfg.thresholds.p99_itl_ms,
         repetitions=cfg.repetitions,
     )
-    assert recomputed.ttft_ms.p50 == pytest.approx(rep.candidate.ttft_ms.p50)
-    assert recomputed.ttft_ms.p99 == pytest.approx(rep.candidate.ttft_ms.p99)
-    assert recomputed.itl_ms.p99 == pytest.approx(rep.candidate.itl_ms.p99)
-    assert recomputed.e2e_ms.p99 == pytest.approx(rep.candidate.e2e_ms.p99)
+    assert recomputed.ttft_ms.p50 == pytest.approx(metrics.ttft_ms.p50)
+    assert recomputed.ttft_ms.p99 == pytest.approx(metrics.ttft_ms.p99)
+    assert recomputed.itl_ms.p99 == pytest.approx(metrics.itl_ms.p99)
+    assert recomputed.e2e_ms.p99 == pytest.approx(metrics.e2e_ms.p99)
+
+    # The contract bench/score.py consumes: request id -> PromptTiming.
+    assert set(replay.result.timings) == {"r1", "r2"}
+    assert set(replay.outputs) == {"r1", "r2"}
+    for rid, timing in replay.result.timings.items():
+        assert timing.completion_tokens == 6
+        assert len(timing.itl_s) == 5
+        assert timing.ttft_s > 0
+        assert replay.outputs[rid]
 
 
 def test_warmup_excluded_from_metrics(tmp_path: Path):
@@ -215,15 +227,16 @@ def test_warmup_excluded_from_metrics(tmp_path: Path):
         warmup_requests=1,
         thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
     )
-    with (
-        MockEngine(MockEngineConfig(model="b")) as b,
-        MockEngine(MockEngineConfig(model="c")) as c,
-    ):
-        run_sla_bench(
-            b.base_url, c.base_url, trace=trace, cfg=cfg, evidence_dir=tmp_path
+    with MockEngine(MockEngineConfig(model="c")) as c:
+        run_sla_engine(
+            c.base_url,
+            role="candidate-0",
+            requests=list(trace.requests),
+            cfg=cfg,
+            evidence_dir=tmp_path,
         )
     # Warmup rows exist but flagged; measured reps are rep_1/rep_2.
-    warm = tmp_path / "candidate" / "warmup" / "requests.jsonl"
+    warm = tmp_path / "candidate-0" / "warmup" / "requests.jsonl"
     assert warm.is_file()
     warm_rows = [
         json.loads(line)
@@ -234,7 +247,7 @@ def test_warmup_excluded_from_metrics(tmp_path: Path):
     for n in (1, 2):
         rep_rows = [
             json.loads(line)
-            for line in (tmp_path / "candidate" / f"rep_{n}" / "requests.jsonl")
+            for line in (tmp_path / "candidate-0" / f"rep_{n}" / "requests.jsonl")
             .read_text()
             .splitlines()
             if line.strip() and '"_rep_meta"' not in line
@@ -269,14 +282,25 @@ def test_arrival_offsets_respected(tmp_path: Path):
     )
     import time
 
-    with (
-        MockEngine(MockEngineConfig(model="b")) as b,
-        MockEngine(MockEngineConfig(model="c")) as c,
-    ):
+    with MockEngine(MockEngineConfig(model="b")) as b:
         t0 = time.monotonic()
-        run_sla_bench(
-            b.base_url, c.base_url, trace=trace, cfg=cfg, evidence_dir=tmp_path
+        run_sla_engine(
+            b.base_url,
+            role="baseline",
+            requests=list(trace.requests),
+            cfg=cfg,
+            evidence_dir=tmp_path,
         )
         elapsed = time.monotonic() - t0
-    # The 80ms-offset request means each engine's rep takes >= ~80ms.
+    # The 80ms-offset request means the rep takes >= ~80ms.
     assert elapsed >= 0.08
+
+
+def test_median_rep_row_keeps_one_real_repetition():
+    """Timings and text must come from the same run, not be blended."""
+    rows = [
+        {"e2e_ms": 30.0, "text": "slow"},
+        {"e2e_ms": 10.0, "text": "fast"},
+        {"e2e_ms": 20.0, "text": "median"},
+    ]
+    assert _median_rep_row(rows)["text"] == "median"

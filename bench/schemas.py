@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from bench.score import PromptTiming
+
 
 # ---------------------------------------------------------------------------
 # Workload trace
@@ -84,7 +86,10 @@ class WorkloadTrace:
 # bench_request.json
 # ---------------------------------------------------------------------------
 
-BenchMode = Literal["all", "correctness", "sla_bench"]
+# "all" runs the whole round, scorer included. "sla_bench" stops after the
+# timing runs and is a debugging mode. Correctness has no mode of its own,
+# because the text it grades is what the SLA replay captured.
+BenchMode = Literal["all", "sla_bench"]
 
 
 @dataclass
@@ -135,14 +140,21 @@ class EngineSpec:
 
 @dataclass
 class EnginesSpec:
+    """One baseline plus every candidate in the round.
+
+    A round is one baseline and N candidates (the leader is just another
+    candidate to the harness), so one ``bench_request.json`` describes the
+    whole round.
+    """
+
     baseline: EngineSpec
-    candidate: EngineSpec
+    candidates: list[EngineSpec] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> EnginesSpec:
         return cls(
             baseline=EngineSpec.from_dict(d["baseline"]),
-            candidate=EngineSpec.from_dict(d["candidate"]),
+            candidates=[EngineSpec.from_dict(c) for c in (d.get("candidates") or [])],
         )
 
 
@@ -158,33 +170,43 @@ class WorkloadTraceRef:
 
 @dataclass
 class CorrectnessThresholds:
-    mean_abs_logprob_diff: float
-    max_abs_logprob_diff: float
-    argmax_mismatch_rate: float
+    """Absolute logprob bars the shared scorer grades a captured output against.
+
+    One scorer grades every candidate's own output, so there is no second set
+    of logprobs to compare against and the bars stand on their own. A greedy
+    continuation of the pinned model scores around -0.5 to -2.0 per token
+    under that same model; garbage scores below -15.
+    """
+
+    min_mean_logprob: float
+    min_token_logprob: float
+    min_coverage_ratio: float
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessThresholds:
         return cls(
-            mean_abs_logprob_diff=float(d["mean_abs_logprob_diff"]),
-            max_abs_logprob_diff=float(d["max_abs_logprob_diff"]),
-            argmax_mismatch_rate=float(d["argmax_mismatch_rate"]),
+            min_mean_logprob=float(d["min_mean_logprob"]),
+            min_token_logprob=float(d["min_token_logprob"]),
+            min_coverage_ratio=float(d["min_coverage_ratio"]),
         )
 
 
 @dataclass
 class CorrectnessConfig:
+    """How many captured outputs to grade, and the bars to grade them against.
+
+    ``num_prompts`` counts trace requests in trace order; the scorer grades
+    that many of each candidate's captured outputs.
+    """
+
     num_prompts: int
-    max_new_tokens: int
     thresholds: CorrectnessThresholds
-    min_positions_compared: int = 1
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessConfig:
         return cls(
             num_prompts=int(d["num_prompts"]),
-            max_new_tokens=int(d["max_new_tokens"]),
             thresholds=CorrectnessThresholds.from_dict(d["thresholds"]),
-            min_positions_compared=int(d.get("min_positions_compared", 1)),
         )
 
 
@@ -217,6 +239,13 @@ class SlaBenchConfig:
 
 @dataclass
 class BenchRequest:
+    """One round: a baseline, every candidate, and the rule that ranks them.
+
+    ``scoring_rule`` is the round's snapshot of ``campaigns.scoring_rule``.
+    The harness carries it so the pod can score its own entries and the
+    baseline drift with the same formula the round was created under.
+    """
+
     schema_version: int
     task_id: str
     mode: BenchMode
@@ -226,15 +255,14 @@ class BenchRequest:
     workload_trace: WorkloadTraceRef
     correctness: CorrectnessConfig
     sla_bench: SlaBenchConfig
+    scoring_rule: dict[str, Any] = field(default_factory=dict)
     hf_token_env: str = "HF_TOKEN"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
         mode = d.get("mode", "all")
-        if mode not in ("all", "correctness", "sla_bench"):
-            raise ValueError(
-                f"mode must be one of all|correctness|sla_bench, got {mode!r}"
-            )
+        if mode not in ("all", "sla_bench"):
+            raise ValueError(f"mode must be one of all|sla_bench, got {mode!r}")
         return cls(
             schema_version=int(d["schema_version"]),
             task_id=str(d["task_id"]),
@@ -245,6 +273,7 @@ class BenchRequest:
             workload_trace=WorkloadTraceRef.from_dict(d["workload_trace"]),
             correctness=CorrectnessConfig.from_dict(d["correctness"]),
             sla_bench=SlaBenchConfig.from_dict(d["sla_bench"]),
+            scoring_rule=dict(d.get("scoring_rule") or {}),
             hf_token_env=str(d.get("hf_token_env") or "HF_TOKEN"),
         )
 
@@ -256,7 +285,10 @@ class BenchRequest:
 # bench_report.json
 # ---------------------------------------------------------------------------
 
-Verdict = Literal["pass", "fail_correctness", "fail_sla", "error"]
+# Whether the round itself ran end to end. Each candidate's own outcome lives
+# in ``entries``, so one candidate failing correctness is that entry's
+# verdict, not the round's.
+Verdict = Literal["pass", "error"]
 
 
 @dataclass
@@ -293,7 +325,7 @@ class EnvironmentInfo:
 @dataclass
 class InputsFingerprint:
     baseline_image_digest: str
-    candidate_image_digest: str
+    candidate_image_digest: list[str]
     model_repo: str
     model_revision: str
     model_weights_sha256: str
@@ -306,14 +338,21 @@ class InputsFingerprint:
 
 @dataclass
 class CorrectnessReport:
-    verdict: str
+    """One candidate graded by the shared scorer.
+
+    ``infra_failed`` means the scorer produced too few logprobs to judge on.
+    That is a harness problem rather than the candidate being wrong, so the
+    entry is requeued instead of disqualified.
+    """
+
+    verdict: str  # "pass" | "fail_correctness" | "infra_failed"
     num_prompts: int
-    num_positions_compared: int
-    mean_abs_logprob_diff: float
-    max_abs_logprob_diff: float
-    argmax_mismatch_rate: float
-    argmax_mismatches: int
+    num_positions_scored: int
+    mean_logprob: float
+    min_logprob: float
+    coverage_ratio: float
     evidence: str
+    reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -350,29 +389,65 @@ class EngineSlaMetrics:
 
 
 @dataclass
-class SlaBenchReport:
-    verdict: str
-    repetitions: int
-    candidate: EngineSlaMetrics
-    baseline: EngineSlaMetrics
-    speedup: dict[str, float]
+class EngineSlaResult:
+    """One engine's SLA replay: aggregate metrics plus the per-request timings.
+
+    ``timings`` is the shape ``bench.score.score_candidate`` consumes: request
+    id -> ``PromptTiming``. The aggregate metrics sit alongside it in absolute
+    units, not only as a ratio against the baseline, so a stored report still
+    answers questions about a campaign it was never compared within.
+    """
+
+    role: str
+    metrics: EngineSlaMetrics
     cross_rep_variance: dict[str, float]
+    timings: dict[str, PromptTiming]
     evidence: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "verdict": self.verdict,
-            "repetitions": self.repetitions,
-            "candidate": self.candidate.to_dict(),
-            "baseline": self.baseline.to_dict(),
-            "speedup": self.speedup,
+            "role": self.role,
+            "metrics": self.metrics.to_dict(),
             "cross_rep_variance": self.cross_rep_variance,
+            "timings": {rid: asdict(t) for rid, t in self.timings.items()},
             "evidence": self.evidence,
         }
 
 
 @dataclass
+class RoundEntryReport:
+    """One candidate's outcome. ``index`` is its position in ``engines.candidates``."""
+
+    index: int
+    image_digest: str
+    status: str  # "scored" | "disqualified" | "infra_failed"
+    score: float | None = None
+    score_report: dict[str, Any] | None = None
+    sla: EngineSlaResult | None = None
+    correctness: CorrectnessReport | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "index": self.index,
+            "image_digest": self.image_digest,
+            "status": self.status,
+            "score": self.score,
+            "reason": self.reason,
+        }
+        if self.score_report is not None:
+            out["score_report"] = self.score_report
+        if self.sla is not None:
+            out["sla"] = self.sla.to_dict()
+        if self.correctness is not None:
+            out["correctness"] = self.correctness.to_dict()
+        return out
+
+
+@dataclass
 class BenchReport:
+    """One round's result: the baseline reference, every entry, and the drift."""
+
     schema_version: int
     task_id: str
     verdict: Verdict
@@ -380,8 +455,11 @@ class BenchReport:
     finished_at: str
     environment: EnvironmentInfo
     inputs_fingerprint: InputsFingerprint
-    correctness: CorrectnessReport | None = None
-    sla_bench: SlaBenchReport | None = None
+    scoring_rule: dict[str, Any] = field(default_factory=dict)
+    baseline: EngineSlaResult | None = None
+    drift_baseline: EngineSlaResult | None = None
+    baseline_drift: float | None = None
+    entries: list[RoundEntryReport] = field(default_factory=list)
     # Stub/skeleton note (omitted from to_dict when empty).
     stub_note: str | None = None
     # Fail-fast skip note (omitted from to_dict when empty).
@@ -396,11 +474,14 @@ class BenchReport:
             "finished_at": self.finished_at,
             "environment": self.environment.to_dict(),
             "inputs_fingerprint": self.inputs_fingerprint.to_dict(),
+            "scoring_rule": self.scoring_rule,
+            "entries": [e.to_dict() for e in self.entries],
+            "baseline_drift": self.baseline_drift,
         }
-        if self.correctness is not None:
-            out["correctness"] = self.correctness.to_dict()
-        if self.sla_bench is not None:
-            out["sla_bench"] = self.sla_bench.to_dict()
+        if self.baseline is not None:
+            out["baseline"] = self.baseline.to_dict()
+        if self.drift_baseline is not None:
+            out["drift_baseline"] = self.drift_baseline.to_dict()
         if self.stub_note:
             out["stub_note"] = self.stub_note
         if self.skipped_note:

@@ -108,6 +108,51 @@ def _normalize_status(status: str) -> str:
     return cleaned
 
 
+CORRECTNESS_THRESHOLD_KEYS = (
+    "min_mean_logprob",
+    "min_token_logprob",
+    "min_coverage_ratio",
+)
+
+
+def _correctness_thresholds(thresholds: dict | None) -> dict:
+    """Complete absolute correctness bars, defaulting from config."""
+    src = dict(thresholds or {})
+    defaults = {
+        "min_mean_logprob": config.BENCH_CORRECTNESS_MIN_MEAN_LOGPROB,
+        "min_token_logprob": config.BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB,
+        "min_coverage_ratio": config.BENCH_CORRECTNESS_MIN_COVERAGE_RATIO,
+    }
+    out = {k: float(src.get(k, defaults[k])) for k in CORRECTNESS_THRESHOLD_KEYS}
+    if not 0.0 < out["min_coverage_ratio"] <= 1.0:
+        raise ValueError(
+            "bench.correctness.thresholds.min_coverage_ratio must be in (0, 1]"
+        )
+    return out
+
+
+def require_correctness_thresholds(bench: dict | None) -> None:
+    """A campaign may not open without its correctness bars in the manifest.
+
+    The bars are absolute logprobs, so nothing has to be measured before a
+    campaign opens. They still have to be written down: a bar that is not in
+    the manifest is a bar that can move under a live campaign without the
+    manifest hash changing.
+    """
+    corr = (bench or {}).get("correctness") if isinstance(bench, dict) else None
+    thr = corr.get("thresholds") if isinstance(corr, dict) else None
+    missing = (
+        list(CORRECTNESS_THRESHOLD_KEYS)
+        if not isinstance(thr, dict)
+        else [k for k in CORRECTNESS_THRESHOLD_KEYS if k not in thr]
+    )
+    if missing:
+        raise ValueError(
+            "status=open requires campaigns.bench.correctness.thresholds with "
+            f"{sorted(CORRECTNESS_THRESHOLD_KEYS)}; missing {sorted(missing)}"
+        )
+
+
 def build_seed_bench_spec(
     *,
     model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -119,18 +164,15 @@ def build_seed_bench_spec(
     gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     serve_args: list[str] | None = None,
     correctness_num_prompts: int | None = None,
-    correctness_max_new_tokens: int | None = None,
+    correctness_thresholds: dict | None = None,
 ) -> dict:
-    # Sample-size fields only. Correctness thresholds come from the
-    # PARETON_BENCH_CORRECTNESS_* defaults. TODO(PAR-77): the shared scorer
-    # decides where per-campaign thresholds live.
-    correctness: dict | None = None
-    if correctness_num_prompts is not None or correctness_max_new_tokens is not None:
-        correctness = {}
-        if correctness_num_prompts is not None:
-            correctness["num_prompts"] = int(correctness_num_prompts)
-        if correctness_max_new_tokens is not None:
-            correctness["max_new_tokens"] = int(correctness_max_new_tokens)
+    # Every campaign pins its own correctness thresholds. The values default
+    # from config, but they are copied into the manifest here rather than read
+    # from the environment at bench time, so editing an env var on a pod
+    # cannot move a live campaign's correctness bar.
+    correctness: dict = {"thresholds": _correctness_thresholds(correctness_thresholds)}
+    if correctness_num_prompts is not None:
+        correctness["num_prompts"] = int(correctness_num_prompts)
     return {
         "model": {
             "hf_repo": model_repo,
@@ -161,7 +203,7 @@ def seed_synthetic_campaign(
     bench_gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     bench_serve_args: list[str] | None = None,
     bench_correctness_num_prompts: int | None = None,
-    bench_correctness_max_new_tokens: int | None = None,
+    bench_correctness_thresholds: dict | None = None,
     workload_trace_url: str | None = None,
     workload_trace_sha256: str | None = None,
     workload_pool: list[dict] | None = None,
@@ -253,9 +295,12 @@ def seed_synthetic_campaign(
             gpu_count=bench_gpu_count,
             serve_args=bench_serve_args,
             correctness_num_prompts=bench_correctness_num_prompts,
-            correctness_max_new_tokens=bench_correctness_max_new_tokens,
+            correctness_thresholds=bench_correctness_thresholds,
         )
     )
+
+    if status == "open":
+        require_correctness_thresholds(bench)
 
     pool = list(workload_pool) if workload_pool is not None else None
     rule = dict(sampling_rule) if sampling_rule is not None else None
@@ -354,10 +399,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Correctness prompts (default: every request in the workload trace)",
     )
     p.add_argument(
-        "--bench-correctness-max-new-tokens",
-        type=int,
+        "--bench-correctness-min-mean-logprob",
+        type=float,
         default=None,
-        help="Forced continuation length per correctness prompt",
+        help="Scorer bar: mean logprob a candidate's own output must clear",
+    )
+    p.add_argument(
+        "--bench-correctness-min-token-logprob",
+        type=float,
+        default=None,
+        help="Scorer bar: lowest single-token logprob allowed",
+    )
+    p.add_argument(
+        "--bench-correctness-min-coverage-ratio",
+        type=float,
+        default=None,
+        help="Below this share of streamed tokens scored, the run is infra_failed",
     )
     p.add_argument(
         "--baseline-engine-image-digest",
@@ -465,6 +522,12 @@ def main(argv: list[str] | None = None) -> int:
             scoring = json.loads(scoring_path.read_text(encoding="utf-8"))
             if not isinstance(scoring, dict):
                 raise ValueError("--scoring-rule-json must be a JSON object")
+        overrides = {
+            "min_mean_logprob": args.bench_correctness_min_mean_logprob,
+            "min_token_logprob": args.bench_correctness_min_token_logprob,
+            "min_coverage_ratio": args.bench_correctness_min_coverage_ratio,
+        }
+        correctness_thresholds = {k: v for k, v in overrides.items() if v is not None}
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -479,7 +542,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_gpu_count=args.bench_gpu_count,
             bench_serve_args=args.bench_serve_args,
             bench_correctness_num_prompts=args.bench_correctness_num_prompts,
-            bench_correctness_max_new_tokens=args.bench_correctness_max_new_tokens,
+            bench_correctness_thresholds=correctness_thresholds,
             workload_trace_url=args.workload_trace_url,
             workload_trace_sha256=args.workload_trace_sha256,
             workload_pool=pool,
