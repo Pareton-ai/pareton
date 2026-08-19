@@ -1313,8 +1313,9 @@ def _patch_provider_factory(monkeypatch, by_name: dict) -> None:
     monkeypatch.setattr(
         "gpu.orchestrate.get_provider", lambda name, **kw: by_name[name]
     )
-    monkeypatch.setenv("PARETON_GPU_PROVIDER", "lium")
-    monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "shadeform")
+    monkeypatch.delenv("PARETON_GPU_PROVIDER", raising=False)
+    monkeypatch.delenv("PARETON_GPU_PROVIDER_FALLBACKS", raising=False)
+    monkeypatch.setenv("PARETON_GPU_PROVIDERS", "lium,shadeform")
 
 
 def test_provision_fallback_on_capacity_miss(tmp_path: Path, monkeypatch):
@@ -1398,11 +1399,29 @@ def test_registry_add_failure_does_not_fall_back(tmp_path: Path, monkeypatch):
 
 
 def test_provider_order_default_dedup_and_static_ssh(monkeypatch):
+    monkeypatch.delenv("PARETON_GPU_PROVIDER", raising=False)
+    monkeypatch.delenv("PARETON_GPU_PROVIDER_FALLBACKS", raising=False)
+    monkeypatch.setenv(
+        "PARETON_GPU_PROVIDERS", "lium,shadeform,runpod,targon"
+    )
+    assert provider_order("auto") == ["lium", "shadeform", "runpod", "targon"]
+    assert provider_order("shadeform") == [
+        "shadeform",
+        "lium",
+        "runpod",
+        "targon",
+    ]
+    assert provider_order("static_ssh") == ["static_ssh"]
+    monkeypatch.setenv("PARETON_GPU_PROVIDERS", "lium")
+    assert provider_order("auto") == ["lium"]
+
+
+def test_provider_order_legacy_primary_fallbacks(monkeypatch):
+    monkeypatch.delenv("PARETON_GPU_PROVIDERS", raising=False)
     monkeypatch.setenv("PARETON_GPU_PROVIDER", "lium")
     monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "shadeform")
     assert provider_order("auto") == ["lium", "shadeform"]
-    assert provider_order("shadeform") == ["shadeform"]
-    assert provider_order("static_ssh") == ["static_ssh"]
+    assert provider_order("shadeform") == ["shadeform", "lium"]
     monkeypatch.setenv("PARETON_GPU_PROVIDER_FALLBACKS", "")
     assert provider_order("auto") == ["lium"]
 

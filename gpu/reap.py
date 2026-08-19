@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from gpu.errors import DestroyError
-from gpu.providers import get_provider
+from gpu.providers import configured_providers, get_provider
 from gpu.registry import NAME_PREFIX, PodRegistry, is_expired
 from gpu.types import Pod, SshTarget
 from observability import events as obs
@@ -32,7 +32,17 @@ def _configured_cloud_providers(
 ) -> list[Any]:
     factory = factory or get_provider
     out = []
-    for name in ("targon", "shadeform", "lium"):
+    names = [n for n in configured_providers() if n != "static_ssh"]
+    # Always include known cloud providers so orphans from a removed list entry
+    # are still visible when their API key is present.
+    ordered = names + [
+        n for n in ("lium", "shadeform", "runpod", "targon") if n not in names
+    ]
+    seen: set[str] = set()
+    for name in ordered:
+        if name in seen:
+            continue
+        seen.add(name)
         try:
             out.append(factory(name, state_dir=state_dir))
         except Exception as exc:  # noqa: BLE001 — missing key is fine

@@ -103,6 +103,13 @@ BENCH_SKIP_SLA: bool = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lowe
 TARGON_API_KEY: str = os.environ.get("PARETON_TARGON_API_KEY", "")
 SHADEFORM_API_KEY: str = os.environ.get("PARETON_SHADEFORM_API_KEY", "")
 LIUM_API_KEY: str = os.environ.get("PARETON_LIUM_API_KEY", "")
+RUNPOD_API_KEY: str = os.environ.get("PARETON_RUNPOD_API_KEY", "")
+RUNPOD_IMAGE: str = os.environ.get(
+    "PARETON_RUNPOD_IMAGE",
+    "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+)
+# SECURE | COMMUNITY | ANY (prefer community when under budget).
+RUNPOD_CLOUD: str = os.environ.get("PARETON_RUNPOD_CLOUD", "ANY").strip().upper() or "ANY"
 GPU_TTL_HOURS: float = float(os.environ.get("PARETON_GPU_TTL_HOURS", "2"))
 GPU_MAX_HOURLY_CENTS: int = int(os.environ.get("PARETON_GPU_MAX_HOURLY_CENTS", "1000"))
 GPU_STATE_DIR: Path = Path(
@@ -187,14 +194,43 @@ CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "3"))
 # Soft guidance for how many pods / concurrent prepare dirs operators run.
 CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
 CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))
-GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
-# Ordered fallback providers tried after GPU_PROVIDER on no-capacity or
-# provision error. Comma-separated; empty string disables fallback.
-GPU_PROVIDER_FALLBACKS: list[str] = [
-    p.strip().lower()
-    for p in os.environ.get("PARETON_GPU_PROVIDER_FALLBACKS", "shadeform").split(",")
-    if p.strip()
-]
+# Ordered GPU control-plane try list (first → last). Prefer this over the
+# legacy primary + fallbacks pair.
+_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "runpod", "targon")
+
+
+def _parse_gpu_providers(raw: str) -> list[str]:
+    return [p.strip().lower() for p in raw.split(",") if p.strip()]
+
+
+def _load_gpu_providers() -> list[str]:
+    raw = os.environ.get("PARETON_GPU_PROVIDERS")
+    if raw is not None:
+        parsed = _parse_gpu_providers(raw)
+        return parsed or list(_DEFAULT_GPU_PROVIDERS)
+    # Legacy: PARETON_GPU_PROVIDER + PARETON_GPU_PROVIDER_FALLBACKS.
+    if "PARETON_GPU_PROVIDER" in os.environ or "PARETON_GPU_PROVIDER_FALLBACKS" in os.environ:
+        primary = (os.environ.get("PARETON_GPU_PROVIDER") or "lium").strip().lower()
+        if not primary or primary == "auto":
+            primary = "lium"
+        if "PARETON_GPU_PROVIDER_FALLBACKS" in os.environ:
+            fallbacks = _parse_gpu_providers(
+                os.environ.get("PARETON_GPU_PROVIDER_FALLBACKS", "")
+            )
+        else:
+            fallbacks = ["shadeform"]
+        out: list[str] = []
+        for name in [primary, *fallbacks]:
+            if name and name != "auto" and name not in out:
+                out.append(name)
+        return out or list(_DEFAULT_GPU_PROVIDERS)
+    return list(_DEFAULT_GPU_PROVIDERS)
+
+
+GPU_PROVIDERS: list[str] = _load_gpu_providers()
+# Back-compat aliases used by older call sites / docs.
+GPU_PROVIDER: str = GPU_PROVIDERS[0] if GPU_PROVIDERS else "lium"
+GPU_PROVIDER_FALLBACKS: list[str] = list(GPU_PROVIDERS[1:])
 
 # Per-submission fee the miner transfers to PAYMENT_RECIPIENT_ADDRESS before
 # committing; > 0 makes a verified fee proof mandatory. Default off so local
