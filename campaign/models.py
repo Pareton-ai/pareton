@@ -20,9 +20,8 @@ PRIORITY_METRICS = frozenset(
 )
 
 
-# Named ranking rules. One implementation ships today; bench/score.py dispatches
-# on the name. TODO(PAR-76): move dispatch and metric computation into
-# bench/score.py once the scoring seam lands.
+# Named ranking rules. One implementation ships today; bench/score.py holds the
+# implementations and dispatches on the name.
 SCORING_RULE_NAMES = frozenset({"median_e2e_speedup"})
 
 DEFAULT_SCORING_RULE: dict[str, Any] = {"name": "median_e2e_speedup"}
