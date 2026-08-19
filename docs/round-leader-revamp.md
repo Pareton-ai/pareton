@@ -193,7 +193,17 @@ CREATE TABLE IF NOT EXISTS round_entries (
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (round_id, submission_id)
+  -- The baseline row carries submission_id IS NULL, and a default UNIQUE
+  -- treats every NULL as distinct, so without NULLS NOT DISTINCT one round
+  -- could hold many NULL-id rows. Needs Postgres 15+; Neon runs 17.
+  UNIQUE NULLS NOT DISTINCT (round_id, submission_id),
+  -- The baseline is the campaign's pinned engine, not a submission. Every
+  -- other role is a submission. Both directions are held here so a writer
+  -- cannot insert a NULL-id challenger or a submission-backed baseline.
+  CHECK (
+    (role = 'baseline' AND submission_id IS NULL)
+    OR (role <> 'baseline' AND submission_id IS NOT NULL)
+  )
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS round_entries_one_baseline_idx
@@ -235,6 +245,11 @@ Notes on the shape:
   0.0 is a real score and means the image matched baseline speed.
 - The baseline entry stores `score = 0.0`. It anchors the chart zero line.
 - A void round keeps its ordinal. The chart shows honest gaps.
+- `role` and `submission_id` are held in lockstep by a CHECK: the baseline is
+  the campaign's pinned engine and has no submission, every other role has one.
+  With that CHECK in place, `round_entries_one_baseline_idx` is logically
+  redundant. It is kept because it costs nothing and it survives an edit to the
+  CHECK.
 
 ### Changes to existing tables
 

@@ -177,7 +177,17 @@ CREATE TABLE IF NOT EXISTS round_entries (
   started_at TIMESTAMPTZ,
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (round_id, submission_id)
+  -- The baseline row carries submission_id IS NULL, and a default UNIQUE
+  -- treats every NULL as distinct, so without NULLS NOT DISTINCT one round
+  -- could hold many NULL-id rows. Needs Postgres 15+; Neon runs 17.
+  UNIQUE NULLS NOT DISTINCT (round_id, submission_id),
+  -- The baseline is the campaign's pinned engine, not a submission. Every
+  -- other role is a submission. Both directions are held here so a writer
+  -- cannot insert a NULL-id challenger or a submission-backed baseline.
+  CHECK (
+    (role = 'baseline' AND submission_id IS NULL)
+    OR (role <> 'baseline' AND submission_id IS NOT NULL)
+  )
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS round_entries_one_baseline_idx
