@@ -11,11 +11,12 @@ from gpu.errors import ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.providers.runpod import (
     RunpodProvider,
+    _as_item_list,
     _gpu_type_matches,
     _normalize_gpu_type,
     _parse_direct_ssh,
 )
-from gpu.types import Offer, PodSpec, SshTarget
+from gpu.types import ExecResult, Offer, PodSpec, SshTarget
 
 
 class FakeResp:
@@ -210,7 +211,14 @@ def test_ensure_ssh_key_merges(provider: RunpodProvider):
     assert len(transport.ssh_keys["keys"]) == 2
 
 
-def test_provision_waits_for_direct_ssh(provider: RunpodProvider):
+def test_as_item_list_accepts_top_level_array():
+    assert _as_item_list([{"id": "1"}], "pods") == [{"id": "1"}]
+    assert _as_item_list({"pods": [{"id": "2"}]}, "pods") == [{"id": "2"}]
+    assert _as_item_list(None, "pods") == []
+
+
+def test_provision_waits_for_direct_ssh(provider: RunpodProvider, monkeypatch):
+    monkeypatch.setattr(RunpodProvider, "_require_docker_host", lambda self, pod: None)
     offer = Offer(
         provider="runpod",
         instance_id="COMMUNITY:NVIDIA H100 PCIe",
@@ -235,7 +243,32 @@ def test_provision_waits_for_direct_ssh(provider: RunpodProvider):
     body = create[2] or {}
     assert body["startSsh"] is True
     assert "22/tcp" in body["ports"]
+    assert body["disk"] >= 200
     assert body["mounts"]["persistent"]["path"] == "/workspace"
+
+
+def test_provision_destroys_when_docker_missing(provider: RunpodProvider, monkeypatch):
+    def no_docker(self, pod):
+        raise ProvisionError(f"Runpod pod {pod.pod_id} cannot run Docker")
+
+    monkeypatch.setattr(RunpodProvider, "_require_docker_host", no_docker)
+    offer = Offer(
+        provider="runpod",
+        instance_id="COMMUNITY:NVIDIA H100 PCIe",
+        description="H100",
+        hourly_price_cents=180,
+        gpu_count=1,
+        gpu_type="H100 PCIe",
+        raw={"gpu_id": "NVIDIA H100 PCIe", "cloud": "COMMUNITY"},
+    )
+    with pytest.raises(ProvisionError, match="cannot run Docker"):
+        provider.provision(
+            offer,
+            name="pt-test-1h-abcd1234",
+            ssh_public_key="ssh-ed25519 AAAApareton x",
+        )
+    transport: FakeTransport = provider._transport  # type: ignore[assignment]
+    assert any(c[0] == "DELETE" and c[1] == "/v2/pods/pod_abc" for c in transport.calls)
 
 
 def test_destroy_and_list(provider: RunpodProvider):
@@ -257,6 +290,59 @@ def test_destroy_and_list(provider: RunpodProvider):
     assert len(pods) == 1
     provider.destroy(pods[0])
     assert transport.pod == {}
+
+
+def test_list_pods_accepts_top_level_array(provider: RunpodProvider):
+    transport: FakeTransport = provider._transport  # type: ignore[assignment]
+
+    def list_as_array(method, url, **kwargs):
+        path = url.replace("https://api.runpod.io", "")
+        if method == "GET" and path == "/v2/pods":
+            return FakeResp(
+                [
+                    {
+                        "id": "pod_arr",
+                        "name": "from-array",
+                        "status": "RUNNING",
+                        "ssh": {
+                            "direct": {
+                                "host": "9.9.9.9",
+                                "port": 22,
+                                "username": "root",
+                                "command": "ssh root@9.9.9.9",
+                            }
+                        },
+                    }
+                ]
+            )
+        return transport(method, url, **kwargs)
+
+    provider._transport = list_as_array
+    pods = provider.list_pods()
+    assert len(pods) == 1
+    assert pods[0].pod_id == "pod_arr"
+
+
+def test_require_docker_host_ok(provider: RunpodProvider, monkeypatch):
+    from datetime import datetime, timezone
+
+    from gpu.types import Pod
+
+    monkeypatch.setattr(
+        "gpu.providers.runpod.ssh_exec",
+        lambda *a, **k: ExecResult(exit_code=0, stdout="", stderr=""),
+    )
+    ready = Pod(
+        provider="runpod",
+        pod_id="pod_abc",
+        name="n",
+        ssh=SshTarget(host="1.2.3.4", port=22, user="root"),
+        key_path=provider._key_path,
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    provider._require_docker_host(ready)
 
 
 def test_get_provider_runpod(monkeypatch, state_dir: Path):

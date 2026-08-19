@@ -4,7 +4,14 @@ Implements Pareton's Provider protocol against ``https://api.runpod.io/v2``.
 Uses ``gpu.ssh`` for the data plane. Host-local persistent mount at
 ``/workspace`` (deleted with the pod). Requires **direct** SSH
 (``22/tcp`` + ``ssh.direct``) because bootstrap/rsync cannot use the
-interactive-only proxy. Injectable ``transport`` for offline tests.
+interactive-only proxy.
+
+Bench needs a Docker host (``docker pull`` / ``docker run``). Stock Runpod
+shared pods do not expose privileged / DinD; provision fails fast after SSH
+is up if ``docker info`` cannot run, so the orchestrator can fall through.
+Keep ``runpod`` out of the default ``PARETON_GPU_PROVIDERS`` list until the
+account/image is known to support a Docker host (e.g. bare metal). Injectable
+``transport`` for offline tests.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import requests
 from gpu.errors import DestroyError, ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.registry import _state_dir
+from gpu.ssh import exec as ssh_exec
 from gpu.types import Offer, Pod, PodSpec, SshTarget
 
 logger = logging.getLogger(__name__)
@@ -31,8 +39,10 @@ RUNPOD_DASHBOARD = "https://www.console.runpod.io/pods"
 READY_TIMEOUT_S = 720
 READY_POLL_S = 10
 HTTP_TIMEOUT_S = 60.0
+# Official image starts sshd when startSsh=true; nested Docker is not guaranteed.
 DEFAULT_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
-CONTAINER_DISK_GB = 40
+# Container disk holds Docker's data root; engine image pulls need headroom.
+MIN_CONTAINER_DISK_GB = 200
 
 Transport = Callable[..., Any]
 
@@ -71,6 +81,11 @@ def _volume_gib() -> int:
         return 250
 
 
+def _container_disk_gb() -> int:
+    """Ephemeral disk for the OS + Docker data root (engine image pulls)."""
+    return max(MIN_CONTAINER_DISK_GB, _volume_gib())
+
+
 def _runpod_image() -> str:
     try:
         import config as _cfg
@@ -87,6 +102,18 @@ def _runpod_cloud() -> str:
         return str(getattr(_cfg, "RUNPOD_CLOUD", "ANY") or "ANY").strip().upper()
     except Exception:  # noqa: BLE001
         return "ANY"
+
+
+def _as_item_list(data: Any, *keys: str) -> list[Any]:
+    """Normalize list-or-wrapped-object JSON without calling ``.get`` on a list."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in keys:
+            items = data.get(key)
+            if isinstance(items, list):
+                return items
+    return []
 
 
 def _default_transport(
@@ -233,7 +260,7 @@ class RunpodProvider:
         if cloud_pref in ("SECURE", "COMMUNITY"):
             params["cloud"] = cloud_pref
         resp = self._get("/v2/catalog/gpus", params=params)
-        items = (resp or {}).get("gpus", []) if isinstance(resp, dict) else []
+        items = _as_item_list(resp, "gpus")
         out: list[Offer] = []
         for item in items:
             if not isinstance(item, dict):
@@ -310,6 +337,42 @@ class RunpodProvider:
         out.sort(key=lambda o: (o.hourly_price_cents, o.gpu_type))
         return out
 
+    def _require_docker_host(self, pod: Pod) -> None:
+        """Fail closed if the pod cannot run nested Docker for bench engines."""
+        check = ssh_exec(
+            pod,
+            "docker info >/dev/null 2>&1",
+            timeout_s=60.0,
+            check=False,
+            state_dir=self._state_dir,
+        )
+        if check.exit_code == 0:
+            return
+        # Mirror bootstrap's install path once; still fails without privileged/DinD.
+        install = ssh_exec(
+            pod,
+            "command -v docker >/dev/null 2>&1 || "
+            "curl -fsSL https://get.docker.com | sh; "
+            "mkdir -p /etc/docker && "
+            'printf \'{"data-root":"/workspace/docker"}\\n\' > /etc/docker/daemon.json; '
+            "(command -v systemctl >/dev/null && systemctl restart docker) || "
+            "(service docker restart) || "
+            "(dockerd --data-root /workspace/docker >/tmp/dockerd.log 2>&1 &) ; "
+            "for i in 1 2 3 4 5 6 7 8 9 10; do "
+            "docker info >/dev/null 2>&1 && exit 0; sleep 3; done; exit 1",
+            timeout_s=300.0,
+            check=False,
+            state_dir=self._state_dir,
+        )
+        if install.exit_code == 0:
+            logger.info("Docker host ready on Runpod pod %s", pod.pod_id)
+            return
+        raise ProvisionError(
+            f"Runpod pod {pod.pod_id} cannot run Docker "
+            "(stock shared pods lack privileged/DinD; use a Docker-capable "
+            "image/account or omit runpod from PARETON_GPU_PROVIDERS)"
+        )
+
     def provision(self, offer: Offer, *, name: str, ssh_public_key: str) -> Pod:
         raw = offer.raw or {}
         gpu_id = str(raw.get("gpu_id") or "")
@@ -321,6 +384,7 @@ class RunpodProvider:
 
         self._ensure_ssh_key(ssh_public_key)
         volume_gib = _volume_gib()
+        disk_gb = _container_disk_gb()
         body: dict[str, Any] = {
             "name": name,
             "image": _runpod_image(),
@@ -329,7 +393,7 @@ class RunpodProvider:
             "startSsh": True,
             "startJupyter": False,
             "ports": ["22/tcp"],
-            "disk": CONTAINER_DISK_GB,
+            "disk": disk_gb,
             "mounts": {
                 "persistent": {
                     "size": volume_gib,
@@ -350,11 +414,12 @@ class RunpodProvider:
             if not pod_id:
                 raise ProvisionError("Runpod create returned no pod id")
             logger.info(
-                "Runpod pod %s created (gpu=%sx%s cloud=%s volume=%dG)",
+                "Runpod pod %s created (gpu=%sx%s cloud=%s disk=%dG volume=%dG)",
                 pod_id,
                 offer.gpu_count,
                 gpu_id,
                 cloud,
+                disk_gb,
                 volume_gib,
             )
             logger.info("Dashboard: %s/%s", RUNPOD_DASHBOARD, pod_id)
@@ -375,7 +440,9 @@ class RunpodProvider:
                     "dashboard": f"{RUNPOD_DASHBOARD}/{pod_id}",
                 },
             )
-            return self._wait_ready(pod)
+            ready = self._wait_ready(pod)
+            self._require_docker_host(ready)
+            return ready
         except Exception:
             if pod_id:
                 try:
@@ -445,8 +512,8 @@ class RunpodProvider:
             raise DestroyError(str(exc)) from exc
 
     def list_pods(self) -> list[Pod]:
-        data = self._get("/v2/pods") or {}
-        items = data.get("pods", data if isinstance(data, list) else [])
+        data = self._get("/v2/pods")
+        items = _as_item_list(data, "pods")
         out: list[Pod] = []
         for item in items:
             if not isinstance(item, dict):
@@ -476,11 +543,8 @@ class RunpodProvider:
     def list_volumes(self) -> list[dict[str, Any]]:
         # Host-local persistent mounts die with the pod; network volumes are
         # listed for reap visibility if an operator created any manually.
-        data = self._get("/v2/network-volumes") or {}
-        items = data.get(
-            "networkVolumes",
-            data.get("volumes", data if isinstance(data, list) else []),
-        )
+        data = self._get("/v2/network-volumes")
+        items = _as_item_list(data, "networkVolumes", "volumes")
         out: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict):
@@ -497,8 +561,11 @@ class RunpodProvider:
 
 __all__ = [
     "API_BASE",
+    "MIN_CONTAINER_DISK_GB",
     "RUNPOD_DASHBOARD",
     "RunpodProvider",
+    "_as_item_list",
+    "_container_disk_gb",
     "_gpu_type_matches",
     "_normalize_gpu_type",
     "_parse_direct_ssh",

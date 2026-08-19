@@ -12,7 +12,7 @@ from gpu.providers.shadeform import ShadeformProvider
 from gpu.providers.static_ssh import StaticSshProvider
 from gpu.providers.targon import TargonProvider
 
-_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "runpod", "targon")
+_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "targon")
 
 
 def _env_or_config(env_name: str, config_attr: str) -> str:

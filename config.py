@@ -198,7 +198,7 @@ CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
 CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))
 # Ordered GPU control-plane try list (first → last). Prefer this over the
 # legacy primary + fallbacks pair.
-_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "runpod", "targon")
+_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "targon")
 
 
 def _parse_gpu_providers(raw: str) -> list[str]:
