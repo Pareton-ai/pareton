@@ -350,7 +350,9 @@ def test_get_provider_lium(monkeypatch, state_dir: Path, client: FakeClient):
 
 
 def test_resolve_provider_auto_respects_env(monkeypatch):
+    monkeypatch.delenv("PARETON_GPU_PROVIDERS", raising=False)
     monkeypatch.setenv("PARETON_GPU_PROVIDER", "targon")
+    monkeypatch.delenv("PARETON_GPU_PROVIDER_FALLBACKS", raising=False)
     from gpu.providers import resolve_provider_name
 
     assert resolve_provider_name("auto") == "targon"
@@ -363,13 +365,11 @@ def test_get_provider_auto_uses_lium_not_targon(
     monkeypatch.delenv("PARETON_TARGON_API_KEY", raising=False)
     monkeypatch.setenv("PARETON_LIUM_API_KEY", "secret")
     monkeypatch.delenv("PARETON_GPU_PROVIDER", raising=False)
+    monkeypatch.delenv("PARETON_GPU_PROVIDER_FALLBACKS", raising=False)
+    monkeypatch.setenv("PARETON_GPU_PROVIDERS", "lium,shadeform")
     monkeypatch.setattr(
         "gpu.providers._env_or_config",
-        lambda env, attr: (
-            "secret"
-            if env == "PARETON_LIUM_API_KEY"
-            else ("lium" if env == "PARETON_GPU_PROVIDER" else "")
-        ),
+        lambda env, attr: ("secret" if env == "PARETON_LIUM_API_KEY" else ""),
     )
     from gpu.providers import get_provider
 
