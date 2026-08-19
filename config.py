@@ -109,7 +109,9 @@ RUNPOD_IMAGE: str = os.environ.get(
     "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
 )
 # SECURE | COMMUNITY | ANY (prefer community when under budget).
-RUNPOD_CLOUD: str = os.environ.get("PARETON_RUNPOD_CLOUD", "ANY").strip().upper() or "ANY"
+RUNPOD_CLOUD: str = (
+    os.environ.get("PARETON_RUNPOD_CLOUD", "ANY").strip().upper() or "ANY"
+)
 GPU_TTL_HOURS: float = float(os.environ.get("PARETON_GPU_TTL_HOURS", "2"))
 GPU_MAX_HOURLY_CENTS: int = int(os.environ.get("PARETON_GPU_MAX_HOURLY_CENTS", "1000"))
 GPU_STATE_DIR: Path = Path(
@@ -209,7 +211,10 @@ def _load_gpu_providers() -> list[str]:
         parsed = _parse_gpu_providers(raw)
         return parsed or list(_DEFAULT_GPU_PROVIDERS)
     # Legacy: PARETON_GPU_PROVIDER + PARETON_GPU_PROVIDER_FALLBACKS.
-    if "PARETON_GPU_PROVIDER" in os.environ or "PARETON_GPU_PROVIDER_FALLBACKS" in os.environ:
+    if (
+        "PARETON_GPU_PROVIDER" in os.environ
+        or "PARETON_GPU_PROVIDER_FALLBACKS" in os.environ
+    ):
         primary = (os.environ.get("PARETON_GPU_PROVIDER") or "lium").strip().lower()
         if not primary or primary == "auto":
             primary = "lium"

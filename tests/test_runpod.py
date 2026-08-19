@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,6 @@ from gpu.providers.runpod import (
     _parse_direct_ssh,
 )
 from gpu.types import Offer, PodSpec, SshTarget
-
 
 
 class FakeResp:
@@ -130,7 +128,9 @@ class FakeTransport:
             return FakeResp(None, status_code=204)
         if method == "GET" and path == "/v2/network-volumes":
             return FakeResp({"networkVolumes": []})
-        return FakeResp({"error": f"unhandled {method} {path}"}, status_code=500, ok=False)
+        return FakeResp(
+            {"error": f"unhandled {method} {path}"}, status_code=500, ok=False
+        )
 
 
 @pytest.fixture
@@ -189,7 +189,9 @@ def test_parse_direct_ssh_ignores_proxy_only():
 
 def test_search_filters_availability_and_price(provider: RunpodProvider, monkeypatch):
     monkeypatch.setenv("PARETON_RUNPOD_CLOUD", "ANY")
-    offers = provider.search(PodSpec(gpu_type="H100", gpu_count=1, max_hourly_cents=200))
+    offers = provider.search(
+        PodSpec(gpu_type="H100", gpu_count=1, max_hourly_cents=200)
+    )
     assert len(offers) == 1
     assert offers[0].gpu_type == "H100 PCIe"
     assert offers[0].raw["cloud"] == "COMMUNITY"

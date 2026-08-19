@@ -39,7 +39,10 @@ def configured_providers() -> list[str]:
         return parsed or list(_DEFAULT_GPU_PROVIDERS)
 
     # Legacy primary + fallbacks (tests and older .env files).
-    if "PARETON_GPU_PROVIDER" in os.environ or "PARETON_GPU_PROVIDER_FALLBACKS" in os.environ:
+    if (
+        "PARETON_GPU_PROVIDER" in os.environ
+        or "PARETON_GPU_PROVIDER_FALLBACKS" in os.environ
+    ):
         primary = (os.environ.get("PARETON_GPU_PROVIDER") or "lium").strip().lower()
         if not primary or primary == "auto":
             primary = "lium"
@@ -72,7 +75,7 @@ def configured_providers() -> list[str]:
             parsed = [str(p).strip().lower() for p in vals if str(p).strip()]
             if parsed:
                 return parsed
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
     return list(_DEFAULT_GPU_PROVIDERS)
 
@@ -145,14 +148,14 @@ def get_provider(name: str, **kwargs) -> Provider:
 
 
 __all__ = [
+    "LiumProvider",
     "Provider",
+    "RunpodProvider",
+    "ShadeformProvider",
+    "StaticSshProvider",
+    "TargonProvider",
     "configured_providers",
     "get_provider",
     "provider_order",
     "resolve_provider_name",
-    "TargonProvider",
-    "ShadeformProvider",
-    "LiumProvider",
-    "RunpodProvider",
-    "StaticSshProvider",
 ]

@@ -12,9 +12,10 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import requests
 
@@ -217,7 +218,9 @@ class RunpodProvider:
             return
         kept.append(ssh_public_key.strip())
         self._put("/v2/account/ssh-keys", json={"keys": kept})
-        logger.info("Registered Pareton SSH key with Runpod (merged; %d keys)", len(kept))
+        logger.info(
+            "Registered Pareton SSH key with Runpod (merged; %d keys)", len(kept)
+        )
 
     def search(self, spec: PodSpec) -> list[Offer]:
         want = max(1, int(spec.gpu_count or 1))
@@ -244,7 +247,9 @@ class RunpodProvider:
             availability = str(item.get("availability") or "").upper()
             if availability == "NONE":
                 continue
-            max_count = item.get("maxCount") if isinstance(item.get("maxCount"), dict) else {}
+            max_count = (
+                item.get("maxCount") if isinstance(item.get("maxCount"), dict) else {}
+            )
             price = item.get("price") if isinstance(item.get("price"), dict) else {}
             clouds: list[tuple[str, float]] = []
             for cloud_name, flag_key, price_key in (
@@ -268,7 +273,7 @@ class RunpodProvider:
                 if usd <= 0:
                     continue
                 # Catalog price is per-GPU; Pareton caps are for the whole pod.
-                hourly_cents = int(round(usd * 100 * want))
+                hourly_cents = round(usd * 100 * want)
                 if hourly_cents > spec.max_hourly_cents:
                     continue
                 clouds.append((cloud_name, usd))
@@ -277,7 +282,7 @@ class RunpodProvider:
             # Prefer cheaper cloud first (community before secure when ANY).
             clouds.sort(key=lambda c: c[1])
             cloud_name, usd = clouds[0]
-            hourly_cents = int(round(usd * 100 * want))
+            hourly_cents = round(usd * 100 * want)
             data_centers = []
             for dc in item.get("dataCenters") or []:
                 if not isinstance(dc, dict):
@@ -375,7 +380,7 @@ class RunpodProvider:
             if pod_id:
                 try:
                     self._teardown_pod(pod_id)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception("abort cleanup failed for Runpod pod %s", pod_id)
             raise
 
@@ -388,9 +393,7 @@ class RunpodProvider:
         while time.monotonic() < deadline:
             info = self._get(f"/v2/pods/{pod.pod_id}") or {}
             if not isinstance(info, dict):
-                raise ProvisionError(
-                    f"Runpod pod {pod.pod_id} info: expected object"
-                )
+                raise ProvisionError(f"Runpod pod {pod.pod_id} info: expected object")
             status = str(info.get("status") or "").upper()
             last_status = status
             now = time.monotonic()
@@ -404,9 +407,7 @@ class RunpodProvider:
                 )
                 last_log = now
             if status in ("ERROR", "EXITED", "TERMINATED"):
-                raise ProvisionError(
-                    f"Runpod pod {pod.pod_id} entered {status}"
-                )
+                raise ProvisionError(f"Runpod pod {pod.pod_id} entered {status}")
             if status == "RUNNING":
                 ssh = _parse_direct_ssh(info)
                 if ssh is None:
@@ -430,7 +431,7 @@ class RunpodProvider:
             self._teardown_pod(pod.pod_id)
         except DestroyError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise DestroyError(str(exc)) from exc
 
     def _teardown_pod(self, pod_id: str) -> None:
@@ -476,7 +477,10 @@ class RunpodProvider:
         # Host-local persistent mounts die with the pod; network volumes are
         # listed for reap visibility if an operator created any manually.
         data = self._get("/v2/network-volumes") or {}
-        items = data.get("networkVolumes", data.get("volumes", data if isinstance(data, list) else []))
+        items = data.get(
+            "networkVolumes",
+            data.get("volumes", data if isinstance(data, list) else []),
+        )
         out: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict):
@@ -492,10 +496,10 @@ class RunpodProvider:
 
 
 __all__ = [
-    "RunpodProvider",
     "API_BASE",
     "RUNPOD_DASHBOARD",
-    "_normalize_gpu_type",
+    "RunpodProvider",
     "_gpu_type_matches",
+    "_normalize_gpu_type",
     "_parse_direct_ssh",
 ]

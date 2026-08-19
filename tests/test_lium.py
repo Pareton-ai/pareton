@@ -369,7 +369,7 @@ def test_get_provider_auto_uses_lium_not_targon(
     monkeypatch.setenv("PARETON_GPU_PROVIDERS", "lium,shadeform")
     monkeypatch.setattr(
         "gpu.providers._env_or_config",
-        lambda env, attr: ("secret" if env == "PARETON_LIUM_API_KEY" else ""),
+        lambda env, attr: "secret" if env == "PARETON_LIUM_API_KEY" else "",
     )
     from gpu.providers import get_provider
 
