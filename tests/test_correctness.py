@@ -22,6 +22,7 @@ from bench.correctness import (
 )
 from bench.lifecycle import EngineError
 from bench.mock_engine import (
+    GARBAGE_MARKER,
     GARBAGE_TEXT,
     MockEngine,
     MockEngineConfig,
@@ -355,10 +356,40 @@ def test_empty_output_fails_correctness(tmp_path: Path):
     assert "no output" in (report.reason or "")
 
 
-def test_thin_logprob_coverage_is_infra_not_disqualification(tmp_path: Path):
-    """A near-empty extraction is a harness problem, so the entry is
+def test_no_logprobs_at_all_is_infra_not_disqualification(tmp_path: Path):
+    """With nothing scored there is no evidence either way, so the entry is
     requeued rather than disqualified."""
-    outputs = [_captured("r1", "Hello world", " OK OK", tokens=100)]
+
+    def nothing(resp, *, original_prompt: str, continuation: str):
+        return []
+
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        import bench.correctness as correctness
+
+        real = correctness.extract_output_logprobs
+        correctness.extract_output_logprobs = nothing
+        try:
+            report = grade_candidate(
+                scorer.base_url,
+                [_captured("r1", "Hello world", " OK OK")],
+                cfg=_cfg(num_prompts=1),
+                evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            )
+        finally:
+            correctness.extract_output_logprobs = real
+    assert report.verdict == "infra_failed"
+    assert report.num_positions_scored == 0
+
+
+def test_a_candidate_cannot_trade_disqualification_for_a_requeue(tmp_path: Path):
+    """Coverage is measured on what the scorer saw, not on what the candidate
+    says it emitted, and bad output is judged on the evidence there is.
+
+    An engine reporting a huge token count while emitting nonsense would
+    otherwise land under the coverage floor and be requeued instead of
+    disqualified.
+    """
+    outputs = [_captured("r1", "Hello world", GARBAGE_TEXT, tokens=100_000)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
             scorer.base_url,
@@ -366,8 +397,51 @@ def test_thin_logprob_coverage_is_infra_not_disqualification(tmp_path: Path):
             cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
-    assert report.verdict == "infra_failed"
-    assert report.coverage_ratio < 0.5
+    assert report.verdict == "fail_correctness"
+    assert report.coverage_ratio == 1.0
+
+
+def test_one_candidate_the_scorer_chokes_on_does_not_stop_the_batch(tmp_path: Path):
+    """The forced text is whatever a candidate engine chose to emit, so one
+    entry can fail to grade on input nobody else sent."""
+    import bench.correctness as correctness
+
+    real = correctness.extract_output_logprobs
+
+    def fail_on_garbage(resp, *, original_prompt: str, continuation: str):
+        if GARBAGE_MARKER in continuation:
+            raise EngineError("echo logprobs did not reconstruct the forced sequence")
+        return real(resp, original_prompt=original_prompt, continuation=continuation)
+
+    pending = [
+        PendingCorrectness(
+            candidate_index=0, outputs=[_captured("r1", "Hello world", " OK OK")]
+        ),
+        PendingCorrectness(
+            candidate_index=1,
+            outputs=[_captured("r1", "Hello world", GARBAGE_TEXT, tokens=3)],
+        ),
+        PendingCorrectness(
+            candidate_index=2, outputs=[_captured("r1", "Hello world", " OK OK")]
+        ),
+    ]
+    correctness.extract_output_logprobs = fail_on_garbage
+    try:
+        with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+            reports = grade_all(
+                scorer.base_url,
+                pending,
+                cfg=_cfg(num_prompts=1),
+                evidence_dir=tmp_path / "correctness",
+            )
+    finally:
+        correctness.extract_output_logprobs = real
+    assert set(reports) == {0, 1, 2}
+    assert reports[0].verdict == "pass"
+    assert reports[1].verdict == "infra_failed"
+    assert "could not grade" in (reports[1].reason or "")
+    # The entries either side of the bad one are still graded normally.
+    assert reports[2].verdict == "pass"
 
 
 def test_threshold_is_exclusive(tmp_path: Path):

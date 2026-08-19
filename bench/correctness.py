@@ -378,8 +378,13 @@ def score_captured_output(
     captured: CapturedOutput,
     *,
     request_timeout_s: float = 300.0,
-) -> list[float]:
-    """Logprobs the scorer assigns to the candidate's own forced tokens."""
+) -> tuple[list[float], int]:
+    """Logprobs the scorer assigns to the candidate's own forced tokens.
+
+    Returns those logprobs and the number of token positions the scorer saw in
+    the forced span, scored or not. Both numbers come from the scorer, so
+    neither is something the candidate engine can report about itself.
+    """
     full = captured.prompt + captured.output_text
     resp = post_completion(
         scorer_url,
@@ -396,7 +401,13 @@ def score_captured_output(
         original_prompt=captured.prompt,
         continuation=captured.output_text,
     )
-    return [s.logprob for s in scores]
+    if not scores:
+        return [], 0
+    # Positions in the forced span are contiguous, and a position is only
+    # dropped when the scorer returned no logprob for it, so first..last spans
+    # everything the scorer saw of this output.
+    span = scores[-1].position - scores[0].position + 1
+    return [s.logprob for s in scores], span
 
 
 def grade_candidate(
@@ -418,7 +429,7 @@ def grade_candidate(
     """
     thr = cfg.thresholds
     logprobs: list[float] = []
-    streamed_tokens = 0
+    span_positions = 0
     empty: list[str] = []
 
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -428,16 +439,17 @@ def grade_candidate(
             if not captured.output_text:
                 empty.append(captured.request_id)
                 continue
-            scored = score_captured_output(
+            scored, span = score_captured_output(
                 scorer_url, captured, request_timeout_s=request_timeout_s
             )
             logprobs.extend(scored)
-            streamed_tokens += captured.completion_tokens
+            span_positions += span
             ef.write(
                 json.dumps(
                     {
                         "request_id": captured.request_id,
                         "streamed_tokens": captured.completion_tokens,
+                        "span_positions": span,
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),
                         "min_logprob": min(scored) if scored else None,
@@ -461,11 +473,6 @@ def grade_candidate(
             reason=f"engine returned no output for {len(empty)} prompt(s): {empty[0]}",
         )
 
-    # Coverage is measured against what the candidate streamed. A near-empty
-    # extraction means the scorer never saw the output, which is infrastructure,
-    # not a wrong answer. Tokenizers differ between the stream and the scorer's
-    # echo, so the floor is loose on purpose.
-    coverage = (len(logprobs) / streamed_tokens) if streamed_tokens > 0 else 0.0
     if not logprobs:
         return CorrectnessReport(
             verdict="infra_failed",
@@ -477,30 +484,34 @@ def grade_candidate(
             evidence=rel_evidence,
             reason="scorer produced no logprobs for any captured output",
         )
-    if coverage < thr.min_coverage_ratio:
-        return CorrectnessReport(
-            verdict="infra_failed",
-            num_prompts=len(outputs),
-            num_positions_scored=len(logprobs),
-            mean_logprob=statistics.fmean(logprobs),
-            min_logprob=min(logprobs),
-            coverage_ratio=coverage,
-            evidence=rel_evidence,
-            reason=(
-                f"scorer covered {len(logprobs)}/{streamed_tokens} streamed tokens, "
-                f"below the {thr.min_coverage_ratio:.0%} floor"
-            ),
-        )
+
+    # Coverage is how much of what the scorer saw it managed to score. Both
+    # sides of the ratio come from the scorer, never from the candidate's own
+    # report of itself, so a candidate cannot move this number.
+    coverage = (len(logprobs) / span_positions) if span_positions > 0 else 0.0
 
     mean_lp = statistics.fmean(logprobs)
     min_lp = min(logprobs)
     reason: str | None = None
+    verdict = "pass"
     if mean_lp < thr.min_mean_logprob:
         reason = f"mean logprob {mean_lp:.3f} below {thr.min_mean_logprob}"
     elif min_lp < thr.min_token_logprob:
         reason = f"min token logprob {min_lp:.3f} below {thr.min_token_logprob}"
 
-    verdict = "fail_correctness" if reason else "pass"
+    if reason:
+        # Whatever the scorer did manage to read was bad. Thin coverage is no
+        # defence: judging it on the evidence there is beats handing back a
+        # requeue for output already known to be wrong.
+        verdict = "fail_correctness"
+    elif coverage < thr.min_coverage_ratio:
+        # It read too little to call this good. Nothing here says the
+        # candidate is wrong, so the entry is requeued rather than failed.
+        verdict = "infra_failed"
+        reason = (
+            f"scorer scored {len(logprobs)}/{span_positions} positions it saw, "
+            f"below the {thr.min_coverage_ratio:.0%} floor"
+        )
     logger.info(
         "correctness %s positions=%d mean=%.4f min=%.4f coverage=%.3f",
         verdict,
@@ -538,11 +549,28 @@ def grade_all(
     write_completion_response_shape(evidence_dir, probe_resp)
     reports: dict[int, CorrectnessReport] = {}
     for item in pending:
-        reports[item.candidate_index] = grade_candidate(
-            scorer_url,
-            item.outputs,
-            cfg=cfg,
-            evidence_path=evidence_dir / f"candidate_{item.candidate_index}.jsonl",
-            request_timeout_s=request_timeout_s,
-        )
+        try:
+            reports[item.candidate_index] = grade_candidate(
+                scorer_url,
+                item.outputs,
+                cfg=cfg,
+                evidence_path=evidence_dir / f"candidate_{item.candidate_index}.jsonl",
+                request_timeout_s=request_timeout_s,
+            )
+        except EngineError as exc:
+            # The text being forced through the scorer is whatever a candidate
+            # engine chose to emit, so grading one can fail on input nobody
+            # else in the round sent. That is this entry's outcome, not the
+            # round's: keep going and grade the others.
+            logger.warning("scoring candidate %d failed: %s", item.candidate_index, exc)
+            reports[item.candidate_index] = CorrectnessReport(
+                verdict="infra_failed",
+                num_prompts=len(item.outputs),
+                num_positions_scored=0,
+                mean_logprob=0.0,
+                min_logprob=0.0,
+                coverage_ratio=0.0,
+                evidence=f"evidence/correctness/candidate_{item.candidate_index}.jsonl",
+                reason=f"scorer could not grade this output: {exc}",
+            )
     return reports
