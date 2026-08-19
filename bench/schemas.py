@@ -84,7 +84,7 @@ class WorkloadTrace:
 # bench_request.json
 # ---------------------------------------------------------------------------
 
-BenchMode = Literal["all", "correctness", "perf_screen", "sla_bench"]
+BenchMode = Literal["all", "correctness", "sla_bench"]
 
 
 @dataclass
@@ -189,21 +189,6 @@ class CorrectnessConfig:
 
 
 @dataclass
-class PerfScreenConfig:
-    num_requests: int
-    concurrency: int
-    min_throughput_ratio: float
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> PerfScreenConfig:
-        return cls(
-            num_requests=int(d["num_requests"]),
-            concurrency=int(d["concurrency"]),
-            min_throughput_ratio=float(d["min_throughput_ratio"]),
-        )
-
-
-@dataclass
 class SlaThresholds:
     p99_ttft_ms: float
     p99_itl_ms: float
@@ -240,16 +225,15 @@ class BenchRequest:
     engines: EnginesSpec
     workload_trace: WorkloadTraceRef
     correctness: CorrectnessConfig
-    perf_screen: PerfScreenConfig
     sla_bench: SlaBenchConfig
     hf_token_env: str = "HF_TOKEN"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
         mode = d.get("mode", "all")
-        if mode not in ("all", "correctness", "perf_screen", "sla_bench"):
+        if mode not in ("all", "correctness", "sla_bench"):
             raise ValueError(
-                f"mode must be one of all|correctness|perf_screen|sla_bench, got {mode!r}"
+                f"mode must be one of all|correctness|sla_bench, got {mode!r}"
             )
         return cls(
             schema_version=int(d["schema_version"]),
@@ -260,7 +244,6 @@ class BenchRequest:
             engines=EnginesSpec.from_dict(d["engines"]),
             workload_trace=WorkloadTraceRef.from_dict(d["workload_trace"]),
             correctness=CorrectnessConfig.from_dict(d["correctness"]),
-            perf_screen=PerfScreenConfig.from_dict(d["perf_screen"]),
             sla_bench=SlaBenchConfig.from_dict(d["sla_bench"]),
             hf_token_env=str(d.get("hf_token_env") or "HF_TOKEN"),
         )
@@ -273,7 +256,7 @@ class BenchRequest:
 # bench_report.json
 # ---------------------------------------------------------------------------
 
-Verdict = Literal["pass", "fail_correctness", "fail_perf_screen", "fail_sla", "error"]
+Verdict = Literal["pass", "fail_correctness", "fail_sla", "error"]
 
 
 @dataclass
@@ -330,18 +313,6 @@ class CorrectnessReport:
     max_abs_logprob_diff: float
     argmax_mismatch_rate: float
     argmax_mismatches: int
-    evidence: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class PerfScreenReport:
-    verdict: str
-    baseline_output_tokens_per_s: float
-    candidate_output_tokens_per_s: float
-    throughput_ratio: float
     evidence: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -410,7 +381,6 @@ class BenchReport:
     environment: EnvironmentInfo
     inputs_fingerprint: InputsFingerprint
     correctness: CorrectnessReport | None = None
-    perf_screen: PerfScreenReport | None = None
     sla_bench: SlaBenchReport | None = None
     # Stub/skeleton note (omitted from to_dict when empty).
     stub_note: str | None = None
@@ -429,8 +399,6 @@ class BenchReport:
         }
         if self.correctness is not None:
             out["correctness"] = self.correctness.to_dict()
-        if self.perf_screen is not None:
-            out["perf_screen"] = self.perf_screen.to_dict()
         if self.sla_bench is not None:
             out["sla_bench"] = self.sla_bench.to_dict()
         if self.stub_note:

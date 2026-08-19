@@ -9,7 +9,6 @@ import pytest
 from bench.sampler import (
     MAX_PROMPT_CHARS,
     SamplerError,
-    calib_seed,
     compute_sample_seed,
     extract_prompt,
     fetch_hf_row,
@@ -53,18 +52,18 @@ def _fetcher(rows: list[dict]):
 
 
 def test_sample_seed_deterministic():
-    a = compute_sample_seed(
-        block_hash="ab" * 32,
-        patch_hash="cd" * 32,
-        campaign_id=CAMPAIGN,
-    )
-    b = compute_sample_seed(
-        block_hash="0x" + "ab" * 32,
-        patch_hash="sha256:" + "cd" * 32,
-        campaign_id=CAMPAIGN,
-    )
+    a = compute_sample_seed(block_hash="ab" * 32, campaign_id=CAMPAIGN)
+    b = compute_sample_seed(block_hash="0x" + "ab" * 32, campaign_id=CAMPAIGN)
     assert a == b
     assert len(a) == 64
+
+
+def test_sample_seed_is_shared_across_a_round():
+    """Every image in one round draws the same prompt set, so the patch hash
+    is not in the seed material."""
+    seed = compute_sample_seed(block_hash="ab" * 32, campaign_id=CAMPAIGN)
+    other = compute_sample_seed(block_hash="ab" * 32, campaign_id="other-campaign")
+    assert seed != other
 
 
 def test_parse_sampling_rule_requires_hf_rows():
@@ -137,18 +136,12 @@ def test_sample_workload_uses_future_block():
         rule=_rule(),
         commit_block=100,
         block_hash="ee" * 32,
-        patch_hash="ff" * 32,
         campaign_id=CAMPAIGN,
         row_fetcher=_fetcher(rows),
     )
     assert sampled.sample_seed_block == 101
     assert sampled.receipt["type"] == "hf_rows"
     assert sampled.receipt["row_indices"] == list(sampled.row_indices)
-
-
-def test_calib_seed_stable():
-    assert calib_seed(CAMPAIGN, 0) == calib_seed(CAMPAIGN, 0)
-    assert calib_seed(CAMPAIGN, 0) != calib_seed(CAMPAIGN, 1)
 
 
 def test_select_row_indices_modulo_distinct():

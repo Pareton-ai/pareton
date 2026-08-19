@@ -420,7 +420,6 @@ def test_fingerprint_uses_real_aggregate_not_zero(
         candidate_digest=fp.candidate_image_digest,
         model_weights_sha256=staged.weights_sha256,
         corr=None,
-        perf=None,
         sla=None,
         skipped_note=None,
         started_at="2026-07-18T00:00:00Z",

@@ -20,12 +20,10 @@ from campaign.store import (
     get_public_stats,
     get_submission,
     get_submission_for_campaign,
-    list_bench_reports,
     list_bench_summaries,
     list_campaigns,
     list_events,
     list_latest_states,
-    list_live_bench_phases,
     list_submission_jobs,
     list_submissions,
 )
@@ -38,7 +36,7 @@ V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # state (PAR-44). Lists / campaigns keep the shared short TTL above.
 # ``built`` is terminal for no-bench campaigns; bench campaigns continue via
 # ``bench_queued`` (and later) in the same worker turn after enqueue.
-_TERMINAL_SUBMISSION_STATES = frozenset({"built", "benched", "rejected"})
+_TERMINAL_SUBMISSION_STATES = frozenset({"built", "scored", "disqualified", "rejected"})
 _NO_STORE = "no-store"
 
 
@@ -130,9 +128,6 @@ class SubmissionSummaryModel(BaseModel):
     engine_image_ref: str | None = None
     latest_state: SubmissionStateName | None = None
     bench_verdict: str | None = None
-    # Live phase of a bench running right now; None otherwise. Read from the
-    # job row, not the event trail, so it clears on its own when work stops.
-    bench_phase: BenchPhaseName | None = None
 
 
 class SubmissionsPageModel(BaseModel):
@@ -151,7 +146,6 @@ class SubmissionEventModel(BaseModel):
 
 
 class SubmissionJobModel(BaseModel):
-    kind: str
     status: str
     last_error: str | None = None
     phase: BenchPhaseName | None = None
@@ -161,13 +155,12 @@ class SubmissionJobModel(BaseModel):
 
 
 class SubmissionDetailModel(BaseModel):
-    """`submission` and `bench_reports` stay loose: no state field, no payoff."""
+    """`submission` stays loose: no state field, no payoff."""
 
     submission: dict[str, Any]
     latest_state: SubmissionStateName | None = None
     jobs: list[SubmissionJobModel]
     events: list[SubmissionEventModel]
-    bench_reports: list[dict[str, Any]]
     bench_verdict: str | None = None
 
 
@@ -207,7 +200,6 @@ def campaign_submissions(
     ids = [r["id"] for r in rows]
     summaries = list_bench_summaries(campaign_id, submission_ids=ids)
     states = list_latest_states(ids)
-    phases = list_live_bench_phases(ids)
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -221,7 +213,8 @@ def campaign_submissions(
                 },
                 "latest_state": states.get(str(r["id"])),
                 "bench_verdict": summaries.get(str(r["id"])),
-                "bench_phase": phases.get(str(r["id"])),
+                # TODO(PAR-80): bench_phase now lives on the round, not the
+                # submission. The round read API replaces it.
             }
             for r in rows
         ],
@@ -242,7 +235,6 @@ def _iso_or_none(value: Any) -> str | None:
 
 def _submission_detail_payload(row: dict) -> dict:
     events = list_events(row["id"])
-    reports = list_bench_reports(row["id"])
     states = list_latest_states([row["id"]])
     jobs = list_submission_jobs(row["id"])
     return {
@@ -252,7 +244,6 @@ def _submission_detail_payload(row: dict) -> dict:
         "latest_state": states.get(str(row["id"])),
         "jobs": [
             {
-                "kind": j["kind"],
                 "status": j["status"],
                 "last_error": j.get("last_error"),
                 "phase": coerce_phase(j.get("phase")),
@@ -273,21 +264,7 @@ def _submission_detail_payload(row: dict) -> dict:
             }
             for e in events
         ],
-        "bench_reports": [
-            {
-                "task_id": r["task_id"],
-                "stage": r["stage"],
-                "verdict": r["verdict"],
-                "report": r.get("report") or {},
-                "evidence_s3_url": r.get("evidence_s3_url"),
-                "gpu_sku": r.get("gpu_sku"),
-                "mock": bool(r.get("mock")),
-                "created_at": r["created_at"].isoformat()
-                if hasattr(r["created_at"], "isoformat")
-                else str(r["created_at"]),
-            }
-            for r in reports
-        ],
+        # TODO(PAR-80): round entries replace bench_reports here.
         "bench_verdict": derive_bench_verdict_from_events(events),
     }
 

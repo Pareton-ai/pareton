@@ -19,7 +19,6 @@ import threading
 import config
 from campaign.store import claim_next_job, count_pending_jobs
 from observability.events import heartbeat as _heartbeat
-from worker.bench_job import process_bench_job
 from worker.pipeline import process_submission
 
 logger = logging.getLogger(__name__)
@@ -65,7 +64,7 @@ def run_once(
     mock_tampered_candidate: bool,
     registered_hotkeys: list[str] | None,
 ) -> bool:
-    row = claim_next_job(kind="gates")
+    row = claim_next_job()
     if row is not None:
         # Ingest already filtered to metagraph members (chain.watcher).
         # A row in submissions is the registration proof; re-reading the
@@ -85,19 +84,10 @@ def run_once(
         )
         return True
 
-    row = claim_next_job(kind="bench")
-    if row is None:
-        return False
-    logger.info(
-        "processing bench job submission %s patch=%s", row["id"], row["patch_hash"]
-    )
-    outcome = process_bench_job(
-        row,
-        mock_bench=mock_bench,
-        mock_tampered_candidate=mock_tampered_candidate,
-    )
-    logger.info("submission %s bench -> %s", row["id"], outcome)
-    return True
+    # TODO(PAR-83): rounds replace the per-submission bench job. The worker
+    # claims a pending round here once round/store.py and worker/round_job.py
+    # land; mock_bench and mock_tampered_candidate feed that runner.
+    return False
 
 
 def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:

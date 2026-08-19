@@ -75,12 +75,14 @@ def test_absent_engine_leaves_manifest_hash_unchanged():
 def test_engine_none_matches_known_pre_engine_hash():
     """Golden hash: locks the pin set against accidental future drift.
 
-    Rebaselined once, when the submission window left the pin set. Campaigns
-    hashed before that keep their stored hash; nothing recomputes it.
+    Rebaselined twice: once when the submission window left the pin set, and
+    once when the round revamp added scoring_rule and dropped z_threshold.
+    Campaigns hashed before a rebaseline keep their stored hash; nothing
+    recomputes it, so every campaign is reseeded instead (PAR-85).
     """
     fields = freeze_manifest_fields(**_fields_kwargs(campaign_id=None, profile_id=None))
     assert compute_manifest_hash(fields) == (
-        "sha256:3e2602cb9ce5142cbb150e077d863e642011e0c4f70dbca19940f3c4a934c7d4"
+        "sha256:36b3877597c061ebd8ec09a0d8e4c47ba19babed71fcd0174bdd4faf55a9fa67"
     )
 
 

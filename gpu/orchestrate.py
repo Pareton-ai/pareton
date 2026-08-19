@@ -129,8 +129,6 @@ def _write_remote_env(
         # on laptops (can be slower with less RAM).
         "HF_XET_HIGH_PERFORMANCE=1",
     ]
-    if config.BENCH_SKIP_SLA:
-        lines.append("PARETON_BENCH_SKIP_SLA=1")
     hf = os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN")
     if hf:
         lines.append(f"HF_TOKEN={hf}")
@@ -378,23 +376,6 @@ def destroy_pod(
     obs.pod_destroyed(pod=pod.name, provider=pod.provider)
     if pod.provider != "static_ssh":
         registry.remove(pod.name)
-
-
-def discover_calib_requests(requests_dir: Path) -> list[Path]:
-    """Return sample-*/bench_request.json paths sorted by sample index."""
-    root = Path(requests_dir)
-    found = list(root.glob("sample-*/bench_request.json"))
-    if not found:
-        raise ProvisionError(f"no sample-*/bench_request.json under {root}")
-
-    def _idx(path: Path) -> int:
-        name = path.parent.name
-        try:
-            return int(name.split("-", 1)[1])
-        except (IndexError, ValueError) as exc:
-            raise ProvisionError(f"bad sample dir name {name!r}") from exc
-
-    return [p.resolve() for p in sorted(found, key=_idx)]
 
 
 def _report_is_pass(run_dir: Path) -> bool:

@@ -119,7 +119,6 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
             "engines",
             "workload_trace",
             "correctness",
-            "perf_screen",
             "sla_bench",
         ],
         ctx="bench_request",
@@ -200,13 +199,6 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         thr,
         ["mean_abs_logprob_diff", "max_abs_logprob_diff", "argmax_mismatch_rate"],
         ctx="correctness.thresholds",
-    )
-
-    ps = d["perf_screen"]
-    if not isinstance(ps, dict):
-        raise RequestValidationError("perf_screen must be an object")
-    _require_keys(
-        ps, ["num_requests", "concurrency", "min_throughput_ratio"], ctx="perf_screen"
     )
 
     sla = d["sla_bench"]
@@ -315,7 +307,6 @@ def validate_report_dict(d: dict[str, Any]) -> None:
     if d["verdict"] not in (
         "pass",
         "fail_correctness",
-        "fail_perf_screen",
         "fail_sla",
         "error",
     ):

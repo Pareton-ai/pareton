@@ -30,7 +30,6 @@ class OutputLayout:
         ├── env/
         ├── weights/
         ├── correctness/
-        ├── perf_screen/
         └── sla_bench/
     """
 
@@ -40,7 +39,6 @@ class OutputLayout:
         self.env_dir = self.evidence / "env"
         self.weights_dir = self.evidence / "weights"
         self.correctness_dir = self.evidence / "correctness"
-        self.perf_screen_dir = self.evidence / "perf_screen"
         self.sla_bench_dir = self.evidence / "sla_bench"
         self.report_path = self.root / "bench_report.json"
         self.log_path = self.root / "harness.log"
@@ -52,7 +50,6 @@ class OutputLayout:
             self.env_dir,
             self.weights_dir,
             self.correctness_dir,
-            self.perf_screen_dir,
             self.sla_bench_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
