@@ -13,7 +13,7 @@ from db.connection import db_connection
 from gate.types import SUBMISSION_STATES
 
 from .manifest import build_manifest
-from .models import CampaignManifest, CustomerSignoff, SLA
+from .models import CampaignManifest, CustomerSignoff, SLA, validate_scoring_rule
 
 
 def _parse_ts(value: Any) -> datetime:
@@ -166,6 +166,57 @@ def list_campaigns(*, status: str | None = None) -> list[CampaignManifest]:
                 cur.execute("SELECT * FROM campaigns ORDER BY created_at DESC")
             rows = cur.fetchall()
     return [_row_to_manifest(dict(r)) for r in rows]
+
+
+def assert_scoring_rule_mutable(status: str, *, campaign_id: Any = None) -> None:
+    """Refuse a scoring_rule write on a campaign that left draft.
+
+    The rule decides how every round ranks, and it is pinned in
+    manifest_hash. Changing it under a live campaign would re-rank work that
+    miners already submitted against the old formula. The schema carries no
+    trigger for this, by design: this is the guard.
+    """
+    if status != "draft":
+        raise ValueError(
+            f"campaign {campaign_id} is {status!r}: scoring_rule is fixed once a "
+            "campaign leaves draft"
+        )
+
+
+def set_campaign_scoring_rule(
+    campaign_id: UUID | str, rule: dict[str, Any] | None
+) -> CampaignManifest:
+    """Replace scoring_rule on a draft campaign. The only write path for it.
+
+    manifest_hash covers scoring_rule, so it is recomputed in the same
+    transaction; leaving the stored hash behind would describe a formula the
+    campaign no longer uses.
+    """
+    normalized = validate_scoring_rule(rule)
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM campaigns WHERE id = %s FOR UPDATE",
+                (str(campaign_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"campaign {campaign_id} not found")
+            row = dict(row)
+            assert_scoring_rule_mutable(str(row["status"]), campaign_id=campaign_id)
+            row["scoring_rule"] = normalized
+            # Force a recompute instead of carrying the stored hash forward.
+            row["manifest_hash"] = None
+            manifest = _row_to_manifest(row)
+            cur.execute(
+                """
+                UPDATE campaigns
+                SET scoring_rule = %s, manifest_hash = %s
+                WHERE id = %s
+                """,
+                (Json(normalized), manifest.manifest_hash, str(campaign_id)),
+            )
+    return manifest
 
 
 def insert_submission(
