@@ -16,10 +16,14 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
-from campaign.cross_env import DEFAULT_CROSS_ENV, validate_cross_env
 from campaign.engine import ENGINE_PRESETS, preset as engine_preset
 from campaign.manifest import build_manifest
-from campaign.models import CustomerSignoff, SLA, validate_priority_metric
+from campaign.models import (
+    CustomerSignoff,
+    SLA,
+    validate_priority_metric,
+    validate_scoring_rule,
+)
 from campaign.store import insert_campaign, insert_profile, list_campaigns
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,21 +53,7 @@ KNOWN_SEED_STATUSES = frozenset({"draft", "open", "closed"})
 # Partner-facing framing; at pinned gpu_count this is the same lever as throughput.
 DEFAULT_PRIORITY_METRIC = "gpu_hours"
 DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
-# Seed bench floors for the 10% partner bar (do not parse success_threshold text).
-# gpu_hours at pinned gpu_count ⇒ throughput ratio 1/0.9; throughput ⇒ 1.10.
-_SEED_MIN_SPEEDUP_BY_METRIC: dict[str, float] = {
-    "throughput": 1.10,
-    "gpu_hours": 1.0 / 0.9,
-}
-
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-
-
-def _seed_min_speedup_each(priority_metric: str) -> float:
-    """Return seed floor for a normalized priority_metric (lowercase)."""
-    return _SEED_MIN_SPEEDUP_BY_METRIC.get(
-        priority_metric, float(DEFAULT_CROSS_ENV["min_speedup_each"])
-    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -128,14 +118,12 @@ def build_seed_bench_spec(
     baseline_engine_image_digest: str = DEFAULT_BASELINE_ENGINE_IMAGE_DIGEST,
     gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     serve_args: list[str] | None = None,
-    cross_env: dict | None = None,
     correctness_num_prompts: int | None = None,
     correctness_max_new_tokens: int | None = None,
-    perf_concurrency: int | None = None,
 ) -> dict:
-    ce = DEFAULT_CROSS_ENV if cross_env is None else cross_env
-    # Sample-size fields only; thresholds and calibration come from
-    # bench.calibrate apply, never from seed.
+    # Sample-size fields only. Correctness thresholds come from the
+    # PARETON_BENCH_CORRECTNESS_* defaults. TODO(PAR-77): the shared scorer
+    # decides where per-campaign thresholds live.
     correctness: dict | None = None
     if correctness_num_prompts is not None or correctness_max_new_tokens is not None:
         correctness = {}
@@ -143,9 +131,6 @@ def build_seed_bench_spec(
             correctness["num_prompts"] = int(correctness_num_prompts)
         if correctness_max_new_tokens is not None:
             correctness["max_new_tokens"] = int(correctness_max_new_tokens)
-    perf_screen: dict | None = None
-    if perf_concurrency is not None:
-        perf_screen = {"concurrency": int(perf_concurrency)}
     return {
         "model": {
             "hf_repo": model_repo,
@@ -158,8 +143,6 @@ def build_seed_bench_spec(
         "gpu_count": gpu_count,
         "serve_args": list(serve_args) if serve_args else None,
         "correctness": correctness,
-        "perf_screen": perf_screen,
-        "cross_env": validate_cross_env(ce),
     }
 
 
@@ -179,12 +162,11 @@ def seed_synthetic_campaign(
     bench_serve_args: list[str] | None = None,
     bench_correctness_num_prompts: int | None = None,
     bench_correctness_max_new_tokens: int | None = None,
-    bench_perf_concurrency: int | None = None,
     workload_trace_url: str | None = None,
     workload_trace_sha256: str | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
-    z_threshold: float | None = None,
+    scoring_rule: dict | None = None,
     allow_placeholders: bool = False,
     priority_metric: str = DEFAULT_PRIORITY_METRIC,
     success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
@@ -272,26 +254,12 @@ def seed_synthetic_campaign(
             serve_args=bench_serve_args,
             correctness_num_prompts=bench_correctness_num_prompts,
             correctness_max_new_tokens=bench_correctness_max_new_tokens,
-            perf_concurrency=bench_perf_concurrency,
-            cross_env={
-                **DEFAULT_CROSS_ENV,
-                "min_speedup_each": _seed_min_speedup_each(priority_metric),
-            },
         )
     )
 
-    if status == "open":
-        corr = (bench or {}).get("correctness") if isinstance(bench, dict) else None
-        cal = corr.get("calibration") if isinstance(corr, dict) else None
-        if not isinstance(cal, dict) or cal.get("thresholds") is None:
-            raise ValueError(
-                "status=open requires campaigns.bench.correctness.calibration "
-                "with thresholds; seed draft first, run bench.calibrate apply, then open"
-            )
-
     pool = list(workload_pool) if workload_pool is not None else None
     rule = dict(sampling_rule) if sampling_rule is not None else None
-    z_thr = float(z_threshold) if z_threshold is not None else None
+    scoring = validate_scoring_rule(scoring_rule)
 
     fields_manifest = build_manifest(
         campaign_id=campaign_id,
@@ -319,7 +287,7 @@ def seed_synthetic_campaign(
         engine=engine_profile,
         workload_pool=pool,
         sampling_rule=rule,
-        z_threshold=z_thr,
+        scoring_rule=scoring,
     )
 
     signoff = CustomerSignoff(
@@ -354,7 +322,7 @@ def seed_synthetic_campaign(
         engine=engine_profile,
         workload_pool=pool,
         sampling_rule=rule,
-        z_threshold=z_thr,
+        scoring_rule=scoring,
     )
 
     inserted = insert_campaign(manifest)
@@ -390,12 +358,6 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=None,
         help="Forced continuation length per correctness prompt",
-    )
-    p.add_argument(
-        "--bench-perf-concurrency",
-        type=int,
-        default=None,
-        help="Perf screen concurrency (default: PARETON_BENCH_PERF_CONCURRENCY)",
     )
     p.add_argument(
         "--baseline-engine-image-digest",
@@ -463,10 +425,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Path to JSON sampling rule (hf_rows: dataset, revision, n_rows, n_prompts)",
     )
     p.add_argument(
-        "--z-threshold",
-        type=float,
+        "--scoring-rule-json",
         default=None,
-        help="Z-score promotion threshold (promote when aggregate_z < value)",
+        help="Path to a JSON scoring rule (default: median_e2e_speedup)",
     )
     p.add_argument(
         "--allow-placeholders",
@@ -498,6 +459,12 @@ def main(argv: list[str] | None = None) -> int:
             rule = json.loads(rule_path.read_text(encoding="utf-8"))
             if not isinstance(rule, dict):
                 raise ValueError("--sampling-rule-json must be a JSON object")
+        scoring = None
+        if args.scoring_rule_json:
+            scoring_path = Path(args.scoring_rule_json)
+            scoring = json.loads(scoring_path.read_text(encoding="utf-8"))
+            if not isinstance(scoring, dict):
+                raise ValueError("--scoring-rule-json must be a JSON object")
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -513,12 +480,11 @@ def main(argv: list[str] | None = None) -> int:
             bench_serve_args=args.bench_serve_args,
             bench_correctness_num_prompts=args.bench_correctness_num_prompts,
             bench_correctness_max_new_tokens=args.bench_correctness_max_new_tokens,
-            bench_perf_concurrency=args.bench_perf_concurrency,
             workload_trace_url=args.workload_trace_url,
             workload_trace_sha256=args.workload_trace_sha256,
             workload_pool=pool,
             sampling_rule=rule,
-            z_threshold=args.z_threshold,
+            scoring_rule=scoring,
             allow_placeholders=args.allow_placeholders,
             priority_metric=args.priority_metric,
             success_threshold=args.success_threshold,

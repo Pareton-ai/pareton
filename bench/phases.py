@@ -22,7 +22,6 @@ class BenchPhase(StrEnum):
     DOWNLOADING_MODEL = "downloading_model"
     STARTING_ENGINE = "starting_engine"
     CORRECTNESS = "correctness"
-    PERF_SCREEN = "perf_screen"
     SLA_BENCH = "sla_bench"
     TEARDOWN = "teardown"
 
@@ -35,7 +34,6 @@ POD_REPORTABLE_PHASES: frozenset[str] = frozenset(
         BenchPhase.DOWNLOADING_MODEL.value,
         BenchPhase.STARTING_ENGINE.value,
         BenchPhase.CORRECTNESS.value,
-        BenchPhase.PERF_SCREEN.value,
         BenchPhase.SLA_BENCH.value,
     }
 )

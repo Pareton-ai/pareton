@@ -87,9 +87,8 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     monkeypatch.setattr(
         server,
         "list_latest_states",
-        lambda ids: {str(ids[0]): "benched"},
+        lambda ids: {str(ids[0]): "scored"},
     )
-    monkeypatch.setattr(server, "list_live_bench_phases", lambda _ids: {})
 
     resp = client.get("/v1/campaigns/c1/submissions")
     assert resp.status_code == 200
@@ -99,7 +98,7 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert body["offset"] == 0
     assert len(body["submissions"]) == 1
     row = body["submissions"][0]
-    assert row["latest_state"] == "benched"
+    assert row["latest_state"] == "scored"
     assert row["bench_verdict"] == "pass"
     assert (
         resp.headers.get("Cache-Control")
@@ -215,7 +214,6 @@ def test_detail_exposes_live_phase_of_a_running_job(monkeypatch, client: TestCli
         lambda _c, _h: _detail_row(sid, "c1", "sha256:live"),
     )
     monkeypatch.setattr(server, "list_events", lambda _id: [])
-    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
     monkeypatch.setattr(
         server, "list_latest_states", lambda _ids: {sid: "bench_queued"}
     )
@@ -224,7 +222,6 @@ def test_detail_exposes_live_phase_of_a_running_job(monkeypatch, client: TestCli
         "list_submission_jobs",
         lambda _id: [
             {
-                "kind": "bench",
                 "status": "running",
                 "last_error": None,
                 "phase": "downloading_model",
@@ -257,7 +254,6 @@ def test_detail_drops_phase_text_outside_the_vocabulary(
         lambda _c, _h: _detail_row(sid, "c1", "sha256:junk"),
     )
     monkeypatch.setattr(server, "list_events", lambda _id: [])
-    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
     monkeypatch.setattr(
         server, "list_latest_states", lambda _ids: {sid: "bench_queued"}
     )
@@ -266,7 +262,6 @@ def test_detail_drops_phase_text_outside_the_vocabulary(
         "list_submission_jobs",
         lambda _id: [
             {
-                "kind": "bench",
                 "status": "running",
                 "last_error": None,
                 "phase": "<script>alert(1)</script>",
@@ -314,18 +309,14 @@ def test_submissions_payload_matches_the_documented_model(
     monkeypatch.setattr(
         server, "list_bench_summaries", lambda _cid, submission_ids=None: {}
     )
-    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: "sampled"})
     monkeypatch.setattr(
-        server, "list_live_bench_phases", lambda _ids: {sid: "downloading_model"}
+        server, "list_latest_states", lambda _ids: {sid: "round_assigned"}
     )
 
     resp = client.get("/v1/campaigns/c1/submissions")
     assert resp.status_code == 200
     page = server.SubmissionsPageModel.model_validate(resp.json())
-    assert page.submissions[0].latest_state == "sampled"
-    # A bench in progress and one that died hours ago share latest_state, so the
-    # live phase is the only thing on the row that separates them.
-    assert page.submissions[0].bench_phase == "downloading_model"
+    assert page.submissions[0].latest_state == "round_assigned"
     # The documented contract must not have moved the timestamp format.
     assert resp.json()["submissions"][0]["committed_at"].endswith("+00:00")
 
@@ -395,7 +386,6 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     row = _detail_row(sid, "c1", "sha256:dup")
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
     monkeypatch.setattr(server, "list_events", lambda _id: [])
-    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
     monkeypatch.setattr(
         server, "list_latest_states", lambda _ids: {sid: "bench_queued"}
     )
@@ -404,11 +394,10 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
         "list_submission_jobs",
         lambda _id: [
             {
-                "kind": "bench",
                 "status": "failed",
                 "last_error": "bench_exit_bad_request",
             },
-            {"kind": "gates", "status": "done", "last_error": None},
+            {"status": "done", "last_error": None},
         ],
     )
 
@@ -423,7 +412,6 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     assert body["latest_state"] == "bench_queued"
     assert body["jobs"] == [
         {
-            "kind": "bench",
             "status": "failed",
             "last_error": "bench_exit_bad_request",
             "phase": None,
@@ -432,7 +420,6 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
             "progress": None,
         },
         {
-            "kind": "gates",
             "status": "done",
             "last_error": None,
             "phase": None,
@@ -492,7 +479,6 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     monkeypatch.setattr(server, "get_submission", lambda _h: row)
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
     monkeypatch.setattr(server, "list_events", lambda _id: [])
-    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
     monkeypatch.setattr(server, "list_latest_states", lambda _ids: {})
     monkeypatch.setattr(server, "list_submission_jobs", lambda _id: [])
 
@@ -512,7 +498,7 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
         ("building", "no-store"),
         ("bench_queued", "no-store"),
         ("built", V1_CACHE_CONTROL_EXPECTED),
-        ("benched", V1_CACHE_CONTROL_EXPECTED),
+        ("scored", V1_CACHE_CONTROL_EXPECTED),
         ("rejected", V1_CACHE_CONTROL_EXPECTED),
     ],
 )
@@ -525,7 +511,6 @@ def test_submission_detail_cache_control_by_state(
     row = _detail_row(sid, "c1", "sha256:live")
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: row)
     monkeypatch.setattr(server, "list_events", lambda _id: [])
-    monkeypatch.setattr(server, "list_bench_reports", lambda _id: [])
     monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: latest_state})
     monkeypatch.setattr(server, "list_submission_jobs", lambda _id: [])
 
@@ -539,7 +524,7 @@ def test_submission_detail_cache_control_by_state(
     [
         ("building", "no-store"),
         ("built", V1_CACHE_CONTROL_EXPECTED),
-        ("benched", V1_CACHE_CONTROL_EXPECTED),
+        ("scored", V1_CACHE_CONTROL_EXPECTED),
         ("rejected", V1_CACHE_CONTROL_EXPECTED),
     ],
 )

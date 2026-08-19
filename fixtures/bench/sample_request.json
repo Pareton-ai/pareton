@@ -38,11 +38,6 @@
       "argmax_mismatch_rate": 0.001
     }
   },
-  "perf_screen": {
-    "num_requests": 2,
-    "concurrency": 1,
-    "min_throughput_ratio": 1.0
-  },
   "sla_bench": {
     "repetitions": 3,
     "warmup_requests": 1,

@@ -256,14 +256,17 @@ def process_submission(
             "build_log": build_res.evidence.get("build_log"),
         },
     )
-    enqueued = complete_gates_job(
+    # bench_queued is the round creator's input queue, so it is appended in the
+    # same transaction that settles the job. TODO(PAR-79): the watcher selects
+    # each cohort from submissions in this state.
+    enqueue_round = campaign.bench is not None
+    complete_gates_job(
         submission_id,
         job_id=int(job_id) if job_id is not None else None,
-        enqueue_bench=campaign.bench is not None,
+        enqueue_round=enqueue_round,
     )
-    if enqueued:
-        append_event(submission_id, SubmissionState.BENCH_QUEUED, detail={})
-        logger.info("enqueued bench job for submission %s", submission_id)
+    if enqueue_round:
+        logger.info("queued submission %s for the next round", submission_id)
     return build_res
 
 
@@ -281,7 +284,6 @@ def _fail(
     set_job_status(
         submission_id,
         "failed",
-        kind="gates",
         job_id=int(job_id) if job_id is not None else None,
         last_error=result.reason,
     )

@@ -10,7 +10,7 @@ from uuid import UUID
 from psycopg2.extras import Json, RealDictCursor
 
 from db.connection import db_connection
-from gate.types import SUBMISSION_STATES, SubmissionState
+from gate.types import SUBMISSION_STATES
 
 from .manifest import build_manifest
 from .models import CampaignManifest, CustomerSignoff, SLA
@@ -35,8 +35,7 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
     engine = _parse_json_obj(row.get("engine"))
     workload_pool = _parse_json_obj(row.get("workload_pool"))
     sampling_rule = _parse_json_obj(row.get("sampling_rule"))
-    z_raw = row.get("z_threshold")
-    z_threshold = float(z_raw) if z_raw is not None else None
+    scoring_rule = _parse_json_obj(row.get("scoring_rule"))
     return build_manifest(
         campaign_id=row["id"],
         profile_id=row.get("profile_id"),
@@ -60,7 +59,7 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         engine=engine if isinstance(engine, dict) else None,
         workload_pool=list(workload_pool) if isinstance(workload_pool, list) else None,
         sampling_rule=dict(sampling_rule) if isinstance(sampling_rule, dict) else None,
-        z_threshold=z_threshold,
+        scoring_rule=dict(scoring_rule) if isinstance(scoring_rule, dict) else None,
         created_at=(
             _parse_ts(row["created_at"]) if row.get("created_at") is not None else None
         ),
@@ -81,170 +80,6 @@ def insert_profile(name: str, data: dict[str, Any]) -> UUID:
             return cur.fetchone()[0]
 
 
-def apply_campaign_correctness_calibration(
-    campaign_id: UUID | str,
-    correctness_dict: dict[str, Any],
-    *,
-    approver: str = "pareton-admin",
-) -> str:
-    """Write calibrated correctness into a draft campaign with zero submissions.
-
-    Updates ``bench.correctness``, recomputes ``manifest_hash``, and refreshes
-    ``customer_signoff`` in one transaction. Returns the new manifest_hash.
-    """
-    from .manifest import compute_manifest_hash, freeze_manifest_fields
-
-    with db_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM campaigns WHERE id = %s FOR UPDATE",
-                (str(campaign_id),),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise ValueError(f"campaign not found: {campaign_id}")
-            if str(row["status"]) != "draft":
-                raise ValueError(
-                    f"campaign status must be draft, got {row['status']!r}"
-                )
-            cur.execute(
-                "SELECT COUNT(*) AS n FROM submissions WHERE campaign_id = %s",
-                (str(campaign_id),),
-            )
-            n_subs = int(cur.fetchone()["n"])
-            if n_subs != 0:
-                raise ValueError(
-                    f"campaign has {n_subs} submissions; calibration apply requires zero"
-                )
-
-            bench = row.get("bench")
-            if isinstance(bench, str):
-                bench = json.loads(bench)
-            if not isinstance(bench, dict):
-                raise ValueError("campaign.bench missing")
-            bench = dict(bench)
-            bench["correctness"] = correctness_dict
-
-            engine = row.get("engine")
-            if isinstance(engine, str):
-                engine = json.loads(engine)
-            if engine is not None and not isinstance(engine, dict):
-                engine = None
-
-            workload_pool = _parse_json_obj(row.get("workload_pool"))
-            sampling_rule = _parse_json_obj(row.get("sampling_rule"))
-            z_raw = row.get("z_threshold")
-            z_threshold = float(z_raw) if z_raw is not None else None
-            fields = freeze_manifest_fields(
-                campaign_id=row["id"],
-                profile_id=row.get("profile_id"),
-                baseline_repo=row["baseline_repo"],
-                baseline_commit=row["baseline_commit"],
-                base_image_digest=row["base_image_digest"],
-                gpu_skus=list(row.get("gpu_skus") or []),
-                workload_trace_sha256=row["workload_trace_sha256"],
-                workload_trace_url=row["workload_trace_url"],
-                sla=SLA.from_dict(row.get("sla") or {}),
-                scoring_config_sha256=row.get("scoring_config_sha256"),
-                scoring_config_url=row.get("scoring_config_url"),
-                allowed_paths=list(row.get("allowed_paths") or []),
-                denied_paths=list(row.get("denied_paths") or []),
-                priority_metric=row["priority_metric"],
-                success_threshold=row["success_threshold"],
-                bench=bench,
-                engine=engine if isinstance(engine, dict) else None,
-                workload_pool=(
-                    list(workload_pool) if isinstance(workload_pool, list) else None
-                ),
-                sampling_rule=(
-                    dict(sampling_rule) if isinstance(sampling_rule, dict) else None
-                ),
-                z_threshold=z_threshold,
-            )
-            new_hash = compute_manifest_hash(fields)
-            now = datetime.now(timezone.utc)
-            signoff = CustomerSignoff(
-                approved_manifest_hash=new_hash,
-                approver=approver,
-                timestamp=now,
-            )
-            cur.execute(
-                """
-                UPDATE campaigns
-                SET bench = %s,
-                    manifest_hash = %s,
-                    customer_signoff = %s,
-                    updated_at = now()
-                WHERE id = %s
-                """,
-                (
-                    Json(bench),
-                    new_hash,
-                    Json(signoff.to_dict()),
-                    str(campaign_id),
-                ),
-            )
-            return new_hash
-
-
-def apply_campaign_z_calibration(
-    campaign_id: UUID | str,
-    calibration: dict[str, Any],
-    *,
-    approver: str = "pareton-admin",
-) -> str:
-    """Write z-score distribution into campaigns.calibration (draft, zero subs).
-
-    Does not change manifest_hash pin set (calibration is measured, not pinned).
-    Refreshes customer_signoff timestamp only. Returns current manifest_hash.
-    """
-    with db_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM campaigns WHERE id = %s FOR UPDATE",
-                (str(campaign_id),),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise ValueError(f"campaign not found: {campaign_id}")
-            if str(row["status"]) != "draft":
-                raise ValueError(
-                    f"campaign status must be draft, got {row['status']!r}"
-                )
-            cur.execute(
-                "SELECT COUNT(*) AS n FROM submissions WHERE campaign_id = %s",
-                (str(campaign_id),),
-            )
-            n_subs = int(cur.fetchone()["n"])
-            if n_subs != 0:
-                raise ValueError(
-                    f"campaign has {n_subs} submissions; calibration apply requires zero"
-                )
-            if not isinstance(calibration, dict) or not calibration.get("metrics"):
-                raise ValueError("calibration must include metrics object")
-            now = datetime.now(timezone.utc)
-            signoff = CustomerSignoff(
-                approved_manifest_hash=str(row["manifest_hash"]),
-                approver=approver,
-                timestamp=now,
-            )
-            cur.execute(
-                """
-                UPDATE campaigns
-                SET calibration = %s,
-                    customer_signoff = %s,
-                    updated_at = now()
-                WHERE id = %s
-                """,
-                (
-                    Json(calibration),
-                    Json(signoff.to_dict()),
-                    str(campaign_id),
-                ),
-            )
-            return str(row["manifest_hash"])
-
-
 def insert_campaign(manifest: CampaignManifest) -> UUID:
     signoff = (
         Json(manifest.customer_signoff.to_dict()) if manifest.customer_signoff else None
@@ -260,7 +95,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   allowed_paths, denied_paths,
                   manifest_hash, customer_signoff, status, bench, engine,
                   priority_metric, success_threshold,
-                  workload_pool, sampling_rule, z_threshold
+                  workload_pool, sampling_rule, scoring_rule
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
@@ -303,7 +138,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                         if manifest.sampling_rule is not None
                         else None
                     ),
-                    manifest.z_threshold,
+                    Json(manifest.scoring_rule),
                 ),
             )
             return cur.fetchone()[0]
@@ -373,9 +208,9 @@ def insert_submission(
             submission_id = row[0]
             cur.execute(
                 """
-                INSERT INTO submission_jobs (submission_id, kind, status)
-                VALUES (%s, 'gates', 'pending')
-                ON CONFLICT (submission_id, kind) DO NOTHING
+                INSERT INTO submission_jobs (submission_id, status)
+                VALUES (%s, 'pending')
+                ON CONFLICT (submission_id) DO NOTHING
                 """,
                 (str(submission_id),),
             )
@@ -435,12 +270,11 @@ def set_job_status(
     submission_id: UUID | str,
     status: str,
     *,
-    kind: str = "gates",
     job_id: int | None = None,
     last_error: str | None = None,
     bump_attempts: bool = False,
 ) -> None:
-    """Update one job row. Prefer job_id; else (submission_id, kind).
+    """Update one job row. Prefer job_id; else submission_id.
 
     Also clears live activity so a settled job cannot look like it is still running.
     """
@@ -450,8 +284,8 @@ def set_job_status(
                 where = "WHERE id = %s"
                 where_args: tuple[Any, ...] = (job_id,)
             else:
-                where = "WHERE submission_id = %s AND kind = %s"
-                where_args = (str(submission_id), kind)
+                where = "WHERE submission_id = %s"
+                where_args = (str(submission_id),)
             attempts_set = "attempts = attempts + 1," if bump_attempts else ""
             cur.execute(
                 f"""
@@ -537,32 +371,14 @@ def set_engine_image(submission_id: UUID | str, image_ref: str) -> None:
 
 
 def submission_has_terminal_event(submission_id: UUID | str) -> bool:
-    """True if rejected or benched already recorded (blocks rebench)."""
+    """True if a terminal state was already recorded (blocks requeue)."""
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT 1 FROM submission_events
-                WHERE submission_id = %s AND state IN ('rejected', 'benched')
+                WHERE submission_id = %s AND state IN ('rejected', 'scored', 'disqualified')
                 LIMIT 1
-                """,
-                (str(submission_id),),
-            )
-            return cur.fetchone() is not None
-
-
-def enqueue_bench_job(submission_id: UUID | str) -> bool:
-    """Enqueue kind=bench pending. Returns False if terminal or already exists."""
-    if submission_has_terminal_event(submission_id):
-        return False
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO submission_jobs (submission_id, kind, status)
-                VALUES (%s, 'bench', 'pending')
-                ON CONFLICT (submission_id, kind) DO NOTHING
-                RETURNING id
                 """,
                 (str(submission_id),),
             )
@@ -573,12 +389,19 @@ def complete_gates_job(
     submission_id: UUID | str,
     *,
     job_id: int | None = None,
-    enqueue_bench: bool = False,
-) -> bool:
-    """Mark gates job done and optionally enqueue bench in one transaction.
+    enqueue_round: bool = False,
+) -> None:
+    """Mark the gates job done, and queue the submission for a round.
 
-    Avoids the crash window where gates is ``done`` but no bench row exists.
-    Returns whether a new bench job row was inserted.
+    Bench used to be a second job row enqueued here. Rounds replaced it: a
+    submission that reaches ``bench_queued`` waits for the round creator to
+    pick it up. TODO(PAR-79): the watcher selects the cohort from that state.
+
+    The ``bench_queued`` event IS that queue, so it is written in the same
+    transaction as the completion. Split over two transactions, a crash
+    between them settles the job while leaving the submission in no queue at
+    all: only 'pending' jobs are reclaimed, and the round creator only reads
+    'bench_queued'.
     """
     with db_connection() as conn:
         with conn.cursor() as cur:
@@ -596,92 +419,45 @@ def complete_gates_job(
                     """
                     UPDATE submission_jobs
                     SET status = 'done', last_error = NULL, updated_at = now()
-                    WHERE submission_id = %s AND kind = 'gates'
+                    WHERE submission_id = %s
                     """,
                     (str(submission_id),),
                 )
-            if not enqueue_bench:
-                return False
-            cur.execute(
-                """
-                SELECT 1 FROM submission_events
-                WHERE submission_id = %s AND state IN ('rejected', 'benched')
-                LIMIT 1
-                """,
-                (str(submission_id),),
-            )
-            if cur.fetchone() is not None:
-                return False
-            cur.execute(
-                """
-                INSERT INTO submission_jobs (submission_id, kind, status)
-                VALUES (%s, 'bench', 'pending')
-                ON CONFLICT (submission_id, kind) DO NOTHING
-                RETURNING id
-                """,
-                (str(submission_id),),
-            )
-            return cur.fetchone() is not None
-
-
-def count_pending_jobs(*, kind: str | None = None) -> int:
-    """How many jobs are waiting to be claimed. Read-only, for observability."""
-    with db_connection(readonly=True) as conn:
-        with conn.cursor() as cur:
-            if kind is None:
-                cur.execute(
-                    "SELECT count(*) FROM submission_jobs WHERE status = 'pending'"
-                )
-            else:
+            if enqueue_round:
                 cur.execute(
                     """
-                    SELECT count(*) FROM submission_jobs
-                    WHERE status = 'pending' AND kind = %s
+                    INSERT INTO submission_events (submission_id, state, detail)
+                    VALUES (%s, 'bench_queued', %s)
                     """,
-                    (kind,),
+                    (str(submission_id), Json({})),
                 )
+
+
+def count_pending_jobs() -> int:
+    """How many gate jobs are waiting to be claimed. Read-only, for observability."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM submission_jobs WHERE status = 'pending'")
             return int(cur.fetchone()[0])
 
 
-def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
-    """Atomically claim the oldest pending job of ``kind``."""
+def claim_next_job() -> dict[str, Any] | None:
+    """Atomically claim the oldest pending gates job."""
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT j.id AS job_id, j.submission_id, j.kind
+                SELECT j.id AS job_id, j.submission_id
                 FROM submission_jobs j
-                WHERE j.status = 'pending' AND j.kind = %s
+                WHERE j.status = 'pending'
                 ORDER BY j.created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
-                """,
-                (kind,),
+                """
             )
             job = cur.fetchone()
             if job is None:
                 return None
-            if kind == "bench":
-                cur.execute(
-                    """
-                    SELECT 1 FROM submission_events
-                    WHERE submission_id = %s AND state IN ('rejected', 'benched')
-                    LIMIT 1
-                    """,
-                    (str(job["submission_id"]),),
-                )
-                if cur.fetchone() is not None:
-                    cur.execute(
-                        """
-                        UPDATE submission_jobs
-                        SET status = 'failed',
-                            last_error = 'submission_terminal',
-                            updated_at = now()
-                        WHERE id = %s
-                        """,
-                        (job["job_id"],),
-                    )
-                    return None
             # New attempt: drop the previous phase so it cannot look current.
             cur.execute(
                 """
@@ -706,15 +482,15 @@ def claim_next_job(*, kind: str = "gates") -> dict[str, Any] | None:
                        c.allowed_paths, c.denied_paths, c.status AS campaign_status,
                        c.bench, c.sla, c.workload_trace_url, c.workload_trace_sha256,
                        c.gpu_skus, c.manifest_hash,
-                       c.workload_pool, c.sampling_rule, c.calibration, c.z_threshold,
+                       c.workload_pool, c.sampling_rule, c.scoring_rule,
                        c.engine,
-                       %s::bigint AS job_id, %s::text AS job_kind,
+                       %s::bigint AS job_id,
                        %s::int AS job_attempt
                 FROM submissions s
                 JOIN campaigns c ON c.id = s.campaign_id
                 WHERE s.id = %s
                 """,
-                (job["job_id"], job["kind"], attempt, str(job["submission_id"])),
+                (job["job_id"], attempt, str(job["submission_id"])),
             )
             row = cur.fetchone()
     return dict(row) if row else None
@@ -826,43 +602,8 @@ def list_latest_states(
     return out
 
 
-def list_live_bench_phases(
-    submission_ids: list[UUID | str],
-    *,
-    stale_after_s: int = 120,
-) -> dict[str, str | None]:
-    """Map submission_id -> phase of a bench job that is running *right now*.
-
-    The event trail has nothing between ``sampled`` and a result, and an infra
-    failure appends no event at all, so the latest state cannot distinguish a
-    bench in progress from one that died hours ago. This is read live and never
-    stored: when the worker stops writing heartbeats the entry disappears and
-    callers fall back to the event state, so a killed worker cannot strand the
-    UI on a phantom "benching".
-    """
-    if not submission_ids:
-        return {}
-    ids = [str(s) for s in submission_ids]
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT submission_id, phase
-                FROM submission_jobs
-                WHERE submission_id = ANY(%s::uuid[])
-                  AND kind = 'bench'
-                  AND status = 'running'
-                  AND heartbeat_at > now() - make_interval(secs => %s)
-                """,
-                (ids, stale_after_s),
-            )
-            rows = cur.fetchall()
-    out: dict[str, str | None] = {sid: None for sid in ids}
-    for r in rows:
-        out[str(r["submission_id"])] = (
-            str(r["phase"]) if r["phase"] is not None else None
-        )
-    return out
+# TODO(PAR-80): live bench phase now lives on rounds.phase, not on a
+# per-submission job row. The round read API replaces list_live_bench_phases.
 
 
 def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
@@ -888,16 +629,16 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
 
 
 def list_submission_jobs(submission_id: UUID | str) -> list[dict[str, Any]]:
-    """Job rows for one submission, ordered by kind."""
+    """Gate job rows for one submission."""
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT kind, status, last_error,
+                SELECT status, last_error,
                        phase, phase_started_at, heartbeat_at, progress
                 FROM submission_jobs
                 WHERE submission_id = %s
-                ORDER BY kind ASC
+                ORDER BY id ASC
                 """,
                 (str(submission_id),),
             )
@@ -905,120 +646,28 @@ def list_submission_jobs(submission_id: UUID | str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-def insert_bench_report(
-    *,
-    submission_id: UUID | str,
-    task_id: str,
-    stage: str,
-    verdict: str,
-    report: dict[str, Any],
-    evidence_s3_url: str | None = None,
-    gpu_sku: str | None = None,
-    mock: bool = False,
-) -> None:
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO bench_reports (
-                  submission_id, task_id, stage, verdict, report,
-                  evidence_s3_url, gpu_sku, mock
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    str(submission_id),
-                    task_id,
-                    stage,
-                    verdict,
-                    Json(report),
-                    evidence_s3_url,
-                    gpu_sku,
-                    mock,
-                ),
-            )
-
-
-def list_bench_reports(submission_id: UUID | str) -> list[dict[str, Any]]:
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT task_id, stage, verdict, report, evidence_s3_url,
-                       gpu_sku, mock, created_at
-                FROM bench_reports
-                WHERE submission_id = %s
-                ORDER BY created_at ASC
-                """,
-                (str(submission_id),),
-            )
-            rows = cur.fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        if isinstance(d.get("report"), str):
-            d["report"] = json.loads(d["report"])
-        out.append(d)
-    return out
+# TODO(PAR-80): round_entries replaces bench_reports. Entry reads live in
+# round/store.py.
 
 
 BENCH_REJECT_REASONS = frozenset(
     {
         "fail_correctness",
-        "fail_perf_screen",
         "fail_sla",
         "fail_engine_candidate",
-        "fail_cross_env_speedup",
-        "fail_promotion",
     }
 )
 
 
-def record_submission_sample(
-    *,
-    submission_id: UUID | str,
-    sample_seed_block: int,
-    sample_seed_block_hash: str,
-    sampled_trace_sha256: str,
-    sampling_receipt: dict[str, Any],
-) -> None:
-    """Persist realized sample columns and append a sampled event."""
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE submissions
-                SET sample_seed_block = %s,
-                    sample_seed_block_hash = %s,
-                    sampled_trace_sha256 = %s,
-                    sampling_receipt = %s
-                WHERE id = %s
-                """,
-                (
-                    int(sample_seed_block),
-                    str(sample_seed_block_hash),
-                    str(sampled_trace_sha256).lower(),
-                    Json(sampling_receipt),
-                    str(submission_id),
-                ),
-            )
-            cur.execute(
-                """
-                INSERT INTO submission_events (submission_id, state, detail)
-                VALUES (%s, %s, %s)
-                """,
-                (
-                    str(submission_id),
-                    SubmissionState.SAMPLED.value,
-                    Json(sampling_receipt),
-                ),
-            )
+# TODO(PAR-79): sampling is per round. The realized trace is snapshotted
+# onto rounds, not onto submissions.
 
 
 def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None:
-    """Terminal bench verdict from submission_events (WS-E event-sourced).
+    """Terminal round verdict from submission_events.
 
-    ``benched`` -> ``pass``; bench ``rejected`` -> its reason; only
-    ``correct``/``screened`` (or no bench events) -> ``None`` (in progress).
+    ``scored`` -> ``pass``; ``disqualified`` or a bench ``rejected`` -> its
+    reason; anything earlier -> ``None`` (in progress).
     """
     terminal: str | None = None
     for e in events:
@@ -1026,8 +675,10 @@ def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None
         detail = e.get("detail") or {}
         if not isinstance(detail, dict):
             detail = {}
-        if state == "benched":
+        if state == "scored":
             terminal = "pass"
+        elif state == "disqualified":
+            terminal = str(detail.get("reason") or "disqualified")
         elif state == "rejected":
             reason = detail.get("reason")
             if reason in BENCH_REJECT_REASONS:
@@ -1132,97 +783,3 @@ def get_public_stats() -> dict[str, Any]:
             "by_latest_state": by_latest_state,
         },
     }
-
-
-def derive_bench_verdict(reports: list[dict[str, Any]]) -> str | None:
-    """Legacy report-collapse helper (pre-WS-E). Prefer event-sourced API."""
-    if not reports:
-        return None
-    stage_order = ("correctness", "perf_screen", "sla_bench")
-    by_stage = {r["stage"]: r["verdict"] for r in reports if r.get("stage")}
-    for stage in stage_order:
-        v = by_stage.get(stage)
-        if v is None:
-            continue
-        if v != "pass":
-            return str(v)
-    if "sla_bench" in by_stage and all(by_stage.get(s) == "pass" for s in by_stage):
-        return "pass"
-    return None
-
-
-def finalize_bench_job(
-    *,
-    submission_id: UUID | str,
-    job_id: int,
-    task_id: str,
-    report_rows: list[dict[str, Any]],
-    events: list[tuple[str, dict[str, Any]]],
-    job_status: str,
-    last_error: str | None = None,
-) -> None:
-    """One transaction: insert bench_reports + append events + set job status.
-
-    Each report row may carry its own ``task_id`` (WS-E per-SKU); otherwise the
-    top-level ``task_id`` is used (single-SKU / legacy callers).
-    """
-    from psycopg2 import errors as pg_errors
-
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                for row in report_rows:
-                    cur.execute(
-                        """
-                        INSERT INTO bench_reports (
-                          submission_id, task_id, stage, verdict, report,
-                          evidence_s3_url, gpu_sku, mock,
-                          z_scores, aggregate_z, promoted
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            str(submission_id),
-                            str(row.get("task_id") or task_id),
-                            row["stage"],
-                            row["verdict"],
-                            Json(row["report"]),
-                            row.get("evidence_s3_url"),
-                            row.get("gpu_sku") or "unknown",
-                            bool(row.get("mock", False)),
-                            (
-                                Json(row["z_scores"])
-                                if row.get("z_scores") is not None
-                                else None
-                            ),
-                            row.get("aggregate_z"),
-                            row.get("promoted"),
-                        ),
-                    )
-            except pg_errors.UniqueViolation as exc:
-                raise RuntimeError(
-                    "bench_reports unique (submission_id, stage, gpu_sku) conflict; "
-                    "delete stale rows before requeue"
-                ) from exc
-            for state, detail in events:
-                cur.execute(
-                    """
-                    INSERT INTO submission_events
-                      (submission_id, state, evidence_ref, detail)
-                    VALUES (%s, %s, NULL, %s)
-                    """,
-                    (str(submission_id), state, Json(detail)),
-                )
-            cur.execute(
-                """
-                UPDATE submission_jobs
-                SET status = %s,
-                    last_error = %s,
-                    phase = NULL,
-                    phase_started_at = NULL,
-                    heartbeat_at = NULL,
-                    progress = NULL,
-                    updated_at = now()
-                WHERE id = %s
-                """,
-                (job_status, last_error, job_id),
-            )

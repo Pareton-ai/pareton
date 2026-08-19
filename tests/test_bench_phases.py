@@ -225,7 +225,7 @@ def test_claim_resets_live_activity_and_returns_the_attempt(monkeypatch):
     from campaign import store
 
     sqls, _args = _patch_db(monkeypatch)
-    row = store.claim_next_job(kind="bench")
+    row = store.claim_next_job()
     assert row is not None and row["job_attempt"] == 3
     claim = next(s for s in sqls if "SET status = 'running'" in s)
     assert "attempts = attempts + 1" in claim
@@ -242,18 +242,7 @@ def test_settling_a_job_clears_live_activity(monkeypatch):
     assert "phase = NULL" in sqls[-1]
     assert "heartbeat_at = NULL" in sqls[-1]
 
-    sqls.clear()
-    store.finalize_bench_job(
-        submission_id="00000000-0000-0000-0000-000000000001",
-        job_id=5,
-        task_id="t",
-        report_rows=[],
-        events=[],
-        job_status="done",
-    )
-    final = next(s for s in sqls if "UPDATE submission_jobs" in s)
-    assert "phase = NULL" in final
-    assert "progress = NULL" in final
+    assert "progress = NULL" in sqls[-1]
 
 
 def test_set_job_status_still_bumps_attempts_on_request(monkeypatch):
@@ -263,7 +252,6 @@ def test_set_job_status_still_bumps_attempts_on_request(monkeypatch):
     store.set_job_status(
         "00000000-0000-0000-0000-000000000001",
         "pending",
-        kind="gates",
         bump_attempts=True,
     )
     assert "attempts = attempts + 1" in sqls[-1]

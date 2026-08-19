@@ -92,12 +92,6 @@ BENCH_HF_CACHE_DIR: Path = Path(
 BENCH_ENGINE_CACHE_DIR: str = os.environ.get(
     "PARETON_BENCH_ENGINE_CACHE_DIR", ""
 ).strip()
-# Z-calibrate needs correctness + perf_screen only. Skip sla_bench when set.
-BENCH_SKIP_SLA: bool = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-)
 
 # GPU pod orchestration (WS-C)
 TARGON_API_KEY: str = os.environ.get("PARETON_TARGON_API_KEY", "")
@@ -144,20 +138,18 @@ GHCR_USER: str = os.environ.get(
     "PARETON_GHCR_USER", os.environ.get("PARETON_GHCR_USERNAME", "")
 )
 
-# WS-D bench worker. Correctness thresholds are B7-calibrated (2026-08-03, below);
-# the rest remain provisional until a realistic-trace re-calibration.
+# Bench worker bounds.
 TRACE_MAX_BYTES: int = int(
     os.environ.get("PARETON_TRACE_MAX_BYTES", str(100 * 1024 * 1024))
 )
 BENCH_TIMEOUT_S: float = float(os.environ.get("PARETON_BENCH_TIMEOUT_S", "10800"))
 ALLOW_MOCK_BENCH: bool = os.environ.get("PARETON_ALLOW_MOCK_BENCH", "") == "1"
-# Correctness prompts and perf_screen requests have no env default on purpose:
-# campaigns pin bench.correctness.num_prompts / bench.perf_screen.num_requests,
-# and absent a pin the worker scores every request in the trace (PAR-65).
+# Correctness prompts have no env default on purpose: campaigns pin
+# bench.correctness.num_prompts, and absent a pin the worker scores every
+# request in the trace (PAR-65).
 BENCH_CORRECTNESS_MAX_NEW_TOKENS: int = int(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_NEW_TOKENS", "32")
 )
-# B7 Hopper calibration 2026-08-03 (engine 6abb5786…, safety_factor=2.0).
 BENCH_CORRECTNESS_MEAN_ABS_LOGPROB_DIFF: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MEAN_ABS_LOGPROB_DIFF", "0.0246")
 )
@@ -167,26 +159,13 @@ BENCH_CORRECTNESS_MAX_ABS_LOGPROB_DIFF: float = float(
 BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_ARGMAX_MISMATCH_RATE", "0.001")
 )
-BENCH_PERF_CONCURRENCY: int = int(os.environ.get("PARETON_BENCH_PERF_CONCURRENCY", "2"))
-# Screen-only smoke gate: single unrepeated measurement, so identical engines
-# routinely land under 1.0 (B7 baseline-vs-baseline ratios: 0.970, 0.992, 0.999,
-# 0.995, 1.089). The real speedup gate is cross_env.min_speedup_each on
-# sla_bench.speedup (median-of-3). 0.95 keeps the screen from false-rejecting.
-BENCH_PERF_MIN_THROUGHPUT_RATIO: float = float(
-    os.environ.get("PARETON_BENCH_PERF_MIN_THROUGHPUT_RATIO", "0.95")
-)
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 BENCH_SLA_WARMUP_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
 )
 
-# Dynamic workload sampling + z-score promotion calibration.
+# Round seeding waits this many blocks past the head before sampling.
 CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))
-# Minimum distinct baseline-vs-baseline samples for campaigns.calibration.
-CALIB_MIN_SAMPLES: int = int(os.environ.get("PARETON_CALIB_MIN_SAMPLES", "3"))
-# Soft guidance for how many pods / concurrent prepare dirs operators run.
-CALIB_PODS: int = int(os.environ.get("PARETON_CALIB_PODS", "1"))
-CALIB_SAMPLES_PER_POD: int = int(os.environ.get("PARETON_CALIB_SAMPLES_PER_POD", "50"))
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 # Ordered fallback providers tried after GPU_PROVIDER on no-capacity or
 # provision error. Comma-separated; empty string disables fallback.

@@ -25,59 +25,6 @@ def _write_request(tmp_path: Path, *, mode: str, **overrides) -> Path:
     return path
 
 
-def test_cli_mock_engine_mode_perf_screen_pass(tmp_path: Path):
-    """mode=perf_screen runs Module B against the mock engines."""
-    req = _write_request(tmp_path, mode="perf_screen")
-    out = tmp_path / "out"
-    code = main(
-        [
-            "--request",
-            str(req),
-            "--output-dir",
-            str(out),
-            "--mock-engine",
-            "--mock-baseline-token-latency-s",
-            "0.01",
-            "--mock-candidate-token-latency-s",
-            "0.005",
-        ]
-    )
-    assert code == EXIT_OK
-    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
-    validate_report_dict(report)
-    assert report["verdict"] == "pass"
-    assert report["perf_screen"]["verdict"] == "pass"
-    assert report["perf_screen"]["throughput_ratio"] >= 1.0
-    assert "correctness" not in report
-    assert (out / "evidence" / "perf_screen" / "perf_screen.jsonl").is_file()
-
-
-def test_cli_perf_only_fail_has_no_skipped_note(tmp_path: Path):
-    """mode=perf_screen fail must not claim sla_bench was skipped."""
-    req = _write_request(tmp_path, mode="perf_screen")
-    out = tmp_path / "out"
-    code = main(
-        [
-            "--request",
-            str(req),
-            "--output-dir",
-            str(out),
-            "--mock-engine",
-            "--mock-baseline-token-latency-s",
-            "0.005",
-            "--mock-candidate-token-latency-s",
-            "0.02",
-        ]
-    )
-    assert code == EXIT_OK
-    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
-    validate_report_dict(report)
-    assert report["verdict"] == "fail_perf_screen"
-    assert report["perf_screen"]["verdict"] == "fail_perf_screen"
-    assert "sla_bench" not in report
-    assert "skipped_note" not in report
-
-
 def test_cli_invalid_request_exit_1(tmp_path: Path):
     bad = tmp_path / "bad.json"
     bad.write_text('{"schema_version": 1}\n', encoding="utf-8")
@@ -110,8 +57,7 @@ def test_cli_mock_engine_mode_correctness_pass(tmp_path: Path):
     assert evidence.is_file()
 
 
-def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path, monkeypatch):
-    monkeypatch.delenv("PARETON_BENCH_SKIP_SLA", raising=False)
+def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path):
     req = _write_request(tmp_path, mode="all")
     out = tmp_path / "out"
     code = main(
@@ -130,9 +76,8 @@ def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path, monkeypatch):
     assert code == EXIT_OK
     report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
     validate_report_dict(report)
-    # A and B are deterministic; both must pass and produce reports.
+    # Correctness is deterministic and must pass.
     assert report["correctness"]["verdict"] == "pass"
-    assert report["perf_screen"]["verdict"] == "pass"
     # C ran and produced a complete report; its verdict depends on wall-clock
     # TTFT reproducibility, which is genuinely noisy on a shared host, so we
     # assert structure rather than an unconditional pass.
@@ -143,32 +88,6 @@ def test_cli_mock_engine_mode_all_full_pass(tmp_path: Path, monkeypatch):
     assert report["verdict"] in ("pass", "error")
     assert "stub_note" not in report
     assert "skipped_note" not in report
-
-
-def test_cli_mock_engine_skip_sla_omits_sla_bench(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("PARETON_BENCH_SKIP_SLA", "1")
-    req = _write_request(tmp_path, mode="all")
-    out = tmp_path / "out"
-    code = main(
-        [
-            "--request",
-            str(req),
-            "--output-dir",
-            str(out),
-            "--mock-engine",
-            "--mock-baseline-token-latency-s",
-            "0.03",
-            "--mock-candidate-token-latency-s",
-            "0.015",
-        ]
-    )
-    assert code == EXIT_OK
-    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
-    validate_report_dict(report)
-    assert report["correctness"]["verdict"] == "pass"
-    assert report["perf_screen"]["verdict"] == "pass"
-    assert "sla_bench" not in report
-    assert report["verdict"] == "pass"
 
 
 def test_cli_mock_tampered_candidate_fails(tmp_path: Path):
@@ -345,7 +264,7 @@ def test_docker_engines_run_sequentially(tmp_path: Path, monkeypatch):
 
 
 def _fake_docker_harness(monkeypatch, *, corr_verdict: str = "pass"):
-    """Shared BenchNetwork/EngineContainer fakes for fused vs 4-start tests."""
+    """Shared BenchNetwork/EngineContainer fakes for the container-count tests."""
     from dataclasses import dataclass
 
     live = {"n": 0, "max": 0, "starts": 0}
@@ -407,39 +326,8 @@ def _fake_docker_harness(monkeypatch, *, corr_verdict: str = "pass"):
             },
         )()
 
-    def perf_engine(url, *, role, requests, cfg, evidence_dir, **kwargs):
-        order.append(f"{role}-perf")
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-        rows_path = evidence_dir / f"{role}_rows.jsonl"
-        rows_path.write_text("{}\n", encoding="utf-8")
-        return {
-            "role": role,
-            "wall_s": 1.0,
-            "completion_tokens": 1,
-            "output_tokens_per_s": 1.0,
-            "num_requests": 1,
-            "rows_file": rows_path.name,
-        }
-
-    def finish_perf(*a, **k):
-        order.append("candidate-perf")
-        return type(
-            "P",
-            (),
-            {
-                "verdict": "pass",
-                "baseline_output_tokens_per_s": 1.0,
-                "candidate_output_tokens_per_s": 1.0,
-                "throughput_ratio": 1.0,
-                "evidence": "evidence/perf_screen/perf_screen.jsonl",
-            },
-        )()
-
     monkeypatch.setattr("bench.main.collect_baseline_correctness", collect)
     monkeypatch.setattr("bench.main.finish_correctness_with_candidate", finish_corr)
-    monkeypatch.setattr("bench.main.run_perf_screen_engine", perf_engine)
-    monkeypatch.setattr("bench.main.finish_perf_screen", finish_perf)
-    monkeypatch.setenv("PARETON_BENCH_SKIP_SLA", "1")
     return live, order
 
 
@@ -452,13 +340,11 @@ def _sglang_engines() -> dict:
     }
 
 
-def test_mode_all_fuses_containers_per_role(tmp_path: Path, monkeypatch):
+def _run_correctness_modules(tmp_path: Path, req_path: Path, monkeypatch):
     from bench.main import _EngineProvider, run_all_modules
     from bench.output import OutputLayout
     from bench.validate import load_bench_request, load_workload_trace
 
-    live, order = _fake_docker_harness(monkeypatch)
-    req_path = _write_request(tmp_path, mode="all", engines=_sglang_engines())
     req, _ = load_bench_request(req_path)
     trace = load_workload_trace(
         Path(req.workload_trace.path), expected_sha256=req.workload_trace.sha256
@@ -466,95 +352,45 @@ def test_mode_all_fuses_containers_per_role(tmp_path: Path, monkeypatch):
     layout = OutputLayout(tmp_path / "out")
     layout.prepare()
     provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
-    corr, perf, sla, note = run_all_modules(
+    return provider, run_all_modules(
         req=req,
         provider=provider,
         prompts=[PromptCase(id="p1", prompt="hi")],
         trace=trace,
         layout=layout,
     )
+
+
+def test_correctness_starts_one_container_per_role(tmp_path: Path, monkeypatch):
+    live, order = _fake_docker_harness(monkeypatch)
+    req_path = _write_request(tmp_path, mode="correctness", engines=_sglang_engines())
+    provider, (corr, sla, note) = _run_correctness_modules(
+        tmp_path, req_path, monkeypatch
+    )
     assert live["starts"] == 2
     assert live["max"] == 1
     assert live["n"] == 0
-    assert order == [
-        "baseline-correctness",
-        "baseline-perf",
-        "candidate-correctness",
-        "candidate-perf",
-    ]
+    assert order == ["baseline-correctness", "candidate-correctness"]
     assert corr is not None and corr.verdict == "pass"
-    assert perf is not None and perf.verdict == "pass"
     assert sla is None
     assert note is None
     assert provider.baseline_digest == "sha256:" + ("a" * 64)
     assert provider.candidate_digest == "sha256:" + ("a" * 64)
 
 
-def test_fused_correctness_fail_skips_candidate_perf(tmp_path: Path, monkeypatch):
-    from bench.main import _EngineProvider, _NOTE_CORRECTNESS_FAILED, run_all_modules
-    from bench.output import OutputLayout
-    from bench.validate import load_bench_request, load_workload_trace
+def test_correctness_fail_skips_sla(tmp_path: Path, monkeypatch):
+    from bench.main import _NOTE_CORRECTNESS_FAILED
 
     live, order = _fake_docker_harness(monkeypatch, corr_verdict="fail_correctness")
     req_path = _write_request(tmp_path, mode="all", engines=_sglang_engines())
-    req, _ = load_bench_request(req_path)
-    trace = load_workload_trace(
-        Path(req.workload_trace.path), expected_sha256=req.workload_trace.sha256
-    )
-    layout = OutputLayout(tmp_path / "out")
-    layout.prepare()
-    provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
-    corr, perf, sla, note = run_all_modules(
-        req=req,
-        provider=provider,
-        prompts=[PromptCase(id="p1", prompt="hi")],
-        trace=trace,
-        layout=layout,
+    _provider, (corr, sla, note) = _run_correctness_modules(
+        tmp_path, req_path, monkeypatch
     )
     assert live["starts"] == 2
     assert live["max"] == 1
-    assert "candidate-perf" not in order
     assert corr is not None and corr.verdict == "fail_correctness"
-    assert perf is None
     assert sla is None
     assert note == _NOTE_CORRECTNESS_FAILED
-    assert not (layout.perf_screen_dir / "baseline_rows.jsonl").exists()
-
-
-def test_vllm_serve_args_do_not_fuse(tmp_path: Path, monkeypatch):
-    from bench.main import _EngineProvider, run_all_modules
-    from bench.output import OutputLayout
-    from bench.validate import load_bench_request, load_workload_trace
-
-    live, order = _fake_docker_harness(monkeypatch)
-    req_path = _write_request(tmp_path, mode="all")
-    req, _ = load_bench_request(req_path)
-    trace = load_workload_trace(
-        Path(req.workload_trace.path), expected_sha256=req.workload_trace.sha256
-    )
-    layout = OutputLayout(tmp_path / "out")
-    layout.prepare()
-    provider = _EngineProvider(req=req, mock=False, logs_dir=tmp_path / "logs")
-    corr, perf, sla, note = run_all_modules(
-        req=req,
-        provider=provider,
-        prompts=[PromptCase(id="p1", prompt="hi")],
-        trace=trace,
-        layout=layout,
-    )
-    assert live["starts"] == 4
-    assert live["max"] == 1
-    assert live["n"] == 0
-    assert order == [
-        "baseline-correctness",
-        "candidate-correctness",
-        "baseline-perf",
-        "candidate-perf",
-    ]
-    assert corr is not None and corr.verdict == "pass"
-    assert perf is not None and perf.verdict == "pass"
-    assert sla is None
-    assert note is None
 
 
 def test_sku_mismatch_accepts_rtx5090_with_spaces():
