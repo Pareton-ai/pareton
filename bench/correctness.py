@@ -1,15 +1,29 @@
-"""Module A — greedy teacher-forced logprob correctness gate.
+"""Correctness gate: one shared scorer grades every candidate's own output.
 
-Baseline generates greedy continuations; both engines score the identical
-forced sequence via echo+logprobs; per-position logprobs are compared against
-CorrectnessThresholds. Pure URL-based logic — unit tests use in-process mocks.
+Each candidate engine runs once, in production configuration, and its SLA
+replay captures the text it produced. Once every candidate has stopped, a
+single scorer engine (the campaign's pinned baseline image, started with the
+correctness serve args) teacher-forces each captured output and reports the
+logprob it assigns to the candidate's own tokens. An engine serving the
+pinned model scores near that model's own greedy path; nonsense scores far
+below it.
+
+The bars in ``CorrectnessThresholds`` are absolute logprobs rather than a
+comparison against a reference run, because one scorer grades everything and
+there is no second set of logprobs to compare against. The gate therefore
+asks whether an output is plausible under the pinned model, not whether it
+matches the baseline engine token for token: a candidate that answers
+differently but sensibly passes.
+
+Pure URL-based logic. The scorer container's lifecycle lives in bench/main.py,
+which starts it once, grades every candidate through it, and stops it.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import random
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,7 +36,6 @@ from bench.validate import RequestValidationError, load_workload_trace
 
 logger = logging.getLogger(__name__)
 
-EVIDENCE_FILENAME = "logprob_diffs.jsonl"
 SHAPE_EVIDENCE_FILENAME = "completion_response_shape.json"
 
 
@@ -71,7 +84,12 @@ def select_correctness_prompts(
     expected_sha256: str,
     num_prompts: int,
 ) -> list[PromptCase]:
-    """First N prompts from the trace head; require text ``prompt`` fields."""
+    """First N prompts from the trace head; require text ``prompt`` fields.
+
+    These are the trace requests whose captured output the scorer grades. The
+    ids match the SLA replay's request ids, so a captured output is always
+    paired with the prompt that produced it.
+    """
     if num_prompts < 1:
         raise RequestValidationError("correctness.num_prompts must be >= 1")
     trace = load_workload_trace(trace_path, expected_sha256=expected_sha256)
@@ -89,7 +107,7 @@ def select_correctness_prompts(
 def _prompt_case_from_trace_request(req: TraceRequest) -> PromptCase:
     if req.prompt is None or req.prompt == "":
         raise RequestValidationError(
-            f"trace request {req.id!r}: Module A requires a text prompt "
+            f"trace request {req.id!r}: correctness requires a text prompt "
             f"(prompt_token_ids-only entries are not supported yet)"
         )
     return PromptCase(id=req.id, prompt=req.prompt)
@@ -305,245 +323,226 @@ def extract_output_logprobs(
     return out
 
 
-def scoring_order(prompt_ids: list[str], task_id: str) -> list[str]:
-    """Deterministic shuffle of scoring order seeded by task_id."""
-    order = list(prompt_ids)
-    rng = random.Random(task_id)
-    rng.shuffle(order)
-    return order
+@dataclass(frozen=True)
+class CapturedOutput:
+    """One request's output as the candidate actually produced it."""
+
+    request_id: str
+    prompt: str
+    output_text: str
+    completion_tokens: int
 
 
 @dataclass
-class BaselineCorrectnessPhase:
-    """Baseline generate+score results; candidate can run after baseline teardown."""
+class PendingCorrectness:
+    """A candidate waiting on the shared scorer.
 
-    prompts: list[PromptCase]
-    scored: list[tuple[PromptCase, str, list[_PositionScore]]]
+    Queued while the candidate's own container is still running, graded in one
+    batch once every candidate has stopped and the single scorer is up.
+    """
+
+    candidate_index: int
+    outputs: list[CapturedOutput]
 
 
-def collect_baseline_correctness(
-    baseline_url: str,
-    *,
+def capture_outputs(
     prompts: list[PromptCase],
-    cfg: CorrectnessConfig,
-    task_id: str,
-    request_timeout_s: float = 300.0,
-    evidence_dir: Path | None = None,
-) -> BaselineCorrectnessPhase:
-    """Generate forced continuations and score them on the baseline engine."""
-    if not prompts:
-        raise RequestValidationError("correctness: no prompts to evaluate")
+    *,
+    timings,
+    outputs: dict[str, str],
+) -> list[CapturedOutput]:
+    """Pair the correctness prompts with what the candidate emitted for them.
 
-    probe_resp = probe_logprob_capability(baseline_url, timeout=request_timeout_s)
-    if evidence_dir is not None:
-        write_completion_response_shape(evidence_dir, probe_resp)
-
-    forced: dict[str, str] = {}
+    A request the engine never answered is dropped here rather than graded as
+    a wrong answer: the SLA replay already fails the run on a request error.
+    """
+    captured: list[CapturedOutput] = []
     for case in prompts:
-        gen = post_completion(
-            baseline_url,
-            prompt=case.prompt,
-            max_tokens=cfg.max_new_tokens,
-            echo=False,
-            logprobs=None,
-            temperature=0.0,
-            seed=0,
-            timeout=request_timeout_s,
-        )
-        try:
-            continuation = str(gen["choices"][0]["text"])
-        except (KeyError, IndexError, TypeError) as exc:
-            raise EngineError(
-                f"baseline generation malformed for {case.id}: {exc}"
-            ) from exc
-        if continuation == "":
-            raise EngineError(f"baseline generated empty continuation for {case.id}")
-        forced[case.id] = continuation
-        logger.info(
-            "correctness generate id=%s prompt_len=%d cont_len=%d",
-            case.id,
-            len(case.prompt),
-            len(continuation),
-        )
-
-    by_id = {c.id: c for c in prompts}
-    order = scoring_order([c.id for c in prompts], task_id)
-    scored: list[tuple[PromptCase, str, list[_PositionScore]]] = []
-    for pid in order:
-        case = by_id[pid]
-        continuation = forced[pid]
-        full = case.prompt + continuation
-        base_resp = post_completion(
-            baseline_url,
-            prompt=full,
-            max_tokens=0,
-            echo=True,
-            logprobs=1,
-            temperature=0.0,
-            seed=0,
-            timeout=request_timeout_s,
-        )
-        base_scores = extract_output_logprobs(
-            base_resp, original_prompt=case.prompt, continuation=continuation
-        )
-        if not base_scores:
-            raise EngineError(
-                f"baseline echo scoring produced 0 output positions for {case.id}"
+        text = outputs.get(case.id)
+        if text is None:
+            continue
+        timing = timings.get(case.id)
+        captured.append(
+            CapturedOutput(
+                request_id=case.id,
+                prompt=case.prompt,
+                output_text=text,
+                completion_tokens=(timing.completion_tokens if timing else 0),
             )
-        scored.append((case, continuation, base_scores))
-    return BaselineCorrectnessPhase(prompts=prompts, scored=scored)
+        )
+    return captured
 
 
-def finish_correctness_with_candidate(
-    candidate_url: str,
-    baseline: BaselineCorrectnessPhase,
+def score_captured_output(
+    scorer_url: str,
+    captured: CapturedOutput,
+    *,
+    request_timeout_s: float = 300.0,
+) -> list[float]:
+    """Logprobs the scorer assigns to the candidate's own forced tokens."""
+    full = captured.prompt + captured.output_text
+    resp = post_completion(
+        scorer_url,
+        prompt=full,
+        max_tokens=0,
+        echo=True,
+        logprobs=1,
+        temperature=0.0,
+        seed=0,
+        timeout=request_timeout_s,
+    )
+    scores = extract_output_logprobs(
+        resp,
+        original_prompt=captured.prompt,
+        continuation=captured.output_text,
+    )
+    return [s.logprob for s in scores]
+
+
+def grade_candidate(
+    scorer_url: str,
+    outputs: list[CapturedOutput],
     *,
     cfg: CorrectnessConfig,
-    evidence_dir: Path,
+    evidence_path: Path,
     request_timeout_s: float = 300.0,
 ) -> CorrectnessReport:
-    """Score forced sequences on the candidate and compare to baseline."""
-    probe_logprob_capability(candidate_url, timeout=request_timeout_s)
+    """Teacher-force one candidate's captured outputs through the scorer.
 
-    evidence_dir.mkdir(parents=True, exist_ok=True)
-    evidence_path = evidence_dir / EVIDENCE_FILENAME
-    partial_path = evidence_dir / f"{EVIDENCE_FILENAME}.partial"
+    Three outcomes, and the difference between the last two matters:
 
-    abs_diffs: list[float] = []
-    argmax_mismatches = 0
-    positions_compared = 0
-
-    with partial_path.open("w", encoding="utf-8") as ef:
-        for case, continuation, base_scores in baseline.scored:
-            full = case.prompt + continuation
-            cand_resp = post_completion(
-                candidate_url,
-                prompt=full,
-                max_tokens=0,
-                echo=True,
-                logprobs=1,
-                temperature=0.0,
-                seed=0,
-                timeout=request_timeout_s,
-            )
-            cand_scores = extract_output_logprobs(
-                cand_resp,
-                original_prompt=case.prompt,
-                continuation=continuation,
-            )
-            if len(base_scores) != len(cand_scores):
-                raise EngineError(
-                    f"output logprob length mismatch for {case.id}: "
-                    f"baseline={len(base_scores)} candidate={len(cand_scores)}"
-                )
-            for b, c in zip(base_scores, cand_scores, strict=True):
-                if b.text_offset != c.text_offset:
-                    raise EngineError(
-                        f"text_offset mismatch for {case.id} at position "
-                        f"{b.position}: baseline={b.text_offset} "
-                        f"candidate={c.text_offset}"
-                    )
-                # Same forced token is required before any logprob comparison.
-                if b.token != c.token:
-                    raise EngineError(
-                        f"forced token mismatch for {case.id} at position "
-                        f"{b.position} (offset={b.text_offset}): "
-                        f"baseline={b.token!r} candidate={c.token!r}"
-                    )
-                diff = abs(b.logprob - c.logprob)
-                abs_diffs.append(diff)
-                mismatch = b.top1 != c.top1
-                if mismatch:
-                    argmax_mismatches += 1
-                positions_compared += 1
-                ef.write(
-                    json.dumps(
-                        {
-                            "prompt_id": case.id,
-                            "position": b.position,
-                            "text_offset": b.text_offset,
-                            "token_baseline": b.token,
-                            "token_candidate": c.token,
-                            "logprob_baseline": b.logprob,
-                            "logprob_candidate": c.logprob,
-                            "abs_diff": diff,
-                            "top1_baseline": b.top1,
-                            "top1_candidate": c.top1,
-                            "argmax_mismatch": mismatch,
-                        },
-                        sort_keys=True,
-                    )
-                    + "\n"
-                )
-
-    if positions_compared == 0:
-        raise EngineError(
-            "correctness compared 0 output positions "
-            "(empty continuations or alignment produced no scores)"
-        )
-    if positions_compared < cfg.min_positions_compared:
-        raise EngineError(
-            f"correctness compared {positions_compared} positions but "
-            f"min_positions_compared={cfg.min_positions_compared}"
-        )
-
-    partial_path.replace(evidence_path)
-
-    mean_diff = sum(abs_diffs) / positions_compared
-    max_diff = max(abs_diffs)
-    argmax_rate = argmax_mismatches / positions_compared
+    * ``pass``: the scorer finds the output plausible.
+    * ``fail_correctness``: the output is wrong. The entry is disqualified.
+    * ``infra_failed``: the scorer produced too few logprobs to judge on.
+      That is a harness problem, and the entry is requeued, not disqualified.
+    """
     thr = cfg.thresholds
-    # All three metrics must be strictly below their thresholds.
-    passed = (
-        mean_diff < thr.mean_abs_logprob_diff
-        and max_diff < thr.max_abs_logprob_diff
-        and argmax_rate < thr.argmax_mismatch_rate
-    )
-    verdict = "pass" if passed else "fail_correctness"
-    rel_evidence = f"evidence/correctness/{EVIDENCE_FILENAME}"
+    logprobs: list[float] = []
+    streamed_tokens = 0
+    empty: list[str] = []
+
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
+    with partial.open("w", encoding="utf-8") as ef:
+        for captured in outputs:
+            if not captured.output_text:
+                empty.append(captured.request_id)
+                continue
+            scored = score_captured_output(
+                scorer_url, captured, request_timeout_s=request_timeout_s
+            )
+            logprobs.extend(scored)
+            streamed_tokens += captured.completion_tokens
+            ef.write(
+                json.dumps(
+                    {
+                        "request_id": captured.request_id,
+                        "streamed_tokens": captured.completion_tokens,
+                        "scored_positions": len(scored),
+                        "mean_logprob": (sum(scored) / len(scored) if scored else None),
+                        "min_logprob": min(scored) if scored else None,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    partial.replace(evidence_path)
+
+    rel_evidence = f"evidence/correctness/{evidence_path.name}"
+    if empty:
+        return CorrectnessReport(
+            verdict="fail_correctness",
+            num_prompts=len(outputs),
+            num_positions_scored=len(logprobs),
+            mean_logprob=0.0,
+            min_logprob=0.0,
+            coverage_ratio=0.0,
+            evidence=rel_evidence,
+            reason=f"engine returned no output for {len(empty)} prompt(s): {empty[0]}",
+        )
+
+    # Coverage is measured against what the candidate streamed. A near-empty
+    # extraction means the scorer never saw the output, which is infrastructure,
+    # not a wrong answer. Tokenizers differ between the stream and the scorer's
+    # echo, so the floor is loose on purpose.
+    coverage = (len(logprobs) / streamed_tokens) if streamed_tokens > 0 else 0.0
+    if not logprobs:
+        return CorrectnessReport(
+            verdict="infra_failed",
+            num_prompts=len(outputs),
+            num_positions_scored=0,
+            mean_logprob=0.0,
+            min_logprob=0.0,
+            coverage_ratio=0.0,
+            evidence=rel_evidence,
+            reason="scorer produced no logprobs for any captured output",
+        )
+    if coverage < thr.min_coverage_ratio:
+        return CorrectnessReport(
+            verdict="infra_failed",
+            num_prompts=len(outputs),
+            num_positions_scored=len(logprobs),
+            mean_logprob=statistics.fmean(logprobs),
+            min_logprob=min(logprobs),
+            coverage_ratio=coverage,
+            evidence=rel_evidence,
+            reason=(
+                f"scorer covered {len(logprobs)}/{streamed_tokens} streamed tokens, "
+                f"below the {thr.min_coverage_ratio:.0%} floor"
+            ),
+        )
+
+    mean_lp = statistics.fmean(logprobs)
+    min_lp = min(logprobs)
+    reason: str | None = None
+    if mean_lp < thr.min_mean_logprob:
+        reason = f"mean logprob {mean_lp:.3f} below {thr.min_mean_logprob}"
+    elif min_lp < thr.min_token_logprob:
+        reason = f"min token logprob {min_lp:.3f} below {thr.min_token_logprob}"
+
+    verdict = "fail_correctness" if reason else "pass"
     logger.info(
-        "correctness done verdict=%s positions=%d mean=%.6g max=%.6g argmax=%.6g",
+        "correctness %s positions=%d mean=%.4f min=%.4f coverage=%.3f",
         verdict,
-        positions_compared,
-        mean_diff,
-        max_diff,
-        argmax_rate,
+        len(logprobs),
+        mean_lp,
+        min_lp,
+        coverage,
     )
     return CorrectnessReport(
         verdict=verdict,
-        num_prompts=len(baseline.prompts),
-        num_positions_compared=positions_compared,
-        mean_abs_logprob_diff=mean_diff,
-        max_abs_logprob_diff=max_diff,
-        argmax_mismatch_rate=argmax_rate,
-        argmax_mismatches=argmax_mismatches,
+        num_prompts=len(outputs),
+        num_positions_scored=len(logprobs),
+        mean_logprob=mean_lp,
+        min_logprob=min_lp,
+        coverage_ratio=coverage,
         evidence=rel_evidence,
+        reason=reason,
     )
 
 
-def run_correctness(
-    baseline_url: str,
-    candidate_url: str,
+def grade_all(
+    scorer_url: str,
+    pending: list[PendingCorrectness],
     *,
-    prompts: list[PromptCase],
     cfg: CorrectnessConfig,
-    task_id: str,
     evidence_dir: Path,
     request_timeout_s: float = 300.0,
-) -> CorrectnessReport:
-    """Run Module A when both engines are reachable (e.g. in-process mocks)."""
-    baseline = collect_baseline_correctness(
-        baseline_url,
-        prompts=prompts,
-        cfg=cfg,
-        task_id=task_id,
-        request_timeout_s=request_timeout_s,
-        evidence_dir=evidence_dir,
-    )
-    return finish_correctness_with_candidate(
-        candidate_url,
-        baseline,
-        cfg=cfg,
-        evidence_dir=evidence_dir,
-        request_timeout_s=request_timeout_s,
-    )
+) -> dict[int, CorrectnessReport]:
+    """Grade every queued candidate against one already-running scorer.
+
+    The caller starts the scorer, calls this, and stops it, so correctness
+    costs one engine start per round however many candidates the round holds.
+    """
+    probe_resp = probe_logprob_capability(scorer_url, timeout=request_timeout_s)
+    write_completion_response_shape(evidence_dir, probe_resp)
+    reports: dict[int, CorrectnessReport] = {}
+    for item in pending:
+        reports[item.candidate_index] = grade_candidate(
+            scorer_url,
+            item.outputs,
+            cfg=cfg,
+            evidence_path=evidence_dir / f"candidate_{item.candidate_index}.jsonl",
+            request_timeout_s=request_timeout_s,
+        )
+    return reports

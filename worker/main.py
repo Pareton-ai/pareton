@@ -61,7 +61,7 @@ def run_once(
     *,
     mock_build: bool,
     mock_bench: bool,
-    mock_tampered_candidate: bool,
+    mock_correctness_fail: bool,
     registered_hotkeys: list[str] | None,
 ) -> bool:
     row = claim_next_job()
@@ -86,7 +86,7 @@ def run_once(
 
     # TODO(PAR-83): rounds replace the per-submission bench job. The worker
     # claims a pending round here once round/store.py and worker/round_job.py
-    # land; mock_bench and mock_tampered_candidate feed that runner.
+    # land; mock_bench and mock_correctness_fail feed that runner.
     return False
 
 
@@ -114,9 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Run bench in-process with mock engines (requires PARETON_ALLOW_MOCK_BENCH=1)",
     )
     p.add_argument(
-        "--mock-tampered-candidate",
+        "--mock-correctness-fail",
         action="store_true",
-        help="With --mock-bench, offset candidate logprobs (adversarial fail)",
+        help="With --mock-bench, make one candidate emit garbage the scorer fails",
     )
     p.add_argument(
         "--registered-hotkey",
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_once(
             mock_build=args.mock_build,
             mock_bench=args.mock_bench,
-            mock_tampered_candidate=args.mock_tampered_candidate,
+            mock_correctness_fail=args.mock_correctness_fail,
             registered_hotkeys=registered_hotkeys,
         )
 

@@ -62,21 +62,59 @@ def test_bench_flags_shape_correctness(monkeypatch: pytest.MonkeyPatch):
         allow_placeholders=True,
         bench_quantization="fp8",
         bench_correctness_num_prompts=16,
-        bench_correctness_max_new_tokens=64,
+        bench_correctness_thresholds={"min_mean_logprob": -3.5},
     )
     bench = captured["manifest"].bench
     assert bench["model"]["quantization"] == "fp8"
-    assert bench["correctness"] == {"num_prompts": 16, "max_new_tokens": 64}
-    # Seed pins sample sizes only, never thresholds.
-    assert "thresholds" not in bench["correctness"]
+    assert bench["correctness"]["num_prompts"] == 16
+    assert bench["correctness"]["thresholds"]["min_mean_logprob"] == -3.5
+    # An override fills one bar; the rest still come from the seed defaults.
+    assert bench["correctness"]["thresholds"]["min_token_logprob"] == -12.0
 
 
-def test_bench_flags_default_to_none(monkeypatch: pytest.MonkeyPatch):
+def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatch):
+    """The shared scorer's bars live in the manifest, never in the pod's env."""
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(allow_placeholders=True)
     bench = captured["manifest"].bench
     assert bench["model"]["quantization"] is None
-    assert bench["correctness"] is None
+    assert set(bench["correctness"]["thresholds"]) == {
+        "min_mean_logprob",
+        "min_token_logprob",
+        "min_coverage_ratio",
+    }
+    assert "num_prompts" not in bench["correctness"]
+
+
+def test_open_requires_correctness_thresholds():
+    """A bar that is not in the manifest can move under a live campaign
+    without the manifest hash changing, so opening requires all three."""
+    from campaign.seed import require_correctness_thresholds
+
+    require_correctness_thresholds(
+        {
+            "correctness": {
+                "thresholds": {
+                    "min_mean_logprob": -4.0,
+                    "min_token_logprob": -12.0,
+                    "min_coverage_ratio": 0.5,
+                }
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="min_token_logprob"):
+        require_correctness_thresholds(
+            {"correctness": {"thresholds": {"min_mean_logprob": -4.0}}}
+        )
+    with pytest.raises(ValueError, match="status=open requires"):
+        require_correctness_thresholds({})
+
+
+def test_coverage_ratio_must_be_a_fraction():
+    from campaign.seed import build_seed_bench_spec
+
+    with pytest.raises(ValueError, match="min_coverage_ratio"):
+        build_seed_bench_spec(correctness_thresholds={"min_coverage_ratio": 0.0})
 
 
 def test_https_url_with_matching_sha(monkeypatch: pytest.MonkeyPatch):

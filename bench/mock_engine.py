@@ -1,8 +1,18 @@
 """In-process OpenAI-compatible /v1/completions mock (vLLM-shaped).
 
-Configurable per-token logprobs and per-token latencies so later modules can
-test TTFT/ITL deterministically. Tampered mode deliberately offsets logprobs
-so Module A can verify cheating is caught.
+Configurable per-token logprobs and per-token latencies so the harness can
+test TTFT/ITL deterministically.
+
+Two knobs let one mock round stand in for a real one, by giving each image in
+the round its own config:
+
+* ``speed_factor`` divides every per-token latency, so a round can hold a
+  baseline at 1.0, challengers a few percent above it, and a clear leader.
+* ``garbage`` makes an engine emit ``GARBAGE_TEXT``. Any engine asked to score
+  that text assigns ``garbage_logprob`` to those tokens, so the shared scorer
+  fails it on correctness the same way it would fail a real engine emitting
+  nonsense. The emitting engine's own logprobs never come into it: the scorer
+  judges the text, and a candidate is only ever asked for text.
 
 The checked-in fixture at fixtures/bench/vllm_completion_response_shape.json
 documents the expected response shape.
@@ -66,17 +76,25 @@ def mock_detokenize(tokens: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# A token containing this marker is nonsense no engine would greedily emit.
+GARBAGE_MARKER = "zqxj"
+GARBAGE_TEXT = " zqxj zqxj zqxj"
+
+
 @dataclass
 class MockEngineConfig:
     model: str = "mock-model"
-    """Base logprob for token i: base + i * slope (before tamper)."""
+    """Base logprob for token i: base + i * slope."""
     logprob_base: float = -0.5
     logprob_slope: float = -0.01
-    """Additive offset applied in tampered mode (wrong on purpose)."""
-    tamper_logprob_offset: float = 1.0
-    tampered: bool = False
     """Per-output-token latency in seconds (TTFT ≈ first, ITL ≈ rest)."""
     token_latency_s: float = 0.0
+    """Divides every per-token latency: 2.0 serves twice as fast as 1.0."""
+    speed_factor: float = 1.0
+    """Emit GARBAGE_TEXT instead of greedy_text (scores below the correctness bar)."""
+    garbage: bool = False
+    """Logprob any engine assigns to a garbage token when scoring it."""
+    garbage_logprob: float = -30.0
     """Optional explicit logprob list (cycled); overrides base/slope when set."""
     logprobs: list[float] | None = None
     """Optional per-token latency list in seconds (cycled)."""
@@ -87,26 +105,37 @@ class MockEngineConfig:
     host: str = "127.0.0.1"
     port: int = 0  # 0 = ephemeral
 
+    def continuation_text(self) -> str:
+        return GARBAGE_TEXT if self.garbage else self.greedy_text
+
 
 # ---------------------------------------------------------------------------
 # Logprob helpers
 # ---------------------------------------------------------------------------
 
 
-def _logprob_at(cfg: MockEngineConfig, index: int) -> float:
+def _logprob_at(cfg: MockEngineConfig, index: int, token: str = "") -> float:
+    """Logprob this engine assigns to ``token`` at ``index`` while scoring.
+
+    Garbage is judged by its text, not by who produced it, which is what lets
+    one shared scorer grade output captured from any number of candidates.
+    """
+    if GARBAGE_MARKER in token:
+        return float(cfg.garbage_logprob)
     if cfg.logprobs is not None and cfg.logprobs:
         lp = cfg.logprobs[index % len(cfg.logprobs)]
     else:
         lp = cfg.logprob_base + index * cfg.logprob_slope
-    if cfg.tampered:
-        lp = lp + cfg.tamper_logprob_offset
     return float(lp)
 
 
 def _latency_at(cfg: MockEngineConfig, index: int) -> float:
     if cfg.latencies_s is not None and cfg.latencies_s:
-        return float(cfg.latencies_s[index % len(cfg.latencies_s)])
-    return float(cfg.token_latency_s)
+        base = float(cfg.latencies_s[index % len(cfg.latencies_s)])
+    else:
+        base = float(cfg.token_latency_s)
+    factor = float(cfg.speed_factor)
+    return base / factor if factor > 0 else base
 
 
 def build_logprobs_payload(
@@ -139,7 +168,7 @@ def build_logprobs_payload(
             continue
         # For prompt tokens after the first, and all completion tokens, assign logprobs.
         # Index used for deterministic series is absolute position in the echoed sequence.
-        lp = _logprob_at(cfg, i)
+        lp = _logprob_at(cfg, i, tok)
         token_logprobs.append(lp)
         top: dict[str, float] = {}
         if k >= 1:
@@ -172,9 +201,9 @@ def build_completion_response(
         completion_tokens: list[str] = []
     else:
         # Greedy continuation, cycled to fill max_tokens (long completions let
-        # perf/SLA tests measure throughput); Module A uses short max_tokens and
+        # SLA tests measure throughput); teacher forcing uses max_tokens<=0 and
         # is unaffected. Truncate when max_tokens is smaller than the cycle.
-        cont = mock_tokenize(cfg.greedy_text)
+        cont = mock_tokenize(cfg.continuation_text())
         if not cont:
             cont = [" OK"]
         completion_tokens = [cont[i % len(cont)] for i in range(max_tokens)]
@@ -272,7 +301,7 @@ class _Handler(BaseHTTPRequestHandler):
         finish_reason + usage; stream ends with ``data: [DONE]``.
         """
         cfg = self.server.cfg
-        cont = mock_tokenize(cfg.greedy_text) or [" OK"]
+        cont = mock_tokenize(cfg.continuation_text()) or [" OK"]
         n = max(1, max_tokens)
         completion_tokens = [cont[i % len(cont)] for i in range(n)]
         prompt_count = len(mock_tokenize(prompt))
@@ -408,9 +437,10 @@ class MockEngine:
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         logger.info(
-            "mock engine listening on %s (tampered=%s)",
+            "mock engine listening on %s (speed_factor=%s garbage=%s)",
             self.base_url,
-            self.cfg.tampered,
+            self.cfg.speed_factor,
+            self.cfg.garbage,
         )
         return self
 
@@ -526,9 +556,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=8000, help="Bind port (default 8000)")
     p.add_argument("--model", default="mock-model", help="Reported model id")
     p.add_argument(
-        "--tampered",
+        "--garbage",
         action="store_true",
-        help="Offset logprobs so Module A adversarial tests fail",
+        help="Emit nonsense output so the shared scorer fails it on correctness",
     )
     p.add_argument(
         "--token-latency-s",
@@ -537,27 +567,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Per-output-token sleep in seconds",
     )
     p.add_argument(
+        "--speed-factor",
+        type=float,
+        default=1.0,
+        help="Divide per-token latency by this (2.0 = twice the baseline speed)",
+    )
+    p.add_argument(
         "--startup-delay-s",
         type=float,
         default=0.0,
         help="Sleep before listening (tests health-check wait)",
     )
-    p.add_argument(
-        "--tamper-logprob-offset",
-        type=float,
-        default=1.0,
-        help="Additive logprob offset when --tampered",
-    )
-    args = p.parse_args(argv)
+    # A real engine accepts many serve args this mock does not model, and the
+    # harness appends the scorer flags to whatever the campaign pinned, so an
+    # unknown flag is expected. Ignore it rather than refusing to start.
+    args, unknown = p.parse_known_args(argv)
+    if unknown:
+        logger.info("mock engine ignoring unmodelled serve args: %s", unknown)
 
     if args.startup_delay_s > 0:
         time.sleep(args.startup_delay_s)
 
     cfg = MockEngineConfig(
         model=args.model,
-        tampered=args.tampered,
-        tamper_logprob_offset=args.tamper_logprob_offset,
+        garbage=args.garbage,
         token_latency_s=args.token_latency_s,
+        speed_factor=args.speed_factor,
         host=args.host,
         port=args.port,
     )

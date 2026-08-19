@@ -443,6 +443,11 @@ class EngineContainer:
     cmd_timeout_s: float | None = None
     # Progress only; a raising hook must not fail a healthy engine.
     on_ready: Callable[[], None] | None = None
+    # Mount the host engine compile cache into this container, read-write.
+    # A round asks for it on its baseline engine and never on a candidate, so
+    # every candidate starts from the same cache state and whatever it
+    # compiles dies with the container. Off unless a caller asks for it.
+    mount_engine_cache: bool = False
 
     _container_id: str | None = field(default=None, init=False, repr=False)
     _container_name: str = field(default="", init=False, repr=False)
@@ -578,9 +583,12 @@ class EngineContainer:
             # "unhandled system error" without host IPC + a larger shm.
             run_cmd.extend(["--ipc", "host", "--shm-size", "16g"])
         engine_cache = os.environ.get("PARETON_BENCH_ENGINE_CACHE_DIR", "").strip()
-        if engine_cache:
+        if self.mount_engine_cache and engine_cache:
             cache_path = Path(engine_cache)
             cache_path.mkdir(parents=True, exist_ok=True)
+            # TODO(PAR-81): the container-side path belongs in the
+            # campaign's engine profile as a ``cache_dir`` key. Until then it
+            # is hardcoded to the SGLang cache location.
             run_cmd.extend(["-v", f"{cache_path.resolve()}:/root/.cache/sglang"])
         if self.weights_dir is not None:
             run_cmd.extend(["-v", f"{self.weights_dir.resolve()}:/model:ro"])

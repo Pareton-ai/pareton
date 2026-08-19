@@ -1,4 +1,4 @@
-# Minimal mock OpenAI-compatible engine for bench lifecycle / Module A CI.
+# Minimal mock OpenAI-compatible engine for bench lifecycle / correctness CI.
 # Build from repo root:
 #   docker build -f images/mock-engine/Dockerfile -t pareton-mock-engine:local .
 FROM python:3.12-slim

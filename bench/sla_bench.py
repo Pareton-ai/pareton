@@ -1,10 +1,14 @@
-"""Module C — SLA benchmark (open-loop trace replay, streaming).
+"""SLA benchmark (open-loop trace replay, streaming).
 
 Per engine, per repetition: fire each trace request on its own thread after
 ``arrival_offset_ms`` (open-loop: arrivals never block on capacity). Streaming
 /v1/completions yields TTFT/ITL/e2e per request. ITL percentiles are computed
 over the pooled set of inter-token gaps across all requests in a repetition
 (decision: pooled ITL). Median across repetitions -> EngineSlaMetrics.
+
+The replay also captures each request's output text. That text is what the
+correctness gate grades: one shared scorer reads it once every candidate has
+run. Each engine is replayed exactly once, in production configuration.
 
 Percentiles use linear interpolation (numpy-default definition) in pure Python
 so the independent recompute check matches the online aggregation exactly.
@@ -18,18 +22,19 @@ import logging
 import statistics
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from bench.http import post_completion_stream
 from bench.lifecycle import EngineError
 from bench.schemas import (
     EngineSlaMetrics,
+    EngineSlaResult,
     LatencyPercentiles,
     SlaBenchConfig,
-    SlaBenchReport,
     TraceRequest,
-    WorkloadTrace,
 )
+from bench.score import PromptTiming
 from bench.validate import RequestValidationError
 
 logger = logging.getLogger(__name__)
@@ -44,7 +49,7 @@ REPRO_BAR_MAX_REL_RANGE = 0.335  # p99 TTFT relative range ceiling
 def _require_text_prompt(req: TraceRequest) -> str:
     if req.prompt is None or req.prompt == "":
         raise RequestValidationError(
-            f"trace request {req.id!r}: Module C requires a text prompt "
+            f"trace request {req.id!r}: sla_bench requires a text prompt "
             f"(prompt_token_ids-only entries are not supported yet)"
         )
     return req.prompt
@@ -196,6 +201,7 @@ def _fire(
             "e2e_ms": round(res.e2e_s * 1000.0, 3),
             "completion_tokens": res.completion_tokens,
             "finish_reason": res.finish_reason,
+            "text": res.text,
             "error": None,
         }
     except EngineError as exc:
@@ -210,6 +216,7 @@ def _fire(
             "e2e_ms": None,
             "completion_tokens": None,
             "finish_reason": None,
+            "text": "",
             "error": str(exc),
         }
         if not is_warmup:
@@ -268,6 +275,19 @@ def _write_rep(rep_dir: Path, rows: list[dict], wall_s: float) -> None:
     tmp.replace(path)
 
 
+@dataclass(frozen=True)
+class EngineReplay:
+    """One engine's finished replay: the report payload plus its output text.
+
+    ``outputs`` maps request id to the text that engine produced on the same
+    repetition ``result.timings`` was taken from, so a candidate is graded on
+    the very run its speed was measured on.
+    """
+
+    result: EngineSlaResult
+    outputs: dict[str, str]
+
+
 def _run_engine(
     base_url: str,
     *,
@@ -276,8 +296,11 @@ def _run_engine(
     cfg: SlaBenchConfig,
     engine_evidence_dir: Path,
     timeout_s: float,
-) -> list[dict]:
-    """Warmup + N measured reps for one engine. Returns per-rep metric dicts."""
+) -> tuple[list[dict], list[dict]]:
+    """Warmup + N measured reps for one engine.
+
+    Returns (per-rep metric dicts, every measured row across reps).
+    """
     if cfg.warmup_requests > 0:
         warm_rows, _, _ = _replay(
             base_url,
@@ -290,6 +313,7 @@ def _run_engine(
         _write_rep(engine_evidence_dir / WARMUP_DIRNAME, warm_rows, 0.0)
 
     rep_metrics: list[dict] = []
+    measured: list[dict] = []
     for rep in range(1, cfg.repetitions + 1):
         rep_rows, wall_s, errs = _replay(
             base_url, requests, role=role, rep=rep, is_warmup=False, timeout_s=timeout_s
@@ -299,6 +323,7 @@ def _run_engine(
             raise EngineError(
                 f"sla_bench {role} rep {rep} had {len(errs)} failed request(s): {errs[0]}"
             )
+        measured.extend(rep_rows)
         rep_metrics.append(
             aggregate_rep_metrics(
                 rep_rows,
@@ -307,40 +332,39 @@ def _run_engine(
                 p99_itl_ms=cfg.thresholds.p99_itl_ms,
             )
         )
-    return rep_metrics
+    return rep_metrics, measured
+
+
+def _median_rep_row(rows: list[dict]) -> dict:
+    """The repetition whose end-to-end latency is the median for this request.
+
+    Picking one real repetition keeps ``(ttft, itl, tokens, text)`` a
+    self-consistent set. Averaging would blend ITL vectors of different lengths
+    and pair timings with text that never occurred together.
+    """
+    ordered = sorted(rows, key=lambda r: float(r["e2e_ms"]))
+    return ordered[(len(ordered) - 1) // 2]
+
+
+def _per_request(rows: list[dict]) -> tuple[dict[str, PromptTiming], dict[str, str]]:
+    by_id: dict[str, list[dict]] = {}
+    for row in rows:
+        by_id.setdefault(str(row["request_id"]), []).append(row)
+    timings: dict[str, PromptTiming] = {}
+    outputs: dict[str, str] = {}
+    for rid, rid_rows in by_id.items():
+        row = _median_rep_row(rid_rows)
+        timings[rid] = PromptTiming(
+            ttft_s=float(row["ttft_ms"]) / 1000.0,
+            itl_s=[float(x) / 1000.0 for x in (row.get("itl_ms") or [])],
+            completion_tokens=int(row.get("completion_tokens") or 0),
+        )
+        outputs[rid] = str(row.get("text") or "")
+    return timings, outputs
 
 
 def _rep_dir_paths(base: Path, repetitions: int) -> list[Path]:
     return [base / f"rep_{n}" / REQUESTS_FILENAME for n in range(1, repetitions + 1)]
-
-
-def run_sla_bench(
-    baseline_url: str,
-    candidate_url: str,
-    *,
-    trace: WorkloadTrace,
-    cfg: SlaBenchConfig,
-    evidence_dir: Path,
-    request_timeout_s: float = 120.0,
-) -> SlaBenchReport:
-    """Run Module C against two healthy base URLs (baseline then candidate)."""
-    requests = list(trace.requests)
-    base_reps = run_sla_engine(
-        baseline_url,
-        role="baseline",
-        requests=requests,
-        cfg=cfg,
-        evidence_dir=evidence_dir,
-        request_timeout_s=request_timeout_s,
-    )
-    return finish_sla_bench(
-        candidate_url,
-        baseline_reps=base_reps,
-        requests=requests,
-        cfg=cfg,
-        evidence_dir=evidence_dir,
-        request_timeout_s=request_timeout_s,
-    )
 
 
 def run_sla_engine(
@@ -351,101 +375,66 @@ def run_sla_engine(
     cfg: SlaBenchConfig,
     evidence_dir: Path,
     request_timeout_s: float = 120.0,
-) -> list[dict]:
-    """Run one engine's warmup + measured reps; persist evidence; return rep metrics."""
+) -> EngineReplay:
+    """Replay the trace against one healthy engine and persist its evidence.
+
+    Every engine in a round goes through this one path: the baseline, each
+    candidate, and the closing drift baseline. Nothing here varies by engine
+    or by role, so every image in the round is measured the same way.
+    """
     if not requests:
         raise EngineError("sla_bench: empty workload trace")
     for req in requests:
         _require_text_prompt(req)
-    return _run_engine(
+
+    engine_evidence_dir = evidence_dir / role
+    rep_metrics, measured = _run_engine(
         base_url,
         role=role,
         requests=requests,
         cfg=cfg,
-        engine_evidence_dir=evidence_dir / role,
+        engine_evidence_dir=engine_evidence_dir,
         timeout_s=request_timeout_s,
     )
+    metrics = _engine_metrics_from_reps(rep_metrics)
 
-
-def finish_sla_bench(
-    candidate_url: str,
-    *,
-    baseline_reps: list[dict],
-    requests: list[TraceRequest],
-    cfg: SlaBenchConfig,
-    evidence_dir: Path,
-    request_timeout_s: float = 120.0,
-) -> SlaBenchReport:
-    """Run candidate, combine with baseline rep metrics, emit report."""
-    cand_reps = run_sla_engine(
-        candidate_url,
-        role="candidate",
-        requests=requests,
-        cfg=cfg,
-        evidence_dir=evidence_dir,
-        request_timeout_s=request_timeout_s,
-    )
-
-    baseline = _engine_metrics_from_reps(baseline_reps)
-    candidate = _engine_metrics_from_reps(cand_reps)
-
-    def rel_range(reps: list[dict], key: str, stat: str) -> float:
-        return _relative_range([getattr(m[key], stat) for m in reps])
+    def rel_range(key: str, stat: str) -> float:
+        return _relative_range([getattr(m[key], stat) for m in rep_metrics])
 
     cross_rep_variance = {
-        "p99_ttft_ms_rel_range": rel_range(cand_reps, "ttft_ms", "p99"),
-        "p99_itl_ms_rel_range": rel_range(cand_reps, "itl_ms", "p99"),
-        "p99_e2e_ms_rel_range": rel_range(cand_reps, "e2e_ms", "p99"),
+        "p99_ttft_ms_rel_range": rel_range("ttft_ms", "p99"),
+        "p99_itl_ms_rel_range": rel_range("itl_ms", "p99"),
+        "p99_e2e_ms_rel_range": rel_range("e2e_ms", "p99"),
     }
-    repro_ok = cross_rep_variance["p99_ttft_ms_rel_range"] <= REPRO_BAR_MAX_REL_RANGE
+    if cross_rep_variance["p99_ttft_ms_rel_range"] > REPRO_BAR_MAX_REL_RANGE:
+        logger.warning(
+            "sla_bench %s p99 TTFT rel_range %.4f exceeds the reproducibility "
+            "bar %.4f; the round's drift check is the backstop",
+            role,
+            cross_rep_variance["p99_ttft_ms_rel_range"],
+            REPRO_BAR_MAX_REL_RANGE,
+        )
 
-    sla_pass = (
-        candidate.ttft_ms.p99 <= cfg.thresholds.p99_ttft_ms
-        and candidate.itl_ms.p99 <= cfg.thresholds.p99_itl_ms
-    )
-
-    def ratio(num: float, den: float) -> float:
-        return (num / den) if den else 0.0
-
-    speedup = {
-        "output_tokens_per_s_ratio": ratio(
-            candidate.output_tokens_per_s, baseline.output_tokens_per_s
-        ),
-        "requests_per_s_ratio": ratio(
-            candidate.requests_per_s, baseline.requests_per_s
-        ),
-        "p99_ttft_ratio": ratio(baseline.ttft_ms.p99, candidate.ttft_ms.p99),
-        "p99_itl_ratio": ratio(baseline.itl_ms.p99, candidate.itl_ms.p99),
-        "p99_e2e_ratio": ratio(baseline.e2e_ms.p99, candidate.e2e_ms.p99),
-    }
-
-    if not repro_ok:
-        verdict = "error"
-    elif sla_pass:
-        verdict = "pass"
-    else:
-        verdict = "fail_sla"
-
-    # Hard requirement: independently recompute the candidate metrics from the
+    # Hard requirement: independently recompute this engine's metrics from the
     # persisted rep_<n>/requests.jsonl via a separate code path and confirm it
-    # matches the online aggregation before trusting the report.
+    # matches the online aggregation before trusting the numbers.
     recomputed = recompute_sla_metrics(
-        evidence_dir / "candidate",
+        engine_evidence_dir,
         p99_ttft_ms=cfg.thresholds.p99_ttft_ms,
         p99_itl_ms=cfg.thresholds.p99_itl_ms,
         repetitions=cfg.repetitions,
     )
-    _assert_metrics_close(recomputed, candidate)
+    _assert_metrics_close(recomputed, metrics)
 
-    return SlaBenchReport(
-        verdict=verdict,
-        repetitions=cfg.repetitions,
-        candidate=candidate,
-        baseline=baseline,
-        speedup=speedup,
+    timings, outputs = _per_request(measured)
+    result = EngineSlaResult(
+        role=role,
+        metrics=metrics,
         cross_rep_variance=cross_rep_variance,
-        evidence="evidence/sla_bench",
+        timings=timings,
+        evidence=f"evidence/sla_bench/{role}",
     )
+    return EngineReplay(result=result, outputs=outputs)
 
 
 def _assert_metrics_close(

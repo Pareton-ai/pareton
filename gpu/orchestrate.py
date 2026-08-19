@@ -223,7 +223,7 @@ def _entry_from_pod(pod: Pod, *, state: str = "active") -> RegistryEntry:
 
 def _engine_image_refs(req) -> list[str]:
     refs: list[str] = []
-    for eng in (req.engines.baseline, req.engines.candidate):
+    for eng in [req.engines.baseline, *req.engines.candidates]:
         img = str(eng.image or "").strip()
         if img and img not in refs:
             refs.append(img)

@@ -120,6 +120,7 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
             "workload_trace",
             "correctness",
             "sla_bench",
+            "scoring_rule",
         ],
         ctx="bench_request",
     )
@@ -160,9 +161,13 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     engines = d["engines"]
     if not isinstance(engines, dict):
         raise RequestValidationError("engines must be an object")
-    _require_keys(engines, ["baseline", "candidate"], ctx="engines")
-    for role in ("baseline", "candidate"):
-        eng = engines[role]
+    _require_keys(engines, ["baseline", "candidates"], ctx="engines")
+    candidates = engines["candidates"]
+    if not isinstance(candidates, list) or not candidates:
+        raise RequestValidationError("engines.candidates must be a non-empty list")
+    named = [("baseline", engines["baseline"])]
+    named += [(f"candidates[{i}]", c) for i, c in enumerate(candidates)]
+    for role, eng in named:
         if not isinstance(eng, dict):
             raise RequestValidationError(f"engines.{role} must be an object")
         _require_keys(eng, ["image"], ctx=f"engines.{role}")
@@ -183,23 +188,22 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     corr = d["correctness"]
     if not isinstance(corr, dict):
         raise RequestValidationError("correctness must be an object")
-    _require_keys(
-        corr, ["num_prompts", "max_new_tokens", "thresholds"], ctx="correctness"
-    )
+    _require_keys(corr, ["num_prompts", "thresholds"], ctx="correctness")
     if int(corr["num_prompts"]) < 1:
         raise RequestValidationError("correctness.num_prompts must be >= 1")
-    if int(corr["max_new_tokens"]) < 1:
-        raise RequestValidationError("correctness.max_new_tokens must be >= 1")
-    if "min_positions_compared" in corr and int(corr["min_positions_compared"]) < 1:
-        raise RequestValidationError("correctness.min_positions_compared must be >= 1")
     thr = corr["thresholds"]
     if not isinstance(thr, dict):
         raise RequestValidationError("correctness.thresholds must be an object")
     _require_keys(
         thr,
-        ["mean_abs_logprob_diff", "max_abs_logprob_diff", "argmax_mismatch_rate"],
+        ["min_mean_logprob", "min_token_logprob", "min_coverage_ratio"],
         ctx="correctness.thresholds",
     )
+    coverage = float(thr["min_coverage_ratio"])
+    if not 0.0 < coverage <= 1.0:
+        raise RequestValidationError(
+            "correctness.thresholds.min_coverage_ratio must be in (0, 1]"
+        )
 
     sla = d["sla_bench"]
     if not isinstance(sla, dict):
@@ -207,10 +211,22 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     _require_keys(
         sla, ["repetitions", "warmup_requests", "thresholds"], ctx="sla_bench"
     )
+    # Every container discards warmup requests before it is measured. A round
+    # with no warmup times cold starts and ranks engines on that noise.
+    if int(sla["warmup_requests"]) < 1:
+        raise RequestValidationError("sla_bench.warmup_requests must be >= 1")
+    if int(sla["repetitions"]) < 1:
+        raise RequestValidationError("sla_bench.repetitions must be >= 1")
     sla_thr = sla["thresholds"]
     if not isinstance(sla_thr, dict):
         raise RequestValidationError("sla_bench.thresholds must be an object")
     _require_keys(sla_thr, ["p99_ttft_ms", "p99_itl_ms"], ctx="sla_bench.thresholds")
+
+    rule = d.get("scoring_rule")
+    if not isinstance(rule, dict) or not str(rule.get("name") or "").strip():
+        raise RequestValidationError(
+            "scoring_rule must be an object with a non-empty name"
+        )
 
     return BenchRequest.from_dict(d)
 
@@ -304,12 +320,7 @@ def validate_report_dict(d: dict[str, Any]) -> None:
         ],
         ctx="bench_report",
     )
-    if d["verdict"] not in (
-        "pass",
-        "fail_correctness",
-        "fail_sla",
-        "error",
-    ):
+    if d["verdict"] not in ("pass", "error"):
         raise RequestValidationError(f"invalid verdict {d['verdict']!r}")
     env = d["environment"]
     _require_keys(
@@ -338,3 +349,8 @@ def validate_report_dict(d: dict[str, Any]) -> None:
         ],
         ctx="inputs_fingerprint",
     )
+    if not isinstance(fp["candidate_image_digest"], list):
+        raise RequestValidationError(
+            "inputs_fingerprint.candidate_image_digest must be a list "
+            "(one digest per candidate in the round)"
+        )

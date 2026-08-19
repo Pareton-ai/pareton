@@ -33,22 +33,41 @@ def test_sample_request_round_trip():
     assert req.mode == "all"
     assert req.model.quantization is None
     assert "@sha256:" in req.engines.baseline.image
-    assert req.correctness.min_positions_compared == 1
+    assert len(req.engines.candidates) == 1
     back = req.to_dict()
     # Round-trip through validator again
     again = validate_bench_request_dict(back)
     assert again.task_id == req.task_id
-    assert again.correctness.thresholds.mean_abs_logprob_diff == 0.005
-    assert again.correctness.min_positions_compared == 1
+    assert again.correctness.thresholds.min_mean_logprob == -4.0
+    assert again.scoring_rule == {"name": "median_e2e_speedup"}
 
 
-def test_min_positions_compared_optional_and_validated():
+def test_candidates_must_be_a_non_empty_list():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
-    raw["correctness"]["min_positions_compared"] = 1024
-    req = validate_bench_request_dict(raw)
-    assert req.correctness.min_positions_compared == 1024
-    raw["correctness"]["min_positions_compared"] = 0
-    with pytest.raises(RequestValidationError, match="min_positions_compared"):
+    raw["engines"]["candidates"] = []
+    with pytest.raises(RequestValidationError, match="candidates"):
+        validate_bench_request_dict(raw)
+
+
+def test_every_candidate_image_must_be_digest_pinned():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["engines"]["candidates"].append({"image": "ghcr.io/example/engine:latest"})
+    with pytest.raises(RequestValidationError, match=r"candidates\[1\]"):
+        validate_bench_request_dict(raw)
+
+
+def test_warmup_requests_must_be_positive():
+    """Without warmup a round times cold starts and ranks engines on them."""
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["sla_bench"]["warmup_requests"] = 0
+    with pytest.raises(RequestValidationError, match="warmup_requests"):
+        validate_bench_request_dict(raw)
+
+
+def test_scoring_rule_is_required():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw.pop("scoring_rule")
+    with pytest.raises(RequestValidationError, match="scoring_rule"):
         validate_bench_request_dict(raw)
 
 
@@ -149,10 +168,10 @@ def test_invalid_request_non_numeric_gpu_count():
         validate_bench_request_dict(raw)
 
 
-def test_invalid_request_zero_max_new_tokens():
+def test_invalid_request_coverage_ratio_out_of_range():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
-    raw["correctness"]["max_new_tokens"] = 0
-    with pytest.raises(RequestValidationError, match="max_new_tokens"):
+    raw["correctness"]["thresholds"]["min_coverage_ratio"] = 1.5
+    with pytest.raises(RequestValidationError, match="min_coverage_ratio"):
         validate_bench_request_dict(raw)
 
 
@@ -212,7 +231,7 @@ def test_report_dict_validation_accepts_stub_shape():
         },
         "inputs_fingerprint": {
             "baseline_image_digest": "sha256:" + ("a" * 64),
-            "candidate_image_digest": "sha256:" + ("b" * 64),
+            "candidate_image_digest": ["sha256:" + ("b" * 64)],
             "model_repo": "Qwen/Qwen2.5-7B-Instruct",
             "model_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
             "model_weights_sha256": "sha256:" + ("0" * 64),
