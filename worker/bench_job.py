@@ -1150,7 +1150,7 @@ def _run_one_sku(
         from gpu.types import PodSpec
 
         spec = PodSpec(
-            provider="auto",
+            provider=config.GPU_PROVIDER,
             gpu_count=int(bench.get("gpu_count") or 1),
             gpu_type=gpu_sku,
             ttl_hours=config.GPU_TTL_HOURS,
