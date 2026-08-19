@@ -389,12 +389,19 @@ def complete_gates_job(
     submission_id: UUID | str,
     *,
     job_id: int | None = None,
+    enqueue_round: bool = False,
 ) -> None:
-    """Mark the gates job done.
+    """Mark the gates job done, and queue the submission for a round.
 
     Bench used to be a second job row enqueued here. Rounds replaced it: a
     submission that reaches ``bench_queued`` waits for the round creator to
     pick it up. TODO(PAR-79): the watcher selects the cohort from that state.
+
+    The ``bench_queued`` event IS that queue, so it is written in the same
+    transaction as the completion. Split over two transactions, a crash
+    between them settles the job while leaving the submission in no queue at
+    all: only 'pending' jobs are reclaimed, and the round creator only reads
+    'bench_queued'.
     """
     with db_connection() as conn:
         with conn.cursor() as cur:
@@ -415,6 +422,14 @@ def complete_gates_job(
                     WHERE submission_id = %s
                     """,
                     (str(submission_id),),
+                )
+            if enqueue_round:
+                cur.execute(
+                    """
+                    INSERT INTO submission_events (submission_id, state, detail)
+                    VALUES (%s, 'bench_queued', %s)
+                    """,
+                    (str(submission_id), Json({})),
                 )
 
 

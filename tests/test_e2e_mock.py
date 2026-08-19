@@ -189,17 +189,18 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
     assert "applied" in events
     assert "surface_ok" in events
     assert "built" in events
-    # bench=None campaign: no bench job enqueued
+    # bench=None campaign: settled gates job, and nothing queued for a round
     from db.connection import db_connection
 
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT kind, status FROM submission_jobs WHERE submission_id = %s",
+                "SELECT status FROM submission_jobs WHERE submission_id = %s",
                 (str(sid),),
             )
             jobs = cur.fetchall()
-    assert jobs == [("gates", "done")]
+    assert jobs == [("done",)]
+    assert "bench_queued" not in events
 
 
 # TODO(PAR-83): the bench e2e tests lived here. They drove the per-submission
