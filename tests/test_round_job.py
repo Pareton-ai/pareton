@@ -319,6 +319,102 @@ def test_round_infra_error_carries_void_reason():
     assert err.reason == VOID_LEADER_IMAGE_MISSING
 
 
+def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monkeypatch):
+    """A disqualified incumbent has no in-round score; the history row must
+    still carry the score it won with, from leaders.last_score."""
+    import json as _json
+    from pathlib import Path
+
+    import worker.round_job as rj
+    from round.rank import EVENT_OVERTAKEN
+
+    campaign = _campaign()
+    round_row = _round_row(incumbent_submission_id=str(uuid4()))
+    entries = _entries()
+    captured: dict = {}
+
+    monkeypatch.setattr(rj, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(rj, "list_round_entries", lambda _rid: entries)
+    monkeypatch.setattr(rj, "remaining_round_budget_s", lambda *a, **k: 100.0)
+    monkeypatch.setattr(rj, "get_leader", lambda _cid: {"last_score": 0.20})
+    monkeypatch.setattr(rj, "set_round_phase", lambda **k: True)
+    monkeypatch.setattr(rj, "touch_round_heartbeat", lambda **k: True)
+
+    def fake_materialize(_row, _campaign, dest_dir, **_k):
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        trace = dest / "trace.json"
+        _write_trace(trace)
+        return trace
+
+    def fake_build(_row, _campaign, _entries, *, task_id, trace_path):
+        captured["task_id"] = task_id
+        return {
+            "task_id": task_id,
+            "engines": {
+                "baseline": {"image": BASELINE_REF},
+                "candidates": [{"image": CAND_A_REF}, {"image": CAND_B_REF}],
+            },
+        }
+
+    def fake_bench(request_path, output_dir, **_k):
+        request_bytes = Path(request_path).read_bytes()
+        report = {
+            "schema_version": 1,
+            "task_id": captured["task_id"],
+            "verdict": "pass",
+            "started_at": "t0",
+            "finished_at": "t1",
+            "environment": {
+                "gpu": [],
+                "driver_version": "",
+                "cuda_version": "",
+                "docker_version": "",
+                "harness_version": "",
+                "hostname_hash": "",
+            },
+            "inputs_fingerprint": {
+                "baseline_image_digest": BASELINE_DIGEST,
+                "candidate_image_digest": [CAND_A, CAND_B],
+                "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+                "model_revision": HF_REV,
+                "model_weights_sha256": "sha256:" + "0" * 64,
+                "trace_sha256": TRACE_SHA,
+                "request_sha256": sha256_bytes(request_bytes),
+            },
+            "baseline": {"role": "baseline", "timings": {}, "cross_rep_variance": {}},
+            "entries": [
+                {"index": 0, "status": "disqualified", "reason": "wrong_outputs"},
+                {"index": 1, "status": "scored", "score": 0.42},
+            ],
+            "baseline_drift": 0.0,
+        }
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "bench_report.json").write_text(_json.dumps(report))
+        return 0
+
+    def fake_complete(**kwargs):
+        captured["decision"] = kwargs["decision"]
+        return True
+
+    monkeypatch.setattr(rj, "materialize_round_trace", fake_materialize)
+    monkeypatch.setattr(rj, "build_round_request", fake_build)
+    monkeypatch.setattr(rj, "complete_round", fake_complete)
+
+    outcome = rj.process_round(
+        round_row,
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=fake_bench,
+    )
+
+    assert outcome == "ok"
+    decision = captured["decision"]
+    assert decision.event == EVENT_OVERTAKEN
+    assert decision.prev_score == 0.20
+
+
 def test_remaining_budget_voids_when_the_clock_has_run_out():
     started = datetime.now(timezone.utc) - timedelta(seconds=10)
     with pytest.raises(RoundInfraError) as exc:

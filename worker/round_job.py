@@ -43,6 +43,7 @@ from round.store import (
     VOID_ROUND_TIMEOUT,
     VOID_TRACE_UNAVAILABLE,
     complete_round,
+    get_leader,
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
@@ -700,11 +701,19 @@ def _process_round(
         )
         for r in results
     ]
+    # A disqualified incumbent carries no in-round score; rank_round reports
+    # the stored leaders.last_score as prev_score on the history row instead.
+    incumbent_score = None
+    if round_row.get("incumbent_submission_id") is not None:
+        leader_row = get_leader(campaign_id)
+        if leader_row is not None and leader_row.get("last_score") is not None:
+            incumbent_score = float(leader_row["last_score"])
     decision = rank_round(
         rank_entries,
         epsilon=float(config.OVERTAKE_EPSILON),
         drift=drift_f,
         drift_ceiling=float(config.BASELINE_DRIFT_CEILING),
+        leader_score=incumbent_score,
     )
     if decision.void:
         raise RoundInfraError(str(decision.void_reason))
