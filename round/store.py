@@ -446,16 +446,27 @@ def list_score_progress(campaign_id: UUID | str) -> list[dict[str, Any]]:
 def list_submission_round_entries(
     submission_ids: list[UUID | str],
 ) -> dict[str, dict[str, Any]]:
-    """Map submission_id -> its newest round entry. Missing ids are absent.
+    """Map submission_id -> the round entry the API reports. Missing ids absent.
 
     This is the outcome the submission API reports: the round a submission was
     assigned to, its score there, and its verdict.
+
+    A submission can hold entries in several rounds, so newest is not the
+    answer. A void round changed no submission state (decision 27), so it never
+    surfaces. Among what is left, an entry that reached a verdict beats a live
+    one: a leader re-seated into a running round must keep reporting the score
+    it won with, not a fresh ``pending``. A submission whose only entry is live
+    still reports that entry, so the live assignment has one source of truth
+    rather than being reconstructed from the ``round_assigned`` event.
     """
     if not submission_ids:
         return {}
     ids = [str(s) for s in submission_ids]
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Not round.rank.SETTLED_STATUSES: that set is what ranking counts
+            # as a measurement and leaves out infra_failed. Here the question
+            # is only whether the entry can still change.
             cur.execute(
                 """
                 SELECT DISTINCT ON (e.submission_id)
@@ -463,8 +474,11 @@ def list_submission_round_entries(
                        e.score, e.disqualify_reason
                 FROM round_entries e
                 JOIN rounds r ON r.id = e.round_id
-                WHERE e.submission_id = ANY(%s::uuid[])
-                ORDER BY e.submission_id, r.ordinal DESC
+                WHERE e.submission_id = ANY(%s::uuid[]) AND r.status <> 'void'
+                ORDER BY e.submission_id,
+                         (e.status IN ('scored','disqualified','infra_failed'))
+                             DESC,
+                         r.ordinal DESC
                 """,
                 (ids,),
             )

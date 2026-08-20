@@ -556,6 +556,9 @@ def test_build_log_cache_control_by_state(
 
 
 HOTKEY = "5FakesHotkeyForE2ETesting000000000000000000000"
+# The round read endpoints type campaign_id as a UUID, so these paths
+# cannot use a short placeholder id.
+CAMPAIGN_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 
 def _leader_row() -> dict:
@@ -590,7 +593,7 @@ def test_leader_is_404_when_vacant(monkeypatch, client: TestClient):
 
     _open_campaign(monkeypatch)
     monkeypatch.setattr(server, "get_leader", lambda _cid: None)
-    resp = client.get("/v1/campaigns/c1/leader")
+    resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/leader")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "leader is vacant"
 
@@ -600,9 +603,22 @@ def test_leader_404_when_campaign_is_unknown(monkeypatch, client: TestClient):
 
     monkeypatch.setattr(server, "get_campaign", lambda _cid: None)
     for path in ("leader", "rounds", "score-progress"):
-        resp = client.get(f"/v1/campaigns/nope/{path}")
+        resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/{path}")
         assert resp.status_code == 404
         assert resp.json()["detail"] == "campaign not found"
+
+
+def test_round_reads_reject_a_malformed_campaign_id(monkeypatch, client: TestClient):
+    """A bad id is a 422 from the path type, before any store call."""
+    from api import server
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("store must not be reached")
+
+    monkeypatch.setattr(server, "get_campaign", _boom)
+    for path in ("leader", "rounds", "score-progress"):
+        resp = client.get(f"/v1/campaigns/not-a-uuid/{path}")
+        assert resp.status_code == 422, path
 
 
 def test_leader_detail_carries_the_full_hotkey(monkeypatch, client: TestClient):
@@ -610,11 +626,11 @@ def test_leader_detail_carries_the_full_hotkey(monkeypatch, client: TestClient):
 
     _open_campaign(monkeypatch)
     monkeypatch.setattr(server, "get_leader", lambda _cid: _leader_row())
-    resp = client.get("/v1/campaigns/c1/leader")
+    resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/leader")
     assert resp.status_code == 200
     body = resp.json()
     assert body["hotkey"] == HOTKEY
-    assert body["campaign_id"] == "c1"
+    assert body["campaign_id"] == CAMPAIGN_ID
     server.LeaderModel.model_validate(body)
 
 
@@ -659,7 +675,7 @@ def test_rounds_list_cache_control_follows_the_live_round(
             "items": [_round_summary(1, status)],
         },
     )
-    resp = client.get("/v1/campaigns/c1/rounds")
+    resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds")
     assert resp.status_code == 200
     assert resp.headers.get("Cache-Control") == expected_cache
     page = server.RoundsPageModel.model_validate(resp.json())
@@ -681,7 +697,7 @@ def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
         "list_rounds",
         lambda _cid, *, limit, offset: {"total": 3, "items": rows},
     )
-    body = client.get("/v1/campaigns/c1/rounds").json()
+    body = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds").json()
     assert [r["ordinal"] for r in body["rounds"]] == [3, 2, 1]
     assert body["rounds"][1]["void_reason"] == "baseline_drift"
 
@@ -852,7 +868,7 @@ def test_score_progress_keeps_void_ordinals_and_null_scores(
     ]
     monkeypatch.setattr(server, "list_score_progress", lambda _cid: points)
 
-    resp = client.get("/v1/campaigns/c1/score-progress")
+    resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/score-progress")
     assert resp.status_code == 200
     body = resp.json()
     server.ScoreProgressModel.model_validate(body)
@@ -884,5 +900,5 @@ def test_score_progress_is_uncacheable_while_a_round_runs(
             }
         ],
     )
-    resp = client.get("/v1/campaigns/c1/score-progress")
+    resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/score-progress")
     assert resp.headers.get("Cache-Control") == "no-store"

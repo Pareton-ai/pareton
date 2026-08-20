@@ -383,13 +383,13 @@ def _require_campaign(campaign_id: str) -> None:
     "/v1/campaigns/{campaign_id}/leader",
     responses={200: {"model": LeaderModel}},
 )
-def campaign_leader(campaign_id: str):
+def campaign_leader(campaign_id: UUID):
     """The crown holder. A vacant crown has no row, so it is a 404."""
-    _require_campaign(campaign_id)
-    row = get_leader(campaign_id)
+    _require_campaign(str(campaign_id))
+    row = get_leader(str(campaign_id))
     if row is None:
         raise HTTPException(status_code=404, detail="leader is vacant")
-    return {"campaign_id": campaign_id, **row}
+    return {"campaign_id": str(campaign_id), **row}
 
 
 @app.get(
@@ -397,17 +397,17 @@ def campaign_leader(campaign_id: str):
     responses={200: {"model": RoundsPageModel}},
 )
 def campaign_rounds(
-    campaign_id: str,
+    campaign_id: UUID,
     response: Response,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    _require_campaign(campaign_id)
-    page = list_rounds(campaign_id, limit=limit, offset=offset)
+    _require_campaign(str(campaign_id))
+    page = list_rounds(str(campaign_id), limit=limit, offset=offset)
     rows = page["items"]
     _set_live_round_cache_control(response, [r["status"] for r in rows])
     return {
-        "campaign_id": campaign_id,
+        "campaign_id": str(campaign_id),
         "total": page["total"],
         "limit": limit,
         "offset": offset,
@@ -419,15 +419,15 @@ def campaign_rounds(
     "/v1/campaigns/{campaign_id}/score-progress",
     responses={200: {"model": ScoreProgressModel}},
 )
-def campaign_score_progress(campaign_id: str, response: Response):
+def campaign_score_progress(campaign_id: UUID, response: Response):
     """Chart series, oldest ordinal first. Void rounds keep their ordinal."""
-    _require_campaign(campaign_id)
-    points = list_score_progress(campaign_id)
+    _require_campaign(str(campaign_id))
+    points = list_score_progress(str(campaign_id))
     _set_live_round_cache_control(response, [p["status"] for p in points])
     for point in points:
         for entry in point["entries"]:
             entry["hotkey"] = _short_hotkey(entry["hotkey"])
-    return {"campaign_id": campaign_id, "points": points}
+    return {"campaign_id": str(campaign_id), "points": points}
 
 
 @app.get("/v1/rounds/{round_id}", responses={200: {"model": RoundDetailModel}})

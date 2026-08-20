@@ -28,6 +28,7 @@ ENGINE_DIGEST = "sha256:" + "a" * 64
 IMAGE_A = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "1" * 64
 IMAGE_B = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "2" * 64
 IMAGE_C = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "3" * 64
+IMAGE_D = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "4" * 64
 
 
 def _image(i: int) -> str:
@@ -506,13 +507,18 @@ def test_public_reads_of_rounds_leader_and_score_progress():
             )
 
     # A second round that voids: it keeps its ordinal and carries no winner.
-    _queued(campaign_id, image_ref=IMAGE_C, block=20, waited_s=40_000)
+    voided = _queued(campaign_id, image_ref=IMAGE_C, block=20, waited_s=40_000)
     create_due_rounds(_FakeSubtensor())
     _first, second = _rounds(campaign_id)
     second_id = str(second["id"])
     _settle_round(
         second_id, winner_sid=None, status="void", void_reason="baseline_drift"
     )
+
+    # A third round left live, so the leader is re-seated while it runs.
+    newcomer = _queued(campaign_id, image_ref=IMAGE_D, block=30, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    third_id = str(_rounds(campaign_id)[2]["id"])
 
     leader = get_leader(campaign_id)
     assert str(leader["submission_id"]) == winner
@@ -522,11 +528,11 @@ def test_public_reads_of_rounds_leader_and_score_progress():
     assert get_leader(uuid4()) is None
 
     page = list_rounds(campaign_id)
-    assert page["total"] == 2
-    assert [r["ordinal"] for r in page["items"]] == [2, 1]
-    assert page["items"][0]["void_reason"] == "baseline_drift"
-    assert page["items"][1]["entry_count"] == 3
-    assert page["items"][1]["leader_changed"] is True
+    assert page["total"] == 3
+    assert [r["ordinal"] for r in page["items"]] == [3, 2, 1]
+    assert page["items"][1]["void_reason"] == "baseline_drift"
+    assert page["items"][2]["entry_count"] == 3
+    assert page["items"][2]["leader_changed"] is True
 
     detail = get_round(first_id)
     assert detail["scoring_rule"] == {"name": "median_e2e_speedup"}
@@ -546,7 +552,7 @@ def test_public_reads_of_rounds_leader_and_score_progress():
     assert "evidence_s3_url" not in entries[2]
 
     points = list_score_progress(campaign_id)
-    assert [p["ordinal"] for p in points] == [1, 2]
+    assert [p["ordinal"] for p in points] == [1, 2, 3]
     assert float(points[0]["leader_score"]) == 0.31
     # The void round keeps ordinal 2 and leaves a gap in the line.
     assert points[1]["ordinal"] == 2 and points[1]["leader_score"] is None
@@ -555,10 +561,21 @@ def test_public_reads_of_rounds_leader_and_score_progress():
     assert points[0]["entries"][0]["score"] is None
     assert points[0]["entries"][0]["status"] == "disqualified"
 
-    outcomes = list_submission_round_entries([winner, loser])
-    # The winner ran again as the leader of round 2, so its newest entry wins.
-    assert outcomes[winner]["ordinal"] == 2
-    assert outcomes[winner]["status"] == "pending"
+    outcomes = list_submission_round_entries([winner, loser, voided, newcomer])
+    # The winner sits live in round 3 and voided out of round 2, but the API
+    # reports the scored entry it won round 1 with, not a fresh pending.
+    assert outcomes[winner]["round_id"] == first_id
+    assert outcomes[winner]["ordinal"] == 1
+    assert outcomes[winner]["status"] == "scored"
+    assert float(outcomes[winner]["score"]) == 0.31
     assert outcomes[loser]["ordinal"] == 1
     assert outcomes[loser]["disqualify_reason"] == "fail_correctness"
+    # A void round changed no submission state, so its only entry surfaces
+    # nothing at all.
+    assert voided not in outcomes
+    # A submission whose only entry is live still reports that live assignment.
+    assert outcomes[newcomer]["round_id"] == third_id
+    assert outcomes[newcomer]["ordinal"] == 3
+    assert outcomes[newcomer]["status"] == "pending"
+    assert outcomes[newcomer]["score"] is None
     assert list_submission_round_entries([]) == {}
