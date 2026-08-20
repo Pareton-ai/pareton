@@ -561,6 +561,7 @@ def _build_entries(
     runs: list[_CandidateRun],
     correctness: dict[int, CorrectnessReport],
     digests: list[str],
+    mock_engine: bool = False,
 ) -> list[RoundEntryReport]:
     entries: list[RoundEntryReport] = []
     for run in runs:
@@ -606,7 +607,9 @@ def _build_entries(
 
         variance = run.replay.result.cross_rep_variance or {}
         rel_range = float(variance.get("p99_e2e_ms_rel_range") or 0.0)
-        if rel_range > REPRO_BAR_MAX_REL_RANGE:
+        # A mock engine sleeps on the host clock, so its spread measures the
+        # machine running the harness rather than the candidate.
+        if not mock_engine and rel_range > REPRO_BAR_MAX_REL_RANGE:
             entries.append(
                 RoundEntryReport(
                     index=run.index,
@@ -809,6 +812,7 @@ def run_bench(
             runs=runs,
             correctness=correctness,
             digests=provider.candidate_digests,
+            mock_engine=mock_engine,
         )
         report = BenchReport(
             schema_version=1,
