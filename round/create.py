@@ -158,15 +158,24 @@ def create_due_rounds(subtensor: Any) -> list[dict[str, Any]]:
     )
     created: list[dict[str, Any]] = []
     for queue in queues:
-        campaign = get_campaign(queue["campaign_id"])
-        if campaign is None:
+        # One campaign's bad pin or dead HF fetch must not cost every other
+        # campaign its round on this cycle, and every cycle after it.
+        try:
+            campaign = get_campaign(queue["campaign_id"])
+            if campaign is None:
+                continue
+            row = try_create_round(
+                campaign,
+                queue,
+                seed_block=seed_block,
+                seed_block_hash=seed_block_hash,
+            )
+        except Exception:
+            logger.exception(
+                "campaign %s: round creation failed; continuing with the rest",
+                queue["campaign_id"],
+            )
             continue
-        row = try_create_round(
-            campaign,
-            queue,
-            seed_block=seed_block,
-            seed_block_hash=seed_block_hash,
-        )
         if row is not None:
             logger.info(
                 "campaign %s: created round %d with %d challenger(s)",

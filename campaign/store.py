@@ -706,6 +706,7 @@ BENCH_REJECT_REASONS = frozenset(
         "fail_correctness",
         "fail_sla",
         "fail_engine_candidate",
+        "duplicate_image",
     }
 )
 

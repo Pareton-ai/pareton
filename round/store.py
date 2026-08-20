@@ -75,15 +75,21 @@ def create_round(
     ``dedupe`` collapses cohort rows that share an image digest; it is passed
     in because the cohort is only known inside this transaction.
 
-    Two watchers can reach the insert together: the loser trips
-    ``rounds_one_live_per_campaign_idx`` or ``UNIQUE (campaign_id, ordinal)``,
-    rolls back, and its cohort rows keep their ``bench_queued`` event for the
-    next cycle. Rows another creator held are skipped by ``SKIP LOCKED`` and
-    stay queued for the same reason.
+    Two watchers can reach this together. The lock on the campaign row
+    serializes them: the cohort must be the oldest queued submissions by
+    ``commit_block``, and creators splitting one queue between them would seat
+    newer rows while older ones wait. The second creator blocks, then sees the
+    live round in the re-check and returns None, leaving its cohort rows their
+    ``bench_queued`` event for the next cycle. The ``UniqueViolation`` catch
+    stays as the backstop.
     """
     try:
         with db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                    (str(campaign_id),),
+                )
                 cur.execute(
                     """
                     SELECT 1 FROM rounds
@@ -109,7 +115,7 @@ def create_round(
                       AND latest.state = 'bench_queued'
                     ORDER BY s.commit_block ASC, s.id ASC
                     LIMIT %s
-                    FOR UPDATE OF s SKIP LOCKED
+                    FOR UPDATE OF s
                     """,
                     (str(campaign_id), int(cohort_limit)),
                 )
@@ -255,6 +261,9 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
                     SELECT submission_id, 'bench_queued', %s
                     FROM round_entries
                     WHERE round_id = %s AND role = 'challenger'
+                      -- A terminal entry is already judged; requeueing it
+                      -- would resurrect a disqualified submission.
+                      AND status IN ('pending', 'running')
                     """,
                     (
                         Json(

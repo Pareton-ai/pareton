@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+import config
 from campaign.manifest import build_manifest
 from campaign.models import SLA
 from campaign.store import (
@@ -27,6 +28,11 @@ ENGINE_DIGEST = "sha256:" + "a" * 64
 IMAGE_A = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "1" * 64
 IMAGE_B = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "2" * 64
 IMAGE_C = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "3" * 64
+
+
+def _image(i: int) -> str:
+    """A distinct digest per index, so dedupe keeps every row."""
+    return f"ghcr.io/pareton-ai/pareton-engine@sha256:{i:064x}"
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +153,8 @@ def _rounds(campaign_id: UUID) -> list[dict]:
             cur.execute(
                 """
                 SELECT id, ordinal, status, gpu_sku, seed_block, seed_block_hash,
-                       sampled_trace_sha256, scoring_rule, void_reason
+                       sampled_trace_sha256, scoring_rule, void_reason,
+                       incumbent_submission_id
                 FROM rounds WHERE campaign_id = %s ORDER BY ordinal
                 """,
                 (str(campaign_id),),
@@ -208,13 +215,23 @@ def test_aged_cohort_of_three_creates_a_round_of_three():
 
 
 def test_racing_creators_produce_one_live_round():
+    """A leftover queue must not let the loser seat newer submissions.
+
+    The queue is deliberately longer than ROUND_SIZE: without the campaign
+    lock the second creator takes the rows the first one left behind, and the
+    cohort stops being the oldest by commit_block.
+    """
     campaign_id = _campaign()
+    assert config.ROUND_SIZE == 5
     sids = [
-        _queued(campaign_id, image_ref=ref, block=10 + i, waited_s=40_000)
-        for i, ref in enumerate((IMAGE_A, IMAGE_B, IMAGE_C))
+        _queued(campaign_id, image_ref=_image(i), block=10 + i, waited_s=40_000)
+        for i in range(config.ROUND_SIZE + 2)
     ]
     campaign = get_campaign(campaign_id)
-    queue = {"queued": 3, "oldest_queued_at": datetime(2020, 1, 1, tzinfo=timezone.utc)}
+    queue = {
+        "queued": len(sids),
+        "oldest_queued_at": datetime(2020, 1, 1, tzinfo=timezone.utc),
+    }
     start = threading.Barrier(2)
     outcomes: list = []
 
@@ -236,9 +253,15 @@ def test_racing_creators_produce_one_live_round():
         t.join(timeout=60)
 
     assert len([o for o in outcomes if o is not None]) == 1
-    assert len(_rounds(campaign_id)) == 1
-    for sid in sids:
+    (rnd,) = _rounds(campaign_id)
+    challengers = [
+        sid for role, sid, _ref in _entries(str(rnd["id"])) if role == "challenger"
+    ]
+    assert challengers == sids[: config.ROUND_SIZE]
+    for sid in sids[: config.ROUND_SIZE]:
         assert _latest_state(sid)[0] == "round_assigned"
+    for sid in sids[config.ROUND_SIZE :]:
+        assert _latest_state(sid)[0] == "bench_queued"
 
 
 def test_stale_round_voids_and_requeues_challengers_only():
@@ -247,6 +270,7 @@ def test_stale_round_voids_and_requeues_challengers_only():
         _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000),
         _queued(campaign_id, image_ref=IMAGE_B, block=11, waited_s=39_000),
     ]
+    dq_sid = _queued(campaign_id, image_ref=_image(9), block=12, waited_s=38_000)
     leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
     create_due_rounds(_FakeSubtensor())
     (rnd,) = _rounds(campaign_id)
@@ -261,6 +285,13 @@ def test_stale_round_voids_and_requeues_challengers_only():
                 ) VALUES (%s, %s, 'leader', %s)
                 """,
                 (round_id, leader_sid, IMAGE_C),
+            )
+            cur.execute(
+                """
+                UPDATE round_entries SET status = 'disqualified'
+                WHERE round_id = %s AND submission_id = %s
+                """,
+                (round_id, dq_sid),
             )
             cur.execute(
                 """
@@ -287,6 +318,7 @@ def test_stale_round_voids_and_requeues_challengers_only():
             )
             before = cur.fetchone()[0]
     leader_state_before = _latest_state(leader_sid)
+    dq_state_before = _latest_state(dq_sid)
 
     voided = reap_stale_rounds(1800)
 
@@ -300,6 +332,7 @@ def test_stale_round_voids_and_requeues_challengers_only():
         assert state == "bench_queued"
         assert detail["void_reason"] == "heartbeat_stale"
     assert _latest_state(leader_sid) == leader_state_before
+    assert _latest_state(dq_sid) == dq_state_before
 
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
@@ -308,6 +341,47 @@ def test_stale_round_voids_and_requeues_challengers_only():
                 (str(campaign_id),),
             )
             assert cur.fetchone()[0] == before
+
+
+def test_leader_is_seated_as_an_entry_and_is_not_requeued():
+    """The incumbent runs every round, but is not a queued challenger."""
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    (first,) = _rounds(campaign_id)
+
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE rounds SET status = 'complete', completed_at = now() "
+                "WHERE id = %s",
+                (str(first["id"]),),
+            )
+            cur.execute(
+                """
+                INSERT INTO leaders (
+                  campaign_id, submission_id, engine_image_ref, hotkey,
+                  won_at_round_id, won_at_ordinal, last_score
+                ) VALUES (%s, %s, %s, 'hk', %s, 1, 0.42)
+                """,
+                (str(campaign_id), leader_sid, IMAGE_C, str(first["id"])),
+            )
+    leader_state_before = _latest_state(leader_sid)
+
+    challenger = _queued(campaign_id, image_ref=IMAGE_B, block=20, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+
+    _first, second = _rounds(campaign_id)
+    assert second["ordinal"] == 2
+    assert str(second["incumbent_submission_id"]) == leader_sid
+    assert _entries(str(second["id"])) == [
+        ("baseline", None, f"ghcr.io/pareton-ai/pareton-engine@{ENGINE_DIGEST}"),
+        ("leader", leader_sid, IMAGE_C),
+        ("challenger", challenger, IMAGE_B),
+    ]
+    # The leader is not queued work, so it gets no round_assigned event.
+    assert _latest_state(leader_sid) == leader_state_before
 
 
 def test_duplicate_image_digest_is_rejected():
