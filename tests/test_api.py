@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from campaign.store import KNOWN_CAMPAIGN_STATUSES, KNOWN_SUBMISSION_STATES
+from campaign.store import (
+    KNOWN_CAMPAIGN_STATUSES,
+    KNOWN_SUBMISSION_STATES,
+    derive_bench_verdict_from_events,
+)
 
 V1_CACHE_CONTROL_EXPECTED = "public, max-age=30, stale-while-revalidate=300"
 
@@ -23,6 +27,15 @@ def client(monkeypatch):
         lambda status=None: [],
     )
     return TestClient(server.app)
+
+
+def test_duplicate_image_is_a_terminal_bench_verdict():
+    """round/store.py rejects a duplicate image; the API must not call it pending."""
+    events = [
+        {"state": "bench_queued", "detail": {}},
+        {"state": "rejected", "detail": {"reason": "duplicate_image"}},
+    ]
+    assert derive_bench_verdict_from_events(events) == "duplicate_image"
 
 
 def test_health_no_store(client: TestClient):
