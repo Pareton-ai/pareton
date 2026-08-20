@@ -20,7 +20,18 @@ from campaign.store import (
 from db.connection import db_connection
 from e2e_db import cleanup_e2e_rows, require_e2e_database_url
 from round.create import create_due_rounds, try_create_round
-from round.store import campaigns_with_queue, reap_stale_rounds
+from round.rank import EVENT_OVERTAKEN, EVENT_SEATED, EVENT_VACATED, RankDecision
+from round.store import (
+    VOID_POD_FAILED,
+    campaigns_with_queue,
+    claim_pending_round,
+    complete_round,
+    get_leader,
+    reap_stale_rounds,
+    set_round_phase,
+    touch_round_heartbeat,
+    void_round,
+)
 
 pytestmark = pytest.mark.e2e
 
@@ -579,3 +590,340 @@ def test_public_reads_of_rounds_leader_and_score_progress():
     assert outcomes[newcomer]["status"] == "pending"
     assert outcomes[newcomer]["score"] is None
     assert list_submission_round_entries([]) == {}
+
+
+def _runner_entries(round_id: str) -> list[dict]:
+    from psycopg2.extras import RealDictCursor
+
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.id, e.submission_id, e.role, e.engine_image_ref, s.hotkey
+                FROM round_entries e
+                LEFT JOIN submissions s ON s.id = e.submission_id
+                WHERE e.round_id = %s
+                ORDER BY e.id
+                """,
+                (round_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _result(
+    row: dict, *, status: str, score: float | None, reason: str | None = None
+) -> dict:
+    return {
+        "id": row["id"],
+        "submission_id": (
+            str(row["submission_id"]) if row["submission_id"] is not None else None
+        ),
+        "role": row["role"],
+        "engine_image_ref": row["engine_image_ref"],
+        "hotkey": row["hotkey"],
+        "status": status,
+        "score": score,
+        "disqualify_reason": reason,
+        "report": {"status": status, "score": score},
+    }
+
+
+def _seed_incumbent(campaign_id: UUID, sid: str, image_ref: str) -> str:
+    """Insert a placeholder complete round so leaders.won_at_round_id can bind."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO rounds (
+                  campaign_id, ordinal, gpu_sku, seed_block, seed_block_hash,
+                  seed_hex, sampled_trace_sha256, sampling_receipt, scoring_rule,
+                  status, completed_at
+                ) VALUES (
+                  %s, 0, 'H200', 1, '0x00', '00', %s, '{}'::jsonb,
+                  '{"name":"median_e2e_speedup"}'::jsonb, 'complete', now()
+                )
+                RETURNING id
+                """,
+                (str(campaign_id), "sha256:" + "e" * 64),
+            )
+            rid = str(cur.fetchone()[0])
+            cur.execute("SELECT hotkey FROM submissions WHERE id = %s", (sid,))
+            hotkey = cur.fetchone()[0]
+            cur.execute(
+                """
+                INSERT INTO leaders (
+                  campaign_id, submission_id, engine_image_ref, hotkey,
+                  won_at_round_id, won_at_ordinal, last_score
+                ) VALUES (%s, %s, %s, %s, %s, 0, 0.20)
+                """,
+                (str(campaign_id), sid, image_ref, hotkey, rid),
+            )
+    return rid
+
+
+def _history(campaign_id: UUID) -> list[tuple]:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT event, new_submission_id, prev_submission_id
+                FROM leader_history WHERE campaign_id = %s ORDER BY id
+                """,
+                (str(campaign_id),),
+            )
+            return [
+                (r[0], str(r[1]) if r[1] else None, str(r[2]) if r[2] else None)
+                for r in cur.fetchall()
+            ]
+
+
+def test_claim_sets_started_at_and_heartbeat_at():
+    campaign_id = _campaign()
+    _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    assert claimed["status"] == "running"
+    assert claimed["started_at"] is not None
+    assert claimed["heartbeat_at"] is not None
+    assert str(claimed["campaign_id"]) == str(campaign_id)
+    assert claim_pending_round() is None
+
+
+def test_phase_and_heartbeat_land_on_a_running_round():
+    campaign_id = _campaign()
+    _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    assert set_round_phase(round_id=rid, phase="provisioning", progress={"n": 1})
+    assert touch_round_heartbeat(round_id=rid)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, phase, progress, heartbeat_at FROM rounds WHERE id = %s",
+                (rid,),
+            )
+            status, phase, progress, heartbeat_at = cur.fetchone()
+    assert status == "running"
+    assert phase == "provisioning"
+    assert progress == {"n": 1}
+    assert heartbeat_at is not None
+
+
+def test_complete_hold_writes_winner_submission_id():
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    rows = _runner_entries(rid)
+    by_role = {r["role"]: r for r in rows}
+    results = [
+        _result(by_role["baseline"], status="scored", score=0.0),
+        _result(by_role["leader"], status="scored", score=0.20),
+        _result(by_role["challenger"], status="scored", score=0.201),
+    ]
+    decision = RankDecision(
+        leader_submission_id=leader_sid,
+        leader_score=0.20,
+        overtake_threshold=0.202,
+    )
+    assert decision.leader_changed is False
+    assert complete_round(
+        round_id=rid,
+        campaign_id=campaign_id,
+        ordinal=int(claimed["ordinal"]),
+        decision=decision,
+        entries=results,
+        baseline_drift=0.001,
+        epsilon=0.01,
+    )
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, winner_submission_id, leader_changed, baseline_drift
+                FROM rounds WHERE id = %s
+                """,
+                (rid,),
+            )
+            status, winner, changed, drift = cur.fetchone()
+    assert status == "complete"
+    assert str(winner) == leader_sid
+    assert changed is False
+    assert float(drift) == pytest.approx(0.001)
+    assert _history(campaign_id) == []
+    seated = get_leader(campaign_id)
+    assert seated is not None
+    assert str(seated["submission_id"]) == leader_sid
+    assert _latest_state(challenger)[0] == "scored"
+
+
+def test_complete_overtake_writes_leaders_and_history_together():
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    rows = _runner_entries(rid)
+    by_role = {r["role"]: r for r in rows}
+    results = [
+        _result(by_role["baseline"], status="scored", score=0.0),
+        _result(by_role["leader"], status="scored", score=0.20),
+        _result(by_role["challenger"], status="scored", score=0.30),
+    ]
+    decision = RankDecision(
+        event=EVENT_OVERTAKEN,
+        leader_submission_id=challenger,
+        leader_score=0.30,
+        prev_submission_id=leader_sid,
+        prev_score=0.20,
+        overtake_threshold=0.202,
+    )
+    assert complete_round(
+        round_id=rid,
+        campaign_id=campaign_id,
+        ordinal=int(claimed["ordinal"]),
+        decision=decision,
+        entries=results,
+        baseline_drift=0.0,
+        epsilon=0.01,
+    )
+    seated = get_leader(campaign_id)
+    assert seated is not None
+    assert str(seated["submission_id"]) == challenger
+    assert float(seated["last_score"]) == pytest.approx(0.30)
+    assert str(seated["won_at_round_id"]) == rid
+    assert _history(campaign_id) == [(EVENT_OVERTAKEN, challenger, leader_sid)]
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT winner_submission_id, leader_changed FROM rounds WHERE id = %s",
+                (rid,),
+            )
+            winner, changed = cur.fetchone()
+    assert str(winner) == challenger
+    assert changed is True
+
+
+def test_complete_vacate_deletes_leader_and_writes_history():
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    rows = _runner_entries(rid)
+    by_role = {r["role"]: r for r in rows}
+    results = [
+        _result(by_role["baseline"], status="scored", score=0.0),
+        _result(
+            by_role["leader"],
+            status="disqualified",
+            score=None,
+            reason="fail_correctness",
+        ),
+        _result(
+            by_role["challenger"], status="disqualified", score=None, reason="fail"
+        ),
+    ]
+    decision = RankDecision(
+        event=EVENT_VACATED,
+        prev_submission_id=leader_sid,
+        prev_score=0.20,
+        overtake_threshold=0.0,
+    )
+    assert complete_round(
+        round_id=rid,
+        campaign_id=campaign_id,
+        ordinal=int(claimed["ordinal"]),
+        decision=decision,
+        entries=results,
+        baseline_drift=0.0,
+        epsilon=0.01,
+    )
+    assert get_leader(campaign_id) is None
+    assert _history(campaign_id) == [(EVENT_VACATED, None, leader_sid)]
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT winner_submission_id, leader_changed FROM rounds WHERE id = %s",
+                (rid,),
+            )
+            winner, changed = cur.fetchone()
+    assert winner is None
+    assert changed is True
+    assert _latest_state(challenger)[0] == "disqualified"
+
+
+def test_void_leaves_leader_untouched_and_requeues_challengers():
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    assert void_round(rid, VOID_POD_FAILED)
+    seated = get_leader(campaign_id)
+    assert seated is not None
+    assert str(seated["submission_id"]) == leader_sid
+    assert _history(campaign_id) == []
+    state, detail = _latest_state(challenger)
+    assert state == "bench_queued"
+    assert detail["void_reason"] == VOID_POD_FAILED
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, void_reason, winner_submission_id FROM rounds WHERE id = %s",
+                (rid,),
+            )
+            status, reason, winner = cur.fetchone()
+    assert status == "void"
+    assert reason == VOID_POD_FAILED
+    assert winner is None
+
+
+def test_complete_seats_first_leader():
+    campaign_id = _campaign()
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    rows = _runner_entries(rid)
+    by_role = {r["role"]: r for r in rows}
+    results = [
+        _result(by_role["baseline"], status="scored", score=0.0),
+        _result(by_role["challenger"], status="scored", score=0.31),
+    ]
+    decision = RankDecision(
+        event=EVENT_SEATED,
+        leader_submission_id=challenger,
+        leader_score=0.31,
+        overtake_threshold=0.0,
+    )
+    assert complete_round(
+        round_id=rid,
+        campaign_id=campaign_id,
+        ordinal=int(claimed["ordinal"]),
+        decision=decision,
+        entries=results,
+        baseline_drift=0.0,
+        epsilon=0.01,
+    )
+    seated = get_leader(campaign_id)
+    assert seated is not None
+    assert str(seated["submission_id"]) == challenger
+    assert _history(campaign_id) == [(EVENT_SEATED, challenger, None)]

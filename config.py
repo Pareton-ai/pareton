@@ -177,6 +177,13 @@ CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "
 ROUND_SIZE: int = int(os.environ.get("PARETON_ROUND_SIZE", "5"))
 ROUND_MAX_WAIT_S: int = int(os.environ.get("PARETON_ROUND_MAX_WAIT_S", "21600"))
 ROUND_STALE_S: int = int(os.environ.get("PARETON_ROUND_STALE_S", "1800"))
+ROUND_MAX_DURATION_S: int = int(os.environ.get("PARETON_ROUND_MAX_DURATION_S", "21600"))
+OVERTAKE_EPSILON: float = float(os.environ.get("PARETON_OVERTAKE_EPSILON", "0.01"))
+# Drift is in the same units as the crown decision. The overtake moat is 0.01,
+# so a round voids only when the machine moved five times that margin.
+BASELINE_DRIFT_CEILING: float = float(
+    os.environ.get("PARETON_BASELINE_DRIFT_CEILING", "0.05")
+)
 
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 # Ordered fallback providers tried after GPU_PROVIDER on no-capacity or

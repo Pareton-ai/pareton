@@ -214,6 +214,40 @@ def test_cli_host_environment_error_exit_2(tmp_path: Path, monkeypatch):
     assert not (out / "bench_report.json").exists()
 
 
+def test_variance_gate_infra_fails_before_score():
+    """p99 e2e relative range over the 0.335 bar lands infra_failed, not a score."""
+    from bench.main import _CandidateRun, _build_entries
+    from bench.sla_bench import REPRO_BAR_MAX_REL_RANGE
+
+    class _Result:
+        cross_rep_variance = {
+            "p99_ttft_ms_rel_range": 0.01,
+            "p99_itl_ms_rel_range": 0.01,
+            "p99_e2e_ms_rel_range": REPRO_BAR_MAX_REL_RANGE + 0.01,
+        }
+        timings = {}
+
+    run = _CandidateRun(
+        index=0, status="ok", replay=type("Replay", (), {"result": _Result()})()
+    )
+    entries = _build_entries(
+        req=None,  # unused: the gate fires before score_candidate
+        baseline=None,
+        runs=[run],
+        correctness={},
+        digests=["sha256:" + "b" * 64],
+    )
+    assert len(entries) == 1
+    assert entries[0].status == "infra_failed"
+    assert entries[0].score is None
+    assert "p99_e2e_ms_rel_range" in (entries[0].reason or "")
+    assert entries[0].sla is run.replay.result
+    assert (
+        entries[0].sla.cross_rep_variance["p99_e2e_ms_rel_range"]
+        > REPRO_BAR_MAX_REL_RANGE
+    )
+
+
 def test_sku_mismatch_accepts_rtx5090_with_spaces():
     from bench.env import warn_gpu_sku_mismatch
     from bench.schemas import EnvironmentInfo, GpuInfo

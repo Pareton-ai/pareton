@@ -70,7 +70,7 @@ from bench.schemas import (
     WorkloadTrace,
 )
 from bench.score import score_candidate
-from bench.sla_bench import EngineReplay, run_sla_engine
+from bench.sla_bench import REPRO_BAR_MAX_REL_RANGE, EngineReplay, run_sla_engine
 from bench.validate import (
     RequestValidationError,
     extract_image_digest,
@@ -600,6 +600,24 @@ def _build_entries(
                     sla=run.replay.result,
                     correctness=corr,
                     reason=corr.reason,
+                )
+            )
+            continue
+
+        variance = run.replay.result.cross_rep_variance or {}
+        rel_range = float(variance.get("p99_e2e_ms_rel_range") or 0.0)
+        if rel_range > REPRO_BAR_MAX_REL_RANGE:
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="infra_failed",
+                    sla=run.replay.result,
+                    correctness=corr,
+                    reason=(
+                        f"p99_e2e_ms_rel_range {rel_range:.4f} exceeds "
+                        f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
+                    ),
                 )
             )
             continue

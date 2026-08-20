@@ -203,9 +203,124 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
     assert "bench_queued" not in events
 
 
-# TODO(PAR-83): the bench e2e tests lived here. They drove the per-submission
-# bench job, which rounds replace. The design calls for one --mock-bench
-# end-to-end round in this file once the round runner lands.
+def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
+    """One --mock-bench round: claim, run, complete. No GPU, no Docker pull."""
+    import config
+    from campaign.models import SLA
+    from campaign.seed import build_seed_bench_spec
+    from round.create import create_due_rounds
+    from round.store import claim_pending_round, get_round, list_round_entries
+    from worker.round_job import process_round
+
+    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
+    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
+
+    trace = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
+    )
+    trace_sha = "sha256:" + hashlib.sha256(trace.read_bytes()).hexdigest()
+    engine_digest = "sha256:" + "a" * 64
+    image_a = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "1" * 64
+    image_b = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "2" * 64
+
+    profile_id = insert_profile("e2e", {"fixture": True})
+    campaign_id = uuid4()
+    manifest = build_manifest(
+        campaign_id=campaign_id,
+        profile_id=profile_id,
+        baseline_repo="https://example/baseline.git",
+        baseline_commit="deadbeef",
+        base_image_digest="sha256:" + "d" * 64,
+        gpu_skus=["H200"],
+        workload_trace_sha256=trace_sha,
+        workload_trace_url=f"file://{trace}",
+        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
+        scoring_config_sha256=None,
+        scoring_config_url=None,
+        allowed_paths=["vllm/**"],
+        denied_paths=["tests/**"],
+        priority_metric="throughput",
+        success_threshold=">=10% at SLA",
+        status="open",
+        bench=build_seed_bench_spec(baseline_engine_image_digest=engine_digest),
+        scoring_rule={"name": "median_e2e_speedup"},
+    )
+    insert_campaign(manifest)
+
+    def _queue(image_ref: str, block: int) -> str:
+        sid = insert_submission(
+            campaign_id=campaign_id,
+            patch_hash="sha256:" + uuid4().hex * 2,
+            hotkey="5FakesHotkeyForE2ETesting000000000000000000000",
+            baseline_commit="deadbeef",
+            retrieval_url=(
+                f"https://cdn.test/stage0/campaigns/{campaign_id}/p/e2e.diff"
+            ),
+            commit_block=block,
+        )
+        assert sid is not None
+        from db.connection import db_connection
+
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE submissions SET engine_image_ref = %s WHERE id = %s",
+                    (image_ref, str(sid)),
+                )
+                cur.execute(
+                    """
+                    UPDATE submission_events
+                    SET created_at = now() - make_interval(secs => 40060)
+                    WHERE submission_id = %s
+                    """,
+                    (str(sid),),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO submission_events
+                        (submission_id, state, detail, created_at)
+                    VALUES (%s, 'bench_queued', '{}'::jsonb,
+                            now() - make_interval(secs => 40000))
+                    """,
+                    (str(sid),),
+                )
+        return str(sid)
+
+    _queue(image_a, 10)
+    _queue(image_b, 11)
+
+    class _FakeSubtensor:
+        block = 1000
+
+        def get_block_hash(self, number: int) -> str:
+            return "0x" + f"{number:064x}"
+
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    outcome = process_round(
+        claimed,
+        mock_bench=True,
+        work_root=tmp_path / "round-work",
+    )
+    assert outcome == "ok"
+    settled = get_round(claimed["id"])
+    assert settled is not None
+    assert settled["status"] == "complete"
+    assert settled["baseline_drift"] is not None
+    entries = list_round_entries(claimed["id"])
+    assert entries[0]["role"] == "baseline"
+    assert entries[0]["status"] == "scored"
+    assert float(entries[0]["score"]) == 0.0
+    challengers = [e for e in entries if e["role"] == "challenger"]
+    assert len(challengers) == 2
+    assert {e["status"] for e in challengers} <= {
+        "scored",
+        "disqualified",
+        "infra_failed",
+    }
 
 
 def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
