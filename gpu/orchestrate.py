@@ -599,6 +599,7 @@ def run_bench_on_pod(
     state_dir: Path | None = None,
     repo_root: Path | None = None,
     on_phase: PhaseSink | None = None,
+    bench_timeout_s: float | None = None,
 ) -> int:
     """Run bench request(s) on a GPU pod.
 
@@ -609,6 +610,9 @@ def run_bench_on_pod(
     ``--repetitions`` still replays one request N times (not a sample pool).
 
     ``on_phase`` is called as the run moves through provisioning, bootstrap, pull, harness, teardown.
+
+    ``bench_timeout_s`` bounds the remote harness ssh exec. None uses
+    ``config.BENCH_TIMEOUT_S``, so the GPU CLI path is unchanged.
 
     Returns the last bench exit code, or EXIT_DESTROY_FAILED (75) if teardown
     failed (pod/volume may still be billing; takes precedence).
@@ -729,7 +733,11 @@ def run_bench_on_pod(
                 result = ssh_exec(
                     pod,
                     bench_cmd,
-                    timeout_s=float(config.BENCH_TIMEOUT_S),
+                    timeout_s=float(
+                        config.BENCH_TIMEOUT_S
+                        if bench_timeout_s is None
+                        else bench_timeout_s
+                    ),
                     runner=runner,
                     state_dir=registry.state_dir,
                     check=False,

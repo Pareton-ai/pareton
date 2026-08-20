@@ -19,7 +19,9 @@ import threading
 import config
 from campaign.store import claim_next_job, count_pending_jobs
 from observability.events import heartbeat as _heartbeat
+from round.store import claim_pending_round
 from worker.pipeline import process_submission
+from worker.round_job import process_round
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +86,22 @@ def run_once(
         )
         return True
 
-    # TODO(PAR-83): rounds replace the per-submission bench job. The worker
-    # claims a pending round here once round/store.py and worker/round_job.py
-    # land; mock_bench and mock_correctness_fail feed that runner.
-    return False
+    claimed = claim_pending_round()
+    if claimed is None:
+        return False
+    logger.info(
+        "processing round %s ordinal=%s campaign=%s",
+        claimed["id"],
+        claimed["ordinal"],
+        claimed["campaign_id"],
+    )
+    outcome = process_round(
+        claimed,
+        mock_bench=mock_bench,
+        mock_correctness_fail=mock_correctness_fail,
+    )
+    logger.info("round %s -> %s", claimed["id"], outcome)
+    return True
 
 
 def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:

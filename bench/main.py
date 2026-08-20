@@ -70,7 +70,7 @@ from bench.schemas import (
     WorkloadTrace,
 )
 from bench.score import score_candidate
-from bench.sla_bench import EngineReplay, run_sla_engine
+from bench.sla_bench import REPRO_BAR_MAX_REL_RANGE, EngineReplay, run_sla_engine
 from bench.validate import (
     RequestValidationError,
     extract_image_digest,
@@ -561,6 +561,7 @@ def _build_entries(
     runs: list[_CandidateRun],
     correctness: dict[int, CorrectnessReport],
     digests: list[str],
+    mock_engine: bool = False,
 ) -> list[RoundEntryReport]:
     entries: list[RoundEntryReport] = []
     for run in runs:
@@ -600,6 +601,26 @@ def _build_entries(
                     sla=run.replay.result,
                     correctness=corr,
                     reason=corr.reason,
+                )
+            )
+            continue
+
+        variance = run.replay.result.cross_rep_variance or {}
+        rel_range = float(variance.get("p99_e2e_ms_rel_range") or 0.0)
+        # A mock engine sleeps on the host clock, so its spread measures the
+        # machine running the harness rather than the candidate.
+        if not mock_engine and rel_range > REPRO_BAR_MAX_REL_RANGE:
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="infra_failed",
+                    sla=run.replay.result,
+                    correctness=corr,
+                    reason=(
+                        f"p99_e2e_ms_rel_range {rel_range:.4f} exceeds "
+                        f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
+                    ),
                 )
             )
             continue
@@ -791,6 +812,7 @@ def run_bench(
             runs=runs,
             correctness=correctness,
             digests=provider.candidate_digests,
+            mock_engine=mock_engine,
         )
         report = BenchReport(
             schema_version=1,

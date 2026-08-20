@@ -16,9 +16,22 @@ import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 
 from db.connection import db_connection
+from gate.types import SubmissionState
+from round.rank import (
+    EVENT_OVERTAKEN,
+    EVENT_SEATED,
+    EVENT_VACATED,
+    SETTLED_STATUSES,
+    RankDecision,
+)
 
 # rounds.void_reason written by the watcher. The runner owns the rest.
 VOID_HEARTBEAT_STALE = "heartbeat_stale"
+VOID_POD_PROVISION_FAILED = "pod_provision_failed"
+VOID_POD_FAILED = "pod_failed"
+VOID_ROUND_TIMEOUT = "round_timeout"
+VOID_TRACE_UNAVAILABLE = "trace_unavailable"
+VOID_LEADER_IMAGE_MISSING = "leader_image_missing"
 
 
 def campaigns_with_queue() -> list[dict[str, Any]]:
@@ -255,28 +268,403 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
             )
             voided = [dict(r) for r in cur.fetchall()]
             for row in voided:
+                _requeue_challengers(cur, row["id"], VOID_HEARTBEAT_STALE)
+    return voided
+
+
+def _requeue_challengers(cur: Any, round_id: Any, void_reason: str) -> None:
+    """Put unsettled challenger entries back on the round queue.
+
+    Terminal entries are already judged; requeueing them would resurrect a
+    disqualified or scored submission. infra_failed is not terminal: it gets
+    its one requeue. SETTLED_STATUSES is the do-not-requeue test.
+    """
+    cur.execute(
+        """
+        INSERT INTO submission_events (submission_id, state, detail)
+        SELECT submission_id, 'bench_queued', %s
+        FROM round_entries
+        WHERE round_id = %s AND role = 'challenger'
+          AND NOT (status = ANY(%s))
+        """,
+        (
+            Json({"round_id": str(round_id), "void_reason": void_reason}),
+            str(round_id),
+            list(SETTLED_STATUSES),
+        ),
+    )
+
+
+def infra_failed_follow_up_states(had_prior: bool) -> tuple[str, ...]:
+    """Events to write for an infra_failed entry. The requeue is bench_queued.
+
+    No prior infra_failed event means this is the one retry. A prior row means
+    write infra_failed and stop; the cohort query will not pick it up again.
+    """
+    if had_prior:
+        return (SubmissionState.INFRA_FAILED,)
+    return (SubmissionState.INFRA_FAILED, SubmissionState.BENCH_QUEUED)
+
+
+def claim_pending_round() -> dict[str, Any] | None:
+    """Claim the oldest pending round. started_at and heartbeat_at are set here.
+
+    The PAR-79 reaper keys on COALESCE(heartbeat_at, started_at). A running
+    round with both NULL is unreapable, so they land in the same statement as
+    status='running'.
+    """
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE rounds
+                SET status = 'running',
+                    started_at = now(),
+                    heartbeat_at = now(),
+                    phase = NULL,
+                    progress = NULL
+                WHERE id = (
+                    SELECT id FROM rounds
+                    WHERE status = 'pending'
+                    ORDER BY created_at
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                RETURNING id, campaign_id, ordinal, gpu_sku,
+                          seed_block, seed_block_hash, seed_hex,
+                          sampled_trace_sha256, sampling_receipt, scoring_rule,
+                          status, incumbent_submission_id, winner_submission_id,
+                          leader_changed, baseline_drift, phase, progress,
+                          created_at, started_at, heartbeat_at, completed_at
+                """
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_round_phase(
+    *,
+    round_id: UUID | str,
+    phase: str,
+    progress: dict[str, Any] | None = None,
+) -> bool:
+    """Record what a running round is doing now. Returns whether it landed."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE rounds
+                SET phase = %s,
+                    phase_started_at = CASE
+                      WHEN phase IS DISTINCT FROM %s THEN now()
+                      ELSE phase_started_at
+                    END,
+                    heartbeat_at = now(),
+                    progress = %s
+                WHERE id = %s AND status = 'running'
+                """,
+                (
+                    phase,
+                    phase,
+                    Json(progress) if progress else None,
+                    str(round_id),
+                ),
+            )
+            return cur.rowcount > 0
+
+
+def touch_round_heartbeat(*, round_id: UUID | str) -> bool:
+    """Confirm the round is still alive. Returns whether it landed."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE rounds
+                SET heartbeat_at = now()
+                WHERE id = %s AND status = 'running'
+                """,
+                (str(round_id),),
+            )
+            return cur.rowcount > 0
+
+
+def complete_round(
+    *,
+    round_id: UUID | str,
+    campaign_id: UUID | str,
+    ordinal: int,
+    decision: RankDecision,
+    entries: list[dict[str, Any]],
+    baseline_drift: float | None,
+    epsilon: float,
+    evidence_s3_url: str | None = None,
+) -> bool:
+    """Settle a running round. Returns False when a concurrent void won the race.
+
+    One transaction: entry results, submission events, leaders upsert or
+    delete, leader_history, and running -> complete. winner_submission_id is
+    written even when the incumbent holds, because it is the only per-round
+    record of who wore the crown.
+    """
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            for entry in entries:
+                report = entry.get("report") or {}
                 cur.execute(
                     """
-                    INSERT INTO submission_events (submission_id, state, detail)
-                    SELECT submission_id, 'bench_queued', %s
-                    FROM round_entries
-                    WHERE round_id = %s AND role = 'challenger'
-                      -- Terminal entries are already judged; requeueing them
-                      -- would resurrect a disqualified or scored submission.
-                      -- infra_failed is not terminal: it gets its one requeue.
-                      AND status IN ('pending', 'running', 'infra_failed')
+                    UPDATE round_entries
+                    SET status = %s,
+                        score = %s,
+                        disqualify_reason = %s,
+                        report = %s,
+                        evidence_s3_url = COALESCE(%s, evidence_s3_url),
+                        completed_at = now()
+                    WHERE id = %s AND round_id = %s
                     """,
                     (
-                        Json(
-                            {
-                                "round_id": str(row["id"]),
-                                "void_reason": VOID_HEARTBEAT_STALE,
-                            }
-                        ),
-                        str(row["id"]),
+                        entry["status"],
+                        entry.get("score"),
+                        entry.get("disqualify_reason"),
+                        Json(report),
+                        evidence_s3_url,
+                        entry["id"],
+                        str(round_id),
                     ),
                 )
-    return voided
+                sid = entry.get("submission_id")
+                if sid is None:
+                    continue
+                status = entry["status"]
+                if status == SubmissionState.INFRA_FAILED:
+                    cur.execute(
+                        """
+                        SELECT 1 FROM submission_events
+                        WHERE submission_id = %s AND state = %s
+                        LIMIT 1
+                        """,
+                        (str(sid), SubmissionState.INFRA_FAILED),
+                    )
+                    had_prior = cur.fetchone() is not None
+                    states = infra_failed_follow_up_states(had_prior)
+                    if entry.get("role") != "challenger":
+                        states = (SubmissionState.INFRA_FAILED,)
+                    for state in states:
+                        cur.execute(
+                            """
+                            INSERT INTO submission_events
+                                (submission_id, state, detail)
+                            VALUES (%s, %s, %s)
+                            """,
+                            (
+                                str(sid),
+                                state,
+                                Json(
+                                    {
+                                        "round_id": str(round_id),
+                                        "ordinal": int(ordinal),
+                                        "reason": entry.get("disqualify_reason"),
+                                    }
+                                ),
+                            ),
+                        )
+                elif status in (SubmissionState.SCORED, SubmissionState.DISQUALIFIED):
+                    cur.execute(
+                        """
+                        INSERT INTO submission_events (submission_id, state, detail)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (
+                            str(sid),
+                            status,
+                            Json(
+                                {
+                                    "round_id": str(round_id),
+                                    "ordinal": int(ordinal),
+                                    "score": entry.get("score"),
+                                    "reason": entry.get("disqualify_reason"),
+                                }
+                            ),
+                        ),
+                    )
+
+            event = decision.event
+            if event == EVENT_VACATED:
+                cur.execute(
+                    "DELETE FROM leaders WHERE campaign_id = %s",
+                    (str(campaign_id),),
+                )
+            elif decision.leader_submission_id is not None:
+                winner = next(
+                    (
+                        e
+                        for e in entries
+                        if e.get("submission_id") is not None
+                        and str(e["submission_id"])
+                        == str(decision.leader_submission_id)
+                    ),
+                    None,
+                )
+                hotkey = (winner or {}).get("hotkey")
+                image_ref = (winner or {}).get("engine_image_ref")
+                if hotkey is None or image_ref is None:
+                    cur.execute(
+                        """
+                        SELECT hotkey, engine_image_ref FROM submissions
+                        WHERE id = %s
+                        """,
+                        (str(decision.leader_submission_id),),
+                    )
+                    sub = cur.fetchone()
+                    if sub is not None:
+                        hotkey = hotkey or sub["hotkey"]
+                        image_ref = image_ref or sub["engine_image_ref"]
+                if hotkey is None or image_ref is None:
+                    raise RuntimeError(
+                        "complete_round: winner is missing hotkey or image ref"
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO leaders (
+                      campaign_id, submission_id, engine_image_ref, hotkey,
+                      won_at_round_id, won_at_ordinal, last_score,
+                      last_scored_round_id, updated_at
+                    ) VALUES (
+                      %s, %s, %s, %s, %s, %s, %s, %s, now()
+                    )
+                    ON CONFLICT (campaign_id) DO UPDATE SET
+                      submission_id = EXCLUDED.submission_id,
+                      engine_image_ref = EXCLUDED.engine_image_ref,
+                      hotkey = EXCLUDED.hotkey,
+                      won_at_round_id = CASE
+                        WHEN leaders.submission_id IS DISTINCT FROM
+                             EXCLUDED.submission_id
+                        THEN EXCLUDED.won_at_round_id
+                        ELSE leaders.won_at_round_id
+                      END,
+                      won_at_ordinal = CASE
+                        WHEN leaders.submission_id IS DISTINCT FROM
+                             EXCLUDED.submission_id
+                        THEN EXCLUDED.won_at_ordinal
+                        ELSE leaders.won_at_ordinal
+                      END,
+                      last_score = EXCLUDED.last_score,
+                      last_scored_round_id = EXCLUDED.last_scored_round_id,
+                      updated_at = now()
+                    """,
+                    (
+                        str(campaign_id),
+                        str(decision.leader_submission_id),
+                        image_ref,
+                        hotkey,
+                        str(round_id),
+                        int(ordinal),
+                        decision.leader_score,
+                        str(round_id),
+                    ),
+                )
+
+            if event in (EVENT_SEATED, EVENT_OVERTAKEN, EVENT_VACATED):
+                new_sid = decision.leader_submission_id
+                prev_sid = decision.prev_submission_id
+                new_hotkey = None
+                prev_hotkey = None
+                if new_sid is not None:
+                    cur.execute(
+                        "SELECT hotkey FROM submissions WHERE id = %s",
+                        (str(new_sid),),
+                    )
+                    row = cur.fetchone()
+                    new_hotkey = row["hotkey"] if row is not None else None
+                if prev_sid is not None:
+                    cur.execute(
+                        "SELECT hotkey FROM submissions WHERE id = %s",
+                        (str(prev_sid),),
+                    )
+                    row = cur.fetchone()
+                    prev_hotkey = row["hotkey"] if row is not None else None
+                cur.execute(
+                    """
+                    INSERT INTO leader_history (
+                      campaign_id, round_id, ordinal, event,
+                      new_submission_id, new_hotkey, new_score,
+                      prev_submission_id, prev_hotkey, prev_score,
+                      overtake_threshold, epsilon
+                    ) VALUES (
+                      %s, %s, %s, %s,
+                      %s, %s, %s,
+                      %s, %s, %s,
+                      %s, %s
+                    )
+                    """,
+                    (
+                        str(campaign_id),
+                        str(round_id),
+                        int(ordinal),
+                        event,
+                        str(new_sid) if new_sid is not None else None,
+                        new_hotkey,
+                        decision.leader_score,
+                        str(prev_sid) if prev_sid is not None else None,
+                        prev_hotkey,
+                        decision.prev_score,
+                        decision.overtake_threshold,
+                        float(epsilon),
+                    ),
+                )
+
+            cur.execute(
+                """
+                UPDATE rounds
+                SET status = 'complete',
+                    winner_submission_id = %s,
+                    leader_changed = %s,
+                    baseline_drift = %s,
+                    completed_at = now()
+                WHERE id = %s AND status = 'running'
+                RETURNING id
+                """,
+                (
+                    (
+                        str(decision.leader_submission_id)
+                        if decision.leader_submission_id is not None
+                        else None
+                    ),
+                    bool(decision.leader_changed),
+                    baseline_drift,
+                    str(round_id),
+                ),
+            )
+            landed = cur.fetchone() is not None
+            if not landed:
+                conn.rollback()
+                return False
+    return True
+
+
+def void_round(round_id: UUID | str, reason: str) -> bool:
+    """Abandon a running round. Returns False when it was already settled.
+
+    Never touches leaders or leader_history. Requeues challengers that have
+    not reached a settled status.
+    """
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE rounds
+                SET status = 'void',
+                    void_reason = %s,
+                    completed_at = now()
+                WHERE id = %s AND status = 'running'
+                RETURNING id
+                """,
+                (reason, str(round_id)),
+            )
+            landed = cur.fetchone() is not None
+            if not landed:
+                return False
+            _requeue_challengers(cur, round_id, reason)
+    return True
 
 
 def get_leader(campaign_id: UUID | str) -> dict[str, Any] | None:
