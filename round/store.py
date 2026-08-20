@@ -277,3 +277,219 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
                     ),
                 )
     return voided
+
+
+def get_leader(campaign_id: UUID | str) -> dict[str, Any] | None:
+    """The campaign's crown holder, or None when the crown is vacant.
+
+    ``patch_hash`` comes along because it is how the public API addresses a
+    submission; ``leaders`` stores the internal id.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT l.submission_id, l.hotkey, l.engine_image_ref,
+                       l.won_at_round_id, l.won_at_ordinal, l.last_score,
+                       l.last_scored_round_id, l.updated_at, s.patch_hash
+                FROM leaders l
+                JOIN submissions s ON s.id = l.submission_id
+                WHERE l.campaign_id = %s
+                """,
+                (str(campaign_id),),
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_rounds(
+    campaign_id: UUID | str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Paginated rounds for a campaign, newest ordinal first.
+
+    Returns ``{"total": int, "items": [row, ...]}``. A void round keeps its
+    ordinal, so the list shows honest gaps rather than renumbering.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM rounds WHERE campaign_id = %s",
+                (str(campaign_id),),
+            )
+            total = int(cur.fetchone()["n"])
+            cur.execute(
+                """
+                SELECT r.id, r.ordinal, r.status, r.void_reason, r.gpu_sku,
+                       r.seed_block, r.seed_block_hash, r.leader_changed,
+                       r.created_at, r.completed_at,
+                       (SELECT COUNT(*) FROM round_entries e
+                        WHERE e.round_id = r.id) AS entry_count
+                FROM rounds r
+                WHERE r.campaign_id = %s
+                ORDER BY r.ordinal DESC
+                LIMIT %s OFFSET %s
+                """,
+                (str(campaign_id), int(limit), int(offset)),
+            )
+            rows = cur.fetchall()
+    return {"total": total, "items": [dict(r) for r in rows]}
+
+
+def get_round(round_id: UUID | str) -> dict[str, Any] | None:
+    """One round row. ``sampling_receipt`` and ``report`` stay unexposed."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, campaign_id, ordinal, status, void_reason, gpu_sku,
+                       seed_block, seed_block_hash, seed_hex,
+                       sampled_trace_sha256, scoring_rule,
+                       incumbent_submission_id, winner_submission_id,
+                       leader_changed, baseline_drift, phase, phase_started_at,
+                       heartbeat_at, progress, created_at, started_at,
+                       completed_at
+                FROM rounds
+                WHERE id = %s
+                """,
+                (str(round_id),),
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
+    """Every entry of one round, in run order.
+
+    ``evidence_s3_url`` and ``report`` are deliberately not selected: evidence
+    stays behind its current gate.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.id, e.submission_id, e.role, e.engine_image_ref,
+                       e.status, e.score, e.disqualify_reason,
+                       e.started_at, e.completed_at,
+                       s.patch_hash, s.hotkey
+                FROM round_entries e
+                LEFT JOIN submissions s ON s.id = e.submission_id
+                WHERE e.round_id = %s
+                ORDER BY e.id ASC
+                """,
+                (str(round_id),),
+            )
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_score_progress(campaign_id: UUID | str) -> list[dict[str, Any]]:
+    """One point per round ordinal, oldest first, already shaped for a chart.
+
+    ``leader_score`` is the score of the round's winner, so a void round or a
+    round that seated nobody leaves a gap in the line rather than renumbering
+    the axis. ``entries`` is the scatter: every non-baseline entry other than
+    the winner. The baseline is a fixed 0.0 zero line, not a competitor.
+    A NULL score stays null; 0.0 is a real score meaning baseline speed.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT r.id AS round_id, r.ordinal, r.status,
+                       r.winner_submission_id,
+                       e.submission_id, e.role, e.status AS entry_status,
+                       e.score, s.hotkey
+                FROM rounds r
+                LEFT JOIN round_entries e
+                       ON e.round_id = r.id AND e.role <> 'baseline'
+                LEFT JOIN submissions s ON s.id = e.submission_id
+                WHERE r.campaign_id = %s
+                ORDER BY r.ordinal ASC, e.id ASC
+                """,
+                (str(campaign_id),),
+            )
+            rows = cur.fetchall()
+    points: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        key = str(r["round_id"])
+        point = points.setdefault(
+            key,
+            {
+                "round_id": key,
+                "ordinal": int(r["ordinal"]),
+                "status": r["status"],
+                "leader_score": None,
+                "entries": [],
+            },
+        )
+        if r["submission_id"] is None:
+            continue
+        winner = r["winner_submission_id"]
+        if winner is not None and str(winner) == str(r["submission_id"]):
+            point["leader_score"] = r["score"]
+            continue
+        point["entries"].append(
+            {
+                "submission_id": str(r["submission_id"]),
+                "hotkey": r["hotkey"],
+                "role": r["role"],
+                "status": r["entry_status"],
+                "score": r["score"],
+            }
+        )
+    return list(points.values())
+
+
+def list_submission_round_entries(
+    submission_ids: list[UUID | str],
+) -> dict[str, dict[str, Any]]:
+    """Map submission_id -> the round entry the API reports. Missing ids absent.
+
+    This is the outcome the submission API reports: the round a submission was
+    assigned to, its score there, and its verdict.
+
+    A submission can hold entries in several rounds, so newest is not the
+    answer. A void round changed no submission state (decision 27), so it never
+    surfaces. Among what is left, an entry that reached a verdict beats a live
+    one: a leader re-seated into a running round must keep reporting the score
+    it won with, not a fresh ``pending``. A submission whose only entry is live
+    still reports that entry, so the live assignment has one source of truth
+    rather than being reconstructed from the ``round_assigned`` event.
+    """
+    if not submission_ids:
+        return {}
+    ids = [str(s) for s in submission_ids]
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Not round.rank.SETTLED_STATUSES: that set is what ranking counts
+            # as a measurement and leaves out infra_failed. Here the question
+            # is only whether the entry can still change.
+            cur.execute(
+                """
+                SELECT DISTINCT ON (e.submission_id)
+                       e.submission_id, e.round_id, r.ordinal, e.status,
+                       e.score, e.disqualify_reason
+                FROM round_entries e
+                JOIN rounds r ON r.id = e.round_id
+                WHERE e.submission_id = ANY(%s::uuid[]) AND r.status <> 'void'
+                ORDER BY e.submission_id,
+                         (e.status IN ('scored','disqualified','infra_failed'))
+                             DESC,
+                         r.ordinal DESC
+                """,
+                (ids,),
+            )
+            rows = cur.fetchall()
+    return {
+        str(r["submission_id"]): {
+            "round_id": str(r["round_id"]),
+            "ordinal": int(r["ordinal"]),
+            "status": r["status"],
+            "score": r["score"],
+            "disqualify_reason": r["disqualify_reason"],
+        }
+        for r in rows
+    }

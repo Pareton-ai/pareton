@@ -653,10 +653,6 @@ def list_latest_states(
     return out
 
 
-# TODO(PAR-80): live bench phase now lives on rounds.phase, not on a
-# per-submission job row. The round read API replaces list_live_bench_phases.
-
-
 def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -697,95 +693,8 @@ def list_submission_jobs(submission_id: UUID | str) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
-# TODO(PAR-80): round_entries replaces bench_reports. Entry reads live in
-# round/store.py.
-
-
-BENCH_REJECT_REASONS = frozenset(
-    {
-        "fail_correctness",
-        "fail_sla",
-        "fail_engine_candidate",
-        "duplicate_image",
-    }
-)
-
-
 # Sampling is per round: the realized trace is snapshotted onto rounds, not
 # onto submissions. See round/create.py.
-
-
-def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None:
-    """Terminal round verdict from submission_events.
-
-    ``scored`` -> ``pass``; ``disqualified`` or a bench ``rejected`` -> its
-    reason; anything earlier -> ``None`` (in progress).
-    """
-    terminal: str | None = None
-    for e in events:
-        state = str(e.get("state") or "")
-        detail = e.get("detail") or {}
-        if not isinstance(detail, dict):
-            detail = {}
-        if state == "scored":
-            terminal = "pass"
-        elif state == "disqualified":
-            terminal = str(detail.get("reason") or "disqualified")
-        elif state == "rejected":
-            reason = detail.get("reason")
-            if reason in BENCH_REJECT_REASONS:
-                terminal = str(reason)
-    return terminal
-
-
-def list_bench_summaries(
-    campaign_id: UUID | str,
-    submission_ids: list[UUID | str] | None = None,
-) -> dict[str, str | None]:
-    """Map submission_id -> event-sourced bench_verdict for campaign list API.
-
-    When ``submission_ids`` is set, only those rows are loaded (page-scoped).
-    """
-    with db_connection(readonly=True) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            if submission_ids is not None:
-                ids = [str(s) for s in submission_ids]
-                if not ids:
-                    return {}
-                cur.execute(
-                    """
-                    SELECT s.id AS submission_id, e.state, e.detail, e.created_at
-                    FROM submissions s
-                    LEFT JOIN submission_events e ON e.submission_id = s.id
-                    WHERE s.campaign_id = %s
-                      AND s.id = ANY(%s::uuid[])
-                    ORDER BY s.id, e.created_at ASC NULLS LAST
-                    """,
-                    (str(campaign_id), ids),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT s.id AS submission_id, e.state, e.detail, e.created_at
-                    FROM submissions s
-                    LEFT JOIN submission_events e ON e.submission_id = s.id
-                    WHERE s.campaign_id = %s
-                    ORDER BY s.id, e.created_at ASC NULLS LAST
-                    """,
-                    (str(campaign_id),),
-                )
-            rows = cur.fetchall()
-    by_sub: dict[str, list[dict[str, Any]]] = {}
-    for r in rows:
-        sid = str(r["submission_id"])
-        by_sub.setdefault(sid, [])
-        if r.get("state") is None:
-            continue
-        detail = r.get("detail")
-        if isinstance(detail, str):
-            detail = json.loads(detail)
-        by_sub[sid].append({"state": r["state"], "detail": detail or {}})
-    return {sid: derive_bench_verdict_from_events(evts) for sid, evts in by_sub.items()}
 
 
 def get_public_stats() -> dict[str, Any]:

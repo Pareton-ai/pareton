@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,12 +16,10 @@ from bench.phases import BenchPhase, coerce_phase, coerce_progress
 from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
     count_submission_campaigns,
-    derive_bench_verdict_from_events,
     get_campaign,
     get_public_stats,
     get_submission,
     get_submission_for_campaign,
-    list_bench_summaries,
     list_campaigns,
     list_events,
     list_latest_states,
@@ -29,6 +28,14 @@ from campaign.store import (
 )
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from gate.types import SubmissionState
+from round.store import (
+    get_leader,
+    get_round,
+    list_round_entries,
+    list_rounds,
+    list_score_progress,
+    list_submission_round_entries,
+)
 from storage.s3 import create_presigned_patch_upload
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
@@ -37,7 +44,12 @@ V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # ``built`` is terminal for no-bench campaigns; bench campaigns continue via
 # ``bench_queued`` (and later) in the same worker turn after enqueue.
 _TERMINAL_SUBMISSION_STATES = frozenset({"built", "scored", "disqualified", "rejected"})
+# rounds.status: a pending or running round is live and moves without warning.
+_TERMINAL_ROUND_STATUSES = frozenset({"complete", "void"})
 _NO_STORE = "no-store"
+
+# Identity is the hotkey. Lists carry a prefix; detail pages carry it in full.
+_HOTKEY_PREFIX_LEN = 16
 
 
 def _is_terminal_submission_state(state: str | None) -> bool:
@@ -50,6 +62,16 @@ def _set_live_submission_cache_control(
     """Detail + build-log stay fresh while the pipeline is still moving."""
     if not _is_terminal_submission_state(latest_state):
         response.headers["Cache-Control"] = _NO_STORE
+
+
+def _set_live_round_cache_control(response: Response, statuses: list[str]) -> None:
+    """Same rule for rounds: one live round makes the whole payload uncacheable."""
+    if any(s not in _TERMINAL_ROUND_STATUSES for s in statuses):
+        response.headers["Cache-Control"] = _NO_STORE
+
+
+def _short_hotkey(hotkey: str | None) -> str | None:
+    return hotkey[:_HOTKEY_PREFIX_LEN] if hotkey else hotkey
 
 
 class CacheControlMiddleware(BaseHTTPMiddleware):
@@ -114,6 +136,21 @@ SubmissionStateName = SubmissionState | str
 BenchPhaseName = BenchPhase | str
 
 
+class SubmissionRoundModel(BaseModel):
+    """A submission's newest round entry: where it ran and how it did.
+
+    `status` is the entry verdict (`round_entries.status`). A submission that
+    never reached a round has no model at all, and `rejected` is reported by
+    `latest_state`: a rejected submission never got an entry.
+    """
+
+    round_id: str
+    ordinal: int
+    status: str
+    score: float | None = None
+    disqualify_reason: str | None = None
+
+
 class SubmissionSummaryModel(BaseModel):
     """One row of `GET /v1/campaigns/{campaign_id}/submissions`."""
 
@@ -127,7 +164,7 @@ class SubmissionSummaryModel(BaseModel):
     committed_at: str
     engine_image_ref: str | None = None
     latest_state: SubmissionStateName | None = None
-    bench_verdict: str | None = None
+    round: SubmissionRoundModel | None = None
 
 
 class SubmissionsPageModel(BaseModel):
@@ -161,7 +198,120 @@ class SubmissionDetailModel(BaseModel):
     latest_state: SubmissionStateName | None = None
     jobs: list[SubmissionJobModel]
     events: list[SubmissionEventModel]
-    bench_verdict: str | None = None
+    round: SubmissionRoundModel | None = None
+
+
+class LeaderModel(BaseModel):
+    """`GET /v1/campaigns/{campaign_id}/leader`. Detail page: full hotkey."""
+
+    campaign_id: str
+    submission_id: str
+    patch_hash: str
+    hotkey: str
+    engine_image_ref: str
+    won_at_round_id: str
+    won_at_ordinal: int
+    last_score: float
+    last_scored_round_id: str | None = None
+    updated_at: str
+
+
+class RoundSummaryModel(BaseModel):
+    """One row of `GET /v1/campaigns/{campaign_id}/rounds`."""
+
+    id: str
+    ordinal: int
+    status: str
+    void_reason: str | None = None
+    gpu_sku: str
+    seed_block: int
+    seed_block_hash: str
+    entry_count: int
+    leader_changed: bool | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
+class RoundsPageModel(BaseModel):
+    campaign_id: str
+    total: int
+    limit: int
+    offset: int
+    rounds: list[RoundSummaryModel]
+
+
+class RoundEntryModel(BaseModel):
+    """One image run inside a round. Evidence URLs stay behind their gate.
+
+    `role` and `status` are `round_entries` values; the vocabularies are
+    `round.rank.ENTRY_ROLES` and `round.rank.ENTRY_STATUSES`. `score` is null
+    for a disqualified or infra-failed entry; 0.0 means baseline speed.
+    """
+
+    id: int
+    submission_id: str | None = None
+    patch_hash: str | None = None
+    hotkey: str | None = None
+    role: str
+    engine_image_ref: str
+    status: str
+    score: float | None = None
+    disqualify_reason: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class RoundDetailModel(BaseModel):
+    """`GET /v1/rounds/{round_id}`. `phase` is live while the round runs."""
+
+    id: str
+    campaign_id: str
+    ordinal: int
+    status: str
+    void_reason: str | None = None
+    gpu_sku: str
+    seed_block: int
+    seed_block_hash: str
+    seed_hex: str
+    sampled_trace_sha256: str
+    scoring_rule: dict[str, Any]
+    incumbent_submission_id: str | None = None
+    winner_submission_id: str | None = None
+    leader_changed: bool | None = None
+    baseline_drift: float | None = None
+    phase: BenchPhaseName | None = None
+    phase_started_at: str | None = None
+    heartbeat_at: str | None = None
+    progress: dict[str, Any] | None = None
+    created_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    entries: list[RoundEntryModel]
+
+
+class ScorePointEntryModel(BaseModel):
+    """One scatter dot. List response, so the hotkey is truncated."""
+
+    submission_id: str
+    hotkey: str | None = None
+    role: str
+    status: str
+    score: float | None = None
+
+
+class ScorePointModel(BaseModel):
+    """One round ordinal on the chart. A void round leaves a gap, not a zero."""
+
+    round_id: str
+    ordinal: int
+    status: str
+    leader_score: float | None = None
+    entries: list[ScorePointEntryModel]
+
+
+class ScoreProgressModel(BaseModel):
+    campaign_id: str
+    points: list[ScorePointModel]
 
 
 @app.get("/health")
@@ -198,7 +348,7 @@ def campaign_submissions(
     page = list_submissions(campaign_id, limit=limit, offset=offset)
     rows = page["items"]
     ids = [r["id"] for r in rows]
-    summaries = list_bench_summaries(campaign_id, submission_ids=ids)
+    entries = list_submission_round_entries(ids)
     states = list_latest_states(ids)
     return {
         "campaign_id": campaign_id,
@@ -212,9 +362,7 @@ def campaign_submissions(
                     for k, v in r.items()
                 },
                 "latest_state": states.get(str(r["id"])),
-                "bench_verdict": summaries.get(str(r["id"])),
-                # TODO(PAR-80): bench_phase now lives on the round, not the
-                # submission. The round read API replaces it.
+                "round": entries.get(str(r["id"])),
             }
             for r in rows
         ],
@@ -224,6 +372,78 @@ def campaign_submissions(
 @app.get("/v1/stats")
 def stats():
     return get_public_stats()
+
+
+def _require_campaign(campaign_id: str) -> None:
+    if get_campaign(campaign_id) is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+
+
+@app.get(
+    "/v1/campaigns/{campaign_id}/leader",
+    responses={200: {"model": LeaderModel}},
+)
+def campaign_leader(campaign_id: UUID):
+    """The crown holder. A vacant crown has no row, so it is a 404."""
+    _require_campaign(str(campaign_id))
+    row = get_leader(str(campaign_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="leader is vacant")
+    return {"campaign_id": str(campaign_id), **row}
+
+
+@app.get(
+    "/v1/campaigns/{campaign_id}/rounds",
+    responses={200: {"model": RoundsPageModel}},
+)
+def campaign_rounds(
+    campaign_id: UUID,
+    response: Response,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    _require_campaign(str(campaign_id))
+    page = list_rounds(str(campaign_id), limit=limit, offset=offset)
+    rows = page["items"]
+    _set_live_round_cache_control(response, [r["status"] for r in rows])
+    return {
+        "campaign_id": str(campaign_id),
+        "total": page["total"],
+        "limit": limit,
+        "offset": offset,
+        "rounds": rows,
+    }
+
+
+@app.get(
+    "/v1/campaigns/{campaign_id}/score-progress",
+    responses={200: {"model": ScoreProgressModel}},
+)
+def campaign_score_progress(campaign_id: UUID, response: Response):
+    """Chart series, oldest ordinal first. Void rounds keep their ordinal."""
+    _require_campaign(str(campaign_id))
+    points = list_score_progress(str(campaign_id))
+    _set_live_round_cache_control(response, [p["status"] for p in points])
+    for point in points:
+        for entry in point["entries"]:
+            entry["hotkey"] = _short_hotkey(entry["hotkey"])
+    return {"campaign_id": str(campaign_id), "points": points}
+
+
+@app.get("/v1/rounds/{round_id}", responses={200: {"model": RoundDetailModel}})
+def round_detail(round_id: UUID, response: Response):
+    row = get_round(round_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="round not found")
+    _set_live_round_cache_control(response, [row["status"]])
+    return {
+        **row,
+        # Pod-written columns: names outside the vocabulary are dropped, and
+        # progress is clamped to short scalars.
+        "phase": coerce_phase(row.get("phase")),
+        "progress": coerce_progress(row.get("progress")),
+        "entries": list_round_entries(round_id),
+    }
 
 
 def _iso_or_none(value: Any) -> str | None:
@@ -264,8 +484,7 @@ def _submission_detail_payload(row: dict) -> dict:
             }
             for e in events
         ],
-        # TODO(PAR-80): round entries replace bench_reports here.
-        "bench_verdict": derive_bench_verdict_from_events(events),
+        "round": list_submission_round_entries([row["id"]]).get(str(row["id"])),
     }
 
 
