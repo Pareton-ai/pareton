@@ -13,6 +13,9 @@ import threading
 
 import config
 from chain.watcher import scan_chain
+from observability import events as obs
+from round.create import create_due_rounds
+from round.store import VOID_HEARTBEAT_STALE, reap_stale_rounds
 from worker.main import _configure_logging, _run_loop
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,11 @@ def scan_cycle(subtensor, drain: threading.Event):
     build on ``pareton-worker`` does not look like a stalled scanner. A
     failed scan drops the client so the next cycle reconnects instead of
     retrying a dead websocket forever.
+
+    Chain work and round work fail apart. Reaping a dead round needs no chain
+    at all, so a broken websocket must not leave a stale round holding the
+    campaign's live-round slot; and a round that cannot be created must not
+    cost the process its subtensor.
     """
     if drain.is_set():
         return subtensor
@@ -43,21 +51,49 @@ def scan_cycle(subtensor, drain: threading.Event):
                 config.NETUID,
             )
             subtensor = _connect_subtensor()
-        created, _hotkeys = scan_chain(
-            subtensor, config.NETUID, network=config.SUBTENSOR_NETWORK
-        )
-        if created:
-            logger.info("chain scan enqueued %d new submission(s)", len(created))
-        return subtensor
     except Exception:
-        logger.exception("chain scan failed; will reconnect next cycle")
-        # Each bt.Subtensor holds a websocket; GC does not reliably reap it.
+        logger.exception("subtensor connect failed; will retry next cycle")
+        subtensor = None
+
+    if subtensor is not None:
         try:
-            if subtensor is not None:
-                subtensor.close()
+            created, _hotkeys = scan_chain(
+                subtensor, config.NETUID, network=config.SUBTENSOR_NETWORK
+            )
+            if created:
+                logger.info("chain scan enqueued %d new submission(s)", len(created))
         except Exception:
-            pass
-        return None
+            logger.exception("chain scan failed; will reconnect next cycle")
+            # Each bt.Subtensor holds a websocket; GC does not reliably reap it.
+            try:
+                subtensor.close()
+            except Exception:
+                pass
+            subtensor = None
+
+    # Reap first: voiding a dead round frees the live-round slot, so a new
+    # round can start in this same cycle.
+    try:
+        for row in reap_stale_rounds(config.ROUND_STALE_S):
+            logger.warning(
+                "voided round %s (campaign %s): heartbeat stale",
+                row["ordinal"],
+                row["campaign_id"],
+            )
+            obs.round_voided(
+                round_id=str(row["id"]),
+                campaign_id=str(row["campaign_id"]),
+                void_reason=VOID_HEARTBEAT_STALE,
+            )
+    except Exception:
+        logger.exception("round reaping failed; will retry next cycle")
+
+    if subtensor is not None:
+        try:
+            create_due_rounds(subtensor)
+        except Exception:
+            logger.exception("round creation failed; will retry next cycle")
+    return subtensor
 
 
 def main(argv: list[str] | None = None) -> int:

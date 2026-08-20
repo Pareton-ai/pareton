@@ -257,8 +257,8 @@ def process_submission(
         },
     )
     # bench_queued is the round creator's input queue, so it is appended in the
-    # same transaction that settles the job. TODO(PAR-79): the watcher selects
-    # each cohort from submissions in this state.
+    # same transaction that settles the job: the watcher selects each cohort
+    # from submissions in this state.
     enqueue_round = campaign.bench is not None
     complete_gates_job(
         submission_id,

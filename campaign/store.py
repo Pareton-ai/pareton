@@ -446,7 +446,7 @@ def complete_gates_job(
 
     Bench used to be a second job row enqueued here. Rounds replaced it: a
     submission that reaches ``bench_queued`` waits for the round creator to
-    pick it up. TODO(PAR-79): the watcher selects the cohort from that state.
+    pick it up; ``round.create`` selects each cohort from that state.
 
     The ``bench_queued`` event IS that queue, so it is written in the same
     transaction as the completion. Split over two transactions, a crash
@@ -710,8 +710,8 @@ BENCH_REJECT_REASONS = frozenset(
 )
 
 
-# TODO(PAR-79): sampling is per round. The realized trace is snapshotted
-# onto rounds, not onto submissions.
+# Sampling is per round: the realized trace is snapshotted onto rounds, not
+# onto submissions. See round/create.py.
 
 
 def derive_bench_verdict_from_events(events: list[dict[str, Any]]) -> str | None:

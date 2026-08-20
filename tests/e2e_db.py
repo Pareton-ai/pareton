@@ -60,6 +60,18 @@ def cleanup_e2e_rows() -> None:
             profile_ids = tuple(row[0] for row in cur.fetchall())
             if not profile_ids:
                 return
+            # Rounds and leaders reference submissions, so they go first.
+            # round_entries follows its round by ON DELETE CASCADE.
+            for table in ("leader_history", "leaders", "rounds"):
+                cur.execute(
+                    f"""
+                    DELETE FROM {table}
+                    WHERE campaign_id IN (
+                      SELECT id FROM campaigns WHERE profile_id IN %s
+                    )
+                    """,
+                    (profile_ids,),
+                )
             cur.execute(
                 """
                 DELETE FROM submissions

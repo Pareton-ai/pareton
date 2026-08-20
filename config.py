@@ -168,8 +168,16 @@ BENCH_SLA_WARMUP_REQUESTS: int = int(
     os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
 )
 
-# Round seeding waits this many blocks past the head before sampling.
+# Round seeding reads the block this many behind the head, so the seed block is
+# already settled and the watcher never blocks waiting for the tip to finalize.
 CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))
+
+# Round creation. A round fires at ROUND_SIZE queued challengers, or when the
+# oldest queued submission has waited ROUND_MAX_WAIT_S;
+ROUND_SIZE: int = int(os.environ.get("PARETON_ROUND_SIZE", "5"))
+ROUND_MAX_WAIT_S: int = int(os.environ.get("PARETON_ROUND_MAX_WAIT_S", "21600"))
+ROUND_STALE_S: int = int(os.environ.get("PARETON_ROUND_STALE_S", "1800"))
+
 GPU_PROVIDER: str = os.environ.get("PARETON_GPU_PROVIDER", "lium")
 # Ordered fallback providers tried after GPU_PROVIDER on no-capacity or
 # provision error. Comma-separated; empty string disables fallback.

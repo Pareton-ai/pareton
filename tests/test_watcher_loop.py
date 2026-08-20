@@ -2,7 +2,16 @@
 
 import threading
 
+import pytest
+
 from worker.watcher import scan_cycle
+
+
+@pytest.fixture(autouse=True)
+def _stub_round_maintenance(monkeypatch):
+    """Round maintenance talks to Postgres; this file is an offline unit test."""
+    monkeypatch.setattr("worker.watcher.reap_stale_rounds", lambda _stale_s: [])
+    monkeypatch.setattr("worker.watcher.create_due_rounds", lambda _subtensor: [])
 
 
 def test_scan_cycle_returns_same_client_on_success(monkeypatch):
@@ -80,6 +89,52 @@ def test_failed_scan_drops_client_so_next_cycle_reconnects(monkeypatch):
     )
     assert scan_cycle(None, drain) is live
     assert connects == [1, 1]
+
+
+def test_failed_scan_still_reaps_stale_rounds(monkeypatch):
+    """A dead websocket must not leave a stale round holding the live slot."""
+    reaped = []
+
+    monkeypatch.setattr(
+        "worker.watcher.scan_chain",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("websocket dead")),
+    )
+    monkeypatch.setattr(
+        "worker.watcher.reap_stale_rounds",
+        lambda _stale_s: (
+            reaped.append(1) or [{"id": "r1", "campaign_id": "c1", "ordinal": 4}]
+        ),
+    )
+
+    assert scan_cycle(object(), threading.Event()) is None
+    assert reaped == [1]
+
+
+def test_failed_connect_still_reaps_stale_rounds(monkeypatch):
+    reaped = []
+
+    monkeypatch.setattr(
+        "worker.watcher._connect_subtensor",
+        lambda: (_ for _ in ()).throw(RuntimeError("no rpc")),
+    )
+    monkeypatch.setattr(
+        "worker.watcher.reap_stale_rounds",
+        lambda _stale_s: reaped.append(1) or [],
+    )
+
+    assert scan_cycle(None, threading.Event()) is None
+    assert reaped == [1]
+
+
+def test_round_creation_failure_keeps_the_subtensor(monkeypatch):
+    client = object()
+    monkeypatch.setattr("worker.watcher.scan_chain", lambda *_a, **_k: ([], ["hk"]))
+    monkeypatch.setattr(
+        "worker.watcher.create_due_rounds",
+        lambda _subtensor: (_ for _ in ()).throw(RuntimeError("no database")),
+    )
+
+    assert scan_cycle(client, threading.Event()) is client
 
 
 def test_drained_cycle_does_not_scan(monkeypatch):
