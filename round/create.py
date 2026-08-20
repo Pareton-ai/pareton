@@ -12,7 +12,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from bench.sampler import compute_sample_seed, fetch_hf_row, generate_trace
+from bench.sampler import (
+    compute_sample_seed,
+    fetch_hf_row,
+    generate_trace,
+    parse_sampling_rule,
+)
 from builder.registry import baseline_engine_image_ref, normalize_digest
 from campaign.store import get_campaign
 import config
@@ -108,7 +113,9 @@ def try_create_round(
 
     seed_hex = compute_sample_seed(block_hash=seed_block_hash, campaign_id=campaign_id)
     if campaign.sampling_rule:
-        rule = campaign.sampling_rule
+        # The default row fetcher indexes config/split directly; parsing fills
+        # the defaults a minimal rule omits.
+        rule = parse_sampling_rule(campaign.sampling_rule)
         sampled = generate_trace(
             rule=rule,
             seed_hex=seed_hex,

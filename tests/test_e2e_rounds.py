@@ -271,6 +271,7 @@ def test_stale_round_voids_and_requeues_challengers_only():
         _queued(campaign_id, image_ref=IMAGE_B, block=11, waited_s=39_000),
     ]
     dq_sid = _queued(campaign_id, image_ref=_image(9), block=12, waited_s=38_000)
+    if_sid = _queued(campaign_id, image_ref=_image(8), block=13, waited_s=37_000)
     leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
     create_due_rounds(_FakeSubtensor())
     (rnd,) = _rounds(campaign_id)
@@ -292,6 +293,13 @@ def test_stale_round_voids_and_requeues_challengers_only():
                 WHERE round_id = %s AND submission_id = %s
                 """,
                 (round_id, dq_sid),
+            )
+            cur.execute(
+                """
+                UPDATE round_entries SET status = 'infra_failed'
+                WHERE round_id = %s AND submission_id = %s
+                """,
+                (round_id, if_sid),
             )
             cur.execute(
                 """
@@ -331,6 +339,10 @@ def test_stale_round_voids_and_requeues_challengers_only():
         state, detail = _latest_state(sid)
         assert state == "bench_queued"
         assert detail["void_reason"] == "heartbeat_stale"
+    # infra_failed is not terminal: the void is its one requeue.
+    state, detail = _latest_state(if_sid)
+    assert state == "bench_queued"
+    assert detail["void_reason"] == "heartbeat_stale"
     assert _latest_state(leader_sid) == leader_state_before
     assert _latest_state(dq_sid) == dq_state_before
 

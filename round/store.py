@@ -261,9 +261,10 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
                     SELECT submission_id, 'bench_queued', %s
                     FROM round_entries
                     WHERE round_id = %s AND role = 'challenger'
-                      -- A terminal entry is already judged; requeueing it
-                      -- would resurrect a disqualified submission.
-                      AND status IN ('pending', 'running')
+                      -- Terminal entries are already judged; requeueing them
+                      -- would resurrect a disqualified or scored submission.
+                      -- infra_failed is not terminal: it gets its one requeue.
+                      AND status IN ('pending', 'running', 'infra_failed')
                     """,
                     (
                         Json(

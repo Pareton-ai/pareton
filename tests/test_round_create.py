@@ -140,3 +140,37 @@ def test_no_round_without_a_baseline_engine_pin(monkeypatch):
 
     assert out is None
     assert calls == []
+
+
+def test_minimal_hf_rule_fetches_with_parsed_defaults(monkeypatch):
+    """fetch_hf_row indexes config/split; a minimal rule must be parsed first."""
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(config, "ROUND_SIZE", 1)
+    rule = {
+        "type": "hf_rows",
+        "dataset": "d",
+        "revision": "r",
+        "n_rows": 5,
+        "n_prompts": 2,
+    }
+
+    def fake_fetch(rule_arg, idx):
+        # Mirror _cached_hf_split: these keys must exist after parsing.
+        assert rule_arg["config"] == "default"
+        assert rule_arg["split"] == "train"
+        return {"trajectory": [{"role": "user", "content": "hello"}]}
+
+    monkeypatch.setattr("round.create.fetch_hf_row", fake_fetch)
+
+    out = try_create_round(
+        _campaign(sampling_rule=rule),
+        {"queued": 5, "oldest_queued_at": NOW},
+        seed_block=1000,
+        seed_block_hash="ab" * 32,
+    )
+
+    assert out == {"round_id": "r1", "ordinal": 1}
+    (kw,) = calls
+    assert kw["sampling_receipt"]["type"] == "hf_rows"
+    assert kw["sampling_receipt"]["config"] == "default"
+    assert kw["sampling_receipt"]["split"] == "train"
