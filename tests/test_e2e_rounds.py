@@ -413,3 +413,152 @@ def test_duplicate_image_digest_is_rejected():
     assert state == "rejected"
     assert detail["reason"] == "duplicate_image"
     assert detail["kept_submission_id"] == kept
+
+
+def _settle_round(
+    round_id: str, *, winner_sid: str | None, status: str, **over
+) -> None:
+    """Close a round the way the runner (PAR-83) will, so the reads have data."""
+    fields = {
+        "status": status,
+        "winner_submission_id": winner_sid,
+        "leader_changed": winner_sid is not None,
+        "void_reason": over.get("void_reason"),
+    }
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE rounds
+                SET status = %(status)s,
+                    winner_submission_id = %(winner_submission_id)s,
+                    leader_changed = %(leader_changed)s,
+                    void_reason = %(void_reason)s,
+                    completed_at = now()
+                WHERE id = %(id)s
+                """,
+                {**fields, "id": round_id},
+            )
+
+
+def _settle_entry(round_id: str, submission_id: str | None, **fields) -> None:
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = %s, score = %s, disqualify_reason = %s
+                WHERE round_id = %s
+                  AND submission_id IS NOT DISTINCT FROM %s
+                """,
+                (
+                    fields["status"],
+                    fields.get("score"),
+                    fields.get("disqualify_reason"),
+                    round_id,
+                    submission_id,
+                ),
+            )
+
+
+def test_public_reads_of_rounds_leader_and_score_progress():
+    """One complete round, one void round: the shapes the read API serves."""
+    from round.store import (
+        get_leader,
+        get_round,
+        list_round_entries,
+        list_rounds,
+        list_score_progress,
+        list_submission_round_entries,
+    )
+
+    campaign_id = _campaign()
+    winner = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    loser = _queued(campaign_id, image_ref=IMAGE_B, block=11, waited_s=39_000)
+    create_due_rounds(_FakeSubtensor())
+    (first,) = _rounds(campaign_id)
+    first_id = str(first["id"])
+
+    _settle_entry(first_id, None, status="scored", score=0)
+    _settle_entry(first_id, winner, status="scored", score="0.31")
+    _settle_entry(
+        first_id, loser, status="disqualified", disqualify_reason="fail_correctness"
+    )
+    _settle_round(first_id, winner_sid=winner, status="complete")
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO leaders (
+                  campaign_id, submission_id, engine_image_ref, hotkey,
+                  won_at_round_id, won_at_ordinal, last_score,
+                  last_scored_round_id
+                ) VALUES (%s, %s, %s, %s, %s, 1, 0.31, %s)
+                """,
+                (
+                    str(campaign_id),
+                    winner,
+                    IMAGE_A,
+                    "5FakesHotkeyForE2ETesting000000000000000000000",
+                    first_id,
+                    first_id,
+                ),
+            )
+
+    # A second round that voids: it keeps its ordinal and carries no winner.
+    _queued(campaign_id, image_ref=IMAGE_C, block=20, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    _first, second = _rounds(campaign_id)
+    second_id = str(second["id"])
+    _settle_round(
+        second_id, winner_sid=None, status="void", void_reason="baseline_drift"
+    )
+
+    leader = get_leader(campaign_id)
+    assert str(leader["submission_id"]) == winner
+    assert leader["hotkey"] == "5FakesHotkeyForE2ETesting000000000000000000000"
+    assert float(leader["last_score"]) == 0.31
+    assert leader["patch_hash"].startswith("sha256:")
+    assert get_leader(uuid4()) is None
+
+    page = list_rounds(campaign_id)
+    assert page["total"] == 2
+    assert [r["ordinal"] for r in page["items"]] == [2, 1]
+    assert page["items"][0]["void_reason"] == "baseline_drift"
+    assert page["items"][1]["entry_count"] == 3
+    assert page["items"][1]["leader_changed"] is True
+
+    detail = get_round(first_id)
+    assert detail["scoring_rule"] == {"name": "median_e2e_speedup"}
+    assert str(detail["winner_submission_id"]) == winner
+    assert get_round(uuid4()) is None
+    entries = list_round_entries(first_id)
+    assert [(e["role"], e["status"]) for e in entries] == [
+        ("baseline", "scored"),
+        ("challenger", "scored"),
+        ("challenger", "disqualified"),
+    ]
+    assert entries[0]["submission_id"] is None and entries[0]["hotkey"] is None
+    assert float(entries[0]["score"]) == 0.0
+    # A disqualified entry has no score. 0.0 would be a lie: it is baseline speed.
+    assert entries[2]["score"] is None
+    assert entries[2]["disqualify_reason"] == "fail_correctness"
+    assert "evidence_s3_url" not in entries[2]
+
+    points = list_score_progress(campaign_id)
+    assert [p["ordinal"] for p in points] == [1, 2]
+    assert float(points[0]["leader_score"]) == 0.31
+    # The void round keeps ordinal 2 and leaves a gap in the line.
+    assert points[1]["ordinal"] == 2 and points[1]["leader_score"] is None
+    # The winner is the line, so the scatter holds only the other challenger.
+    assert [e["submission_id"] for e in points[0]["entries"]] == [loser]
+    assert points[0]["entries"][0]["score"] is None
+    assert points[0]["entries"][0]["status"] == "disqualified"
+
+    outcomes = list_submission_round_entries([winner, loser])
+    # The winner ran again as the leader of round 2, so its newest entry wins.
+    assert outcomes[winner]["ordinal"] == 2
+    assert outcomes[winner]["status"] == "pending"
+    assert outcomes[loser]["ordinal"] == 1
+    assert outcomes[loser]["disqualify_reason"] == "fail_correctness"
+    assert list_submission_round_entries([]) == {}

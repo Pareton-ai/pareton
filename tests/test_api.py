@@ -8,11 +8,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from campaign.store import (
-    KNOWN_CAMPAIGN_STATUSES,
-    KNOWN_SUBMISSION_STATES,
-    derive_bench_verdict_from_events,
-)
+from campaign.store import KNOWN_CAMPAIGN_STATUSES, KNOWN_SUBMISSION_STATES
+from round.rank import ENTRY_ROLES, ENTRY_STATUSES
 
 V1_CACHE_CONTROL_EXPECTED = "public, max-age=30, stale-while-revalidate=300"
 
@@ -26,16 +23,9 @@ def client(monkeypatch):
         "list_campaigns",
         lambda status=None: [],
     )
+    # No unit test may reach the database. Tests that care override this.
+    monkeypatch.setattr(server, "list_submission_round_entries", lambda _ids: {})
     return TestClient(server.app)
-
-
-def test_duplicate_image_is_a_terminal_bench_verdict():
-    """round/store.py rejects a duplicate image; the API must not call it pending."""
-    events = [
-        {"state": "bench_queued", "detail": {}},
-        {"state": "rejected", "detail": {"reason": "duplicate_image"}},
-    ]
-    assert derive_bench_verdict_from_events(events) == "duplicate_image"
 
 
 def test_health_no_store(client: TestClient):
@@ -92,9 +82,15 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     )
     monkeypatch.setattr(
         server,
-        "list_bench_summaries",
-        lambda _cid, submission_ids=None: {
-            "11111111-1111-1111-1111-111111111111": "pass"
+        "list_submission_round_entries",
+        lambda _ids: {
+            "11111111-1111-1111-1111-111111111111": {
+                "round_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ordinal": 3,
+                "status": "scored",
+                "score": 0.31,
+                "disqualify_reason": None,
+            }
         },
     )
     monkeypatch.setattr(
@@ -112,7 +108,8 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert len(body["submissions"]) == 1
     row = body["submissions"][0]
     assert row["latest_state"] == "scored"
-    assert row["bench_verdict"] == "pass"
+    assert row["round"]["ordinal"] == 3
+    assert row["round"]["score"] == 0.31
     assert (
         resp.headers.get("Cache-Control")
         == "public, max-age=30, stale-while-revalidate=300"
@@ -132,7 +129,7 @@ def test_submissions_offset_past_end(monkeypatch, client: TestClient):
         "list_submissions",
         lambda _cid, *, limit=50, offset=0: {"total": 3, "items": []},
     )
-    monkeypatch.setattr(server, "list_bench_summaries", lambda *_a, **_k: {})
+    monkeypatch.setattr(server, "list_submission_round_entries", lambda *_a: {})
     monkeypatch.setattr(server, "list_latest_states", lambda _ids: {})
 
     resp = client.get("/v1/campaigns/c1/submissions?limit=50&offset=100")
@@ -319,9 +316,7 @@ def test_submissions_payload_matches_the_documented_model(
             ],
         },
     )
-    monkeypatch.setattr(
-        server, "list_bench_summaries", lambda _cid, submission_ids=None: {}
-    )
+    monkeypatch.setattr(server, "list_submission_round_entries", lambda _ids: {})
     monkeypatch.setattr(
         server, "list_latest_states", lambda _ids: {sid: "round_assigned"}
     )
@@ -421,7 +416,7 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     assert body["submission"]["id"] == sid
     assert body["submission"]["campaign_id"] == "c1"
     assert body["events"] == []
-    assert body["bench_verdict"] is None
+    assert body["round"] is None
     assert body["latest_state"] == "bench_queued"
     assert body["jobs"] == [
         {
@@ -558,3 +553,336 @@ def test_build_log_cache_control_by_state(
     resp = client.get("/v1/campaigns/c1/submissions/sha256:log/build-log")
     assert resp.status_code == 200
     assert resp.headers.get("Cache-Control") == expected_cache
+
+
+HOTKEY = "5FakesHotkeyForE2ETesting000000000000000000000"
+
+
+def _leader_row() -> dict:
+    return {
+        "submission_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        "patch_hash": "sha256:lead",
+        "hotkey": HOTKEY,
+        "engine_image_ref": "ghcr.io/x/e@sha256:" + "1" * 64,
+        "won_at_round_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "won_at_ordinal": 2,
+        "last_score": 0.31,
+        "last_scored_round_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        "updated_at": "2026-08-20T00:00:00+00:00",
+    }
+
+
+def _open_campaign(monkeypatch) -> None:
+    from api import server
+
+    monkeypatch.setattr(
+        server,
+        "get_campaign",
+        lambda _cid: SimpleNamespace(
+            status="open", to_public_dict=lambda: {"id": "c1"}
+        ),
+    )
+
+
+def test_leader_is_404_when_vacant(monkeypatch, client: TestClient):
+    """A vacant crown has no leaders row; the API must not invent an empty one."""
+    from api import server
+
+    _open_campaign(monkeypatch)
+    monkeypatch.setattr(server, "get_leader", lambda _cid: None)
+    resp = client.get("/v1/campaigns/c1/leader")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "leader is vacant"
+
+
+def test_leader_404_when_campaign_is_unknown(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "get_campaign", lambda _cid: None)
+    for path in ("leader", "rounds", "score-progress"):
+        resp = client.get(f"/v1/campaigns/nope/{path}")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "campaign not found"
+
+
+def test_leader_detail_carries_the_full_hotkey(monkeypatch, client: TestClient):
+    from api import server
+
+    _open_campaign(monkeypatch)
+    monkeypatch.setattr(server, "get_leader", lambda _cid: _leader_row())
+    resp = client.get("/v1/campaigns/c1/leader")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["hotkey"] == HOTKEY
+    assert body["campaign_id"] == "c1"
+    server.LeaderModel.model_validate(body)
+
+
+def _round_summary(ordinal: int, status: str, **over) -> dict:
+    row = {
+        "id": f"cccccccc-cccc-cccc-cccc-{ordinal:012d}",
+        "ordinal": ordinal,
+        "status": status,
+        "void_reason": None,
+        "gpu_sku": "H200",
+        "seed_block": 1000 + ordinal,
+        "seed_block_hash": "0x" + f"{ordinal:064x}",
+        "leader_changed": False,
+        "created_at": "2026-08-20T00:00:00+00:00",
+        "completed_at": None,
+        "entry_count": 7,
+    }
+    row.update(over)
+    return row
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_cache"),
+    [
+        ("pending", "no-store"),
+        ("running", "no-store"),
+        ("complete", V1_CACHE_CONTROL_EXPECTED),
+        ("void", V1_CACHE_CONTROL_EXPECTED),
+    ],
+)
+def test_rounds_list_cache_control_follows_the_live_round(
+    monkeypatch, client: TestClient, status: str, expected_cache: str
+):
+    from api import server
+
+    _open_campaign(monkeypatch)
+    monkeypatch.setattr(
+        server,
+        "list_rounds",
+        lambda _cid, *, limit, offset: {
+            "total": 1,
+            "items": [_round_summary(1, status)],
+        },
+    )
+    resp = client.get("/v1/campaigns/c1/rounds")
+    assert resp.status_code == 200
+    assert resp.headers.get("Cache-Control") == expected_cache
+    page = server.RoundsPageModel.model_validate(resp.json())
+    assert page.rounds[0].entry_count == 7
+    assert page.limit == 50 and page.offset == 0
+
+
+def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
+    from api import server
+
+    _open_campaign(monkeypatch)
+    rows = [
+        _round_summary(3, "complete", leader_changed=True),
+        _round_summary(2, "void", void_reason="baseline_drift"),
+        _round_summary(1, "complete"),
+    ]
+    monkeypatch.setattr(
+        server,
+        "list_rounds",
+        lambda _cid, *, limit, offset: {"total": 3, "items": rows},
+    )
+    body = client.get("/v1/campaigns/c1/rounds").json()
+    assert [r["ordinal"] for r in body["rounds"]] == [3, 2, 1]
+    assert body["rounds"][1]["void_reason"] == "baseline_drift"
+
+
+ROUND_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+
+
+def _round_row(**over) -> dict:
+    row = {
+        "id": ROUND_ID,
+        "campaign_id": "c1",
+        "ordinal": 4,
+        "status": "running",
+        "void_reason": None,
+        "gpu_sku": "H200",
+        "seed_block": 1004,
+        "seed_block_hash": "0x" + "a" * 64,
+        "seed_hex": "b" * 64,
+        "sampled_trace_sha256": "sha256:" + "c" * 64,
+        "scoring_rule": {"name": "median_e2e_speedup"},
+        "incumbent_submission_id": None,
+        "winner_submission_id": None,
+        "leader_changed": None,
+        "baseline_drift": None,
+        "phase": "sla_bench",
+        "phase_started_at": "2026-08-20T00:00:00+00:00",
+        "heartbeat_at": "2026-08-20T00:01:00+00:00",
+        "progress": {"entry": 2},
+        "created_at": "2026-08-20T00:00:00+00:00",
+        "started_at": "2026-08-20T00:00:00+00:00",
+        "completed_at": None,
+    }
+    row.update(over)
+    return row
+
+
+def _round_entries() -> list[dict]:
+    return [
+        {
+            "id": 1,
+            "submission_id": None,
+            "role": "baseline",
+            "engine_image_ref": "ghcr.io/x/e@sha256:" + "0" * 64,
+            "status": "scored",
+            "score": 0.0,
+            "disqualify_reason": None,
+            "started_at": None,
+            "completed_at": None,
+            "patch_hash": None,
+            "hotkey": None,
+        },
+        {
+            "id": 2,
+            "submission_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            "role": "challenger",
+            "engine_image_ref": "ghcr.io/x/e@sha256:" + "1" * 64,
+            "status": "disqualified",
+            "score": None,
+            "disqualify_reason": "fail_correctness",
+            "started_at": None,
+            "completed_at": None,
+            "patch_hash": "sha256:dq",
+            "hotkey": HOTKEY,
+        },
+    ]
+
+
+def test_round_detail_entries_and_live_phase(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "get_round", lambda _rid: _round_row())
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: _round_entries())
+
+    resp = client.get(f"/v1/rounds/{ROUND_ID}")
+    assert resp.status_code == 200
+    # A running round is live and must not be cached.
+    assert resp.headers.get("Cache-Control") == "no-store"
+    body = resp.json()
+    server.RoundDetailModel.model_validate(body)
+    assert body["phase"] == "sla_bench"
+    assert body["progress"] == {"entry": 2}
+    baseline, challenger = body["entries"]
+    # Serialized enums are the round/rank.py vocabularies, not a respelling.
+    assert {e["role"] for e in body["entries"]} <= set(ENTRY_ROLES)
+    assert {e["status"] for e in body["entries"]} <= set(ENTRY_STATUSES)
+    # 0.0 is a real score; a disqualified entry has none.
+    assert baseline["score"] == 0.0
+    assert challenger["score"] is None
+    assert challenger["disqualify_reason"] == "fail_correctness"
+    # Detail page: full hotkey. Evidence stays behind its gate.
+    assert challenger["hotkey"] == HOTKEY
+    assert "evidence_s3_url" not in challenger
+    assert "report" not in challenger
+
+
+def test_round_detail_drops_phase_text_outside_the_vocabulary(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    monkeypatch.setattr(
+        server,
+        "get_round",
+        lambda _rid: _round_row(phase="<script>", progress={"deep": {"no": 1}}),
+    )
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    assert body["phase"] is None
+    assert body["progress"] is None
+
+
+def test_round_detail_404_and_bad_uuid(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "get_round", lambda _rid: None)
+    assert client.get(f"/v1/rounds/{ROUND_ID}").status_code == 404
+    assert client.get("/v1/rounds/not-a-uuid").status_code == 422
+
+
+def test_round_detail_of_a_terminal_round_is_cacheable(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(
+        server, "get_round", lambda _rid: _round_row(status="void", phase=None)
+    )
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    resp = client.get(f"/v1/rounds/{ROUND_ID}")
+    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+
+
+def test_score_progress_keeps_void_ordinals_and_null_scores(
+    monkeypatch, client: TestClient
+):
+    """Void rounds leave gaps at their ordinal; nothing is renumbered to 0."""
+    from api import server
+
+    _open_campaign(monkeypatch)
+    points = [
+        {
+            "round_id": "11111111-1111-1111-1111-111111111111",
+            "ordinal": 1,
+            "status": "complete",
+            "leader_score": 0.31,
+            "entries": [
+                {
+                    "submission_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                    "hotkey": HOTKEY,
+                    "role": "challenger",
+                    "status": "disqualified",
+                    "score": None,
+                }
+            ],
+        },
+        {
+            "round_id": "22222222-2222-2222-2222-222222222222",
+            "ordinal": 2,
+            "status": "void",
+            "leader_score": None,
+            "entries": [],
+        },
+        {
+            "round_id": "33333333-3333-3333-3333-333333333333",
+            "ordinal": 3,
+            "status": "complete",
+            "leader_score": 0.4,
+            "entries": [],
+        },
+    ]
+    monkeypatch.setattr(server, "list_score_progress", lambda _cid: points)
+
+    resp = client.get("/v1/campaigns/c1/score-progress")
+    assert resp.status_code == 200
+    body = resp.json()
+    server.ScoreProgressModel.model_validate(body)
+    assert [p["ordinal"] for p in body["points"]] == [1, 2, 3]
+    assert [p["leader_score"] for p in body["points"]] == [0.31, None, 0.4]
+    # A disqualified entry is null, never 0.0. The client decides how to draw it.
+    assert body["points"][0]["entries"][0]["score"] is None
+    # List response: the hotkey is truncated.
+    assert body["points"][0]["entries"][0]["hotkey"] == HOTKEY[:16]
+    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+
+
+def test_score_progress_is_uncacheable_while_a_round_runs(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    _open_campaign(monkeypatch)
+    monkeypatch.setattr(
+        server,
+        "list_score_progress",
+        lambda _cid: [
+            {
+                "round_id": "44444444-4444-4444-4444-444444444444",
+                "ordinal": 1,
+                "status": "running",
+                "leader_score": None,
+                "entries": [],
+            }
+        ],
+    )
+    resp = client.get("/v1/campaigns/c1/score-progress")
+    assert resp.headers.get("Cache-Control") == "no-store"
