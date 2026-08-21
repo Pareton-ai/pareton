@@ -1480,7 +1480,12 @@ def test_parse_pubkeys_rejects_malformed():
             _parse_pubkeys(bad)
 
 
-def _pull_command(user: str, *, env_file: str = "/tmp/e.env") -> str:
+def _pull_command(
+    user: str,
+    *,
+    env_file: str = "/tmp/e.env",
+    refs: list[str] | None = None,
+) -> str:
     """Remote script pull_engine_images would run on a pod with this ssh user."""
     from gpu.bootstrap import pull_engine_images
 
@@ -1502,7 +1507,10 @@ def _pull_command(user: str, *, env_file: str = "/tmp/e.env") -> str:
         raw={},
     )
     pull_engine_images(
-        pod, ["ghcr.io/x/y@sha256:abc"], env_file=env_file, runner=runner
+        pod,
+        refs or ["ghcr.io/x/y@sha256:abc"],
+        env_file=env_file,
+        runner=runner,
     )
     cmd = captured[-1]
     return cmd[-1] if isinstance(cmd, list) else str(cmd)
@@ -1535,7 +1543,14 @@ def test_pull_credential_chown_is_a_noop_for_root_pods():
     assert "|| true" in remote
 
 
-def _run_pull_script(tmp_path: Path, user: str, *, login_rc: int) -> tuple[int, str]:
+def _run_pull_script(
+    tmp_path: Path,
+    user: str,
+    *,
+    login_rc: int,
+    refs: list[str] | None = None,
+    fail_pull: str | None = None,
+) -> tuple[int, str]:
     """Execute the rendered remote script with docker/sudo stubbed.
 
     Returns (exit code, the docker subcommands that actually ran). Lets the test
@@ -1553,8 +1568,10 @@ def _run_pull_script(tmp_path: Path, user: str, *, login_rc: int) -> tuple[int, 
     stub.mkdir(exist_ok=True)
     (stub / "docker").write_text(
         "#!/bin/bash\n"
-        f'echo "$1" >> {log}\n'
-        f'if [ "$1" = "login" ]; then exit {login_rc}; fi\nexit 0\n',
+        f'echo "$1 $2" >> {log}\n'
+        f'if [ "$1" = "login" ]; then exit {login_rc}; fi\n'
+        f'if [ "$1" = "pull" ] && [ "$2" = "{fail_pull}" ]; then exit 1; fi\n'
+        "exit 0\n",
         encoding="utf-8",
     )
     # sudo stub drops leading flags (-E) and runs the rest, so `sudo -E docker`
@@ -1566,7 +1583,7 @@ def _run_pull_script(tmp_path: Path, user: str, *, login_rc: int) -> tuple[int, 
     for f in ("docker", "sudo"):
         (stub / f).chmod(0o755)
 
-    remote = _pull_command(user, env_file=str(env_file))
+    remote = _pull_command(user, env_file=str(env_file), refs=refs)
     proc = subprocess.run(
         ["bash", "-c", remote],
         capture_output=True,
@@ -1596,3 +1613,58 @@ def test_successful_login_proceeds_to_pull(tmp_path: Path, user: str):
     assert rc == 0
     assert "login" in ran
     assert "pull" in ran
+
+
+@pytest.mark.parametrize("user", ["shadeform", "root"])
+@pytest.mark.parametrize("fail_index", [1, 2])
+def test_one_unpullable_ref_does_not_stop_the_others(
+    tmp_path: Path, user: str, fail_index: int
+):
+    """Decision 28: one bad challenger image must not take the round down.
+
+    The pre-pull is best-effort warming. bench/lifecycle.py pulls each image
+    again at its own start, where bench/main.py can blame the single entry that
+    owns it, so a ref that will not pull here must not abort the rest and must
+    not fail the step. fail_index 2 is the last ref, which is what the trailing
+    `true` covers: without it the group would exit non-zero and, with ssh_exec
+    checked, raise.
+    """
+    refs = [f"ghcr.io/x/y@sha256:{c * 64}" for c in "abc"]
+    rc, ran = _run_pull_script(
+        tmp_path, user, login_rc=0, refs=refs, fail_pull=refs[fail_index]
+    )
+    assert rc == 0
+    for ref in refs:
+        assert f"pull {ref}" in ran
+
+
+def test_failed_login_raises_rather_than_warning(tmp_path: Path):
+    """A bad GHCR token is host auth, not a candidate fault.
+
+    Decision 28 covers a challenger that cannot start, not a login the whole
+    round depends on. Swallowing this would let the round stage hundreds of GB
+    of weights and only then void, instead of failing in seconds.
+    """
+    from gpu.bootstrap import pull_engine_images
+
+    ensure_durable_keypair(tmp_path / "st")
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    with pytest.raises(GpuError):
+        pull_engine_images(
+            pod,
+            [f"ghcr.io/x/y@sha256:{'a' * 64}"],
+            env_file="/opt/pareton/.pareton-bench.env",
+            runner=lambda cmd, *, timeout, input_text=None: SshResult(
+                1, "", "unauthorized"
+            ),
+            state_dir=tmp_path / "st",
+        )
