@@ -69,10 +69,9 @@ def _parse_json_field(value: Any) -> Any:
     return value
 
 
-def _campaign_engine_name(campaign: Any) -> str:
+def _campaign_engine_profile(campaign: Any) -> dict[str, Any]:
     raw = campaign.engine if campaign is not None else None
-    profile = resolve_engine(raw if isinstance(raw, dict) else None)
-    return str(profile["name"])
+    return resolve_engine(raw if isinstance(raw, dict) else None)
 
 
 def fetch_trace_bytes(
@@ -231,9 +230,11 @@ def build_round_request(
     max_model_len = int(model["max_model_len"])
     dtype = str(model.get("dtype") or "bfloat16")
     extra_serve = list(bench.get("serve_args") or [])
+    engine_profile = _campaign_engine_profile(campaign)
+    cache_dir = str(engine_profile["cache_dir"])
     serve_args = ["--model", "/model"]
     # SGLang rejects --max-model-len (it uses campaign --context-length).
-    if _campaign_engine_name(campaign) != "sglang":
+    if engine_profile["name"] != "sglang":
         serve_args.extend(["--max-model-len", str(max_model_len)])
     serve_args.extend(["--dtype", dtype])
     quantization = model.get("quantization")
@@ -293,12 +294,14 @@ def build_round_request(
                 "image": baseline_image,
                 "serve_args": list(serve_args),
                 "env": {},
+                "cache_dir": cache_dir,
             },
             "candidates": [
                 {
                     "image": str(row["engine_image_ref"]),
                     "serve_args": list(serve_args),
                     "env": {},
+                    "cache_dir": cache_dir,
                 }
                 for row in candidates
             ],

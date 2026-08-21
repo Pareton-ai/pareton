@@ -556,7 +556,7 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     assert pushed
     assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
     assert "HF_XET_HIGH_PERFORMANCE=1" in pushed[0]
-    assert "PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/sglang-cache" in pushed[0]
+    assert "PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/engine-cache" in pushed[0]
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):

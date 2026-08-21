@@ -120,6 +120,7 @@ def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
         image=spec.image,
         serve_args=list(spec.serve_args) + extra,
         env=dict(spec.env),
+        cache_dir=spec.cache_dir,
     )
 
 

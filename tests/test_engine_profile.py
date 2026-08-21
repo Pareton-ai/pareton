@@ -124,6 +124,7 @@ def test_engine_hash_is_key_order_independent():
                 "name": "sglang",
                 "install_cmd": SGLANG_ENGINE["install_cmd"],
                 "entrypoint": list(SGLANG_ENGINE["entrypoint"]),
+                "cache_dir": SGLANG_ENGINE["cache_dir"],
             },
         )
     )
@@ -133,6 +134,7 @@ def test_engine_hash_is_key_order_independent():
             engine={
                 "entrypoint": list(SGLANG_ENGINE["entrypoint"]),
                 "name": "SGLang",  # also exercises case normalization
+                "cache_dir": "  " + SGLANG_ENGINE["cache_dir"] + "  ",
                 "install_cmd": "  " + SGLANG_ENGINE["install_cmd"] + "  ",
             },
         )
@@ -158,6 +160,7 @@ def test_build_manifest_normalizes_engine_onto_the_object():
             "name": "SGLANG",
             "install_cmd": SGLANG_ENGINE["install_cmd"],
             "entrypoint": list(SGLANG_ENGINE["entrypoint"]),
+            "cache_dir": SGLANG_ENGINE["cache_dir"],
         },
     )
     assert m.engine == SGLANG_ENGINE
@@ -180,6 +183,12 @@ def test_presets_are_self_consistent():
         assert profile["name"] == name
     assert DEFAULT_ENGINE == VLLM_ENGINE
     assert preset("SGLang") == SGLANG_ENGINE
+
+
+def test_each_engine_pins_its_own_compile_cache_dir():
+    """The mount target is per engine, so a vLLM round does not write nowhere."""
+    assert preset("vllm")["cache_dir"] == "/root/.cache/vllm"
+    assert preset("sglang")["cache_dir"] == "/root/.cache/sglang"
 
 
 def test_preset_rejects_unknown_name():
@@ -215,6 +224,14 @@ def test_preset_rejects_unknown_name():
             },
             r"engine.entrypoint\[1\] must be a string",
         ),
+        (
+            {
+                "name": "vllm",
+                "install_cmd": "pip install -e .",
+                "entrypoint": ["python"],
+            },
+            "engine.cache_dir must be a string",
+        ),
     ],
 )
 def test_validate_engine_rejects_malformed(engine, match):
@@ -223,6 +240,7 @@ def test_validate_engine_rejects_malformed(engine, match):
 
 
 def test_validate_engine_rejects_unknown_keys():
+    assert len(VLLM_ENGINE) == 4  # a fifth key is still an unknown key
     with pytest.raises(ValueError, match="engine has unknown keys"):
         validate_engine({**VLLM_ENGINE, "torch_cuda_arch_list": "9.0"})
 
@@ -255,6 +273,7 @@ def test_validate_engine_returns_a_copy():
         "name": "sglang",
         "install_cmd": SGLANG_ENGINE["install_cmd"],
         "entrypoint": list(SGLANG_ENGINE["entrypoint"]),
+        "cache_dir": SGLANG_ENGINE["cache_dir"],
     }
     out = validate_engine(src)
     out["entrypoint"].append("--tp")

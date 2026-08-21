@@ -125,9 +125,18 @@ class HardwareSpec:
 
 @dataclass
 class EngineSpec:
+    """One engine container: its image, how to serve, and its compile cache.
+
+    ``cache_dir`` is the container-side path the campaign's engine profile
+    pins (``campaign/engine.py``); the harness mounts the host cache there for
+    the starts that ask for it. A request that omits it gets the vLLM path,
+    the same default ``resolve_engine(None)`` applies campaign-side.
+    """
+
     image: str
     serve_args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    cache_dir: str = "/root/.cache/vllm"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> EngineSpec:
@@ -135,6 +144,7 @@ class EngineSpec:
             image=str(d["image"]),
             serve_args=[str(x) for x in (d.get("serve_args") or [])],
             env={str(k): str(v) for k, v in (d.get("env") or {}).items()},
+            cache_dir=str(d.get("cache_dir") or "/root/.cache/vllm"),
         )
 
 
