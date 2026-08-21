@@ -215,15 +215,20 @@ def pull_engine_images(
     The pulls are best-effort warming, not a gate. bench/lifecycle.py pulls
     each image again at its own start turn, and bench/main.py turns a failure
     there into infra_failed for that one entry, which is decision 28: the round
-    continues with the rest. Chaining these with && under a checked ssh_exec
-    let one bad challenger image abort a whole 9-start round before any engine
-    started. The login stays a gate, because every pull fails without it.
+    continues with the rest. Chaining these with && let one bad challenger
+    image abort a whole 9-start round before any engine started.
+
+    The login and the env file stay a gate. A bad GHCR token is host auth, not
+    a candidate fault, and decision 28 does not cover it: failing fast here
+    beats staging hundreds of GB of weights first and then voiding the round.
     """
     if not image_refs:
         return
     docker = remote_docker(pod)
     # Braces keep the group bound to the login's &&; without them only the
-    # first pull would be skipped when the login fails.
+    # first pull would be skipped when the login fails. The trailing `true`
+    # keeps a failed pull out of the exit code, so ssh_exec stays checked and
+    # only login or env-file failures raise.
     pulls = "; ".join(f"{docker} pull {shlex.quote(img)}" for img in image_refs)
     env_q = shlex.quote(env_file)
     # Single shell so login sees vars from the env file; password via stdin.
@@ -241,21 +246,12 @@ def pull_engine_images(
         'sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker" 2>/dev/null || true; '
         "fi; "
         "fi && "
-        f"{{ {pulls}; }}"
+        f"{{ {pulls}; true; }}"
     )
-    result = ssh_exec(
+    ssh_exec(
         pod,
         remote,
         timeout_s=3600.0,
         runner=runner,
         state_dir=state_dir,
-        check=False,
     )
-    if result.exit_code != 0:
-        logger.warning(
-            "pre-pull did not finish cleanly (exit %s); each image is pulled "
-            "again at its own engine start, so a ref that stays unpullable "
-            "fails that entry alone: %s",
-            result.exit_code,
-            (result.stderr or result.stdout or "").strip()[-800:],
-        )
