@@ -121,7 +121,18 @@ def validate_engine(engine: dict[str, Any]) -> dict[str, Any]:
         for i, part in enumerate(entrypoint)
     ]
 
+    # cache_dir is the target half of ``docker -v <host>:<target>``, where ':'
+    # is the delimiter. A value like "/root/.cache/vllm:ro" would parse as a
+    # read-only mount and silently cost the baseline its warm compile cache,
+    # with no error anywhere. The sibling fields never reach a mount spec, so
+    # this check belongs here rather than in _clean_shell_token.
     cache_dir = _clean_shell_token(engine.get("cache_dir"), field="cache_dir")
+    if ":" in cache_dir:
+        raise ValueError(f"engine.cache_dir must not contain ':', got {cache_dir!r}")
+    if not cache_dir.startswith("/"):
+        raise ValueError(
+            f"engine.cache_dir must be an absolute path, got {cache_dir!r}"
+        )
 
     unknown = set(engine) - {"name", "install_cmd", "entrypoint", "cache_dir"}
     if unknown:

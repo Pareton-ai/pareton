@@ -232,6 +232,24 @@ def test_preset_rejects_unknown_name():
             },
             "engine.cache_dir must be a string",
         ),
+        (
+            {
+                "name": "vllm",
+                "install_cmd": "pip install -e .",
+                "entrypoint": ["python"],
+                "cache_dir": "/root/.cache/vllm:ro",
+            },
+            "engine.cache_dir must not contain ':'",
+        ),
+        (
+            {
+                "name": "vllm",
+                "install_cmd": "pip install -e .",
+                "entrypoint": ["python"],
+                "cache_dir": "root/.cache/vllm",
+            },
+            "engine.cache_dir must be an absolute path",
+        ),
     ],
 )
 def test_validate_engine_rejects_malformed(engine, match):
