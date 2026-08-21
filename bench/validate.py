@@ -170,7 +170,10 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     for role, eng in named:
         if not isinstance(eng, dict):
             raise RequestValidationError(f"engines.{role} must be an object")
-        _require_keys(eng, ["image"], ctx=f"engines.{role}")
+        # cache_dir is required here, not defaulted, because EngineSpec falls
+        # back to the vLLM path. An SGLang request that omitted it would mount
+        # the cache where SGLang never looks and never say so.
+        _require_keys(eng, ["image", "cache_dir"], ctx=f"engines.{role}")
         try:
             extract_image_digest(str(eng["image"]))
         except RequestValidationError as exc:

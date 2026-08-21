@@ -152,11 +152,13 @@ def _spec(
     image: str = "ghcr.io/example/engine@sha256:" + ("b" * 64),
     serve_args: list[str] | None = None,
     env: dict[str, str] | None = None,
+    cache_dir: str = "/root/.cache/vllm",
 ) -> EngineSpec:
     return EngineSpec(
         image=image,
         serve_args=serve_args or ["--enable-prefix-caching"],
         env=env or {},
+        cache_dir=cache_dir,
     )
 
 
@@ -506,12 +508,16 @@ def test_gpu_count_passed_as_docker_count_not_all():
     assert run[run.index("--shm-size") + 1] == "16g"
 
 
-def test_engine_cache_dir_mounted_only_when_opted_in(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("cache_dir", ["/root/.cache/vllm", "/root/.cache/sglang"])
+def test_engine_cache_dir_mounted_only_when_opted_in(
+    tmp_path: Path, monkeypatch, cache_dir: str
+):
+    """The mount target is the engine profile's, not one engine's hardcoded."""
     fake = FakeDocker()
-    spec = _spec(image="local:img")
+    spec = _spec(image="local:img", cache_dir=cache_dir)
     fake.image_digests[spec.image] = []
     fake.image_ids[spec.image] = "sha256:" + ("9" * 64)
-    cache = tmp_path / "sglang-cache"
+    cache = tmp_path / "engine-cache"
     monkeypatch.setenv("PARETON_BENCH_ENGINE_CACHE_DIR", str(cache))
 
     import bench.lifecycle as life
@@ -537,7 +543,7 @@ def test_engine_cache_dir_mounted_only_when_opted_in(tmp_path: Path, monkeypatch
         life.wait_until_healthy = original_wait  # type: ignore[assignment]
 
     runs = [c for c, _ in fake.calls if c[:2] == ["docker", "run"]]
-    vol = f"{cache.resolve()}:/root/.cache/sglang"
+    vol = f"{cache.resolve()}:{cache_dir}"
     # Default is no mount even with the env var set, so a candidate cannot
     # inherit the warm compile cache the baseline left behind.
     assert vol not in runs[0]

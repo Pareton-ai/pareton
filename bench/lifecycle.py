@@ -586,10 +586,7 @@ class EngineContainer:
         if self.mount_engine_cache and engine_cache:
             cache_path = Path(engine_cache)
             cache_path.mkdir(parents=True, exist_ok=True)
-            # TODO(PAR-81): the container-side path belongs in the
-            # campaign's engine profile as a ``cache_dir`` key. Until then it
-            # is hardcoded to the SGLang cache location.
-            run_cmd.extend(["-v", f"{cache_path.resolve()}:/root/.cache/sglang"])
+            run_cmd.extend(["-v", f"{cache_path.resolve()}:{self.spec.cache_dir}"])
         if self.weights_dir is not None:
             run_cmd.extend(["-v", f"{self.weights_dir.resolve()}:/model:ro"])
         if self._env_file is not None:

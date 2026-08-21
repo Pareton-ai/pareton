@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 REMOTE_REPO = "/opt/pareton"
 REMOTE_VENV = f"{REMOTE_REPO}/.venv"
 REMOTE_HF_CACHE = "/workspace/hf-cache"
-REMOTE_ENGINE_CACHE = "/workspace/sglang-cache"
+REMOTE_ENGINE_CACHE = "/workspace/engine-cache"
 
 
 def local_code_sha(repo_root: Path) -> str:

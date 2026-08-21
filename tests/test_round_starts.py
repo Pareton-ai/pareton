@@ -37,21 +37,30 @@ EXPECTED_STARTS = 9
 
 VLLM_SERVE_ARGS = ["--model", "/model", "--enable-prefix-caching"]
 SGLANG_SERVE_ARGS = ["--model-path", "/model", "--tp-size", "8"]
+VLLM_CACHE_DIR = "/root/.cache/vllm"
+SGLANG_CACHE_DIR = "/root/.cache/sglang"
 
 
-def _request(serve_args: list[str], *, candidates: int = ROUND_CANDIDATES) -> dict:
+def _request(
+    serve_args: list[str],
+    *,
+    candidates: int = ROUND_CANDIDATES,
+    cache_dir: str = VLLM_CACHE_DIR,
+) -> dict:
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["workload_trace"]["path"] = str(SAMPLE_TRACE)
     raw["engines"]["baseline"] = {
         "image": "ghcr.io/example/engine@sha256:" + ("a" * 64),
         "serve_args": list(serve_args),
         "env": {},
+        "cache_dir": cache_dir,
     }
     raw["engines"]["candidates"] = [
         {
             "image": f"ghcr.io/example/engine@sha256:{'0123456789abcdef'[i] * 64}",
             "serve_args": list(serve_args),
             "env": {},
+            "cache_dir": cache_dir,
         }
         for i in range(candidates)
     ]
@@ -147,15 +156,21 @@ def test_the_runner_performs_exactly_the_planned_starts(tmp_path: Path):
     ]
 
 
+@pytest.mark.parametrize(
+    "serve_args,cache_dir",
+    [(VLLM_SERVE_ARGS, VLLM_CACHE_DIR), (SGLANG_SERVE_ARGS, SGLANG_CACHE_DIR)],
+)
 def test_a_candidate_container_is_never_launched_with_a_cache_mount(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, serve_args: list[str], cache_dir: str
 ):
     """End to end through the real docker argv builder, against a fake daemon."""
     from tests.test_lifecycle import FakeDocker
 
     cache = tmp_path / "engine-cache"
     monkeypatch.setenv("PARETON_BENCH_ENGINE_CACHE_DIR", str(cache))
-    req = validate_bench_request_dict(_request(VLLM_SERVE_ARGS, candidates=2))
+    req = validate_bench_request_dict(
+        _request(serve_args, candidates=2, cache_dir=cache_dir)
+    )
     fake = FakeDocker()
     for spec in [req.engines.baseline, *req.engines.candidates]:
         fake.image_digests[spec.image] = [f"{spec.image}"]
@@ -174,7 +189,7 @@ def test_a_candidate_container_is_never_launched_with_a_cache_mount(
     finally:
         life.wait_until_healthy = original_wait  # type: ignore[assignment]
 
-    mount = f"{cache.resolve()}:/root/.cache/sglang"
+    mount = f"{cache.resolve()}:{cache_dir}"
     runs = [c for c, _ in fake.calls if c[:2] == ["docker", "run"]]
     assert len(runs) == 5
     by_name = {c[c.index("--name") + 1]: c for c in runs}

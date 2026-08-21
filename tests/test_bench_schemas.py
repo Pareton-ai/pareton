@@ -241,3 +241,19 @@ def test_report_dict_validation_accepts_stub_shape():
         "stub_note": "skeleton",
     }
     validate_report_dict(report)  # does not raise
+
+
+def test_every_engine_must_pin_its_cache_dir():
+    # EngineSpec defaults cache_dir to the vLLM path, so an SGLang request that
+    # omitted it would mount the cache where SGLang never looks and say nothing.
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    del raw["engines"]["baseline"]["cache_dir"]
+    with pytest.raises(RequestValidationError, match="cache_dir"):
+        validate_bench_request_dict(raw)
+
+
+def test_every_candidate_must_pin_its_cache_dir():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    del raw["engines"]["candidates"][0]["cache_dir"]
+    with pytest.raises(RequestValidationError, match=r"candidates\[0\]"):
+        validate_bench_request_dict(raw)

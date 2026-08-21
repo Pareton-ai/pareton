@@ -17,6 +17,7 @@ def _candidate(letter: str) -> dict:
         "image": f"ghcr.io/example/engine@sha256:{letter * 64}",
         "serve_args": ["--enable-prefix-caching"],
         "env": {},
+        "cache_dir": "/root/.cache/vllm",
     }
 
 

@@ -19,7 +19,8 @@
       "serve_args": [
         "--enable-prefix-caching"
       ],
-      "env": {}
+      "env": {},
+      "cache_dir": "/root/.cache/vllm"
     },
     "candidates": [
       {
@@ -27,7 +28,8 @@
         "serve_args": [
           "--enable-prefix-caching"
         ],
-        "env": {}
+        "env": {},
+        "cache_dir": "/root/.cache/vllm"
       }
     ]
   },

@@ -86,8 +86,8 @@ BENCH_HF_CACHE_DIR: Path = Path(
         str(Path.home() / ".cache" / "pareton" / "hf"),
     )
 ).expanduser()
-# Host dir mounted at /root/.cache/sglang inside the engine container.
-# Empty means no mount (laptop tests). GPU remote env sets /workspace/sglang-cache
+# Host dir mounted at the engine profile's cache_dir inside the container.
+# Empty means no mount (laptop tests). GPU remote env sets /workspace/engine-cache
 # so FlashInfer autotune survives container restarts.
 BENCH_ENGINE_CACHE_DIR: str = os.environ.get(
     "PARETON_BENCH_ENGINE_CACHE_DIR", ""

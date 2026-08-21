@@ -554,9 +554,13 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     )
     _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
     assert pushed
-    assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
-    assert "HF_XET_HIGH_PERFORMANCE=1" in pushed[0]
-    assert "PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/sglang-cache" in pushed[0]
+    # Assert per key. The pushed file carries the real HF and GHCR tokens from
+    # the ambient environment, and a substring assertion against the whole file
+    # prints all of them into the pytest log the moment it fails.
+    env = dict(line.split("=", 1) for line in pushed[0].splitlines() if "=" in line)
+    assert env["PARETON_BENCH_HEALTH_TIMEOUT_S"] == "1800.0"
+    assert env["HF_XET_HIGH_PERFORMANCE"] == "1"
+    assert env["PARETON_BENCH_ENGINE_CACHE_DIR"] == "/workspace/engine-cache"
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):

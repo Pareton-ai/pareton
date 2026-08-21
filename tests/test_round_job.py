@@ -152,6 +152,26 @@ def test_build_round_request_omits_max_model_len_for_sglang(tmp_path):
     assert "--dtype" in args
 
 
+@pytest.mark.parametrize(
+    "engine,cache_dir",
+    [(None, "/root/.cache/vllm"), (preset("sglang"), "/root/.cache/sglang")],
+)
+def test_build_round_request_carries_the_engine_cache_dir(tmp_path, engine, cache_dir):
+    """The pod mounts the cache where the campaign's engine writes it."""
+    trace = tmp_path / "trace.json"
+    raw = _write_trace(trace)
+    row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    req = build_round_request(
+        row,
+        _campaign(engine=engine),
+        _entries(),
+        task_id=str(uuid4()),
+        trace_path=str(trace),
+    )
+    assert req["engines"]["baseline"]["cache_dir"] == cache_dir
+    assert [c["cache_dir"] for c in req["engines"]["candidates"]] == [cache_dir] * 2
+
+
 def test_bind_report_to_round_accepts_positional_candidate_digests():
     task_id = str(uuid4())
     request_bytes = b'{"task_id":"x"}'
