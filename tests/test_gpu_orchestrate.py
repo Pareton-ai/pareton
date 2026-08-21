@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1596,3 +1597,69 @@ def test_successful_login_proceeds_to_pull(tmp_path: Path, user: str):
     assert rc == 0
     assert "login" in ran
     assert "pull" in ran
+
+
+def _pull_pod(tmp_path: Path) -> Pod:
+    return Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+
+
+def test_pull_engine_images_does_not_chain_pulls_on_success(tmp_path: Path):
+    """One unpullable ref must not stop the others (decision 28).
+
+    The pre-pull is best-effort warming: bench/lifecycle.py pulls each image
+    again at its own start, so a ref that stays broken fails that entry alone
+    rather than aborting a 9-start round before any engine runs.
+    """
+    from gpu.bootstrap import pull_engine_images
+
+    ensure_durable_keypair(tmp_path / "st")
+    remote_cmds: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        remote_cmds.append(cmd[-1] if cmd else "")
+        return SshResult(0, "", "")
+
+    refs = [f"ghcr.io/x/y@sha256:{c * 64}" for c in "abc"]
+    pull_engine_images(
+        _pull_pod(tmp_path),
+        refs,
+        env_file="/opt/pareton/.pareton-bench.env",
+        runner=runner,
+        state_dir=tmp_path / "st",
+    )
+    remote = remote_cmds[0]
+    for ref in refs:
+        assert f"docker pull {ref}" in remote
+    # The pulls are ';'-separated inside a brace group, so a failure in one
+    # does not skip the rest, and the group still hangs off the login's &&.
+    assert "pull " + refs[0] + " && " not in remote
+    assert remote.rstrip().endswith("; }")
+    assert "fi && { " in remote
+
+
+def test_pull_engine_images_survives_a_failing_pull(tmp_path: Path, caplog):
+    from gpu.bootstrap import pull_engine_images
+
+    ensure_durable_keypair(tmp_path / "st")
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(1, "", "manifest unknown")
+
+    with caplog.at_level(logging.WARNING, logger="gpu.bootstrap"):
+        pull_engine_images(
+            _pull_pod(tmp_path),
+            [f"ghcr.io/x/y@sha256:{'a' * 64}"],
+            env_file="/opt/pareton/.pareton-bench.env",
+            runner=runner,
+            state_dir=tmp_path / "st",
+        )
+    assert "manifest unknown" in caplog.text
