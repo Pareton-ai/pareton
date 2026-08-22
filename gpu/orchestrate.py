@@ -239,11 +239,11 @@ def provision_pod(
 ) -> Pod:
     """Rent one pod, falling back through the configured provider order.
 
-    With no injected ``provider``, the primary comes from ``spec.provider``
-    and fallbacks from ``PARETON_GPU_PROVIDER_FALLBACKS`` (default shadeform).
-    A ``ProvisionError`` (no capacity, rent/wait-ready failure) tries the next
-    provider; any other exception aborts immediately. The single-flight check
-    is local policy and never triggers fallback.
+    With no injected ``provider``, walks ``provider_order(spec.provider)``
+    (``auto`` → ``PARETON_GPU_PROVIDERS``). A ``ProvisionError`` (no capacity,
+    rent/wait-ready failure) tries the next provider; any other exception
+    aborts immediately. The single-flight check is local policy and never
+    triggers fallback.
     """
     registry = registry or PodRegistry(state_dir)
     if provider is not None:
