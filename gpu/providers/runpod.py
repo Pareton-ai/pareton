@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-from gpu.errors import DestroyError, ProvisionError
+from gpu.errors import DestroyError, GpuError, ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.registry import _state_dir
 from gpu.ssh import exec as ssh_exec
@@ -337,19 +337,37 @@ class RunpodProvider:
         out.sort(key=lambda o: (o.hourly_price_cents, o.gpu_type))
         return out
 
+    def _probe(self, pod: Pod, cmd: str, *, timeout_s: float):
+        """Run a probe, turning any ssh failure into a ProvisionError.
+
+        ``check=False`` covers a non-zero exit, but an ssh timeout raises a bare
+        ``GpuError`` before ``check`` is consulted. ``provision_pod`` falls
+        through to the next provider only on ``ProvisionError``, and
+        ``ProvisionError`` is a *subclass* of ``GpuError``, so a bare one lands
+        in the ``except Exception`` arm and aborts the whole try-list. A slow
+        Docker install on Runpod would then stop Lium and Shadeform from ever
+        being attempted, which is the opposite of the ordered fallback.
+        """
+        try:
+            return ssh_exec(
+                pod,
+                cmd,
+                timeout_s=timeout_s,
+                check=False,
+                state_dir=self._state_dir,
+            )
+        except GpuError as exc:
+            raise ProvisionError(
+                f"Runpod pod {pod.pod_id} Docker probe failed: {exc}"
+            ) from exc
+
     def _require_docker_host(self, pod: Pod) -> None:
         """Fail closed if the pod cannot run nested Docker for bench engines."""
-        check = ssh_exec(
-            pod,
-            "docker info >/dev/null 2>&1",
-            timeout_s=60.0,
-            check=False,
-            state_dir=self._state_dir,
-        )
+        check = self._probe(pod, "docker info >/dev/null 2>&1", timeout_s=60.0)
         if check.exit_code == 0:
             return
         # Mirror bootstrap's install path once; still fails without privileged/DinD.
-        install = ssh_exec(
+        install = self._probe(
             pod,
             "command -v docker >/dev/null 2>&1 || "
             "curl -fsSL https://get.docker.com | sh; "
@@ -361,8 +379,6 @@ class RunpodProvider:
             "for i in 1 2 3 4 5 6 7 8 9 10; do "
             "docker info >/dev/null 2>&1 && exit 0; sleep 3; done; exit 1",
             timeout_s=300.0,
-            check=False,
-            state_dir=self._state_dir,
         )
         if install.exit_code == 0:
             logger.info("Docker host ready on Runpod pod %s", pod.pod_id)

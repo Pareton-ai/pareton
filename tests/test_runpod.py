@@ -345,6 +345,40 @@ def test_require_docker_host_ok(provider: RunpodProvider, monkeypatch):
     provider._require_docker_host(ready)
 
 
+def test_require_docker_host_timeout_is_a_provision_error(
+    provider: RunpodProvider, monkeypatch
+):
+    """An ssh timeout must not abort the whole provider try-list.
+
+    ssh_exec raises a bare GpuError on timeout, before check=False is
+    consulted. provision_pod falls through to the next provider only on
+    ProvisionError, and ProvisionError subclasses GpuError, so a bare one hits
+    the `except Exception` arm and re-raises. Runpod stalling would then stop
+    Lium and Shadeform from ever being tried.
+    """
+    from datetime import datetime, timezone
+
+    from gpu.errors import GpuError, ProvisionError
+    from gpu.types import Pod
+
+    def timed_out(*_a, **_k):
+        raise GpuError("ssh/rsync timed out after 300.0s")
+
+    monkeypatch.setattr("gpu.providers.runpod.ssh_exec", timed_out)
+    ready = Pod(
+        provider="runpod",
+        pod_id="pod_slow",
+        name="n",
+        ssh=SshTarget(host="1.2.3.4", port=22, user="root"),
+        key_path=provider._key_path,
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    with pytest.raises(ProvisionError, match="Docker probe failed"):
+        provider._require_docker_host(ready)
+
+
 def test_get_provider_runpod(monkeypatch, state_dir: Path):
     monkeypatch.setenv("PARETON_RUNPOD_API_KEY", "secret")
     from gpu.providers import get_provider
