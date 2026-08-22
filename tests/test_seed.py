@@ -56,31 +56,65 @@ def test_default_file_url_with_placeholders(monkeypatch: pytest.MonkeyPatch):
     assert m.workload_trace_sha256 == _fixture_sha()
 
 
-def test_bench_flags_shape_correctness_and_perf(monkeypatch: pytest.MonkeyPatch):
+def test_bench_flags_shape_correctness(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(
         allow_placeholders=True,
         bench_quantization="fp8",
         bench_correctness_num_prompts=16,
-        bench_correctness_max_new_tokens=64,
-        bench_perf_concurrency=8,
+        bench_correctness_thresholds={"min_mean_logprob": -3.5},
     )
     bench = captured["manifest"].bench
     assert bench["model"]["quantization"] == "fp8"
-    assert bench["correctness"] == {"num_prompts": 16, "max_new_tokens": 64}
-    assert bench["perf_screen"] == {"concurrency": 8}
-    # Seed never pins thresholds or calibration; that is bench.calibrate apply.
-    assert "thresholds" not in bench["correctness"]
-    assert "calibration" not in bench["correctness"]
+    assert bench["correctness"]["num_prompts"] == 16
+    assert bench["correctness"]["thresholds"]["min_mean_logprob"] == -3.5
+    # An override fills one bar; the rest still come from the seed defaults.
+    assert bench["correctness"]["thresholds"]["min_token_logprob"] == -12.0
 
 
-def test_bench_flags_default_to_none(monkeypatch: pytest.MonkeyPatch):
+def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatch):
+    """The shared scorer's bars live in the manifest, never in the pod's env."""
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(allow_placeholders=True)
     bench = captured["manifest"].bench
     assert bench["model"]["quantization"] is None
-    assert bench["correctness"] is None
-    assert bench["perf_screen"] is None
+    assert set(bench["correctness"]["thresholds"]) == {
+        "min_mean_logprob",
+        "min_token_logprob",
+        "min_coverage_ratio",
+    }
+    assert "num_prompts" not in bench["correctness"]
+
+
+def test_open_requires_correctness_thresholds():
+    """A bar that is not in the manifest can move under a live campaign
+    without the manifest hash changing, so opening requires all three."""
+    from campaign.seed import require_correctness_thresholds
+
+    require_correctness_thresholds(
+        {
+            "correctness": {
+                "thresholds": {
+                    "min_mean_logprob": -4.0,
+                    "min_token_logprob": -12.0,
+                    "min_coverage_ratio": 0.5,
+                }
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="min_token_logprob"):
+        require_correctness_thresholds(
+            {"correctness": {"thresholds": {"min_mean_logprob": -4.0}}}
+        )
+    with pytest.raises(ValueError, match="status=open requires"):
+        require_correctness_thresholds({})
+
+
+def test_coverage_ratio_must_be_a_fraction():
+    from campaign.seed import build_seed_bench_spec
+
+    with pytest.raises(ValueError, match="min_coverage_ratio"):
+        build_seed_bench_spec(correctness_thresholds={"min_coverage_ratio": 0.0})
 
 
 def test_https_url_with_matching_sha(monkeypatch: pytest.MonkeyPatch):
@@ -189,33 +223,29 @@ def test_main_https_flags_wired(monkeypatch: pytest.MonkeyPatch):
     assert captured["manifest"].workload_trace_url == HTTPS_TRACE
 
 
-def test_seed_threshold_matches_bench_floor(monkeypatch: pytest.MonkeyPatch):
+def test_seed_pins_the_priority_metric_and_threshold_text(
+    monkeypatch: pytest.MonkeyPatch,
+):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(allow_placeholders=True)
     m = captured["manifest"]
-    assert m.bench["cross_env"]["min_speedup_each"] == pytest.approx(1.0 / 0.9)
     assert m.priority_metric == "gpu_hours"
     assert "10%" in m.success_threshold
 
 
-@pytest.mark.parametrize(
-    "metric,floor",
-    [
-        ("gpu_hours", 1.0 / 0.9),
-        ("throughput", 1.10),
-        ("latency", 1.0),
-        ("GPU_Hours", 1.0 / 0.9),
-    ],
-)
-def test_seed_bench_floor_follows_priority_metric(
-    monkeypatch: pytest.MonkeyPatch, metric: str, floor: float
+def test_seed_defaults_to_the_median_e2e_speedup_rule(
+    monkeypatch: pytest.MonkeyPatch,
 ):
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True, priority_metric=metric)
-    assert captured["manifest"].priority_metric == metric.strip().lower()
-    assert captured["manifest"].bench["cross_env"]["min_speedup_each"] == pytest.approx(
-        floor
-    )
+    seed_synthetic_campaign(allow_placeholders=True)
+    assert captured["manifest"].scoring_rule == {"name": "median_e2e_speedup"}
+
+
+def test_seed_rejects_an_unknown_scoring_rule(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="scoring_rule.name must be one of"):
+        seed_synthetic_campaign(allow_placeholders=True, scoring_rule={"name": "vibes"})
+    assert captured["inserts"] == 0
 
 
 def test_seed_profile_uses_cli_metrics(monkeypatch: pytest.MonkeyPatch):
@@ -251,15 +281,6 @@ def test_seed_gpu_skus_and_status_override(monkeypatch: pytest.MonkeyPatch):
     assert m.status == "draft"
     assert m.gpu_skus == ["H200-SXM-141GB", "B200"]
     assert captured["profile_data"]["hardware"] == ["H200-SXM-141GB", "B200"]
-
-
-def test_seed_open_requires_calibration(monkeypatch: pytest.MonkeyPatch):
-    captured = _patch_store(monkeypatch)
-    with pytest.raises(
-        ValueError, match="requires campaigns.bench.correctness.calibration"
-    ):
-        seed_synthetic_campaign(allow_placeholders=True, status="open")
-    assert captured["inserts"] == 0
 
 
 def test_seed_rejects_empty_gpu_skus(monkeypatch: pytest.MonkeyPatch):

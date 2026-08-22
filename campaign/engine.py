@@ -5,11 +5,12 @@ engine as a black box behind an OpenAI-compatible base URL — but the *build*
 recipe was a module constant in ``builder/hermetic.py``. This module turns that
 recipe into a campaign field so one manifest can pin vLLM and another SGLang.
 
-Only two things actually differ between the two engines (PAR-53 / PAR-54,
+Only three things actually differ between the two engines (PAR-53 / PAR-54,
 measured on live engines):
 
 * ``install_cmd`` — vLLM's package root is the repo root; SGLang's is ``python/``
 * ``entrypoint``  — different server module
+* ``cache_dir``   — where the engine writes its compile cache in the container
 
 Deliberately **not** fields:
 
@@ -37,6 +38,7 @@ VLLM_ENGINE: dict[str, Any] = {
     "name": "vllm",
     "install_cmd": "pip install --no-deps --no-build-isolation -e .",
     "entrypoint": ["python", "-m", "vllm.entrypoints.openai.api_server"],
+    "cache_dir": "/root/.cache/vllm",
 }
 
 # SGLang v0.5.17. Verified on a live B300 (sm_103) in PAR-54: patched build
@@ -46,6 +48,7 @@ SGLANG_ENGINE: dict[str, Any] = {
     "name": "sglang",
     "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
     "entrypoint": ["python3", "-m", "sglang.launch_server"],
+    "cache_dir": "/root/.cache/sglang",
 }
 
 DEFAULT_ENGINE: dict[str, Any] = VLLM_ENGINE
@@ -92,7 +95,7 @@ def _clean_shell_token(value: Any, *, field: str) -> str:
 def validate_engine(engine: dict[str, Any]) -> dict[str, Any]:
     """Validate a campaigns.engine block; return a normalized copy.
 
-    Normalization is total: the returned dict has exactly the three known keys,
+    Normalization is total: the returned dict has exactly the four known keys,
     so an equal profile always hashes identically regardless of key order or
     extra junk in the input.
     """
@@ -118,17 +121,31 @@ def validate_engine(engine: dict[str, Any]) -> dict[str, Any]:
         for i, part in enumerate(entrypoint)
     ]
 
-    unknown = set(engine) - {"name", "install_cmd", "entrypoint"}
+    # cache_dir is the target half of ``docker -v <host>:<target>``, where ':'
+    # is the delimiter. A value like "/root/.cache/vllm:ro" would parse as a
+    # read-only mount and silently cost the baseline its warm compile cache,
+    # with no error anywhere. The sibling fields never reach a mount spec, so
+    # this check belongs here rather than in _clean_shell_token.
+    cache_dir = _clean_shell_token(engine.get("cache_dir"), field="cache_dir")
+    if ":" in cache_dir:
+        raise ValueError(f"engine.cache_dir must not contain ':', got {cache_dir!r}")
+    if not cache_dir.startswith("/"):
+        raise ValueError(
+            f"engine.cache_dir must be an absolute path, got {cache_dir!r}"
+        )
+
+    unknown = set(engine) - {"name", "install_cmd", "entrypoint", "cache_dir"}
     if unknown:
         raise ValueError(
             f"engine has unknown keys: {sorted(unknown)} "
-            f"(allowed: ['entrypoint', 'install_cmd', 'name'])"
+            f"(allowed: ['cache_dir', 'entrypoint', 'install_cmd', 'name'])"
         )
 
     return {
         "name": normalized_name,
         "install_cmd": install_cmd,
         "entrypoint": cleaned_entrypoint,
+        "cache_dir": cache_dir,
     }
 
 

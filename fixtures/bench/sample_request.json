@@ -16,14 +16,22 @@
   "engines": {
     "baseline": {
       "image": "ghcr.io/example/engine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "serve_args": ["--enable-prefix-caching"],
-      "env": {}
+      "serve_args": [
+        "--enable-prefix-caching"
+      ],
+      "env": {},
+      "cache_dir": "/root/.cache/vllm"
     },
-    "candidate": {
-      "image": "ghcr.io/example/engine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "serve_args": ["--enable-prefix-caching"],
-      "env": {}
-    }
+    "candidates": [
+      {
+        "image": "ghcr.io/example/engine@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "serve_args": [
+          "--enable-prefix-caching"
+        ],
+        "env": {},
+        "cache_dir": "/root/.cache/vllm"
+      }
+    ]
   },
   "workload_trace": {
     "path": "./fixtures/bench/sample_trace.json",
@@ -31,17 +39,11 @@
   },
   "correctness": {
     "num_prompts": 2,
-    "max_new_tokens": 8,
     "thresholds": {
-      "mean_abs_logprob_diff": 0.005,
-      "max_abs_logprob_diff": 0.05,
-      "argmax_mismatch_rate": 0.001
+      "min_mean_logprob": -4.0,
+      "min_token_logprob": -12.0,
+      "min_coverage_ratio": 0.5
     }
-  },
-  "perf_screen": {
-    "num_requests": 2,
-    "concurrency": 1,
-    "min_throughput_ratio": 1.0
   },
   "sla_bench": {
     "repetitions": 3,
@@ -50,6 +52,9 @@
       "p99_ttft_ms": 2000,
       "p99_itl_ms": 50
     }
+  },
+  "scoring_rule": {
+    "name": "median_e2e_speedup"
   },
   "hf_token_env": "HF_TOKEN"
 }

@@ -194,12 +194,12 @@ def post_completion_stream(
             f"(cannot measure TTFT/ITL)"
         )
     # include_usage was requested; without a count the coalesced-stream and
-    # Module C multi-token ITL guards cannot run and fail open.
+    # multi-token ITL guards cannot run and fail open.
     if completion_tokens is None:
         raise EngineError(
             f"completions stream from {url} omitted usage.completion_tokens"
         )
-    # ITL is inter-choice-chunk gaps; Module C treats them as inter-token. Reject
+    # ITL is inter-choice-chunk gaps; sla_bench treats them as inter-token. Reject
     # under-count (full or partial coalesce). Do not require exact equality:
     # empty-text choice chunks can add extra gaps on real engines.
     expected_gaps = completion_tokens - 1

@@ -50,14 +50,16 @@ class PhaseReporter:
     def __init__(
         self,
         *,
-        job_id: int,
+        job_id: int | str,
         attempt: int,
         phase_writer: PhaseWriter | None = None,
         heartbeat_writer: HeartbeatWriter | None = None,
         interval_s: float | None = None,
+        label: str | None = None,
     ) -> None:
-        self.job_id = int(job_id)
-        self.attempt = int(attempt)
+        self.job_id = job_id
+        self.attempt = attempt
+        self._label = label if label is not None else f"job {job_id}"
         self._interval_s = (
             config.JOB_HEARTBEAT_INTERVAL_S if interval_s is None else interval_s
         )
@@ -105,7 +107,7 @@ class PhaseReporter:
                 progress=detail,
             )
         except Exception as exc:  # noqa: BLE001 - progress must never fail a bench
-            logger.warning("phase write failed job=%s %s: %s", self.job_id, name, exc)
+            logger.warning("phase write failed %s %s: %s", self._label, name, exc)
             return
         if not landed:
             self._mark_orphaned("phase")
@@ -113,7 +115,7 @@ class PhaseReporter:
         with self._lock:
             if not self._orphaned:
                 self._current = name
-        logger.info("bench phase job=%s attempt=%s %s", self.job_id, self.attempt, name)
+        logger.info("bench phase %s attempt=%s %s", self._label, self.attempt, name)
 
     def _mark_orphaned(self, source: str) -> None:
         with self._lock:
@@ -121,9 +123,9 @@ class PhaseReporter:
                 return
             self._orphaned = True
         logger.info(
-            "job %s attempt %s stopped accepting progress (%s write rejected); "
+            "%s attempt %s stopped accepting progress (%s write rejected); "
             "the job has settled or another attempt owns it",
-            self.job_id,
+            self._label,
             self.attempt,
             source,
         )
@@ -137,7 +139,7 @@ class PhaseReporter:
                 job_id=self.job_id, attempt=self.attempt
             )
         except Exception as exc:  # noqa: BLE001 - liveness must never fail a bench
-            logger.warning("heartbeat write failed job=%s: %s", self.job_id, exc)
+            logger.warning("heartbeat write failed %s: %s", self._label, exc)
             return
         if not landed:
             self._mark_orphaned("heartbeat")

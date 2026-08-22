@@ -154,7 +154,7 @@ def test_workload_pool_absent_keeps_hash_stable():
     assert "workload_pool" not in base
 
 
-def test_workload_pool_and_z_threshold_change_hash():
+def test_workload_pool_and_sampling_rule_change_hash():
     kwargs = _manifest_kwargs()
     a = build_manifest(**kwargs)
     b = build_manifest(
@@ -164,8 +164,31 @@ def test_workload_pool_and_z_threshold_change_hash():
             {"sha256": "sha256:" + ("2" * 64), "url": "https://x/2.json"},
         ],
         sampling_rule={"type": "uniform_index", "seed_block_offset": 1},
-        z_threshold=3.0,
     )
     assert a.manifest_hash != b.manifest_hash
     assert b.workload_pool is not None
-    assert b.z_threshold == 3.0
+
+
+def test_scoring_rule_is_always_pinned_and_defaults():
+    """The scoring formula is part of what a miner competes on, so two
+    campaigns with the same hash must rank identically."""
+    kwargs = _manifest_kwargs()
+    default = build_manifest(**kwargs)
+    assert default.scoring_rule == {"name": "median_e2e_speedup"}
+    fields = freeze_manifest_fields(**_manifest_kwargs())
+    assert fields["scoring_rule"] == {"name": "median_e2e_speedup"}
+
+
+def test_scoring_rule_extras_change_hash():
+    kwargs = _manifest_kwargs()
+    a = build_manifest(**kwargs)
+    b = build_manifest(
+        **kwargs, scoring_rule={"name": "median_e2e_speedup", "min_prompts": 8}
+    )
+    assert a.manifest_hash != b.manifest_hash
+    assert b.scoring_rule["min_prompts"] == 8
+
+
+def test_unknown_scoring_rule_is_refused():
+    with pytest.raises(ValueError, match="scoring_rule.name must be one of"):
+        build_manifest(**_manifest_kwargs(), scoring_rule={"name": "vibes"})

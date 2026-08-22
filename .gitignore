@@ -178,6 +178,7 @@ docs/running_knowledge_base.md
 # Local planning / private docs (keep on disk, not in git)
 docs/roadmap.md
 docs/technical-decisions.md
+docs/round-leader-revamp.md
 
 # PDFs (architecture/business memos — local only)
 *.pdf

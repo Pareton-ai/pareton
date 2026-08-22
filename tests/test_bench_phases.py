@@ -225,7 +225,7 @@ def test_claim_resets_live_activity_and_returns_the_attempt(monkeypatch):
     from campaign import store
 
     sqls, _args = _patch_db(monkeypatch)
-    row = store.claim_next_job(kind="bench")
+    row = store.claim_next_job()
     assert row is not None and row["job_attempt"] == 3
     claim = next(s for s in sqls if "SET status = 'running'" in s)
     assert "attempts = attempts + 1" in claim
@@ -242,18 +242,7 @@ def test_settling_a_job_clears_live_activity(monkeypatch):
     assert "phase = NULL" in sqls[-1]
     assert "heartbeat_at = NULL" in sqls[-1]
 
-    sqls.clear()
-    store.finalize_bench_job(
-        submission_id="00000000-0000-0000-0000-000000000001",
-        job_id=5,
-        task_id="t",
-        report_rows=[],
-        events=[],
-        job_status="done",
-    )
-    final = next(s for s in sqls if "UPDATE submission_jobs" in s)
-    assert "phase = NULL" in final
-    assert "progress = NULL" in final
+    assert "progress = NULL" in sqls[-1]
 
 
 def test_set_job_status_still_bumps_attempts_on_request(monkeypatch):
@@ -263,7 +252,6 @@ def test_set_job_status_still_bumps_attempts_on_request(monkeypatch):
     store.set_job_status(
         "00000000-0000-0000-0000-000000000001",
         "pending",
-        kind="gates",
         bump_attempts=True,
     )
     assert "attempts = attempts + 1" in sqls[-1]
@@ -438,23 +426,38 @@ def test_layout_phase_write_never_raises(tmp_path: Path):
 
 
 def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Path):
-    """starting_engine during load, then back to the module."""
-    from bench.main import _EngineProvider
+    """starting_engine during load, then the phase the start is doing work for."""
+    from bench.main import _EngineProvider, plan_round_starts
     from bench.schemas import BenchRequest
     from bench.validate import load_bench_request
+    from tests.test_lifecycle import FakeDocker
 
     req: BenchRequest = load_bench_request(
         ROOT / "fixtures" / "bench" / "sample_request.json"
     )[0]
     seen: list[str] = []
-    provider = _EngineProvider(req=req, mock=False, phase_sink=seen.append)
-    provider._enter_module(BenchPhase.CORRECTNESS)
+    fake = FakeDocker()
+    fake.image_digests[req.engines.baseline.image] = [
+        f"{req.engines.baseline.image}@sha256:" + ("a" * 64)
+    ]
+    provider = _EngineProvider(
+        req=req,
+        mock=False,
+        phase_sink=seen.append,
+        logs_dir=tmp_path / "logs",
+        docker_runner=fake,
+    )
 
-    class _Net:
-        run_id = "run"
-        runner = None
+    import bench.lifecycle as life
 
-    container = provider._docker_phase(_Net(), "baseline")
-    assert seen == ["correctness", "starting_engine"]
-    container.on_ready()
-    assert seen[-1] == "correctness"
+    original_wait = life.wait_until_healthy
+    life.wait_until_healthy = lambda *_a, **_k: None  # type: ignore[assignment]
+    try:
+        start = plan_round_starts(req.engines)[0]
+        with provider.start(start, phase=BenchPhase.SLA_BENCH):
+            pass
+    finally:
+        life.wait_until_healthy = original_wait  # type: ignore[assignment]
+
+    assert seen[0] == "starting_engine"
+    assert "sla_bench" in seen

@@ -1,13 +1,17 @@
-"""Mock engine: response shape, echo+logprobs quirks, tampered mode."""
+"""Mock engine: response shape, echo+logprobs quirks, round scripting."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import pytest
+
 from bench.mock_engine import (
+    GARBAGE_TEXT,
     MockEngine,
     MockEngineConfig,
+    _latency_at,
     build_completion_response,
     mock_tokenize,
     post_completion,
@@ -124,45 +128,45 @@ def test_repeat_to_max_tokens():
     assert resp["choices"][0]["finish_reason"] == "length"
 
 
-def test_tampered_mode_alters_logprobs():
-    clean_cfg = MockEngineConfig(
-        tampered=False, logprob_base=-0.5, tamper_logprob_offset=1.25
-    )
-    dirty_cfg = MockEngineConfig(
-        tampered=True, logprob_base=-0.5, tamper_logprob_offset=1.25
-    )
-    prompt = "Hello world"
+def test_garbage_output_scores_far_below_a_clean_one():
+    """A scorer judges text, not who produced it, which is what lets one
+    shared scorer grade output captured from any number of candidates."""
+    scorer = MockEngineConfig(logprob_base=-0.5)
     clean = build_completion_response(
-        cfg=clean_cfg,
-        prompt=prompt,
+        cfg=scorer,
+        prompt="Hello world" + " OK OK",
         max_tokens=0,
         echo=True,
         temperature=0.0,
         logprobs_requested=1,
     )
     dirty = build_completion_response(
-        cfg=dirty_cfg,
-        prompt=prompt,
+        cfg=scorer,
+        prompt="Hello world" + GARBAGE_TEXT,
         max_tokens=0,
         echo=True,
         temperature=0.0,
         logprobs_requested=1,
     )
-    clean_lps = clean["choices"][0]["logprobs"]["token_logprobs"]
-    dirty_lps = dirty["choices"][0]["logprobs"]["token_logprobs"]
-    # First stays null in both; at least one later position differs by the offset.
-    assert clean_lps[0] is None and dirty_lps[0] is None
-    diffs = [
-        abs(a - b)
-        for a, b in zip(clean_lps[1:], dirty_lps[1:])
-        if isinstance(a, float) and isinstance(b, float)
-    ]
-    assert diffs
-    assert all(abs(d - 1.25) < 1e-9 for d in diffs)
+    clean_lps = [x for x in clean["choices"][0]["logprobs"]["token_logprobs"] if x]
+    dirty_lps = [x for x in dirty["choices"][0]["logprobs"]["token_logprobs"] if x]
+    assert min(clean_lps) > -5.0
+    assert min(dirty_lps) <= -30.0
+
+
+def test_speed_factor_divides_per_token_latency():
+    base = MockEngineConfig(token_latency_s=0.02)
+    fast = MockEngineConfig(token_latency_s=0.02, speed_factor=2.0)
+    assert _latency_at(base, 0) == pytest.approx(0.02)
+    assert _latency_at(fast, 0) == pytest.approx(0.01)
+    # A zero or negative factor is ignored rather than dividing by zero.
+    assert _latency_at(MockEngineConfig(token_latency_s=0.02, speed_factor=0.0), 0) == (
+        pytest.approx(0.02)
+    )
 
 
 def test_configurable_explicit_logprobs_list():
-    cfg = MockEngineConfig(logprobs=[-1.0, -2.0, -3.0], tampered=False)
+    cfg = MockEngineConfig(logprobs=[-1.0, -2.0, -3.0])
     resp = build_completion_response(
         cfg=cfg,
         prompt="A B C",

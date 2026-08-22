@@ -9,11 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bench.lifecycle import BenchNetwork
 from bench.main import (
     MOCK_WEIGHTS_SHA256,
     _EngineProvider,
-    build_bench_report,
     build_inputs_fingerprint,
 )
 from bench.output import OutputLayout
@@ -360,31 +358,36 @@ def test_write_weights_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
 
 def test_engine_provider_passes_weights_dir(tmp_path: Path):
+    from bench.main import plan_round_starts
+    from bench.phases import BenchPhase
     from tests.test_lifecycle import FakeDocker
 
     raw = load_json(SAMPLE_REQUEST)
     req = validate_bench_request_dict(raw)
     weights = tmp_path / "staged"
     weights.mkdir()
-    provider = _EngineProvider(
-        req=req, mock=False, logs_dir=tmp_path / "logs", weights_dir=weights
-    )
-
     fake = FakeDocker()
     fake.image_digests[req.engines.baseline.image] = [
         f"{req.engines.baseline.image}@sha256:" + ("a" * 64)
     ]
+    provider = _EngineProvider(
+        req=req,
+        mock=False,
+        logs_dir=tmp_path / "logs",
+        weights_dir=weights,
+        docker_runner=fake,
+    )
+
     import bench.lifecycle as life
 
     original_wait = life.wait_until_healthy
     life.wait_until_healthy = lambda *_a, **_k: None  # type: ignore[assignment]
     try:
-        with BenchNetwork(run_id="w5run0000001", runner=fake, cmd_timeout_s=30) as net:
-            with provider._docker_phase(net, "baseline") as handle:
-                assert handle.container_name.startswith("pareton-bench-")
+        start = plan_round_starts(req.engines)[0]
+        with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
+            assert url.startswith("http://")
     finally:
         life.wait_until_healthy = original_wait  # type: ignore[assignment]
-        provider.shutdown()
 
     run = next(c for c, _ in fake.calls if c[:2] == ["docker", "run"])
     vol = next(a for a in run if a.endswith(":/model:ro"))
@@ -404,29 +407,13 @@ def test_fingerprint_uses_real_aggregate_not_zero(
         request_raw=raw,
         req=req,
         baseline_digest="sha256:" + ("a" * 64),
-        candidate_digest="sha256:" + ("b" * 64),
+        candidate_digests=["sha256:" + ("b" * 64)],
         model_weights_sha256=staged.weights_sha256,
     )
     assert fp.model_weights_sha256 == staged.weights_sha256
     assert fp.model_weights_sha256 != MOCK_WEIGHTS_SHA256
 
-    from bench.env import collect_environment
-
-    report = build_bench_report(
-        request_raw=raw,
-        req=req,
-        env=collect_environment(),
-        baseline_digest=fp.baseline_image_digest,
-        candidate_digest=fp.candidate_image_digest,
-        model_weights_sha256=staged.weights_sha256,
-        corr=None,
-        perf=None,
-        sla=None,
-        skipped_note=None,
-        started_at="2026-07-18T00:00:00Z",
-    )
-    d = report.to_dict()
-    assert d["inputs_fingerprint"]["model_weights_sha256"] == staged.weights_sha256
+    assert fp.to_dict()["candidate_image_digest"] == ["sha256:" + ("b" * 64)]
 
     # Independent recompute from manifest alone
     recomputed, agg, _, _ = build_weights_manifest(

@@ -40,10 +40,14 @@ class SubmissionState(StrEnum):
     IMAGE_PUSHED = "image_pushed"
     BUILT = "built"
     BENCH_QUEUED = "bench_queued"
-    SAMPLED = "sampled"
-    CORRECT = "correct"
-    SCREENED = "screened"
-    BENCHED = "benched"
+    ROUND_ASSIGNED = "round_assigned"
+    # Not terminal. The image never ran because of infrastructure; one requeue.
+    INFRA_FAILED = "infra_failed"
+    # Terminal. The image ran and holds a round score.
+    SCORED = "scored"
+    # Terminal. The image ran and produced wrong output.
+    DISQUALIFIED = "disqualified"
+    # Terminal. The submission never ran.
     REJECTED = "rejected"
 
 

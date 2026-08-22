@@ -1,30 +1,48 @@
 """CLI entrypoint: python -m bench --request ... --output-dir ...
 
+One ``bench_request.json`` describes one whole round: a baseline and every
+candidate. The harness starts one engine container at a time, in this order:
+
+1. The baseline, with the engine compile cache mounted read-write. Its SLA
+   replay is the fixed reference every candidate is scored against.
+2. Each candidate, with no cache mount and in production configuration, so
+   they all meet the same cold cache and are timed on the same footing.
+3. One scorer, after the last candidate has stopped, teacher-forcing every
+   output the candidates produced. Then stopped.
+4. The baseline again, SLA only, to measure how far the pod drifted while
+   the round ran.
+
+That is ``3 + len(candidates)`` engine starts. Only the scorer runs with
+correctness-specific serve args, so the count does not depend on which engine
+the campaign pins: a vLLM round and an SGLang round are the same size.
+
 Exit codes:
-  0 = harness completed (pass/fail is in the report)
+  0 = harness completed (per-entry outcomes are in the report)
   1 = bad request / schema validation failure
   2 = environment error
-  3 = engine failure
+  3 = engine failure the round cannot continue past
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
-import os
 import sys
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from bench import __version__
 from bench.correctness import (
+    PendingCorrectness,
     PromptCase,
-    collect_baseline_correctness,
-    finish_correctness_with_candidate,
+    capture_outputs,
+    grade_all,
     load_correctness_prompts,
     resolve_trace_path,
-    run_correctness,
 )
 from bench.env import (
     collect_env_raw_dumps,
@@ -41,22 +59,18 @@ from bench.lifecycle import (
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.output import JsonlFileHandler, OutputLayout
 from bench.phases import BenchPhase
-from bench.perf_screen import (
-    finish_perf_screen,
-    run_perf_screen,
-    run_perf_screen_engine,
-)
 from bench.schemas import (
     BenchReport,
     BenchRequest,
     CorrectnessReport,
     EngineSpec,
+    EnginesSpec,
     InputsFingerprint,
-    PerfScreenReport,
-    SlaBenchReport,
+    RoundEntryReport,
     WorkloadTrace,
 )
-from bench.sla_bench import finish_sla_bench, run_sla_bench, run_sla_engine
+from bench.score import score_candidate
+from bench.sla_bench import REPRO_BAR_MAX_REL_RANGE, EngineReplay, run_sla_engine
 from bench.validate import (
     RequestValidationError,
     extract_image_digest,
@@ -69,8 +83,10 @@ from bench.weights import stage_weights
 
 MOCK_WEIGHTS_SHA256 = "sha256:" + ("0" * 64)
 
-# Correctness-phase only. FlashInfer autotune flag is conditional on the pinned
-# vLLM accepting --no-enable-flashinfer-autotune (GPU smoke later may drop it).
+# Serve args for the scorer, which needs reproducible logprobs rather than
+# speed. Exactly one container in a round is started with them. The autotune
+# flag is conditional on the pinned vLLM accepting
+# --no-enable-flashinfer-autotune (GPU smoke later may drop it).
 CORRECTNESS_EXTRA_SERVE_ARGS = [
     "--no-enable-prefix-caching",
     "--no-enable-flashinfer-autotune",
@@ -78,22 +94,10 @@ CORRECTNESS_EXTRA_SERVE_ARGS = [
 
 
 def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
-    """vLLM-only correctness flags. SGLang uses --tp-size and rejects these."""
+    """vLLM-only scorer flags. SGLang uses --tp-size and rejects these."""
     if "--tp-size" in serve_args:
         return []
     return list(CORRECTNESS_EXTRA_SERVE_ARGS)
-
-
-def can_fuse_correctness_perf(req: BenchRequest) -> bool:
-    """Reuse one container per role only when correctness adds no serve args.
-
-    vLLM correctness appends --no-enable-prefix-caching /
-    --no-enable-flashinfer-autotune, so its perf must keep a separate container.
-    SGLang (--tp-size) gets an empty list and can fuse.
-    """
-    return not correctness_extra_serve_args(
-        req.engines.baseline.serve_args
-    ) and not correctness_extra_serve_args(req.engines.candidate.serve_args)
 
 
 EXIT_OK = 0
@@ -101,20 +105,94 @@ EXIT_BAD_REQUEST = 1
 EXIT_ENV = 2
 EXIT_ENGINE = 3
 
-_NOTE_CORRECTNESS_FAILED = "correctness gate failed; perf_screen/sla_bench skipped"
-_NOTE_PERF_FAILED = "perf_screen failed; sla_bench skipped"
-
 logger = logging.getLogger("bench")
 
 
-def correctness_engine_spec(spec: EngineSpec) -> EngineSpec:
-    """Copy of ``spec`` with correctness-only serve args appended."""
+def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
+    """The scorer: the campaign's own baseline image plus the scorer flags.
+
+    The scorer is per campaign rather than per candidate, and it is derived
+    from the pinned baseline rather than named separately, so a campaign
+    manifest carries no scorer field of its own.
+    """
     extra = correctness_extra_serve_args(spec.serve_args)
     return EngineSpec(
         image=spec.image,
         serve_args=list(spec.serve_args) + extra,
         env=dict(spec.env),
+        cache_dir=spec.cache_dir,
     )
+
+
+# ---------------------------------------------------------------------------
+# Round plan
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EngineStart:
+    """One engine container start in a round.
+
+    ``role`` names the container and its evidence directory, so every start in
+    a round is distinguishable after the fact.
+    """
+
+    role: str
+    kind: str  # "baseline" | "candidate" | "scorer" | "drift"
+    spec: EngineSpec
+    mount_engine_cache: bool
+    candidate_index: int | None = None
+
+
+def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[EngineStart]:
+    """Every container this round will start, in order.
+
+    The runner consumes this list, so the plan is the only place a start can
+    be added. Two invariants live here:
+
+    * only a baseline start mounts the engine compile cache, so every
+      candidate begins in the same cache state and whatever it compiles dies
+      with the container;
+    * the closing drift baseline mounts it too, because the drift number is a
+      comparison against the first baseline run and the two must differ only
+      in when they ran.
+    """
+    starts = [
+        EngineStart(
+            role="baseline",
+            kind="baseline",
+            spec=engines.baseline,
+            mount_engine_cache=True,
+        )
+    ]
+    for i, cand in enumerate(engines.candidates):
+        starts.append(
+            EngineStart(
+                role=f"candidate-{i}",
+                kind="candidate",
+                spec=cand,
+                mount_engine_cache=False,
+                candidate_index=i,
+            )
+        )
+    if mode == "all":
+        starts.append(
+            EngineStart(
+                role="scorer",
+                kind="scorer",
+                spec=scorer_engine_spec(engines.baseline),
+                mount_engine_cache=False,
+            )
+        )
+    starts.append(
+        EngineStart(
+            role="baseline-drift",
+            kind="drift",
+            spec=engines.baseline,
+            mount_engine_cache=True,
+        )
+    )
+    return starts
 
 
 def _utc_now_iso() -> str:
@@ -126,12 +204,12 @@ def build_inputs_fingerprint(
     request_raw: bytes,
     req: BenchRequest,
     baseline_digest: str,
-    candidate_digest: str,
+    candidate_digests: list[str],
     model_weights_sha256: str,
 ) -> InputsFingerprint:
     return InputsFingerprint(
         baseline_image_digest=baseline_digest,
-        candidate_image_digest=candidate_digest,
+        candidate_image_digest=list(candidate_digests),
         model_repo=req.model.hf_repo,
         model_revision=req.model.hf_revision,
         model_weights_sha256=model_weights_sha256,
@@ -200,7 +278,9 @@ def _write_engine_error_report(
         "environment": env.to_dict(),
         "inputs_fingerprint": {
             "baseline_image_digest": extract_image_digest(req.engines.baseline.image),
-            "candidate_image_digest": extract_image_digest(req.engines.candidate.image),
+            "candidate_image_digest": [
+                extract_image_digest(c.image) for c in req.engines.candidates
+            ],
             "model_repo": req.model.hf_repo,
             "model_revision": req.model.hf_revision,
             "model_weights_sha256": model_weights_sha256,
@@ -209,7 +289,7 @@ def _write_engine_error_report(
         },
         "error": str(exc),
     }
-    if role in ("baseline", "candidate"):
+    if role:
         report["error_role"] = role
     validate_report_dict(report)
     layout.write_report(report)
@@ -223,13 +303,48 @@ def _write_engine_error_report(
     print(f"wrote {layout.report_path}")
 
 
-class _EngineProvider:
-    """Supplies healthy engine base URLs for each module run.
+# ---------------------------------------------------------------------------
+# Mock round scripting
+# ---------------------------------------------------------------------------
 
-    - mock: both in-process mocks start on first use and stay up for the run
-      (cheap, no GPU); digests come from the request image pins.
-    - docker: each module phase starts the needed container(s) on an internal
-      network, runs, and tears them down; baseline and candidate never coexist.
+
+@dataclass
+class MockCandidatePlan:
+    """One mock candidate's behaviour.
+
+    Together these cover every outcome a real candidate can reach: faster than
+    the baseline, barely different from it, wrong, or unable to start.
+    """
+
+    speed_factor: float = 1.0
+    garbage: bool = False
+    infra_fail: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict) -> MockCandidatePlan:
+        return cls(
+            speed_factor=float(d.get("speed_factor", 1.0)),
+            garbage=bool(d.get("garbage", False)),
+            infra_fail=bool(d.get("infra_fail", False)),
+        )
+
+
+@dataclass
+class MockPlan:
+    baseline_token_latency_s: float = 0.0
+    candidates: list[MockCandidatePlan] = field(default_factory=list)
+
+    def candidate(self, index: int) -> MockCandidatePlan:
+        if index < len(self.candidates):
+            return self.candidates[index]
+        return MockCandidatePlan()
+
+
+class _EngineProvider:
+    """Yields one healthy engine base URL per planned start, then tears it down.
+
+    Mock and Docker modes both honour the plan one start at a time, so the
+    start count a test observes is the start count a round performs.
     """
 
     def __init__(
@@ -237,297 +352,112 @@ class _EngineProvider:
         *,
         req: BenchRequest,
         mock: bool,
-        tampered_candidate: bool = False,
-        baseline_token_latency_s: float = 0.0,
-        candidate_token_latency_s: float = 0.0,
+        mock_plan: MockPlan | None = None,
         logs_dir: Path | None = None,
         weights_dir: Path | None = None,
         phase_sink: Callable[[str], None] | None = None,
+        docker_runner=None,
     ) -> None:
         self._req = req
         self._mock = mock
-        self._tampered = tampered_candidate
-        self._base_latency = baseline_token_latency_s
-        self._cand_latency = candidate_token_latency_s
+        self._mock_plan = mock_plan or MockPlan()
         self._logs_dir = logs_dir or Path(".")
+        # Test seam: a fake runner exercises the real docker argv without a daemon.
+        self._docker_runner = docker_runner
         self.weights_dir = weights_dir
         self._phase_sink = phase_sink
-        self._module_phase: BenchPhase | None = None
         self.baseline_digest = extract_image_digest(req.engines.baseline.image)
-        self.candidate_digest = extract_image_digest(req.engines.candidate.image)
-        self._mocks: tuple[MockEngine, MockEngine] | None = None
+        self.candidate_digests = [
+            extract_image_digest(c.image) for c in req.engines.candidates
+        ]
+        self.starts: list[str] = []
 
     def _write_phase(self, phase: BenchPhase) -> None:
         if self._phase_sink is not None:
             self._phase_sink(phase.value)
 
-    def _enter_module(self, phase: BenchPhase) -> None:
-        """Set the module phase; engine restarts report starting_engine then restore this."""
-        self._module_phase = phase
-        self._write_phase(phase)
-
-    def _ensure_mocks(self) -> tuple[MockEngine, MockEngine]:
-        if self._mocks is None:
-            base = MockEngine(
-                MockEngineConfig(
-                    model="mock-baseline",
-                    host="127.0.0.1",
-                    port=0,
-                    token_latency_s=self._base_latency,
-                )
+    def _mock_config(self, start: EngineStart) -> MockEngineConfig:
+        latency = self._mock_plan.baseline_token_latency_s
+        if start.candidate_index is None:
+            return MockEngineConfig(
+                model=f"mock-{start.role}",
+                host="127.0.0.1",
+                port=0,
+                token_latency_s=latency,
             )
-            cand = MockEngine(
-                MockEngineConfig(
-                    model="mock-candidate",
-                    host="127.0.0.1",
-                    port=0,
-                    tampered=self._tampered,
-                    token_latency_s=self._cand_latency,
-                )
-            )
-            base.__enter__()
-            cand.__enter__()
-            self._mocks = (base, cand)
-        return self._mocks
-
-    def shutdown(self) -> None:
-        if self._mocks is not None:
-            base, cand = self._mocks
-            cand.__exit__(None, None, None)
-            base.__exit__(None, None, None)
-            self._mocks = None
-
-    def _docker_phase(
-        self,
-        net: BenchNetwork,
-        role: str,
-        extra_serve_args: tuple[str, ...] | list[str] = (),
-    ) -> EngineContainer:
-        spec = (
-            self._req.engines.baseline
-            if role == "baseline"
-            else self._req.engines.candidate
+        plan = self._mock_plan.candidate(start.candidate_index)
+        return MockEngineConfig(
+            model=f"mock-{start.role}",
+            host="127.0.0.1",
+            port=0,
+            token_latency_s=latency,
+            speed_factor=plan.speed_factor,
+            garbage=plan.garbage,
         )
-        if extra_serve_args:
-            spec = EngineSpec(
-                image=spec.image,
-                serve_args=list(spec.serve_args) + list(extra_serve_args),
-                env=dict(spec.env),
-            )
-        # Engine load can take minutes; report starting_engine then restore the module.
+
+    @contextmanager
+    def start(self, start: EngineStart, *, phase: BenchPhase) -> Iterator[str]:
+        """Bring one planned engine up, yield its base URL, always tear it down."""
+        self.starts.append(start.role)
         self._write_phase(BenchPhase.STARTING_ENGINE)
-        module_phase = self._module_phase
-        return EngineContainer(
-            spec=spec,
-            network=net,
-            role=role,
-            gpu_count=_effective_gpu_count(self._req.hardware.gpu_count),
-            weights_dir=self.weights_dir,
-            publish_port=False,
-            pull=_should_pull_image(spec.image),
-            logs_dir=self._logs_dir,
-            on_ready=(
-                (lambda: self._write_phase(module_phase))
-                if module_phase is not None
+        if self._mock:
+            plan = (
+                self._mock_plan.candidate(start.candidate_index)
+                if start.candidate_index is not None
                 else None
-            ),
+            )
+            if plan is not None and plan.infra_fail:
+                raise EngineError(
+                    f"mock engine {start.role} failed to start",
+                    error_role=start.role,
+                )
+            engine = MockEngine(self._mock_config(start))
+            engine.__enter__()
+            try:
+                self._write_phase(phase)
+                yield engine.base_url
+            finally:
+                engine.__exit__(None, None, None)
+            return
+
+        net_kwargs = (
+            {} if self._docker_runner is None else {"runner": self._docker_runner}
         )
-
-    @staticmethod
-    def _reraise_with_role(role: str, exc: EngineError) -> None:
-        if getattr(exc, "error_role", None) is None:
-            raise EngineError(str(exc), error_role=role) from exc
-        raise exc
-
-    def run_correctness(
-        self, prompts: list[PromptCase], cfg, task_id: str, evidence_dir: Path
-    ) -> CorrectnessReport:
-        self._enter_module(BenchPhase.CORRECTNESS)
-        if self._mock:
-            base, cand = self._ensure_mocks()
-            return run_correctness(
-                base.base_url,
-                cand.base_url,
-                prompts=prompts,
-                cfg=cfg,
-                task_id=task_id,
-                evidence_dir=evidence_dir,
+        with BenchNetwork(run_id=new_run_id(), internal=True, **net_kwargs) as net:
+            container = EngineContainer(
+                spec=start.spec,
+                network=net,
+                role=start.role,
+                gpu_count=_effective_gpu_count(self._req.hardware.gpu_count),
+                weights_dir=self.weights_dir,
+                publish_port=False,
+                pull=_should_pull_image(start.spec.image),
+                logs_dir=self._logs_dir,
+                mount_engine_cache=start.mount_engine_cache,
+                on_ready=lambda: self._write_phase(phase),
             )
-        with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            try:
-                with self._docker_phase(
-                    net,
-                    "baseline",
-                    extra_serve_args=correctness_extra_serve_args(
-                        self._req.engines.baseline.serve_args
-                    ),
-                ) as base:
-                    phase = collect_baseline_correctness(
-                        base.base_url,
-                        prompts=prompts,
-                        cfg=cfg,
-                        task_id=task_id,
-                        evidence_dir=evidence_dir,
-                    )
-                    self.baseline_digest = base.image_digest
-            except EngineError as exc:
-                self._reraise_with_role("baseline", exc)
-            try:
-                with self._docker_phase(
-                    net,
-                    "candidate",
-                    extra_serve_args=correctness_extra_serve_args(
-                        self._req.engines.candidate.serve_args
-                    ),
-                ) as cand:
-                    report = finish_correctness_with_candidate(
-                        cand.base_url, phase, cfg=cfg, evidence_dir=evidence_dir
-                    )
-                    self.candidate_digest = cand.image_digest
-                    return report
-            except EngineError as exc:
-                self._reraise_with_role("candidate", exc)
-        raise AssertionError("unreachable")
-
-    def run_perf_screen(self, requests, cfg, evidence_dir: Path) -> PerfScreenReport:
-        self._enter_module(BenchPhase.PERF_SCREEN)
-        if self._mock:
-            base, cand = self._ensure_mocks()
-            return run_perf_screen(
-                base.base_url,
-                cand.base_url,
-                requests=requests,
-                cfg=cfg,
-                evidence_dir=evidence_dir,
-            )
-        with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            try:
-                with self._docker_phase(net, "baseline") as base:
-                    base_metrics = run_perf_screen_engine(
-                        base.base_url,
-                        role="baseline",
-                        requests=requests,
-                        cfg=cfg,
-                        evidence_dir=evidence_dir,
-                    )
-            except EngineError as exc:
-                self._reraise_with_role("baseline", exc)
-            try:
-                with self._docker_phase(net, "candidate") as cand:
-                    return finish_perf_screen(
-                        cand.base_url,
-                        baseline=base_metrics,
-                        requests=requests,
-                        cfg=cfg,
-                        evidence_dir=evidence_dir,
-                    )
-            except EngineError as exc:
-                self._reraise_with_role("candidate", exc)
-        raise AssertionError("unreachable")
-
-    def run_correctness_and_perf(
-        self,
-        *,
-        prompts: list[PromptCase],
-        corr_cfg,
-        task_id: str,
-        corr_dir: Path,
-        requests,
-        perf_cfg,
-        perf_dir: Path,
-    ) -> tuple[CorrectnessReport, PerfScreenReport | None]:
-        """One container per role for correctness then perf. Never share roles."""
-        self._enter_module(BenchPhase.CORRECTNESS)
-        if self._mock:
-            corr = self.run_correctness(prompts, corr_cfg, task_id, corr_dir)
-            if corr.verdict != "pass":
-                return corr, None
-            return corr, self.run_perf_screen(requests, perf_cfg, perf_dir)
-        with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            try:
-                with self._docker_phase(net, "baseline") as base:
-                    phase = collect_baseline_correctness(
-                        base.base_url,
-                        prompts=prompts,
-                        cfg=corr_cfg,
-                        task_id=task_id,
-                        evidence_dir=corr_dir,
-                    )
-                    self.baseline_digest = base.image_digest
-                    self._enter_module(BenchPhase.PERF_SCREEN)
-                    base_metrics = run_perf_screen_engine(
-                        base.base_url,
-                        role="baseline",
-                        requests=requests,
-                        cfg=perf_cfg,
-                        evidence_dir=perf_dir,
-                    )
-            except EngineError as exc:
-                self._reraise_with_role("baseline", exc)
-            self._module_phase = BenchPhase.CORRECTNESS
-            try:
-                with self._docker_phase(net, "candidate") as cand:
-                    corr = finish_correctness_with_candidate(
-                        cand.base_url,
-                        phase,
-                        cfg=corr_cfg,
-                        evidence_dir=corr_dir,
-                    )
-                    self.candidate_digest = cand.image_digest
-                    if corr.verdict != "pass":
-                        (perf_dir / base_metrics["rows_file"]).unlink(missing_ok=True)
-                        return corr, None
-                    self._enter_module(BenchPhase.PERF_SCREEN)
-                    return corr, finish_perf_screen(
-                        cand.base_url,
-                        baseline=base_metrics,
-                        requests=requests,
-                        cfg=perf_cfg,
-                        evidence_dir=perf_dir,
-                    )
-            except EngineError as exc:
-                self._reraise_with_role("candidate", exc)
-        raise AssertionError("unreachable")
-
-    def run_sla_bench(self, trace, cfg, evidence_dir: Path) -> SlaBenchReport:
-        self._enter_module(BenchPhase.SLA_BENCH)
-        if self._mock:
-            base, cand = self._ensure_mocks()
-            return run_sla_bench(
-                base.base_url,
-                cand.base_url,
-                trace=trace,
-                cfg=cfg,
-                evidence_dir=evidence_dir,
-            )
-        requests = list(trace.requests)
-        with BenchNetwork(run_id=new_run_id(), internal=True) as net:
-            try:
-                with self._docker_phase(net, "baseline") as base:
-                    base_reps = run_sla_engine(
-                        base.base_url,
-                        role="baseline",
-                        requests=requests,
-                        cfg=cfg,
-                        evidence_dir=evidence_dir,
-                    )
-            except EngineError as exc:
-                self._reraise_with_role("baseline", exc)
-            try:
-                with self._docker_phase(net, "candidate") as cand:
-                    return finish_sla_bench(
-                        cand.base_url,
-                        baseline_reps=base_reps,
-                        requests=requests,
-                        cfg=cfg,
-                        evidence_dir=evidence_dir,
-                    )
-            except EngineError as exc:
-                self._reraise_with_role("candidate", exc)
-        raise AssertionError("unreachable")
+            with container as handle:
+                if start.kind == "baseline":
+                    self.baseline_digest = handle.image_digest
+                elif start.candidate_index is not None:
+                    self.candidate_digests[start.candidate_index] = handle.image_digest
+                yield handle.base_url
 
 
-def run_all_modules(
+# ---------------------------------------------------------------------------
+# Round execution
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _CandidateRun:
+    index: int
+    status: str
+    replay: EngineReplay | None = None
+    reason: str | None = None
+
+
+def run_round(
     *,
     req: BenchRequest,
     provider: _EngineProvider,
@@ -535,99 +465,202 @@ def run_all_modules(
     trace: WorkloadTrace,
     layout: OutputLayout,
 ) -> tuple[
-    CorrectnessReport | None, PerfScreenReport | None, SlaBenchReport | None, str | None
+    EngineReplay,
+    EngineReplay,
+    list[_CandidateRun],
+    dict[int, CorrectnessReport],
 ]:
-    corr: CorrectnessReport | None = None
-    perf: PerfScreenReport | None = None
-    sla: SlaBenchReport | None = None
-    skipped_note: str | None = None
-
-    fused = req.mode == "all" and can_fuse_correctness_perf(req)
-    if fused:
-        corr, perf = provider.run_correctness_and_perf(
-            prompts=prompts,
-            corr_cfg=req.correctness,
-            task_id=req.task_id,
-            corr_dir=layout.correctness_dir,
-            requests=trace.requests,
-            perf_cfg=req.perf_screen,
-            perf_dir=layout.perf_screen_dir,
-        )
-        if corr.verdict != "pass":
-            return corr, None, None, _NOTE_CORRECTNESS_FAILED
-        if perf.verdict != "pass":
-            return corr, perf, None, _NOTE_PERF_FAILED
-
-    if not fused and req.mode in ("all", "correctness"):
-        corr = provider.run_correctness(
-            prompts, req.correctness, req.task_id, layout.correctness_dir
-        )
-        if corr.verdict != "pass":
-            skipped_note = _NOTE_CORRECTNESS_FAILED if req.mode == "all" else None
-            return corr, None, None, skipped_note
-
-    if not fused and req.mode in ("all", "perf_screen"):
-        perf = provider.run_perf_screen(
-            trace.requests, req.perf_screen, layout.perf_screen_dir
-        )
-        if perf.verdict != "pass":
-            skipped_note = _NOTE_PERF_FAILED if req.mode == "all" else None
-            return corr, perf, None, skipped_note
-
-    skip_sla = os.environ.get("PARETON_BENCH_SKIP_SLA", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
+    """Execute the whole round against one pod. Returns the raw material."""
+    requests = list(trace.requests)
+    plan = plan_round_starts(req.engines, mode=req.mode)
+    layout.append_log(
+        {"event": "round_plan", "starts": [s.role for s in plan], "count": len(plan)}
     )
-    if req.mode in ("all", "sla_bench") and not skip_sla:
-        sla = provider.run_sla_bench(trace, req.sla_bench, layout.sla_bench_dir)
 
-    return corr, perf, sla, skipped_note
+    baseline: EngineReplay | None = None
+    drift: EngineReplay | None = None
+    runs: list[_CandidateRun] = []
+    pending: list[PendingCorrectness] = []
+    correctness: dict[int, CorrectnessReport] = {}
+
+    for start in plan:
+        if start.kind in ("baseline", "drift"):
+            phase = BenchPhase.SLA_BENCH
+            try:
+                with provider.start(start, phase=phase) as url:
+                    replay = run_sla_engine(
+                        url,
+                        role=start.role,
+                        requests=requests,
+                        cfg=req.sla_bench,
+                        evidence_dir=layout.sla_bench_dir,
+                    )
+            except EngineError as exc:
+                # The baseline is the fixed reference every candidate is
+                # scored against, so the round cannot continue without it.
+                raise EngineError(str(exc), error_role="baseline") from exc
+            if start.kind == "baseline":
+                baseline = replay
+            else:
+                drift = replay
+
+        elif start.kind == "candidate":
+            index = start.candidate_index
+            assert index is not None
+            try:
+                with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
+                    replay = run_sla_engine(
+                        url,
+                        role=start.role,
+                        requests=requests,
+                        cfg=req.sla_bench,
+                        evidence_dir=layout.sla_bench_dir,
+                    )
+            except EngineError as exc:
+                # One candidate failing to run is that entry's problem, not
+                # the round's. The round continues with the rest.
+                logger.warning("candidate %d infra failure: %s", index, exc)
+                runs.append(
+                    _CandidateRun(index=index, status="infra_failed", reason=str(exc))
+                )
+                continue
+            runs.append(_CandidateRun(index=index, status="scored", replay=replay))
+            pending.append(
+                PendingCorrectness(
+                    candidate_index=index,
+                    outputs=capture_outputs(
+                        prompts, timings=replay.result.timings, outputs=replay.outputs
+                    ),
+                )
+            )
+
+        elif start.kind == "scorer":
+            if not pending:
+                continue
+            try:
+                with provider.start(start, phase=BenchPhase.CORRECTNESS) as url:
+                    correctness = grade_all(
+                        url,
+                        pending,
+                        cfg=req.correctness,
+                        evidence_dir=layout.correctness_dir,
+                    )
+            except EngineError as exc:
+                # Correctness is a hard gate, so an unusable scorer means no
+                # entry in this round can be judged.
+                raise EngineError(str(exc), error_role="scorer") from exc
+
+    if baseline is None or drift is None:
+        raise EngineError("round plan did not produce both baseline runs")
+    return baseline, drift, runs, correctness
 
 
-def _verdict(corr, perf, sla) -> str:
-    if corr is not None and corr.verdict != "pass":
-        return "fail_correctness"
-    if perf is not None and perf.verdict != "pass":
-        return "fail_perf_screen"
-    if sla is not None and sla.verdict != "pass":
-        return "fail_sla" if sla.verdict == "fail_sla" else "error"
-    return "pass"
-
-
-def build_bench_report(
+def _build_entries(
     *,
-    request_raw: bytes,
     req: BenchRequest,
-    env,
-    baseline_digest: str,
-    candidate_digest: str,
-    model_weights_sha256: str,
-    corr: CorrectnessReport | None,
-    perf: PerfScreenReport | None,
-    sla: SlaBenchReport | None,
-    skipped_note: str | None,
-    started_at: str,
-) -> BenchReport:
-    return BenchReport(
-        schema_version=1,
-        task_id=req.task_id,
-        verdict=_verdict(corr, perf, sla),  # type: ignore[arg-type]
-        started_at=started_at,
-        finished_at=_utc_now_iso(),
-        environment=env,
-        inputs_fingerprint=build_inputs_fingerprint(
-            request_raw=request_raw,
-            req=req,
-            baseline_digest=baseline_digest,
-            candidate_digest=candidate_digest,
-            model_weights_sha256=model_weights_sha256,
-        ),
-        correctness=corr,
-        perf_screen=perf,
-        sla_bench=sla,
-        skipped_note=skipped_note,
-    )
+    baseline: EngineReplay,
+    runs: list[_CandidateRun],
+    correctness: dict[int, CorrectnessReport],
+    digests: list[str],
+    mock_engine: bool = False,
+) -> list[RoundEntryReport]:
+    entries: list[RoundEntryReport] = []
+    for run in runs:
+        digest = digests[run.index] if run.index < len(digests) else ""
+        if run.status == "infra_failed" or run.replay is None:
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="infra_failed",
+                    reason=run.reason,
+                )
+            )
+            continue
+
+        corr = correctness.get(run.index)
+        if corr is not None and corr.verdict == "infra_failed":
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="infra_failed",
+                    sla=run.replay.result,
+                    correctness=corr,
+                    reason=corr.reason,
+                )
+            )
+            continue
+        if corr is not None and corr.verdict != "pass":
+            # Correctness is a hard gate: a wrong image gets no score at
+            # all, so it cannot take the crown on speed.
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="disqualified",
+                    sla=run.replay.result,
+                    correctness=corr,
+                    reason=corr.reason,
+                )
+            )
+            continue
+
+        variance = run.replay.result.cross_rep_variance or {}
+        rel_range = float(variance.get("p99_e2e_ms_rel_range") or 0.0)
+        # A mock engine sleeps on the host clock, so its spread measures the
+        # machine running the harness rather than the candidate.
+        if not mock_engine and rel_range > REPRO_BAR_MAX_REL_RANGE:
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="infra_failed",
+                    sla=run.replay.result,
+                    correctness=corr,
+                    reason=(
+                        f"p99_e2e_ms_rel_range {rel_range:.4f} exceeds "
+                        f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
+                    ),
+                )
+            )
+            continue
+
+        scored = score_candidate(
+            req.scoring_rule,
+            baseline=baseline.result.timings,
+            candidate=run.replay.result.timings,
+        )
+        entries.append(
+            RoundEntryReport(
+                index=run.index,
+                image_digest=digest,
+                status="scored",
+                score=scored.score,
+                score_report=scored.to_report(),
+                sla=run.replay.result,
+                correctness=corr,
+            )
+        )
+    return entries
+
+
+def baseline_drift(
+    req: BenchRequest, baseline: EngineReplay, drift: EngineReplay
+) -> float:
+    """How far the pod moved between the round's two baseline runs.
+
+    Drift is ``last_baseline_score - first_baseline_score``. The opening
+    baseline scores 0.0 against itself under any speedup rule, so the
+    difference is exactly the closing run's score. Positive means the pod got
+    faster while the round ran; negative, slower. A round whose drift is too
+    large was not measuring the candidates.
+    """
+    return score_candidate(
+        req.scoring_rule,
+        baseline=baseline.result.timings,
+        candidate=drift.result.timings,
+    ).score
 
 
 def _should_pull_image(image: str) -> bool:
@@ -662,9 +695,7 @@ def run_bench(
     output_dir: Path,
     *,
     mock_engine: bool = False,
-    mock_tampered_candidate: bool = False,
-    mock_baseline_token_latency_s: float = 0.0,
-    mock_candidate_token_latency_s: float = 0.0,
+    mock_plan: MockPlan | None = None,
 ) -> int:
     try:
         req, raw = load_bench_request(request_path)
@@ -672,11 +703,8 @@ def run_bench(
         print(f"error: invalid request: {exc}", file=sys.stderr)
         return EXIT_BAD_REQUEST
 
-    if mock_tampered_candidate and not mock_engine:
-        print(
-            "error: --mock-tampered-candidate requires --mock-engine",
-            file=sys.stderr,
-        )
+    if mock_plan is not None and not mock_engine:
+        print("error: --mock-candidates requires --mock-engine", file=sys.stderr)
         return EXIT_BAD_REQUEST
 
     layout = OutputLayout(output_dir)
@@ -696,12 +724,14 @@ def run_bench(
                 "event": "start",
                 "task_id": req.task_id,
                 "mode": req.mode,
+                "candidates": len(req.engines.candidates),
                 "harness_version": __version__,
                 "mock_engine": mock_engine,
             }
         )
 
-        # Load + validate the trace (and Module A prompts) before engines start.
+        # Load + validate the trace and the correctness prompts before any
+        # engine starts: a bad trace must not cost a pod-hour.
         trace_path = resolve_trace_path(
             req.workload_trace.path, request_path=request_path
         )
@@ -709,7 +739,7 @@ def run_bench(
             trace_path, expected_sha256=req.workload_trace.sha256
         )
         prompts: list[PromptCase] = []
-        if req.mode in ("all", "correctness"):
+        if req.mode == "all":
             prompts = load_correctness_prompts(
                 trace_ref_path=req.workload_trace.path,
                 expected_sha256=req.workload_trace.sha256,
@@ -722,9 +752,7 @@ def run_bench(
         provider = _EngineProvider(
             req=req,
             mock=mock_engine,
-            tampered_candidate=mock_tampered_candidate,
-            baseline_token_latency_s=mock_baseline_token_latency_s,
-            candidate_token_latency_s=mock_candidate_token_latency_s,
+            mock_plan=mock_plan,
             logs_dir=layout.correctness_dir / "engine_logs",
             weights_dir=None,
             phase_sink=layout.write_phase,
@@ -751,7 +779,7 @@ def run_bench(
                         "total_bytes": staged.total_bytes,
                     }
                 )
-            corr, perf, sla, skipped_note = run_all_modules(
+            baseline, drift, runs, correctness = run_round(
                 req=req,
                 provider=provider,
                 prompts=prompts,
@@ -778,21 +806,34 @@ def run_bench(
             except Exception as write_exc:
                 logger.error("failed to write engine error report: %s", write_exc)
             return EXIT_ENGINE
-        finally:
-            provider.shutdown()
 
-        report = build_bench_report(
-            request_raw=raw,
+        entries = _build_entries(
             req=req,
-            env=env,
-            baseline_digest=provider.baseline_digest,
-            candidate_digest=provider.candidate_digest,
-            model_weights_sha256=model_weights_sha256,
-            corr=corr,
-            perf=perf,
-            sla=sla,
-            skipped_note=skipped_note,
+            baseline=baseline,
+            runs=runs,
+            correctness=correctness,
+            digests=provider.candidate_digests,
+            mock_engine=mock_engine,
+        )
+        report = BenchReport(
+            schema_version=1,
+            task_id=req.task_id,
+            verdict="pass",
             started_at=started_at,
+            finished_at=_utc_now_iso(),
+            environment=env,
+            inputs_fingerprint=build_inputs_fingerprint(
+                request_raw=raw,
+                req=req,
+                baseline_digest=provider.baseline_digest,
+                candidate_digests=provider.candidate_digests,
+                model_weights_sha256=model_weights_sha256,
+            ),
+            scoring_rule=dict(req.scoring_rule),
+            baseline=baseline.result,
+            drift_baseline=drift.result,
+            baseline_drift=baseline_drift(req, baseline, drift),
+            entries=entries,
         )
         return _write_validated_report(layout, report)
     except RequestValidationError as exc:
@@ -802,10 +843,20 @@ def run_bench(
         _detach_logging(added)
 
 
+def _parse_mock_candidates(raw: str) -> MockPlan:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RequestValidationError(f"--mock-candidates is not valid JSON: {exc}")
+    if not isinstance(parsed, list):
+        raise RequestValidationError("--mock-candidates must be a JSON list")
+    return MockPlan(candidates=[MockCandidatePlan.from_dict(dict(c)) for c in parsed])
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m bench",
-        description="Pareton bench harness (Stages 1–3).",
+        description="Pareton round bench harness.",
     )
     p.add_argument(
         "--request", required=True, type=Path, help="Path to bench_request.json"
@@ -817,32 +868,38 @@ def main(argv: list[str] | None = None) -> int:
         help="Use in-process mock engines (no Docker/GPU).",
     )
     p.add_argument(
-        "--mock-tampered-candidate",
-        action="store_true",
-        help="With --mock-engine, offset candidate logprobs (adversarial fail).",
-    )
-    p.add_argument(
         "--mock-baseline-token-latency-s",
         type=float,
         default=0.0,
-        help="With --mock-engine, per-token latency (s) for the baseline engine.",
+        help="With --mock-engine, per-token latency (s) every mock engine starts from.",
     )
     p.add_argument(
-        "--mock-candidate-token-latency-s",
-        type=float,
-        default=0.0,
-        help="With --mock-engine, per-token latency (s) for the candidate engine.",
+        "--mock-candidates",
+        default=None,
+        help=(
+            "With --mock-engine, a JSON list scripting each candidate, e.g. "
+            '\'[{"speed_factor": 1.5}, {"garbage": true}, {"infra_fail": true}]\''
+        ),
     )
     p.add_argument("--version", action="version", version=f"bench {__version__}")
     args = p.parse_args(argv)
+
+    plan: MockPlan | None = None
+    if args.mock_candidates is not None:
+        try:
+            plan = _parse_mock_candidates(args.mock_candidates)
+        except RequestValidationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return EXIT_BAD_REQUEST
+    if args.mock_baseline_token_latency_s:
+        plan = plan or MockPlan()
+        plan.baseline_token_latency_s = args.mock_baseline_token_latency_s
 
     return run_bench(
         args.request,
         args.output_dir,
         mock_engine=args.mock_engine,
-        mock_tampered_candidate=args.mock_tampered_candidate,
-        mock_baseline_token_latency_s=args.mock_baseline_token_latency_s,
-        mock_candidate_token_latency_s=args.mock_candidate_token_latency_s,
+        mock_plan=plan,
     )
 
 

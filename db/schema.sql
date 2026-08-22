@@ -1,5 +1,6 @@
--- Pareton schema (Neon Postgres): Stage 0 + bench (WS-D/WS-E).
--- Source of truth for campaigns, submissions, provenance events, and bench jobs.
+-- Pareton schema (Neon Postgres): Stage 0 + rounds.
+-- Source of truth for campaigns, submissions, provenance events, gate jobs,
+-- rounds, round entries, and leaders.
 -- Single canonical schema file: no migration files while the project is pre-launch.
 -- Apply wholesale to a fresh database: psql "$PARETON_DATABASE_URL" -f db/schema.sql
 -- Schema changes pre-launch: edit this file and apply the delta by hand.
@@ -39,7 +40,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   status TEXT NOT NULL DEFAULT 'draft'
     CHECK (status IN ('draft', 'open', 'closed')),
   bench JSONB,
-  -- Build/launch recipe (campaign.engine): {name, install_cmd, entrypoint}.
+  -- Build/launch recipe (campaign.engine):
+  -- {name, install_cmd, entrypoint, cache_dir}.
   -- NULL means the vLLM default and is excluded from manifest_hash, so
   -- campaigns pinned before engine profiles existed keep their hash.
   engine JSONB,
@@ -47,11 +49,9 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- Sampler pin: {type: "hf_rows", dataset, revision, n_rows, n_prompts, ...}.
   -- NULL ⇒ no dynamic sampling (use fixed workload_trace_*).
   sampling_rule JSONB,
-  -- Z-score promotion distribution: {metrics: {name: {mean, std}, ...}, ...}.
-  -- Distinct from bench.correctness.calibration (threshold fingerprint).
-  calibration JSONB,
-  -- Promote when aggregate_z < z_threshold (and no hard error).
-  z_threshold NUMERIC,
+  -- Named ranking rule, pinned in manifest_hash: {name: "median_e2e_speedup"}.
+  -- Fixed once the campaign leaves 'draft'.
+  scoring_rule JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)
@@ -72,11 +72,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   payment_tx INTEGER,
   committed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   engine_image_ref TEXT,
-  -- Realized workload sample (dynamic pool). NULL when campaign has no pool.
-  sample_seed_block INTEGER,
-  sample_seed_block_hash TEXT,
-  sampled_trace_sha256 TEXT,
-  sampling_receipt JSONB,
+  -- Workload sampling is per round now; see rounds.seed_block and friends.
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (campaign_id, patch_hash)
 );
@@ -105,8 +101,6 @@ CREATE INDEX IF NOT EXISTS submission_events_submission_id_idx
 CREATE TABLE IF NOT EXISTS submission_jobs (
   id BIGSERIAL PRIMARY KEY,
   submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL DEFAULT 'gates'
-    CHECK (kind IN ('gates', 'bench')),
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'running', 'done', 'failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -117,34 +111,121 @@ CREATE TABLE IF NOT EXISTS submission_jobs (
     CHECK (phase IS NULL OR phase IN ('provisioning', 'bootstrapping',
                                       'pulling_image', 'downloading_model',
                                       'starting_engine', 'correctness',
-                                      'perf_screen', 'sla_bench', 'teardown')),
+                                      'sla_bench', 'teardown')),
   phase_started_at TIMESTAMPTZ,
   heartbeat_at TIMESTAMPTZ,
   progress JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (submission_id, kind)
+  UNIQUE (submission_id)
 );
 
 CREATE INDEX IF NOT EXISTS submission_jobs_status_idx ON submission_jobs (status, created_at);
 
-CREATE TABLE IF NOT EXISTS bench_reports (
-  id BIGSERIAL PRIMARY KEY,
-  submission_id UUID NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
-  task_id TEXT NOT NULL,
-  stage TEXT NOT NULL
-    CHECK (stage IN ('correctness', 'perf_screen', 'sla_bench', 'promotion')),
-  verdict TEXT NOT NULL,
-  report JSONB NOT NULL DEFAULT '{}'::jsonb,
-  evidence_s3_url TEXT,
-  gpu_sku TEXT NOT NULL DEFAULT 'unknown',
-  mock BOOLEAN NOT NULL DEFAULT false,
-  z_scores JSONB,
-  aggregate_z NUMERIC,
-  promoted BOOLEAN,
+-- Round-based benchmarking. One round rents one pod, draws one prompt set, and
+-- runs the baseline, the leader, and every challenger against that set.
+CREATE TABLE IF NOT EXISTS rounds (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_id UUID NOT NULL REFERENCES campaigns(id),
+  ordinal INTEGER NOT NULL,
+  gpu_sku TEXT NOT NULL,
+  seed_block INTEGER NOT NULL,
+  seed_block_hash TEXT NOT NULL,
+  seed_hex TEXT NOT NULL,
+  sampled_trace_sha256 TEXT NOT NULL,
+  sampling_receipt JSONB NOT NULL DEFAULT '{}'::jsonb,
+  scoring_rule JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'complete', 'void')),
+  void_reason TEXT,
+  incumbent_submission_id UUID REFERENCES submissions(id),
+  winner_submission_id UUID REFERENCES submissions(id),
+  leader_changed BOOLEAN,
+  baseline_drift NUMERIC,
+  phase TEXT CHECK (phase IS NULL OR phase IN (
+    'provisioning', 'bootstrapping', 'pulling_image', 'downloading_model',
+    'starting_engine', 'sla_bench', 'correctness', 'teardown')),
+  phase_started_at TIMESTAMPTZ,
+  heartbeat_at TIMESTAMPTZ,
+  progress JSONB,
+  current_entry_id BIGINT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (submission_id, stage, gpu_sku)
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  UNIQUE (campaign_id, ordinal)
 );
 
-CREATE INDEX IF NOT EXISTS bench_reports_submission_id_idx
-  ON bench_reports (submission_id);
+-- At most one live round per campaign.
+CREATE UNIQUE INDEX IF NOT EXISTS rounds_one_live_per_campaign_idx
+  ON rounds (campaign_id) WHERE status IN ('pending', 'running');
+
+-- One image run inside one round. score is NULL for a disqualified or
+-- infra-failed entry; 0.0 is a real score and means baseline speed. The
+-- baseline entry stores score 0.0 and anchors the chart zero line.
+CREATE TABLE IF NOT EXISTS round_entries (
+  id BIGSERIAL PRIMARY KEY,
+  round_id UUID NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
+  submission_id UUID REFERENCES submissions(id),
+  role TEXT NOT NULL CHECK (role IN ('baseline', 'leader', 'challenger')),
+  engine_image_ref TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'running', 'scored', 'disqualified',
+                      'infra_failed')),
+  score NUMERIC,
+  disqualify_reason TEXT,
+  report JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_s3_url TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- The baseline row carries submission_id IS NULL, and a default UNIQUE
+  -- treats every NULL as distinct, so without NULLS NOT DISTINCT one round
+  -- could hold many NULL-id rows. Needs Postgres 15+; Neon runs 17.
+  UNIQUE NULLS NOT DISTINCT (round_id, submission_id),
+  -- The baseline is the campaign's pinned engine, not a submission. Every
+  -- other role is a submission. Both directions are held here so a writer
+  -- cannot insert a NULL-id challenger or a submission-backed baseline.
+  CHECK (
+    (role = 'baseline' AND submission_id IS NULL)
+    OR (role <> 'baseline' AND submission_id IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS round_entries_one_baseline_idx
+  ON round_entries (round_id) WHERE role = 'baseline';
+
+CREATE INDEX IF NOT EXISTS round_entries_submission_id_idx
+  ON round_entries (submission_id);
+
+-- One leader per campaign. A vacant crown has no row.
+CREATE TABLE IF NOT EXISTS leaders (
+  campaign_id UUID PRIMARY KEY REFERENCES campaigns(id),
+  submission_id UUID NOT NULL REFERENCES submissions(id),
+  engine_image_ref TEXT NOT NULL,
+  hotkey TEXT NOT NULL,
+  won_at_round_id UUID NOT NULL REFERENCES rounds(id),
+  won_at_ordinal INTEGER NOT NULL,
+  last_score NUMERIC NOT NULL,
+  last_scored_round_id UUID REFERENCES rounds(id),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS leader_history (
+  id BIGSERIAL PRIMARY KEY,
+  campaign_id UUID NOT NULL REFERENCES campaigns(id),
+  round_id UUID NOT NULL REFERENCES rounds(id),
+  ordinal INTEGER NOT NULL,
+  event TEXT NOT NULL CHECK (event IN ('seated', 'overtaken', 'vacated')),
+  new_submission_id UUID REFERENCES submissions(id),
+  new_hotkey TEXT,
+  new_score NUMERIC,
+  prev_submission_id UUID REFERENCES submissions(id),
+  prev_hotkey TEXT,
+  prev_score NUMERIC,
+  overtake_threshold NUMERIC,
+  epsilon NUMERIC NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS leader_history_campaign_id_idx
+  ON leader_history (campaign_id, created_at);

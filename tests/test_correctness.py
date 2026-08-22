@@ -1,4 +1,4 @@
-"""Module A correctness gate — in-process mock engines, no Docker."""
+"""Correctness gate: the shared scorer grades captured output. No Docker."""
 
 from __future__ import annotations
 
@@ -8,18 +8,28 @@ from pathlib import Path
 import pytest
 
 from bench.correctness import (
+    CapturedOutput,
+    PendingCorrectness,
     PromptCase,
+    capture_outputs,
     extract_output_logprobs,
+    grade_all,
+    grade_candidate,
     post_completion,
     probe_logprob_capability,
     resolve_trace_path,
-    run_correctness,
-    scoring_order,
     select_correctness_prompts,
 )
 from bench.lifecycle import EngineError
-from bench.mock_engine import MockEngine, MockEngineConfig, build_completion_response
+from bench.mock_engine import (
+    GARBAGE_MARKER,
+    GARBAGE_TEXT,
+    MockEngine,
+    MockEngineConfig,
+    build_completion_response,
+)
 from bench.schemas import CorrectnessConfig, CorrectnessThresholds
+from bench.score import PromptTiming
 from bench.validate import RequestValidationError, sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,20 +38,27 @@ SAMPLE_TRACE = ROOT / "fixtures" / "bench" / "sample_trace.json"
 
 def _cfg(
     *,
-    mean: float = 0.005,
-    max_d: float = 0.05,
-    argmax: float = 0.001,
+    min_mean: float = -4.0,
+    min_token: float = -12.0,
+    coverage: float = 0.5,
     num_prompts: int = 2,
-    max_new: int = 2,
 ) -> CorrectnessConfig:
     return CorrectnessConfig(
         num_prompts=num_prompts,
-        max_new_tokens=max_new,
         thresholds=CorrectnessThresholds(
-            mean_abs_logprob_diff=mean,
-            max_abs_logprob_diff=max_d,
-            argmax_mismatch_rate=argmax,
+            min_mean_logprob=min_mean,
+            min_token_logprob=min_token,
+            min_coverage_ratio=coverage,
         ),
+    )
+
+
+def _captured(request_id: str, prompt: str, text: str, tokens: int = 2):
+    return CapturedOutput(
+        request_id=request_id,
+        prompt=prompt,
+        output_text=text,
+        completion_tokens=tokens,
     )
 
 
@@ -97,14 +114,6 @@ def test_select_rejects_token_ids_only(tmp_path: Path):
             expected_sha256=sha256_bytes(raw),
             num_prompts=1,
         )
-
-
-def test_scoring_order_deterministic_by_task_id():
-    ids = ["a", "b", "c", "d", "e"]
-    t1 = "550e8400-e29b-41d4-a716-446655440000"
-    t2 = "550e8400-e29b-41d4-a716-446655440001"
-    assert scoring_order(ids, t1) == scoring_order(ids, t1)
-    assert scoring_order(ids, t1) != scoring_order(ids, t2)
 
 
 def test_extract_skips_null_and_prompt_portion():
@@ -212,54 +221,23 @@ def test_extract_non_numeric_logprobs_is_engine_error():
         extract_output_logprobs(resp, original_prompt="", continuation="ab")
 
 
-def test_empty_baseline_continuation_is_engine_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """A prompt with empty greedy output must not be silently skipped."""
-    from bench.correctness import post_completion
-
-    real_post = post_completion
-
-    def empty_generate(url, *, prompt, max_tokens=16, echo=False, **kwargs):
-        if not echo and max_tokens > 0:
-            return {"choices": [{"text": ""}]}
-        return real_post(url, prompt=prompt, max_tokens=max_tokens, echo=echo, **kwargs)
-
-    monkeypatch.setattr("bench.correctness.post_completion", empty_generate)
-    prompts = [PromptCase(id="p1", prompt="Hello world")]
-    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base:
-        with pytest.raises(EngineError, match="empty continuation"):
-            run_correctness(
-                base.base_url,
-                base.base_url,
-                prompts=prompts,
-                cfg=_cfg(num_prompts=1),
-                task_id="550e8400-e29b-41d4-a716-446655440000",
-                evidence_dir=tmp_path / "correctness",
-            )
-
-
 def test_probe_logprob_capability_ok():
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as eng:
         resp = probe_logprob_capability(eng.base_url)
         assert "choices" in resp
 
 
-def test_run_correctness_writes_response_shape(tmp_path: Path):
+def test_grade_all_writes_response_shape(tmp_path: Path):
     from bench.correctness import SHAPE_EVIDENCE_FILENAME
 
-    prompts = [PromptCase(id="a", prompt="Hello "), PromptCase(id="b", prompt="Hi ")]
+    pending = [
+        PendingCorrectness(
+            candidate_index=0, outputs=[_captured("a", "Hello ", "there now")]
+        )
+    ]
     evidence = tmp_path / "correctness"
-    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base:
-        with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand:
-            run_correctness(
-                base.base_url,
-                cand.base_url,
-                prompts=prompts,
-                cfg=_cfg(),
-                task_id="t",
-                evidence_dir=evidence,
-            )
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        grade_all(scorer.base_url, pending, cfg=_cfg(), evidence_dir=evidence)
     shape_path = evidence / SHAPE_EVIDENCE_FILENAME
     assert shape_path.is_file()
     payload = json.loads(shape_path.read_text(encoding="utf-8"))
@@ -299,189 +277,230 @@ def test_probe_raises_when_logprobs_missing(monkeypatch):
             probe_logprob_capability(eng.base_url)
 
 
-def test_baseline_vs_baseline_passes(tmp_path: Path):
-    prompts = select_correctness_prompts(
-        trace_path=SAMPLE_TRACE,
-        expected_sha256=sha256_file(SAMPLE_TRACE),
-        num_prompts=2,
-    )
-    with (
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
-    ):
-        report = run_correctness(
-            base.base_url,
-            cand.base_url,
-            prompts=prompts,
-            cfg=_cfg(),
-            task_id="550e8400-e29b-41d4-a716-446655440000",
-            evidence_dir=tmp_path / "correctness",
+def test_capture_outputs_pairs_prompts_with_what_the_engine_emitted():
+    prompts = [PromptCase(id="r1", prompt="Hello "), PromptCase(id="r2", prompt="Hi ")]
+    timings = {"r1": PromptTiming(ttft_s=0.1, itl_s=[0.01], completion_tokens=2)}
+    captured = capture_outputs(prompts, timings=timings, outputs={"r1": "there now"})
+    # r2 was never answered, so there is nothing to grade for it.
+    assert [c.request_id for c in captured] == ["r1"]
+    assert captured[0].prompt == "Hello "
+    assert captured[0].output_text == "there now"
+    assert captured[0].completion_tokens == 2
+
+
+def test_plausible_output_passes(tmp_path: Path):
+    outputs = [
+        _captured("r1", "Hello world", " OK OK"),
+        _captured("r2", "Second prompt", " OK OK"),
+    ]
+    evidence = tmp_path / "correctness" / "candidate_0.jsonl"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url, outputs, cfg=_cfg(), evidence_path=evidence
         )
     assert report.verdict == "pass"
     assert report.num_prompts == 2
-    assert report.num_positions_compared > 0
-    assert report.mean_abs_logprob_diff == 0.0
-    assert report.max_abs_logprob_diff == 0.0
-    assert report.argmax_mismatch_rate == 0.0
-    assert report.argmax_mismatches == 0
-    evidence = tmp_path / "correctness" / "logprob_diffs.jsonl"
+    assert report.num_positions_scored > 0
+    assert report.mean_logprob > -4.0
+    assert report.reason is None
     assert evidence.is_file()
-    assert not (tmp_path / "correctness" / "logprob_diffs.jsonl.partial").exists()
+    assert not evidence.with_suffix(".jsonl.partial").exists()
     lines = evidence.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == report.num_positions_compared
+    assert len(lines) == 2
 
 
-def test_threshold_equality_is_fail(tmp_path: Path):
-    """Thresholds are exclusive: equality fails."""
-    prompts = [PromptCase(id="p1", prompt="Hello world")]
-    with (
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
-    ):
-        report = run_correctness(
-            base.base_url,
-            cand.base_url,
-            prompts=prompts,
-            cfg=_cfg(mean=0.0, max_d=0.0, argmax=0.0, num_prompts=1),
-            task_id="550e8400-e29b-41d4-a716-446655440000",
-            evidence_dir=tmp_path / "correctness",
+def test_garbage_output_is_disqualified(tmp_path: Path):
+    """Correctness is a hard gate, and the scorer judges the text itself."""
+    outputs = [_captured("r1", "Hello world", GARBAGE_TEXT, tokens=3)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
-    assert report.mean_abs_logprob_diff == 0.0
+    assert report.verdict == "fail_correctness"
+    assert report.min_logprob <= -30.0
+    assert "logprob" in (report.reason or "")
+
+
+def test_a_different_but_plausible_output_still_passes(tmp_path: Path):
+    """The gate asks for plausibility, not for a specific answer.
+
+    The scorer's own greedy continuation is " OK"; this candidate emitted
+    something else entirely and still passes, because the bar is whether the
+    pinned model finds the output plausible, not whether it matches a
+    reference run token for token.
+    """
+    outputs = [_captured("r1", "Hello world", " something else entirely", tokens=3)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "pass"
+
+
+def test_empty_output_fails_correctness(tmp_path: Path):
+    outputs = [_captured("r1", "Hello world", "", tokens=0)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert "no output" in (report.reason or "")
+
+
+def test_no_logprobs_at_all_is_infra_not_disqualification(tmp_path: Path):
+    """With nothing scored there is no evidence either way, so the entry is
+    requeued rather than disqualified."""
+
+    def nothing(resp, *, original_prompt: str, continuation: str):
+        return []
+
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        import bench.correctness as correctness
+
+        real = correctness.extract_output_logprobs
+        correctness.extract_output_logprobs = nothing
+        try:
+            report = grade_candidate(
+                scorer.base_url,
+                [_captured("r1", "Hello world", " OK OK")],
+                cfg=_cfg(num_prompts=1),
+                evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            )
+        finally:
+            correctness.extract_output_logprobs = real
+    assert report.verdict == "infra_failed"
+    assert report.num_positions_scored == 0
+
+
+def test_a_candidate_cannot_trade_disqualification_for_a_requeue(tmp_path: Path):
+    """Coverage is measured on what the scorer saw, not on what the candidate
+    says it emitted, and bad output is judged on the evidence there is.
+
+    An engine reporting a huge token count while emitting nonsense would
+    otherwise land under the coverage floor and be requeued instead of
+    disqualified.
+    """
+    outputs = [_captured("r1", "Hello world", GARBAGE_TEXT, tokens=100_000)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert report.coverage_ratio == 1.0
+
+
+def test_one_candidate_the_scorer_chokes_on_does_not_stop_the_batch(tmp_path: Path):
+    """The forced text is whatever a candidate engine chose to emit, so one
+    entry can fail to grade on input nobody else sent."""
+    import bench.correctness as correctness
+
+    real = correctness.extract_output_logprobs
+
+    def fail_on_garbage(resp, *, original_prompt: str, continuation: str):
+        if GARBAGE_MARKER in continuation:
+            raise EngineError("echo logprobs did not reconstruct the forced sequence")
+        return real(resp, original_prompt=original_prompt, continuation=continuation)
+
+    pending = [
+        PendingCorrectness(
+            candidate_index=0, outputs=[_captured("r1", "Hello world", " OK OK")]
+        ),
+        PendingCorrectness(
+            candidate_index=1,
+            outputs=[_captured("r1", "Hello world", GARBAGE_TEXT, tokens=3)],
+        ),
+        PendingCorrectness(
+            candidate_index=2, outputs=[_captured("r1", "Hello world", " OK OK")]
+        ),
+    ]
+    correctness.extract_output_logprobs = fail_on_garbage
+    try:
+        with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+            reports = grade_all(
+                scorer.base_url,
+                pending,
+                cfg=_cfg(num_prompts=1),
+                evidence_dir=tmp_path / "correctness",
+            )
+    finally:
+        correctness.extract_output_logprobs = real
+    assert set(reports) == {0, 1, 2}
+    assert reports[0].verdict == "pass"
+    assert reports[1].verdict == "infra_failed"
+    assert "could not grade" in (reports[1].reason or "")
+    # The entries either side of the bad one are still graded normally.
+    assert reports[2].verdict == "pass"
+
+
+def test_threshold_is_exclusive(tmp_path: Path):
+    """A mean exactly at the bar fails: the check is strictly-below."""
+    outputs = [_captured("r1", "Hello world", " OK OK")]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(min_mean=0.0, num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
     assert report.verdict == "fail_correctness"
 
 
-def test_min_positions_compared_raises_engine_error(tmp_path: Path):
-    prompts = [PromptCase(id="p1", prompt="Hello world")]
-    cfg = CorrectnessConfig(
-        num_prompts=1,
-        max_new_tokens=2,
-        thresholds=CorrectnessThresholds(
-            mean_abs_logprob_diff=1.0,
-            max_abs_logprob_diff=1.0,
-            argmax_mismatch_rate=1.0,
+def test_one_scorer_grades_every_candidate(tmp_path: Path):
+    """One scorer start produces a verdict for every candidate in the round."""
+    pending = [
+        PendingCorrectness(
+            candidate_index=0, outputs=[_captured("r1", "Hello world", " OK OK")]
         ),
-        min_positions_compared=10_000,
-    )
-    with (
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
-    ):
-        with pytest.raises(EngineError, match="min_positions_compared"):
-            run_correctness(
-                base.base_url,
-                cand.base_url,
-                prompts=prompts,
-                cfg=cfg,
-                task_id="550e8400-e29b-41d4-a716-446655440000",
-                evidence_dir=tmp_path / "correctness",
-            )
+        PendingCorrectness(
+            candidate_index=1,
+            outputs=[_captured("r1", "Hello world", GARBAGE_TEXT, tokens=3)],
+        ),
+    ]
+    evidence = tmp_path / "correctness"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        reports = grade_all(
+            scorer.base_url, pending, cfg=_cfg(num_prompts=1), evidence_dir=evidence
+        )
+    assert set(reports) == {0, 1}
+    assert reports[0].verdict == "pass"
+    assert reports[1].verdict == "fail_correctness"
+    assert (evidence / "candidate_0.jsonl").is_file()
+    assert (evidence / "candidate_1.jsonl").is_file()
 
 
 def test_partial_evidence_left_on_engine_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Mid-run EngineError must not promote .partial to the final evidence name."""
-    from bench.correctness import extract_output_logprobs
 
-    real_extract = extract_output_logprobs
-    calls = {"n": 0}
+    def boom(resp, *, original_prompt: str, continuation: str):
+        raise EngineError("simulated scorer failure")
 
-    def fail_on_candidate(resp, *, original_prompt: str, continuation: str):
-        scores = real_extract(
-            resp, original_prompt=original_prompt, continuation=continuation
-        )
-        calls["n"] += 1
-        if calls["n"] > 1:
-            raise EngineError("simulated candidate score failure")
-        return scores
-
-    monkeypatch.setattr("bench.correctness.extract_output_logprobs", fail_on_candidate)
-    prompts = [PromptCase(id="p1", prompt="Hello world")]
+    monkeypatch.setattr("bench.correctness.extract_output_logprobs", boom)
     evidence_dir = tmp_path / "correctness"
     evidence_dir.mkdir(parents=True)
-    prior = evidence_dir / "logprob_diffs.jsonl"
+    prior = evidence_dir / "candidate_0.jsonl"
     prior.write_text('{"prior":true}\n', encoding="utf-8")
-    with (
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
-    ):
-        with pytest.raises(EngineError, match="simulated candidate"):
-            run_correctness(
-                base.base_url,
-                cand.base_url,
-                prompts=prompts,
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        with pytest.raises(EngineError, match="simulated scorer"):
+            grade_candidate(
+                scorer.base_url,
+                [_captured("r1", "Hello world", " OK OK")],
                 cfg=_cfg(num_prompts=1),
-                task_id="550e8400-e29b-41d4-a716-446655440000",
-                evidence_dir=evidence_dir,
+                evidence_path=prior,
             )
-    assert (evidence_dir / "logprob_diffs.jsonl.partial").is_file()
+    assert (evidence_dir / "candidate_0.jsonl.partial").is_file()
     # Failed retry must not erase a prior successful evidence file.
     assert prior.read_text(encoding="utf-8") == '{"prior":true}\n'
-
-
-def test_tampered_candidate_fails(tmp_path: Path):
-    prompts = [
-        PromptCase(id="p1", prompt="Hello world"),
-        PromptCase(id="p2", prompt="Second prompt"),
-    ]
-    with (
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0, tampered=True)) as cand,
-    ):
-        report = run_correctness(
-            base.base_url,
-            cand.base_url,
-            prompts=prompts,
-            cfg=_cfg(),
-            task_id="550e8400-e29b-41d4-a716-446655440000",
-            evidence_dir=tmp_path / "correctness",
-        )
-    assert report.verdict == "fail_correctness"
-    # Tamper offset is +1.0 — well above thresholds.
-    assert report.mean_abs_logprob_diff >= 0.9
-    assert report.max_abs_logprob_diff >= 0.9
-
-
-def test_forced_token_mismatch_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Logprob diffs are undefined when engines report different forced tokens."""
-    from bench.correctness import _PositionScore, extract_output_logprobs
-
-    real_extract = extract_output_logprobs
-    calls = {"n": 0}
-
-    def mutate_candidate_tokens(resp, *, original_prompt: str, continuation: str):
-        scores = real_extract(
-            resp, original_prompt=original_prompt, continuation=continuation
-        )
-        calls["n"] += 1
-        # Baseline phase extracts first; candidate phase extracts afterward.
-        if calls["n"] > 1 and scores:
-            return [
-                _PositionScore(
-                    position=s.position,
-                    token=s.token + "_X",
-                    text_offset=s.text_offset,
-                    logprob=s.logprob,
-                    top1=s.top1,
-                )
-                for s in scores
-            ]
-        return scores
-
-    monkeypatch.setattr(
-        "bench.correctness.extract_output_logprobs", mutate_candidate_tokens
-    )
-    prompts = [PromptCase(id="p1", prompt="Hello world")]
-    with (
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as base,
-        MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as cand,
-    ):
-        with pytest.raises(EngineError, match="forced token mismatch"):
-            run_correctness(
-                base.base_url,
-                cand.base_url,
-                prompts=prompts,
-                cfg=_cfg(num_prompts=1),
-                task_id="550e8400-e29b-41d4-a716-446655440000",
-                evidence_dir=tmp_path / "correctness",
-            )

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 REMOTE_REPO = "/opt/pareton"
 REMOTE_VENV = f"{REMOTE_REPO}/.venv"
 REMOTE_HF_CACHE = "/workspace/hf-cache"
-REMOTE_ENGINE_CACHE = "/workspace/sglang-cache"
+REMOTE_ENGINE_CACHE = "/workspace/engine-cache"
 
 
 def local_code_sha(repo_root: Path) -> str:
@@ -210,11 +210,26 @@ def pull_engine_images(
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
 ) -> None:
-    """Source env_file, docker login (stdin), then pull. Token never on argv."""
+    """Source env_file, docker login (stdin), then pull. Token never on argv.
+
+    The pulls are best-effort warming, not a gate. bench/lifecycle.py pulls
+    each image again at its own start turn, and bench/main.py turns a failure
+    there into infra_failed for that one entry, which is decision 28: the round
+    continues with the rest. Chaining these with && let one bad challenger
+    image abort a whole 9-start round before any engine started.
+
+    The login and the env file stay a gate. A bad GHCR token is host auth, not
+    a candidate fault, and decision 28 does not cover it: failing fast here
+    beats staging hundreds of GB of weights first and then voiding the round.
+    """
     if not image_refs:
         return
     docker = remote_docker(pod)
-    pulls = " && ".join(f"{docker} pull {shlex.quote(img)}" for img in image_refs)
+    # Braces keep the group bound to the login's &&; without them only the
+    # first pull would be skipped when the login fails. The trailing `true`
+    # keeps a failed pull out of the exit code, so ssh_exec stays checked and
+    # only login or env-file failures raise.
+    pulls = "; ".join(f"{docker} pull {shlex.quote(img)}" for img in image_refs)
     env_q = shlex.quote(env_file)
     # Single shell so login sees vars from the env file; password via stdin.
     remote = (
@@ -231,7 +246,7 @@ def pull_engine_images(
         'sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker" 2>/dev/null || true; '
         "fi; "
         "fi && "
-        f"{pulls}"
+        f"{{ {pulls}; true; }}"
     )
     ssh_exec(
         pod,

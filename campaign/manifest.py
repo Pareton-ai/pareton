@@ -14,6 +14,7 @@ from .models import (
     CustomerSignoff,
     SLA,
     validate_priority_metric,
+    validate_scoring_rule,
 )
 
 
@@ -50,15 +51,17 @@ def freeze_manifest_fields(
     engine: dict[str, Any] | None = None,
     workload_pool: list[dict[str, Any]] | None = None,
     sampling_rule: dict[str, Any] | None = None,
-    z_threshold: float | None = None,
+    scoring_rule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
 
     Include ``bench`` only when not None so pre-WS-D campaign hashes stay valid.
     ``engine`` follows the same rule: absent means the vLLM default, and every
     campaign hashed before engine profiles existed keeps its hash.
-    ``workload_pool``, ``sampling_rule``, and ``z_threshold`` use the same
-    absent-means-unpinned rule.
+    ``workload_pool`` and ``sampling_rule`` use the same absent-means-unpinned
+    rule. ``scoring_rule`` does not: it is always pinned, because the scoring
+    formula is part of what a miner competes on, so two campaigns with the same
+    hash must rank identically. None means the default rule.
 
     The submission window used to be pinned here as ``window``. It was dropped
     with the feature, so campaigns hashed before that no longer recompute to
@@ -84,6 +87,7 @@ def freeze_manifest_fields(
         "denied_paths": list(denied_paths),
         "priority_metric": validate_priority_metric(priority_metric),
         "success_threshold": success_threshold,
+        "scoring_rule": validate_scoring_rule(scoring_rule),
     }
     if bench is not None:
         out["bench"] = bench
@@ -93,8 +97,6 @@ def freeze_manifest_fields(
         out["workload_pool"] = _canon(list(workload_pool))
     if sampling_rule is not None:
         out["sampling_rule"] = _canon(dict(sampling_rule))
-    if z_threshold is not None:
-        out["z_threshold"] = float(z_threshold)
     return out
 
 
@@ -129,7 +131,7 @@ def build_manifest(
     engine: dict[str, Any] | None = None,
     workload_pool: list[dict[str, Any]] | None = None,
     sampling_rule: dict[str, Any] | None = None,
-    z_threshold: float | None = None,
+    scoring_rule: dict[str, Any] | None = None,
     created_at: datetime | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
@@ -152,7 +154,7 @@ def build_manifest(
         engine=engine,
         workload_pool=workload_pool,
         sampling_rule=sampling_rule,
-        z_threshold=z_threshold,
+        scoring_rule=scoring_rule,
     )
     mh = manifest_hash or compute_manifest_hash(fields)
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
@@ -161,7 +163,7 @@ def build_manifest(
     engine_obj = fields.get("engine")
     pool_obj = fields.get("workload_pool")
     rule_obj = fields.get("sampling_rule")
-    z_obj = fields.get("z_threshold")
+    scoring_obj = fields["scoring_rule"]
     return CampaignManifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
@@ -187,6 +189,6 @@ def build_manifest(
         engine=engine_obj,
         workload_pool=list(pool_obj) if isinstance(pool_obj, list) else None,
         sampling_rule=dict(rule_obj) if isinstance(rule_obj, dict) else None,
-        z_threshold=float(z_obj) if z_obj is not None else None,
+        scoring_rule=dict(scoring_obj),
         created_at=created_at,
     )

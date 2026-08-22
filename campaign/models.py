@@ -20,6 +20,33 @@ PRIORITY_METRICS = frozenset(
 )
 
 
+# Named ranking rules. One implementation ships today; bench/score.py holds the
+# implementations and dispatches on the name.
+SCORING_RULE_NAMES = frozenset({"median_e2e_speedup"})
+
+DEFAULT_SCORING_RULE: dict[str, Any] = {"name": "median_e2e_speedup"}
+
+
+def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate campaigns.scoring_rule; return a normalized copy.
+
+    None means the default rule. The rule is pinned in manifest_hash, so two
+    campaigns with the same hash rank identically.
+    """
+    if rule is None:
+        return dict(DEFAULT_SCORING_RULE)
+    if not isinstance(rule, dict):
+        raise ValueError("scoring_rule must be an object")
+    name = str(rule.get("name") or "").strip()
+    if name not in SCORING_RULE_NAMES:
+        raise ValueError(
+            f"scoring_rule.name must be one of {sorted(SCORING_RULE_NAMES)}, "
+            f"got {rule.get('name')!r}"
+        )
+    out = {k: rule[k] for k in sorted(rule) if k != "name"}
+    return {"name": name, **out}
+
+
 def validate_priority_metric(value: str) -> str:
     """Validate campaigns.priority_metric; return the normalized value."""
     cleaned = str(value).strip().lower()
@@ -116,12 +143,15 @@ class CampaignManifest:
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
     engine: dict[str, Any] | None = None
-    # Dynamic sampling + z-score promotion. None stays out of the manifest
-    # pin set (same back-compat rule as bench/engine). workload_pool is
-    # unused by the sampler; sampling_rule.type hf_rows generates traces.
+    # Dynamic sampling. None stays out of the manifest pin set (same
+    # back-compat rule as bench/engine). workload_pool is unused by the
+    # sampler; sampling_rule.type hf_rows generates traces.
     workload_pool: list[dict[str, Any]] | None = None
     sampling_rule: dict[str, Any] | None = None
-    z_threshold: float | None = None
+    # Named ranking rule. Always pinned in manifest_hash and NOT NULL in the DB.
+    scoring_rule: dict[str, Any] = field(
+        default_factory=lambda: dict(DEFAULT_SCORING_RULE)
+    )
     # Row creation time, read from the DB rather than pinned. Campaigns run
     # open ended, so this is the only date they carry; None for a manifest
     # built in memory and not yet inserted.
@@ -152,11 +182,10 @@ class CampaignManifest:
             "success_threshold": self.success_threshold,
             "bench": self.bench,
             "engine": self.engine,
+            "scoring_rule": dict(self.scoring_rule),
         }
         if self.workload_pool is not None:
             out["workload_pool"] = list(self.workload_pool)
         if self.sampling_rule is not None:
             out["sampling_rule"] = dict(self.sampling_rule)
-        if self.z_threshold is not None:
-            out["z_threshold"] = self.z_threshold
         return out

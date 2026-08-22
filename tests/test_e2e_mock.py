@@ -189,101 +189,53 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
     assert "applied" in events
     assert "surface_ok" in events
     assert "built" in events
-    # bench=None campaign: no bench job enqueued
+    # bench=None campaign: settled gates job, and nothing queued for a round
     from db.connection import db_connection
 
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT kind, status FROM submission_jobs WHERE submission_id = %s",
+                "SELECT status FROM submission_jobs WHERE submission_id = %s",
                 (str(sid),),
             )
             jobs = cur.fetchall()
-    assert jobs == [("gates", "done")]
+    assert jobs == [("done",)]
+    assert "bench_queued" not in events
 
 
-def _make_repo_and_patch(tmp_path):
-    repo = tmp_path / "baseline"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "user.name=t",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "init",
-        ],
-        cwd=repo,
-        check=True,
-        capture_output=True,
+def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
+    """One --mock-bench round: claim, run, complete. No GPU, no Docker pull."""
+    import config
+    from campaign.models import SLA
+    from campaign.seed import build_seed_bench_spec
+    from round.create import create_due_rounds
+    from round.store import claim_pending_round, get_round, list_round_entries
+    from worker.round_job import process_round
+
+    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
+    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
+    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
+
+    trace = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
     )
-    patch = _patch_for_repo(repo)
-    patch_hash = "sha256:" + hashlib.sha256(patch).hexdigest()
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return repo, patch, patch_hash, commit
+    trace_sha = "sha256:" + hashlib.sha256(trace.read_bytes()).hexdigest()
+    engine_digest = "sha256:" + "a" * 64
+    image_a = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "1" * 64
+    image_b = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "2" * 64
 
-
-def _bench_campaign_spec(trace_path: Path, trace_sha: str) -> dict:
-    return {
-        "model": {
-            "hf_repo": "Qwen/Qwen2.5-7B-Instruct",
-            "hf_revision": "bb46c15ee4bb56c5b63245ef50fd7637234d6f75",
-            "dtype": "bfloat16",
-            "quantization": None,
-            "max_model_len": 8192,
-        },
-        "baseline_engine_image_digest": "sha256:" + ("a" * 64),
-        "gpu_count": 1,
-        "serve_args": None,
-        "correctness": {
-            "num_prompts": 2,
-            "max_new_tokens": 8,
-            "thresholds": {
-                "mean_abs_logprob_diff": 0.005,
-                "max_abs_logprob_diff": 0.05,
-                "argmax_mismatch_rate": 0.001,
-            },
-        },
-        "perf_screen": {
-            "num_requests": 2,
-            "concurrency": 1,
-            "min_throughput_ratio": 1.0,
-        },
-    }
-
-
-def _insert_open_campaign(
-    *,
-    repo,
-    commit,
-    campaign_id,
-    url,
-    now,
-    bench,
-    trace_sha,
-    trace_url,
-):
-    profile_id = insert_profile("e2e-bench", {"fixture": True})
+    profile_id = insert_profile("e2e", {"fixture": True})
+    campaign_id = uuid4()
     manifest = build_manifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
-        baseline_repo=str(repo),
-        baseline_commit=commit,
-        base_image_digest="sha256:" + ("d" * 64),
+        baseline_repo="https://example/baseline.git",
+        baseline_commit="deadbeef",
+        base_image_digest="sha256:" + "d" * 64,
         gpu_skus=["H200"],
         workload_trace_sha256=trace_sha,
-        workload_trace_url=trace_url,
+        workload_trace_url=f"file://{trace}",
         sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
         scoring_config_sha256=None,
         scoring_config_url=None,
@@ -292,533 +244,83 @@ def _insert_open_campaign(
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
         status="open",
-        customer_signoff=CustomerSignoff(
-            approved_manifest_hash="pending",
-            approver="test",
-            timestamp=now,
-        ),
-        bench=bench,
-    )
-    manifest = build_manifest(
-        campaign_id=campaign_id,
-        profile_id=profile_id,
-        baseline_repo=str(repo),
-        baseline_commit=commit,
-        base_image_digest="sha256:" + ("d" * 64),
-        gpu_skus=["H200"],
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=trace_url,
-        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
-        scoring_config_sha256=None,
-        scoring_config_url=None,
-        allowed_paths=["vllm/**"],
-        denied_paths=["tests/**"],
-        priority_metric="throughput",
-        success_threshold=">=10% at SLA",
-        status="open",
-        customer_signoff=CustomerSignoff(
-            approved_manifest_hash=manifest.manifest_hash,
-            approver="test",
-            timestamp=now,
-        ),
-        manifest_hash=manifest.manifest_hash,
-        bench=bench,
+        bench=build_seed_bench_spec(baseline_engine_image_digest=engine_digest),
+        scoring_rule={"name": "median_e2e_speedup"},
     )
     insert_campaign(manifest)
-    return manifest
 
-
-def test_e2e_mock_bench_happy_path(tmp_path, monkeypatch):
-    import config
-    from campaign.store import (
-        claim_next_job,
-        list_bench_reports,
-        list_bench_summaries,
-    )
-    from db.connection import db_connection
-    from worker.bench_job import process_bench_job
-
-    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
-    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
-    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
-    monkeypatch.setenv("PARETON_ALLOW_MOCK_BENCH", "1")
-
-    repo, patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    trace_url = f"file://{sample_trace.resolve()}"
-    now = datetime.now(timezone.utc)
-    campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000001/e2e.diff"
-    bench = _bench_campaign_spec(sample_trace, trace_sha)
-    _insert_open_campaign(
-        repo=repo,
-        commit=commit,
-        campaign_id=campaign_id,
-        url=url,
-        now=now,
-        bench=bench,
-        trace_sha=trace_sha,
-        trace_url=trace_url,
-    )
-    sid = insert_submission(
-        campaign_id=campaign_id,
-        patch_hash=patch_hash,
-        hotkey="5FakesHotkeyForE2ETesting000000000000000000001",
-        baseline_commit=commit,
-        retrieval_url=url,
-        commit_block=1,
-    )
-    row = claim_next_job(kind="gates")
-    assert row is not None
-    result = process_submission(
-        row,
-        registered_hotkeys=[row["hotkey"]],
-        fetcher=lambda _u: patch,
-        mock_build=True,
-        local_repo=repo,
-        work_root=tmp_path / "gate-work",
-    )
-    assert result.ok
-    sub = get_submission(patch_hash)
-    assert "@sha256:" in sub["engine_image_ref"]
-
-    brow = claim_next_job(kind="bench")
-    assert brow is not None
-    # Stabilize SLA verdict for CI (A/B are deterministic; C is wall-clock noisy).
-    from bench.main import run_bench as real_run_bench
-
-    def stable_run(request_path, output_dir, **kwargs):
-        code = real_run_bench(request_path, output_dir, **kwargs)
-        report_path = Path(output_dir) / "bench_report.json"
-        if report_path.is_file():
-            import json
-
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            if (
-                report.get("correctness", {}).get("verdict") == "pass"
-                and report.get("perf_screen", {}).get("verdict") == "pass"
-                and isinstance(report.get("sla_bench"), dict)
-            ):
-                report["sla_bench"]["verdict"] = "pass"
-                report["verdict"] = "pass"
-                report_path.write_text(
-                    json.dumps(report, indent=2) + "\n", encoding="utf-8"
-                )
-        return code
-
-    outcome = process_bench_job(
-        brow,
-        mock_bench=True,
-        mock_baseline_token_latency_s=0.03,
-        mock_candidate_token_latency_s=0.015,
-        work_root=tmp_path / "bench-work",
-        run_bench_fn=stable_run,
-    )
-    assert outcome == "ok"
-    states = [e["state"] for e in list_events(sid)]
-    assert "correct" in states
-    assert "screened" in states
-    assert "benched" in states
-    reports = list_bench_reports(sid)
-    assert len(reports) == 3
-    assert all(r["mock"] is True for r in reports)
-    assert all(r["evidence_s3_url"] is None for r in reports)
-    assert len({r["task_id"] for r in reports}) == 1
-    summaries = list_bench_summaries(campaign_id)
-    assert summaries.get(str(sid)) == "pass"
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT kind, status FROM submission_jobs WHERE submission_id = %s ORDER BY kind",
-                (str(sid),),
-            )
-            assert cur.fetchall() == [("bench", "done"), ("gates", "done")]
-
-
-def test_e2e_mock_bench_adversarial_and_terminal_guard(tmp_path, monkeypatch):
-    import config
-    from campaign.store import claim_next_job, enqueue_bench_job, list_bench_reports
-    from worker.bench_job import process_bench_job
-
-    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
-    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
-    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
-
-    repo, patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    now = datetime.now(timezone.utc)
-    campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000002/adv.diff"
-    _insert_open_campaign(
-        repo=repo,
-        commit=commit,
-        campaign_id=campaign_id,
-        url=url,
-        now=now,
-        bench=_bench_campaign_spec(sample_trace, trace_sha),
-        trace_sha=trace_sha,
-        trace_url=f"file://{sample_trace.resolve()}",
-    )
-    sid = insert_submission(
-        campaign_id=campaign_id,
-        patch_hash=patch_hash,
-        hotkey="5FakesHotkeyForE2ETesting000000000000000000002",
-        baseline_commit=commit,
-        retrieval_url=url,
-        commit_block=2,
-    )
-    grow = claim_next_job(kind="gates")
-    assert process_submission(
-        grow,
-        registered_hotkeys=[grow["hotkey"]],
-        fetcher=lambda _u: patch,
-        mock_build=True,
-        local_repo=repo,
-        work_root=tmp_path / "gate-work",
-    ).ok
-    brow = claim_next_job(kind="bench")
-    outcome = process_bench_job(
-        brow,
-        mock_bench=True,
-        mock_tampered_candidate=True,
-        work_root=tmp_path / "bench-work",
-    )
-    assert outcome == "ok"
-    states = [e["state"] for e in list_events(sid)]
-    assert "rejected" in states
-    assert "screened" not in states
-    assert "benched" not in states
-    reports = list_bench_reports(sid)
-    assert len(reports) == 1
-    assert reports[0]["stage"] == "correctness"
-    assert enqueue_bench_job(sid) is False
-
-
-def test_e2e_mock_bench_candidate_engine_failure(tmp_path, monkeypatch):
-    import config
-    from bench.lifecycle import EngineError
-    from campaign.store import claim_next_job
-    from worker.bench_job import process_bench_job
-
-    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
-    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
-    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
-
-    repo, patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    now = datetime.now(timezone.utc)
-    campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000003/eng.diff"
-    _insert_open_campaign(
-        repo=repo,
-        commit=commit,
-        campaign_id=campaign_id,
-        url=url,
-        now=now,
-        bench=_bench_campaign_spec(sample_trace, trace_sha),
-        trace_sha=trace_sha,
-        trace_url=f"file://{sample_trace.resolve()}",
-    )
-    sid = insert_submission(
-        campaign_id=campaign_id,
-        patch_hash=patch_hash,
-        hotkey="5FakesHotkeyForE2ETesting000000000000000000003",
-        baseline_commit=commit,
-        retrieval_url=url,
-        commit_block=3,
-    )
-    grow = claim_next_job(kind="gates")
-    assert process_submission(
-        grow,
-        registered_hotkeys=[grow["hotkey"]],
-        fetcher=lambda _u: patch,
-        mock_build=True,
-        local_repo=repo,
-        work_root=tmp_path / "gate-work",
-    ).ok
-    brow = claim_next_job(kind="bench")
-
-    def boom(*_a, **_k):
-        raise EngineError("cand crash", error_role="candidate")
-
-    monkeypatch.setattr("bench.main.run_all_modules", boom)
-    outcome = process_bench_job(
-        brow, mock_bench=True, work_root=tmp_path / "bench-work"
-    )
-    assert outcome == "ok"
-    rejected = [e for e in list_events(sid) if e["state"] == "rejected"]
-    assert rejected
-    assert rejected[-1]["detail"].get("reason") == "fail_engine_candidate"
-
-
-def test_e2e_sibling_job_isolation(tmp_path, monkeypatch):
-    import config
-    from campaign.store import claim_next_job, enqueue_bench_job, set_job_status
-    from db.connection import db_connection
-
-    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
-    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
-    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
-
-    repo, patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    now = datetime.now(timezone.utc)
-    campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000004/sib.diff"
-    _insert_open_campaign(
-        repo=repo,
-        commit=commit,
-        campaign_id=campaign_id,
-        url=url,
-        now=now,
-        bench=_bench_campaign_spec(sample_trace, trace_sha),
-        trace_sha=trace_sha,
-        trace_url=f"file://{sample_trace.resolve()}",
-    )
-    sid = insert_submission(
-        campaign_id=campaign_id,
-        patch_hash=patch_hash,
-        hotkey="5FakesHotkeyForE2ETesting000000000000000000004",
-        baseline_commit=commit,
-        retrieval_url=url,
-        commit_block=4,
-    )
-    grow = claim_next_job(kind="gates")
-    assert process_submission(
-        grow,
-        registered_hotkeys=[grow["hotkey"]],
-        fetcher=lambda _u: patch,
-        mock_build=True,
-        local_repo=repo,
-        work_root=tmp_path / "gate-work",
-    ).ok
-    assert enqueue_bench_job(sid) is False  # already enqueued by pipeline
-    set_job_status(sid, "failed", kind="gates", last_error="touch_gates")
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT kind, status, last_error FROM submission_jobs WHERE submission_id = %s ORDER BY kind",
-                (str(sid),),
-            )
-            rows = cur.fetchall()
-    assert ("gates", "failed", "touch_gates") in rows
-    assert ("bench", "pending", None) in rows
-    set_job_status(sid, "failed", kind="bench", last_error="touch_bench")
-    with db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT kind, status, last_error FROM submission_jobs WHERE submission_id = %s ORDER BY kind",
-                (str(sid),),
-            )
-            rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
-    assert rows["gates"] == ("failed", "touch_gates")
-    assert rows["bench"] == ("failed", "touch_bench")
-
-
-def test_e2e_mock_bench_cross_env_speedup_api_verdict(tmp_path, monkeypatch):
-    """Multi-SKU floor reject: stage rows pass, event-sourced API verdict rejects."""
-    import json
-
-    import config
-    from campaign.store import (
-        claim_next_job,
-        derive_bench_verdict_from_events,
-        list_bench_reports,
-        list_bench_summaries,
-        list_events,
-    )
-    from worker.bench_job import process_bench_job
-    from bench.validate import sha256_bytes
-
-    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
-    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
-    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
-    monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
-
-    repo, patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    now = datetime.now(timezone.utc)
-    campaign_id = uuid4()
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/5FakesHotkeyForE2ETesting000000000000000000099/xenv.diff"
-    bench = _bench_campaign_spec(sample_trace, trace_sha)
-    bench["cross_env"] = {
-        "aggregate": "min",
-        "min_speedup_each": 1.5,
-        "speedup_metric": "output_tokens_per_s_ratio",
-    }
-    profile_id = insert_profile("e2e-xenv", {"fixture": True})
-    manifest = build_manifest(
-        campaign_id=campaign_id,
-        profile_id=profile_id,
-        baseline_repo=str(repo),
-        baseline_commit=commit,
-        base_image_digest="sha256:" + ("d" * 64),
-        gpu_skus=["mock-a", "mock-b"],
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=f"file://{sample_trace.resolve()}",
-        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
-        scoring_config_sha256=None,
-        scoring_config_url=None,
-        allowed_paths=["vllm/**"],
-        denied_paths=["tests/**"],
-        priority_metric="throughput",
-        success_threshold=">=10% at SLA",
-        status="open",
-        customer_signoff=CustomerSignoff(
-            approved_manifest_hash="pending",
-            approver="test",
-            timestamp=now,
-        ),
-        bench=bench,
-    )
-    manifest = build_manifest(
-        campaign_id=campaign_id,
-        profile_id=profile_id,
-        baseline_repo=str(repo),
-        baseline_commit=commit,
-        base_image_digest="sha256:" + ("d" * 64),
-        gpu_skus=["mock-a", "mock-b"],
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=f"file://{sample_trace.resolve()}",
-        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
-        scoring_config_sha256=None,
-        scoring_config_url=None,
-        allowed_paths=["vllm/**"],
-        denied_paths=["tests/**"],
-        priority_metric="throughput",
-        success_threshold=">=10% at SLA",
-        status="open",
-        customer_signoff=CustomerSignoff(
-            approved_manifest_hash=manifest.manifest_hash,
-            approver="test",
-            timestamp=now,
-        ),
-        manifest_hash=manifest.manifest_hash,
-        bench=bench,
-    )
-    insert_campaign(manifest)
-    sid = insert_submission(
-        campaign_id=campaign_id,
-        patch_hash=patch_hash,
-        hotkey="5FakesHotkeyForE2ETesting000000000000000000099",
-        baseline_commit=commit,
-        retrieval_url=url,
-        commit_block=99,
-    )
-    grow = claim_next_job(kind="gates")
-    assert process_submission(
-        grow,
-        registered_hotkeys=[grow["hotkey"]],
-        fetcher=lambda _u: patch,
-        mock_build=True,
-        local_repo=repo,
-        work_root=tmp_path / "gate-work",
-    ).ok
-    brow = claim_next_job(kind="bench")
-
-    def run_fn(request_path, output_dir, **_k):
-        req = json.loads(Path(request_path).read_text(encoding="utf-8"))
-        sku = req["hardware"]["gpu_sku_expected"]
-        ratio = 1.0 if sku == "mock-a" else 2.0
-        report = {
-            "schema_version": 1,
-            "task_id": req["task_id"],
-            "verdict": "pass",
-            "started_at": "2026-01-01T00:00:00Z",
-            "finished_at": "2026-01-01T00:01:00Z",
-            "environment": {
-                "gpu": [],
-                "driver_version": "x",
-                "cuda_version": "x",
-                "docker_version": "x",
-                "harness_version": "0",
-                "hostname_hash": "sha256:" + ("e" * 64),
-            },
-            "inputs_fingerprint": {
-                "baseline_image_digest": bench["baseline_engine_image_digest"],
-                "candidate_image_digest": brow["engine_image_ref"].split("@", 1)[-1]
-                if "@" in str(brow["engine_image_ref"])
-                else "sha256:" + ("b" * 64),
-                "model_repo": bench["model"]["hf_repo"],
-                "model_revision": bench["model"]["hf_revision"],
-                "model_weights_sha256": "sha256:" + ("0" * 64),
-                "trace_sha256": trace_sha,
-                "request_sha256": sha256_bytes(Path(request_path).read_bytes()),
-            },
-            "correctness": {
-                "verdict": "pass",
-                "num_prompts": 1,
-                "num_positions_compared": 1,
-                "mean_abs_logprob_diff": 0.0,
-                "max_abs_logprob_diff": 0.0,
-                "argmax_mismatch_rate": 0.0,
-                "evidence": "e",
-            },
-            "perf_screen": {
-                "verdict": "pass",
-                "baseline_output_tokens_per_s": 1.0,
-                "candidate_output_tokens_per_s": 1.0,
-                "throughput_ratio": 1.0,
-                "evidence": "e",
-            },
-            "sla_bench": {
-                "verdict": "pass",
-                "repetitions": 1,
-                "candidate": {},
-                "baseline": {},
-                "speedup": {
-                    "output_tokens_per_s_ratio": ratio,
-                    "requests_per_s_ratio": 1.0,
-                    "p99_ttft_ratio": 1.0,
-                    "p99_itl_ratio": 1.0,
-                    "p99_e2e_ratio": 1.0,
-                },
-                "cross_rep_variance": {},
-                "evidence": "e",
-            },
-        }
-        # candidate digest from built submission
-        sub = get_submission(patch_hash)
-        dig = str(sub["engine_image_ref"]).split("@", 1)[-1]
-        report["inputs_fingerprint"]["candidate_image_digest"] = dig
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(output_dir) / "bench_report.json").write_text(
-            json.dumps(report, indent=2) + "\n", encoding="utf-8"
+    def _queue(image_ref: str, block: int) -> str:
+        sid = insert_submission(
+            campaign_id=campaign_id,
+            patch_hash="sha256:" + uuid4().hex * 2,
+            hotkey="5FakesHotkeyForE2ETesting000000000000000000000",
+            baseline_commit="deadbeef",
+            retrieval_url=(
+                f"https://cdn.test/stage0/campaigns/{campaign_id}/p/e2e.diff"
+            ),
+            commit_block=block,
         )
-        return 0
+        assert sid is not None
+        from db.connection import db_connection
 
-    outcome = process_bench_job(
-        brow,
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE submissions SET engine_image_ref = %s WHERE id = %s",
+                    (image_ref, str(sid)),
+                )
+                cur.execute(
+                    """
+                    UPDATE submission_events
+                    SET created_at = now() - make_interval(secs => 40060)
+                    WHERE submission_id = %s
+                    """,
+                    (str(sid),),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO submission_events
+                        (submission_id, state, detail, created_at)
+                    VALUES (%s, 'bench_queued', '{}'::jsonb,
+                            now() - make_interval(secs => 40000))
+                    """,
+                    (str(sid),),
+                )
+        return str(sid)
+
+    _queue(image_a, 10)
+    _queue(image_b, 11)
+
+    class _FakeSubtensor:
+        block = 1000
+
+        def get_block_hash(self, number: int) -> str:
+            return "0x" + f"{number:064x}"
+
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    outcome = process_round(
+        claimed,
         mock_bench=True,
-        work_root=tmp_path / "bench-work",
-        run_bench_fn=run_fn,
+        work_root=tmp_path / "round-work",
     )
     assert outcome == "ok"
-    reports = list_bench_reports(sid)
-    assert len(reports) == 6
-    assert all(r["verdict"] == "pass" for r in reports)
-    assert len({r["task_id"] for r in reports}) == 2
-    events = list_events(sid)
-    assert derive_bench_verdict_from_events(events) == "fail_cross_env_speedup"
-    assert list_bench_summaries(campaign_id).get(str(sid)) == "fail_cross_env_speedup"
+    settled = get_round(claimed["id"])
+    assert settled is not None
+    assert settled["status"] == "complete"
+    assert settled["baseline_drift"] is not None
+    entries = list_round_entries(claimed["id"])
+    assert entries[0]["role"] == "baseline"
+    assert entries[0]["status"] == "scored"
+    assert float(entries[0]["score"]) == 0.0
+    challengers = [e for e in entries if e["role"] == "challenger"]
+    assert len(challengers) == 2
+    assert {e["status"] for e in challengers} <= {
+        "scored",
+        "disqualified",
+        "infra_failed",
+    }
 
 
 def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
@@ -901,292 +403,3 @@ def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
 
     assert client.get(f"/v1/submissions/{patch_hash}").status_code == 409
     assert client.get(f"/v1/submissions/{patch_hash}/build-log").status_code == 409
-
-
-def test_e2e_live_bench_phase_is_attempt_scoped_and_cleared_on_settle(tmp_path):
-    """Live phase is attempt-scoped and cleared when the job settles."""
-    from bench.phases import BenchPhase
-    from campaign.store import (
-        claim_next_job,
-        enqueue_bench_job,
-        finalize_bench_job,
-        list_submission_jobs,
-        set_job_phase,
-        set_job_status,
-        touch_job_heartbeat,
-    )
-    from worker.phase_reporter import reporter_for_job
-
-    repo, _patch, patch_hash, commit = _make_repo_and_patch(tmp_path)
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    campaign_id = uuid4()
-    hotkey = "5FakesHotkeyForE2ETesting000000000000000000009"
-    url = f"https://cdn.test/stage0/campaigns/{campaign_id}/patches/{hotkey}/e2e.diff"
-    _insert_open_campaign(
-        repo=repo,
-        commit=commit,
-        campaign_id=campaign_id,
-        url=url,
-        now=datetime.now(timezone.utc),
-        bench=_bench_campaign_spec(sample_trace, trace_sha),
-        trace_sha=trace_sha,
-        trace_url=f"file://{sample_trace.resolve()}",
-    )
-    sid = insert_submission(
-        campaign_id=campaign_id,
-        patch_hash=patch_hash,
-        hotkey=hotkey,
-        baseline_commit=commit,
-        retrieval_url=url,
-        commit_block=1,
-    )
-    assert enqueue_bench_job(sid) is True
-
-    def bench_job() -> dict:
-        return next(j for j in list_submission_jobs(sid) if j["kind"] == "bench")
-
-    first = claim_next_job(kind="bench")
-    assert first is not None
-    assert first["job_attempt"] == 1
-    job_id = int(first["job_id"])
-    assert bench_job()["phase"] is None
-
-    reporter = reporter_for_job(first)
-    reporter.set(BenchPhase.DOWNLOADING_MODEL, gpu_sku="H200")
-    row = bench_job()
-    assert row["phase"] == "downloading_model"
-    assert row["progress"] == {"gpu_sku": "H200"}
-    started = row["phase_started_at"]
-    assert started is not None
-    beat = row["heartbeat_at"]
-    assert beat is not None
-    assert (datetime.now(timezone.utc) - beat).total_seconds() < 60
-
-    # Re-reporting the same phase must not restart the clock on it.
-    reporter.set(BenchPhase.DOWNLOADING_MODEL)
-    assert touch_job_heartbeat(job_id=job_id, attempt=1) is True
-    row = bench_job()
-    assert row["phase_started_at"] == started
-    assert row["heartbeat_at"] >= beat
-
-    # Worker dies, job is requeued, then claimed again.
-    set_job_status(sid, "pending", kind="bench")
-    assert bench_job()["phase"] is None
-    second = claim_next_job(kind="bench")
-    assert second is not None
-    assert second["job_attempt"] == 2
-    reporter_for_job(second).set(BenchPhase.PROVISIONING)
-
-    # Dead attempt still running; its writes must not land.
-    assert set_job_phase(job_id=job_id, attempt=1, phase="sla_bench") is False
-    assert touch_job_heartbeat(job_id=job_id, attempt=1) is False
-    assert bench_job()["phase"] == "provisioning"
-
-    finalize_bench_job(
-        submission_id=sid,
-        job_id=job_id,
-        task_id=str(uuid4()),
-        report_rows=[],
-        events=[],
-        job_status="done",
-    )
-    row = bench_job()
-    assert row["status"] == "done"
-    assert (row["phase"], row["phase_started_at"], row["heartbeat_at"]) == (
-        None,
-        None,
-        None,
-    )
-    # A settled job must not be resurrectable by a late write.
-    assert set_job_phase(job_id=job_id, attempt=2, phase="teardown") is False
-
-
-def _insert_draft_calibration_campaign(*, repo, commit, campaign_id, now, bench):
-    """Draft campaign with zero submissions: the only state `apply` accepts."""
-    profile_id = insert_profile("e2e-calib", {"fixture": True})
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    kwargs = dict(
-        campaign_id=campaign_id,
-        profile_id=profile_id,
-        baseline_repo=str(repo),
-        baseline_commit=commit,
-        base_image_digest="sha256:" + ("d" * 64),
-        gpu_skus=["H200"],
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=f"file://{sample_trace.resolve()}",
-        sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
-        scoring_config_sha256=None,
-        scoring_config_url=None,
-        allowed_paths=["vllm/**"],
-        denied_paths=["tests/**"],
-        priority_metric="throughput",
-        success_threshold=">=10% at SLA",
-        status="draft",
-        bench=bench,
-    )
-    manifest = build_manifest(
-        customer_signoff=CustomerSignoff(
-            approved_manifest_hash="pending", approver="test", timestamp=now
-        ),
-        **kwargs,
-    )
-    manifest = build_manifest(
-        customer_signoff=CustomerSignoff(
-            approved_manifest_hash=manifest.manifest_hash,
-            approver="test",
-            timestamp=now,
-        ),
-        manifest_hash=manifest.manifest_hash,
-        **kwargs,
-    )
-    insert_campaign(manifest)
-    return manifest, sample_trace, trace_sha
-
-
-def _campaign_row(campaign_id):
-    from psycopg2.extras import RealDictCursor
-
-    from db.connection import db_connection
-
-    with db_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM campaigns WHERE id = %s", (str(campaign_id),))
-            row = dict(cur.fetchone())
-    row["engine_image_ref"] = "ghcr.io/pareton/e2e@sha256:" + ("c" * 64)
-    return row
-
-
-def test_e2e_calibration_missing_then_applied_unblocks_bench(tmp_path, monkeypatch):
-    """Full calibration path against the real DB: gate -> prepare -> analyze -> apply.
-
-    The mock bench tests all run with ``require_calibration=False``, so this is
-    the only e2e coverage of the enforcement and apply code paths.
-    """
-    import json
-
-    import config
-    from bench.calibrate import (
-        analyze_reports,
-        correctness_dict_from_summary,
-        prepare_campaign_calibration_request,
-    )
-    from campaign.store import apply_campaign_correctness_calibration
-    from test_calibrate import _report
-    from worker.bench_job import (
-        build_bench_request_dict,
-        campaign_calibration_fingerprint,
-    )
-
-    monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
-
-    repo, _patch, _patch_hash, commit = _make_repo_and_patch(tmp_path)
-    now = datetime.now(timezone.utc)
-    campaign_id = uuid4()
-    sample_trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(sample_trace.read_bytes()).hexdigest()
-    bench = _bench_campaign_spec(sample_trace, trace_sha)
-    assert "calibration" not in bench["correctness"]
-    manifest, sample_trace, trace_sha = _insert_draft_calibration_campaign(
-        repo=repo, commit=commit, campaign_id=campaign_id, now=now, bench=bench
-    )
-    old_hash = manifest.manifest_hash
-
-    # 1. An uncalibrated campaign must refuse a real (non-mock) bench.
-    row = _campaign_row(campaign_id)
-    with pytest.raises(Exception) as excinfo:
-        build_bench_request_dict(
-            row,
-            trace_path=str(sample_trace),
-            gpu_sku="H200",
-            require_calibration=True,
-        )
-    assert "calibration_missing" in str(excinfo.value)
-
-    # ...while the mock path still builds, which is why the mock e2e tests
-    # cannot catch a regression in the block above.
-    assert build_bench_request_dict(row, trace_path=str(sample_trace), gpu_sku="H200")[
-        "mode"
-    ] in ("full", "correctness", "all")
-
-    # 2. prepare reads the campaign from the DB and pins baseline == candidate.
-    prep_dir = tmp_path / "calib-prep"
-    req = prepare_campaign_calibration_request(
-        campaign_id=str(campaign_id),
-        output_dir=prep_dir,
-        fetcher=lambda _u: sample_trace.read_bytes(),
-    )
-    assert req["mode"] == "correctness"
-    assert req["engines"]["baseline"]["image"] == req["engines"]["candidate"]["image"]
-    assert (prep_dir / "bench_request.json").is_file()
-
-    # 3. analyze three agreeing self-check reports into suggested thresholds.
-    report_paths = []
-    for i, (mean, max_d, argmax) in enumerate(
-        [(0.002, 0.02, 0.0), (0.0025, 0.03, 0.0004), (0.0018, 0.025, 0.0002)]
-    ):
-        rep = _report(mean=mean, max_d=max_d, argmax=argmax)
-        rep["inputs_fingerprint"]["trace_sha256"] = trace_sha
-        p = tmp_path / f"report-{i}.json"
-        p.write_text(json.dumps(rep, indent=2) + "\n", encoding="utf-8")
-        report_paths.append(p)
-    summary = analyze_reports(report_paths)
-
-    # 4. apply writes thresholds, recomputes manifest_hash, refreshes signoff.
-    fingerprint = campaign_calibration_fingerprint(bench, row)
-    correctness = correctness_dict_from_summary(
-        summary,
-        existing_correctness=bench["correctness"],
-        campaign_fingerprint=fingerprint,
-    )
-    new_hash = apply_campaign_correctness_calibration(campaign_id, correctness)
-    assert new_hash != old_hash
-
-    applied = _campaign_row(campaign_id)
-    stored = applied["bench"]
-    if isinstance(stored, str):
-        stored = json.loads(stored)
-    assert stored["correctness"]["calibration"]["fingerprint"] == fingerprint
-    assert applied["manifest_hash"] == new_hash
-    signoff = applied["customer_signoff"]
-    if isinstance(signoff, str):
-        signoff = json.loads(signoff)
-    assert signoff["approved_manifest_hash"] == new_hash
-
-    # 5. the same bench request now builds, with the calibrated thresholds.
-    request = build_bench_request_dict(
-        applied,
-        trace_path=str(sample_trace),
-        gpu_sku="H200",
-        require_calibration=True,
-    )
-    applied_thresholds = request["correctness"]["thresholds"]
-    suggested = stored["correctness"]["thresholds"]
-    assert applied_thresholds["mean_abs_logprob_diff"] == pytest.approx(
-        suggested["mean_abs_logprob_diff"]
-    )
-    assert applied_thresholds["max_abs_logprob_diff"] == pytest.approx(
-        suggested["max_abs_logprob_diff"]
-    )
-
-    # 6. a serve_args change invalidates the calibration instead of silently
-    #    scoring against thresholds measured on a different engine config.
-    stale = dict(applied)
-    stale_bench = json.loads(json.dumps(stored))
-    stale_bench["serve_args"] = ["--no-enable-prefix-caching"]
-    stale["bench"] = stale_bench
-    with pytest.raises(Exception) as excinfo:
-        build_bench_request_dict(
-            stale,
-            trace_path=str(sample_trace),
-            gpu_sku="H200",
-            require_calibration=True,
-        )
-    assert "calibration_stale" in str(excinfo.value)

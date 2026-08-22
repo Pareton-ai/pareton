@@ -1,4 +1,4 @@
-"""Docker integration: Module A via B3 lifecycle + containerized mock engines.
+"""Docker integration: a whole round via the lifecycle + containerized mock engines.
 
 Skipped automatically when Docker is unavailable. Self-skips on Docker Desktop
 where the host cannot reach container-bridge IPs (production path uses
@@ -152,10 +152,10 @@ def _require_container_ip_reachable(mock_image_digest: str) -> None:
             )
 
 
-def test_cli_correctness_via_lifecycle_baseline_vs_baseline(
+def test_cli_round_via_lifecycle_baseline_vs_baseline(
     mock_image_digest: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Docker lifecycle Module A self-check (no real HF download)."""
+    """Docker lifecycle round self-check (no real HF download)."""
     from bench.weights import StagedWeights
 
     def fake_stage(model, *, token_env="HF_TOKEN", cache_dir=None):
@@ -178,13 +178,10 @@ def test_cli_correctness_via_lifecycle_baseline_vs_baseline(
     _require_container_ip_reachable(mock_image_digest)
 
     req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
-    req["mode"] = "correctness"
     req["workload_trace"]["path"] = str(SAMPLE_TRACE)
-    # Same local mock image for both sides (self-check through Docker).
-    for role in ("baseline", "candidate"):
-        req["engines"][role]["image"] = mock_image_digest
-        req["engines"][role]["serve_args"] = []
-        req["engines"][role]["env"] = {}
+    # Same local mock image everywhere (self-check through Docker).
+    engine = {"image": mock_image_digest, "serve_args": [], "env": {}}
+    req["engines"] = {"baseline": dict(engine), "candidates": [dict(engine)]}
     req_path = tmp_path / "request.json"
     req_path.write_text(json.dumps(req, indent=2) + "\n", encoding="utf-8")
     out = tmp_path / "out"
@@ -198,8 +195,10 @@ def test_cli_correctness_via_lifecycle_baseline_vs_baseline(
     report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
     validate_report_dict(report)
     assert report["verdict"] == "pass"
-    assert report["correctness"]["verdict"] == "pass"
+    assert len(report["entries"]) == 1
+    assert report["entries"][0]["status"] == "scored"
+    assert report["entries"][0]["correctness"]["verdict"] == "pass"
     assert report["inputs_fingerprint"]["model_weights_sha256"] == (
         "sha256:" + ("d" * 64)
     )
-    assert (out / "evidence" / "correctness" / "logprob_diffs.jsonl").is_file()
+    assert (out / "evidence" / "correctness" / "candidate_0.jsonl").is_file()

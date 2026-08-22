@@ -129,8 +129,6 @@ def _write_remote_env(
         # on laptops (can be slower with less RAM).
         "HF_XET_HIGH_PERFORMANCE=1",
     ]
-    if config.BENCH_SKIP_SLA:
-        lines.append("PARETON_BENCH_SKIP_SLA=1")
     hf = os.environ.get("HF_TOKEN") or os.environ.get("PARETON_HF_TOKEN")
     if hf:
         lines.append(f"HF_TOKEN={hf}")
@@ -225,7 +223,7 @@ def _entry_from_pod(pod: Pod, *, state: str = "active") -> RegistryEntry:
 
 def _engine_image_refs(req) -> list[str]:
     refs: list[str] = []
-    for eng in (req.engines.baseline, req.engines.candidate):
+    for eng in [req.engines.baseline, *req.engines.candidates]:
         img = str(eng.image or "").strip()
         if img and img not in refs:
             refs.append(img)
@@ -378,23 +376,6 @@ def destroy_pod(
     obs.pod_destroyed(pod=pod.name, provider=pod.provider)
     if pod.provider != "static_ssh":
         registry.remove(pod.name)
-
-
-def discover_calib_requests(requests_dir: Path) -> list[Path]:
-    """Return sample-*/bench_request.json paths sorted by sample index."""
-    root = Path(requests_dir)
-    found = list(root.glob("sample-*/bench_request.json"))
-    if not found:
-        raise ProvisionError(f"no sample-*/bench_request.json under {root}")
-
-    def _idx(path: Path) -> int:
-        name = path.parent.name
-        try:
-            return int(name.split("-", 1)[1])
-        except (IndexError, ValueError) as exc:
-            raise ProvisionError(f"bad sample dir name {name!r}") from exc
-
-    return [p.resolve() for p in sorted(found, key=_idx)]
 
 
 def _report_is_pass(run_dir: Path) -> bool:
@@ -618,6 +599,7 @@ def run_bench_on_pod(
     state_dir: Path | None = None,
     repo_root: Path | None = None,
     on_phase: PhaseSink | None = None,
+    bench_timeout_s: float | None = None,
 ) -> int:
     """Run bench request(s) on a GPU pod.
 
@@ -628,6 +610,9 @@ def run_bench_on_pod(
     ``--repetitions`` still replays one request N times (not a sample pool).
 
     ``on_phase`` is called as the run moves through provisioning, bootstrap, pull, harness, teardown.
+
+    ``bench_timeout_s`` bounds the remote harness ssh exec. None uses
+    ``config.BENCH_TIMEOUT_S``, so the GPU CLI path is unchanged.
 
     Returns the last bench exit code, or EXIT_DESTROY_FAILED (75) if teardown
     failed (pod/volume may still be billing; takes precedence).
@@ -748,7 +733,11 @@ def run_bench_on_pod(
                 result = ssh_exec(
                     pod,
                     bench_cmd,
-                    timeout_s=float(config.BENCH_TIMEOUT_S),
+                    timeout_s=float(
+                        config.BENCH_TIMEOUT_S
+                        if bench_timeout_s is None
+                        else bench_timeout_s
+                    ),
                     runner=runner,
                     state_dir=registry.state_dir,
                     check=False,

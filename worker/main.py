@@ -19,8 +19,9 @@ import threading
 import config
 from campaign.store import claim_next_job, count_pending_jobs
 from observability.events import heartbeat as _heartbeat
-from worker.bench_job import process_bench_job
+from round.store import claim_pending_round
 from worker.pipeline import process_submission
+from worker.round_job import process_round
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,10 @@ def run_once(
     *,
     mock_build: bool,
     mock_bench: bool,
-    mock_tampered_candidate: bool,
+    mock_correctness_fail: bool,
     registered_hotkeys: list[str] | None,
 ) -> bool:
-    row = claim_next_job(kind="gates")
+    row = claim_next_job()
     if row is not None:
         # Ingest already filtered to metagraph members (chain.watcher).
         # A row in submissions is the registration proof; re-reading the
@@ -85,18 +86,21 @@ def run_once(
         )
         return True
 
-    row = claim_next_job(kind="bench")
-    if row is None:
+    claimed = claim_pending_round()
+    if claimed is None:
         return False
     logger.info(
-        "processing bench job submission %s patch=%s", row["id"], row["patch_hash"]
+        "processing round %s ordinal=%s campaign=%s",
+        claimed["id"],
+        claimed["ordinal"],
+        claimed["campaign_id"],
     )
-    outcome = process_bench_job(
-        row,
+    outcome = process_round(
+        claimed,
         mock_bench=mock_bench,
-        mock_tampered_candidate=mock_tampered_candidate,
+        mock_correctness_fail=mock_correctness_fail,
     )
-    logger.info("submission %s bench -> %s", row["id"], outcome)
+    logger.info("round %s -> %s", claimed["id"], outcome)
     return True
 
 
@@ -124,9 +128,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Run bench in-process with mock engines (requires PARETON_ALLOW_MOCK_BENCH=1)",
     )
     p.add_argument(
-        "--mock-tampered-candidate",
+        "--mock-correctness-fail",
         action="store_true",
-        help="With --mock-bench, offset candidate logprobs (adversarial fail)",
+        help="With --mock-bench, make one candidate emit garbage the scorer fails",
     )
     p.add_argument(
         "--registered-hotkey",
@@ -174,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_once(
             mock_build=args.mock_build,
             mock_bench=args.mock_bench,
-            mock_tampered_candidate=args.mock_tampered_candidate,
+            mock_correctness_fail=args.mock_correctness_fail,
             registered_hotkeys=registered_hotkeys,
         )
 

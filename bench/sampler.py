@@ -1,7 +1,6 @@
 """Deterministic on-the-fly workload traces from a pinned HuggingFace dataset.
 
-Seed (bench) = sha256(block_hash(commit_block + offset) || patch_hash || campaign_id).
-Seed (calib) = sha256(campaign_id || "calib" || i).
+Seed = sha256(block_hash(seed block) || campaign_id).
 Row i = sha256(seed || counter) % n_rows. Empty/too-long rows skip via counter.
 """
 
@@ -95,29 +94,19 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
 def compute_sample_seed(
     *,
     block_hash: str,
-    patch_hash: str,
     campaign_id: str,
 ) -> str:
-    """Return 64-char lowercase hex seed (no sha256: prefix)."""
+    """Return 64-char lowercase hex seed (no sha256: prefix).
+
+    The seed is per campaign and per block, so every image in one round draws
+    the same prompt set. The patch hash is deliberately not in the material.
+    """
     bh = str(block_hash).strip().lower()
     if bh.startswith("0x"):
         bh = bh[2:]
     if not bh or not _HEX_RE.fullmatch(bh):
         raise SamplerError(f"block_hash must be hex, got {block_hash!r}")
-    ph = str(patch_hash).strip().lower()
-    if ph.startswith("sha256:"):
-        ph = ph[len("sha256:") :]
-    if not _SHA256_HEX_RE.fullmatch(ph) and not _HEX_RE.fullmatch(ph):
-        raise SamplerError(f"patch_hash must be hex, got {patch_hash!r}")
-    material = (bh + ph + str(campaign_id).strip().lower()).encode("utf-8")
-    return hashlib.sha256(material).hexdigest()
-
-
-def calib_seed(campaign_id: str, index: int) -> str:
-    """Deterministic calibration seed: sha256(campaign_id || 'calib' || i)."""
-    if int(index) < 0:
-        raise SamplerError("calib index must be >= 0")
-    material = f"{str(campaign_id).strip().lower()}calib{int(index)}".encode("utf-8")
+    material = (bh + str(campaign_id).strip().lower()).encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
 
@@ -340,18 +329,16 @@ def sample_workload(
     rule: dict[str, Any],
     commit_block: int,
     block_hash: str,
-    patch_hash: str,
     campaign_id: str,
     row_fetcher: Callable[[int], dict[str, Any]] | None = None,
 ) -> SampledTrace:
-    """Generate one submission trace from a future-block seed."""
+    """Generate one round trace from a future-block seed."""
     if commit_block is None:
         raise SamplerError("commit_block is required for sampling")
     parsed = parse_sampling_rule(rule)
     seed_block = int(commit_block) + int(parsed["seed_block_offset"])
     seed_hex = compute_sample_seed(
         block_hash=block_hash,
-        patch_hash=patch_hash,
         campaign_id=campaign_id,
     )
     fetcher = row_fetcher or (lambda idx: fetch_hf_row(parsed, idx))

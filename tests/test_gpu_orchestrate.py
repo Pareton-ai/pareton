@@ -532,7 +532,6 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
 
     ensure_durable_keypair(tmp_path / "st")
     monkeypatch.setattr("gpu.orchestrate.config.BENCH_HEALTH_TIMEOUT_S", 1800.0)
-    monkeypatch.setattr("gpu.orchestrate.config.BENCH_SKIP_SLA", False)
     pushed: list[str] = []
 
     def capturing_push(pod, local, remote, **kwargs):
@@ -555,41 +554,13 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     )
     _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
     assert pushed
-    assert "PARETON_BENCH_HEALTH_TIMEOUT_S=1800.0" in pushed[0]
-    assert "HF_XET_HIGH_PERFORMANCE=1" in pushed[0]
-    assert "PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/sglang-cache" in pushed[0]
-    assert "PARETON_BENCH_SKIP_SLA=" not in pushed[0]
-
-
-def test_write_remote_env_forwards_skip_sla(tmp_path: Path, monkeypatch):
-    from gpu.orchestrate import _write_remote_env
-    from gpu.types import Pod, SshTarget
-
-    ensure_durable_keypair(tmp_path / "st")
-    monkeypatch.setattr("gpu.orchestrate.config.BENCH_SKIP_SLA", True)
-    pushed: list[str] = []
-
-    def capturing_push(pod, local, remote, **kwargs):
-        pushed.append(Path(local).read_text(encoding="utf-8"))
-
-    monkeypatch.setattr("gpu.orchestrate.push", capturing_push)
-    monkeypatch.setattr(
-        "gpu.orchestrate.ssh_exec",
-        lambda *a, **k: SshResult(0, "", ""),
-    )
-    pod = Pod(
-        provider="targon",
-        pod_id="wl",
-        name="n",
-        ssh=SshTarget(host="h", port=22, user="u"),
-        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
-        hourly_price_cents=1,
-        created_utc=datetime.now(timezone.utc),
-        ttl_hours=1,
-    )
-    _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
-    assert pushed
-    assert "PARETON_BENCH_SKIP_SLA=1" in pushed[0]
+    # Assert per key. The pushed file carries the real HF and GHCR tokens from
+    # the ambient environment, and a substring assertion against the whole file
+    # prints all of them into the pytest log the moment it fails.
+    env = dict(line.split("=", 1) for line in pushed[0].splitlines() if "=" in line)
+    assert env["PARETON_BENCH_HEALTH_TIMEOUT_S"] == "1800.0"
+    assert env["HF_XET_HIGH_PERFORMANCE"] == "1"
+    assert env["PARETON_BENCH_ENGINE_CACHE_DIR"] == "/workspace/engine-cache"
 
 
 def test_orchestrate_keyboardinterrupt_still_destroys(tmp_path: Path, monkeypatch):
@@ -1137,7 +1108,7 @@ def test_orchestrate_repetitions_invalid(tmp_path: Path):
         )
 
 
-def _calib_sample_dir(parent: Path, idx: int) -> Path:
+def _sample_request_dir(parent: Path, idx: int) -> Path:
     req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     req["workload_trace"]["path"] = str(SAMPLE_TRACE)
     d = parent / f"sample-{idx:03d}"
@@ -1164,30 +1135,18 @@ def _stub_remote(monkeypatch) -> tuple[list[str], Any]:
     return bench_cmds, runner
 
 
-def test_discover_calib_requests_sorted(tmp_path: Path):
-    from gpu.orchestrate import discover_calib_requests
-
-    _calib_sample_dir(tmp_path, 2)
-    _calib_sample_dir(tmp_path, 0)
-    _calib_sample_dir(tmp_path, 1)
-    paths = discover_calib_requests(tmp_path)
-    assert [p.parent.name for p in paths] == ["sample-000", "sample-001", "sample-002"]
-
-
 def test_requests_dir_runs_distinct_samples_one_pod(tmp_path: Path, monkeypatch):
-    from gpu.orchestrate import discover_calib_requests
-
     ensure_durable_keypair(tmp_path / "st")
     provider = FakeProvider()
     bench_cmds, runner = _stub_remote(monkeypatch)
     pool = tmp_path / "pool"
-    _calib_sample_dir(pool, 0)
-    _calib_sample_dir(pool, 1)
+    _sample_request_dir(pool, 0)
+    _sample_request_dir(pool, 1)
     out = tmp_path / "runs"
 
     code = run_bench_on_pod(
         PodSpec(provider="targon", force=True),
-        request_paths=discover_calib_requests(pool),
+        request_paths=sorted(pool.glob("sample-*/bench_request.json")),
         output_dir=out,
         mock_engine=True,
         provider=provider,
@@ -1206,14 +1165,12 @@ def test_requests_dir_runs_distinct_samples_one_pod(tmp_path: Path, monkeypatch)
 
 
 def test_requests_dir_skips_pass_and_keep(tmp_path: Path, monkeypatch):
-    from gpu.orchestrate import discover_calib_requests
-
     ensure_durable_keypair(tmp_path / "st")
     provider = FakeProvider()
     bench_cmds, runner = _stub_remote(monkeypatch)
     pool = tmp_path / "pool"
-    _calib_sample_dir(pool, 0)
-    _calib_sample_dir(pool, 1)
+    _sample_request_dir(pool, 0)
+    _sample_request_dir(pool, 1)
     out = tmp_path / "runs"
     run1 = out / "run-001"
     run1.mkdir(parents=True)
@@ -1223,7 +1180,7 @@ def test_requests_dir_skips_pass_and_keep(tmp_path: Path, monkeypatch):
 
     code = run_bench_on_pod(
         PodSpec(provider="targon", force=True),
-        request_paths=discover_calib_requests(pool),
+        request_paths=sorted(pool.glob("sample-*/bench_request.json")),
         output_dir=out,
         mock_engine=True,
         keep=True,
@@ -1239,8 +1196,6 @@ def test_requests_dir_skips_pass_and_keep(tmp_path: Path, monkeypatch):
 
 
 def test_pod_reuses_registry_without_provision(tmp_path: Path, monkeypatch):
-    from gpu.orchestrate import discover_calib_requests
-
     key_path, _pub = ensure_durable_keypair(tmp_path / "st")
     provider = FakeProvider()
     bench_cmds, runner = _stub_remote(monkeypatch)
@@ -1261,11 +1216,11 @@ def test_pod_reuses_registry_without_provision(tmp_path: Path, monkeypatch):
         )
     )
     pool = tmp_path / "pool"
-    _calib_sample_dir(pool, 0)
+    _sample_request_dir(pool, 0)
 
     code = run_bench_on_pod(
         PodSpec(provider="targon", force=True),
-        request_paths=discover_calib_requests(pool),
+        request_paths=sorted(pool.glob("sample-*/bench_request.json")),
         output_dir=tmp_path / "runs",
         mock_engine=True,
         pod_name=name,
@@ -1548,7 +1503,12 @@ def test_parse_pubkeys_rejects_malformed():
             _parse_pubkeys(bad)
 
 
-def _pull_command(user: str, *, env_file: str = "/tmp/e.env") -> str:
+def _pull_command(
+    user: str,
+    *,
+    env_file: str = "/tmp/e.env",
+    refs: list[str] | None = None,
+) -> str:
     """Remote script pull_engine_images would run on a pod with this ssh user."""
     from gpu.bootstrap import pull_engine_images
 
@@ -1570,7 +1530,10 @@ def _pull_command(user: str, *, env_file: str = "/tmp/e.env") -> str:
         raw={},
     )
     pull_engine_images(
-        pod, ["ghcr.io/x/y@sha256:abc"], env_file=env_file, runner=runner
+        pod,
+        refs or ["ghcr.io/x/y@sha256:abc"],
+        env_file=env_file,
+        runner=runner,
     )
     cmd = captured[-1]
     return cmd[-1] if isinstance(cmd, list) else str(cmd)
@@ -1603,7 +1566,14 @@ def test_pull_credential_chown_is_a_noop_for_root_pods():
     assert "|| true" in remote
 
 
-def _run_pull_script(tmp_path: Path, user: str, *, login_rc: int) -> tuple[int, str]:
+def _run_pull_script(
+    tmp_path: Path,
+    user: str,
+    *,
+    login_rc: int,
+    refs: list[str] | None = None,
+    fail_pull: str | None = None,
+) -> tuple[int, str]:
     """Execute the rendered remote script with docker/sudo stubbed.
 
     Returns (exit code, the docker subcommands that actually ran). Lets the test
@@ -1621,8 +1591,10 @@ def _run_pull_script(tmp_path: Path, user: str, *, login_rc: int) -> tuple[int, 
     stub.mkdir(exist_ok=True)
     (stub / "docker").write_text(
         "#!/bin/bash\n"
-        f'echo "$1" >> {log}\n'
-        f'if [ "$1" = "login" ]; then exit {login_rc}; fi\nexit 0\n',
+        f'echo "$1 $2" >> {log}\n'
+        f'if [ "$1" = "login" ]; then exit {login_rc}; fi\n'
+        f'if [ "$1" = "pull" ] && [ "$2" = "{fail_pull}" ]; then exit 1; fi\n'
+        "exit 0\n",
         encoding="utf-8",
     )
     # sudo stub drops leading flags (-E) and runs the rest, so `sudo -E docker`
@@ -1634,7 +1606,7 @@ def _run_pull_script(tmp_path: Path, user: str, *, login_rc: int) -> tuple[int, 
     for f in ("docker", "sudo"):
         (stub / f).chmod(0o755)
 
-    remote = _pull_command(user, env_file=str(env_file))
+    remote = _pull_command(user, env_file=str(env_file), refs=refs)
     proc = subprocess.run(
         ["bash", "-c", remote],
         capture_output=True,
@@ -1664,3 +1636,58 @@ def test_successful_login_proceeds_to_pull(tmp_path: Path, user: str):
     assert rc == 0
     assert "login" in ran
     assert "pull" in ran
+
+
+@pytest.mark.parametrize("user", ["shadeform", "root"])
+@pytest.mark.parametrize("fail_index", [1, 2])
+def test_one_unpullable_ref_does_not_stop_the_others(
+    tmp_path: Path, user: str, fail_index: int
+):
+    """Decision 28: one bad challenger image must not take the round down.
+
+    The pre-pull is best-effort warming. bench/lifecycle.py pulls each image
+    again at its own start, where bench/main.py can blame the single entry that
+    owns it, so a ref that will not pull here must not abort the rest and must
+    not fail the step. fail_index 2 is the last ref, which is what the trailing
+    `true` covers: without it the group would exit non-zero and, with ssh_exec
+    checked, raise.
+    """
+    refs = [f"ghcr.io/x/y@sha256:{c * 64}" for c in "abc"]
+    rc, ran = _run_pull_script(
+        tmp_path, user, login_rc=0, refs=refs, fail_pull=refs[fail_index]
+    )
+    assert rc == 0
+    for ref in refs:
+        assert f"pull {ref}" in ran
+
+
+def test_failed_login_raises_rather_than_warning(tmp_path: Path):
+    """A bad GHCR token is host auth, not a candidate fault.
+
+    Decision 28 covers a challenger that cannot start, not a login the whole
+    round depends on. Swallowing this would let the round stage hundreds of GB
+    of weights and only then void, instead of failing in seconds.
+    """
+    from gpu.bootstrap import pull_engine_images
+
+    ensure_durable_keypair(tmp_path / "st")
+    pod = Pod(
+        provider="targon",
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=tmp_path / "st" / "keys" / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+    with pytest.raises(GpuError):
+        pull_engine_images(
+            pod,
+            [f"ghcr.io/x/y@sha256:{'a' * 64}"],
+            env_file="/opt/pareton/.pareton-bench.env",
+            runner=lambda cmd, *, timeout, input_text=None: SshResult(
+                1, "", "unauthorized"
+            ),
+            state_dir=tmp_path / "st",
+        )

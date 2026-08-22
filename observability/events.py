@@ -318,6 +318,29 @@ def bench_failed(
     )
 
 
+# -- Rounds ------------------------------------------------------------------
+
+
+def round_voided(
+    *,
+    round_id: str,
+    campaign_id: str,
+    void_reason: str,
+) -> dict[str, Any]:
+    """One round abandoned without a verdict.
+
+    A stale round and an absent worker heartbeat are different failures: the
+    worker process can be healthy while the round it claimed is dead. Alert on
+    this event, not on the heartbeat monitor.
+    """
+    return _emit(
+        "round_voided",
+        round_id=round_id,
+        campaign_id=campaign_id,
+        void_reason=void_reason,
+    )
+
+
 # -- Provider balance --------------------------------------------------------
 
 

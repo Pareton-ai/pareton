@@ -172,6 +172,11 @@ def evidence_object_key(submission_id: str, task_id: str) -> str:
     return f"{prefix}/evidence/{submission_id}/{task_id}.tar.gz"
 
 
+def round_evidence_object_key(round_id: str, task_id: str) -> str:
+    prefix = config.S3_PREFIX.strip("/")
+    return f"{prefix}/evidence/rounds/{round_id}/{task_id}.tar.gz"
+
+
 def realized_trace_object_key(campaign_id: str, sha256: str) -> str:
     digest = str(sha256).lower()
     if digest.startswith("sha256:"):
@@ -193,15 +198,10 @@ def upload_realized_trace(*, campaign_id: str, body: bytes, sha256: str) -> str:
     return public_retrieval_url(key)
 
 
-def upload_evidence_bundle(
-    submission_id: str,
-    task_id: str,
-    output_dir: Path,
+def _upload_bundle(
+    output_dir: Path, *, key: str, archive_name: str
 ) -> tuple[str, str, int]:
-    """Tar.gz the bench output dir and put_object (private, not public-read).
-
-    Returns (s3_url, sha256, size_bytes).
-    """
+    """Tar.gz the bench output dir and put_object. Returns (s3_url, sha256, size)."""
     output_dir = Path(output_dir)
     required = [
         output_dir / "bench_report.json",
@@ -214,12 +214,11 @@ def upload_evidence_bundle(
         raise RuntimeError("evidence bundle missing evidence/ directory")
 
     with tempfile.TemporaryDirectory(prefix="pareton-evidence-") as tmp:
-        archive = Path(tmp) / f"{task_id}.tar.gz"
+        archive = Path(tmp) / f"{archive_name}.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(output_dir, arcname=".")
         data = archive.read_bytes()
         digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
-        key = evidence_object_key(submission_id, task_id)
         client = _client()
         client.put_object(
             Bucket=config.S3_BUCKET,
@@ -229,3 +228,32 @@ def upload_evidence_bundle(
         )
         url = f"s3://{config.S3_BUCKET}/{key}"
         return url, digest, len(data)
+
+
+def upload_evidence_bundle(
+    submission_id: str,
+    task_id: str,
+    output_dir: Path,
+) -> tuple[str, str, int]:
+    """Tar.gz the bench output dir and put_object (private, not public-read).
+
+    Returns (s3_url, sha256, size_bytes).
+    """
+    return _upload_bundle(
+        output_dir,
+        key=evidence_object_key(submission_id, task_id),
+        archive_name=task_id,
+    )
+
+
+def upload_round_evidence(
+    round_id: str,
+    task_id: str,
+    output_dir: Path,
+) -> tuple[str, str, int]:
+    """One evidence bundle per round. Returns (s3_url, sha256, size_bytes)."""
+    return _upload_bundle(
+        output_dir,
+        key=round_evidence_object_key(round_id, task_id),
+        archive_name=task_id,
+    )

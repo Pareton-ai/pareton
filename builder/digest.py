@@ -69,6 +69,29 @@ def resolve_image_repo_digest(
     return None
 
 
+def image_ref_resolves(image_ref: str, *, timeout_s: float = 60.0) -> bool:
+    """True when ``docker manifest inspect`` can see the image in the registry."""
+    try:
+        proc = subprocess.run(
+            ["docker", "manifest", "inspect", image_ref],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.warning("docker manifest inspect failed for %s: %s", image_ref, exc)
+        return False
+    if proc.returncode != 0:
+        logger.warning(
+            "docker manifest inspect non-zero for %s: %s",
+            image_ref,
+            (proc.stderr or proc.stdout)[:500],
+        )
+        return False
+    return True
+
+
 def mock_digest_from_patch_hash(patch_hash: str) -> str:
     """Synthetic sha256:<64 hex> derived from patch_hash for mock builds."""
     hex_part = patch_hash.lower().strip()
