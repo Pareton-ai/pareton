@@ -47,7 +47,6 @@
   },
   "sla_bench": {
     "repetitions": 3,
-    "warmup_requests": 1,
     "thresholds": {
       "p99_ttft_ms": 2000,
       "p99_itl_ms": 50

@@ -301,16 +301,19 @@ def _run_engine(
 
     Returns (per-rep metric dicts, every measured row across reps).
     """
-    if cfg.warmup_requests > 0:
-        warm_rows, _, _ = _replay(
-            base_url,
-            requests[: cfg.warmup_requests],
-            role=role,
-            rep=0,
-            is_warmup=True,
-            timeout_s=timeout_s,
-        )
-        _write_rep(engine_evidence_dir / WARMUP_DIRNAME, warm_rows, 0.0)
+    # Warmup replays the full request set. Measured reps replay the same
+    # trace, so a partial warmup leaves the first measured rep cold on
+    # engines with prefix caching and inflates cross-rep variance past the
+    # reproducibility bar.
+    warm_rows, _, _ = _replay(
+        base_url,
+        requests,
+        role=role,
+        rep=0,
+        is_warmup=True,
+        timeout_s=timeout_s,
+    )
+    _write_rep(engine_evidence_dir / WARMUP_DIRNAME, warm_rows, 0.0)
 
     rep_metrics: list[dict] = []
     measured: list[dict] = []
