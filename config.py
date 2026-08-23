@@ -173,9 +173,6 @@ BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_COVERAGE_RATIO", "0.5")
 )
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
-BENCH_SLA_WARMUP_REQUESTS: int = int(
-    os.environ.get("PARETON_BENCH_SLA_WARMUP_REQUESTS", "1")
-)
 
 # Round seeding reads the block this many behind the head, so the seed block is
 # already settled and the watcher never blocks waiting for the tip to finalize.

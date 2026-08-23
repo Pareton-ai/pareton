@@ -235,14 +235,12 @@ class SlaThresholds:
 @dataclass
 class SlaBenchConfig:
     repetitions: int
-    warmup_requests: int
     thresholds: SlaThresholds
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SlaBenchConfig:
         return cls(
             repetitions=int(d["repetitions"]),
-            warmup_requests=int(d["warmup_requests"]),
             thresholds=SlaThresholds.from_dict(d["thresholds"]),
         )
 

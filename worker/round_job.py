@@ -313,7 +313,6 @@ def build_round_request(
         "correctness": correctness,
         "sla_bench": {
             "repetitions": int(config.BENCH_SLA_REPETITIONS),
-            "warmup_requests": int(config.BENCH_SLA_WARMUP_REQUESTS),
             "thresholds": {
                 "p99_ttft_ms": float(ttft),
                 "p99_itl_ms": float(itl),

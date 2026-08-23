@@ -56,14 +56,6 @@ def test_every_candidate_image_must_be_digest_pinned():
         validate_bench_request_dict(raw)
 
 
-def test_warmup_requests_must_be_positive():
-    """Without warmup a round times cold starts and ranks engines on them."""
-    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
-    raw["sla_bench"]["warmup_requests"] = 0
-    with pytest.raises(RequestValidationError, match="warmup_requests"):
-        validate_bench_request_dict(raw)
-
-
 def test_scoring_rule_is_required():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw.pop("scoring_rule")

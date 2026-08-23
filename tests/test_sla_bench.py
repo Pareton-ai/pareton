@@ -135,7 +135,6 @@ def test_rejects_token_ids_only(tmp_path: Path):
     )
     cfg = SlaBenchConfig(
         repetitions=1,
-        warmup_requests=0,
         thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
     )
     with pytest.raises(RequestValidationError, match="text prompt"):
@@ -174,7 +173,6 @@ def test_recompute_matches_report(tmp_path: Path):
     )
     cfg = SlaBenchConfig(
         repetitions=3,
-        warmup_requests=0,
         thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
     )
     with MockEngine(MockEngineConfig(model="c", token_latency_s=0.005)) as c:
@@ -220,11 +218,17 @@ def test_warmup_excluded_from_metrics(tmp_path: Path):
                 sampling=TraceSampling(0.0, 1.0),
                 prompt="hi",
             ),
+            TraceRequest(
+                id="r2",
+                arrival_offset_ms=10,
+                max_tokens=4,
+                sampling=TraceSampling(0.0, 1.0),
+                prompt="there",
+            ),
         ],
     )
     cfg = SlaBenchConfig(
         repetitions=2,
-        warmup_requests=1,
         thresholds=SlaThresholds(p99_ttft_ms=1e9, p99_itl_ms=1e9),
     )
     with MockEngine(MockEngineConfig(model="c")) as c:
@@ -244,6 +248,9 @@ def test_warmup_excluded_from_metrics(tmp_path: Path):
         if line.strip() and '"_rep_meta"' not in line
     ]
     assert all(r["warmup"] for r in warm_rows)
+    # Warmup covers the full request set: a partial warmup leaves the first
+    # measured rep cold under prefix caching and inflates cross-rep variance.
+    assert {r["request_id"] for r in warm_rows} == {"r1", "r2"}
     for n in (1, 2):
         rep_rows = [
             json.loads(line)
@@ -277,9 +284,7 @@ def test_arrival_offsets_respected(tmp_path: Path):
             ),
         ],
     )
-    cfg = SlaBenchConfig(
-        repetitions=1, warmup_requests=0, thresholds=SlaThresholds(1e9, 1e9)
-    )
+    cfg = SlaBenchConfig(repetitions=1, thresholds=SlaThresholds(1e9, 1e9))
     import time
 
     with MockEngine(MockEngineConfig(model="b")) as b:

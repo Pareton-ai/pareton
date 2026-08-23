@@ -211,13 +211,7 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     sla = d["sla_bench"]
     if not isinstance(sla, dict):
         raise RequestValidationError("sla_bench must be an object")
-    _require_keys(
-        sla, ["repetitions", "warmup_requests", "thresholds"], ctx="sla_bench"
-    )
-    # Every container discards warmup requests before it is measured. A round
-    # with no warmup times cold starts and ranks engines on that noise.
-    if int(sla["warmup_requests"]) < 1:
-        raise RequestValidationError("sla_bench.warmup_requests must be >= 1")
+    _require_keys(sla, ["repetitions", "thresholds"], ctx="sla_bench")
     if int(sla["repetitions"]) < 1:
         raise RequestValidationError("sla_bench.repetitions must be >= 1")
     sla_thr = sla["thresholds"]
