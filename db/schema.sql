@@ -22,8 +22,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
   baseline_commit TEXT NOT NULL,
   base_image_digest TEXT NOT NULL,
   gpu_skus JSONB NOT NULL DEFAULT '[]'::jsonb,
-  workload_trace_sha256 TEXT NOT NULL,
-  workload_trace_url TEXT NOT NULL,
+  -- Unused when sampling_rule is set. Nullable so new seeds do not store a
+  -- leftover file:// path. Live rows may still hold a value until an operator
+  -- ALTER; do not remanifest a live campaign to clear them.
+  workload_trace_sha256 TEXT,
+  workload_trace_url TEXT,
   sla JSONB NOT NULL DEFAULT '{}'::jsonb,
   scoring_config_sha256 TEXT,
   scoring_config_url TEXT,
@@ -47,7 +50,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   engine JSONB,
   workload_pool JSONB,
   -- Sampler pin: {type: "hf_rows", dataset, revision, n_rows, n_prompts, ...}.
-  -- NULL ⇒ no dynamic sampling (use fixed workload_trace_*).
+  -- Required for new campaigns. NULL is a leftover; the watcher will not
+  -- create a round for that campaign.
   sampling_rule JSONB,
   -- Named ranking rule, pinned in manifest_hash: {name: "median_e2e_speedup"}.
   -- Fixed once the campaign leaves 'draft'.

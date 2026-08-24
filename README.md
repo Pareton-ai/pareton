@@ -19,7 +19,7 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 
 ## How It Works
 
-1. **Campaigns** pin a baseline commit, base image digest, allowed/denied path globs, and a content-addressed workload trace. Once open, the manifest is frozen.
+1. **Campaigns** pin a baseline commit, base image digest, allowed/denied path globs, and an `hf_rows` sampling rule. Once open, the manifest is frozen. Each round draws a prompt set from that pin.
 2. **Miners** author a git patch against that baseline, upload it via Pareton-presigned S3, and commit `campaign_id`, `baseline_commit`, `patch_hash`, and `retrieval_url` on-chain.
 3. **The watcher** (`python -m worker.watcher`) scans SN10 for new commitments and writes submissions to Postgres. **The worker** (`python -m worker`) claims jobs and runs validation gates (identity, integrity, base-apply, surface).
 4. **Hermetic build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
