@@ -17,6 +17,7 @@ from bench.correctness import (
     grade_candidate,
     post_completion,
     probe_logprob_capability,
+    quantile_low,
     resolve_trace_path,
     select_correctness_prompts,
 )
@@ -40,14 +41,17 @@ def _cfg(
     *,
     min_mean: float = -4.0,
     min_token: float = -12.0,
+    quantile: float = 0.0,
     coverage: float = 0.5,
     num_prompts: int = 2,
 ) -> CorrectnessConfig:
+    """Default quantile is 0, so existing cases still gate on the plain min."""
     return CorrectnessConfig(
         num_prompts=num_prompts,
         thresholds=CorrectnessThresholds(
             min_mean_logprob=min_mean,
             min_token_logprob=min_token,
+            min_token_quantile=quantile,
             min_coverage_ratio=coverage,
         ),
     )
@@ -322,6 +326,77 @@ def test_garbage_output_is_disqualified(tmp_path: Path):
     assert report.verdict == "fail_correctness"
     assert report.min_logprob <= -30.0
     assert "logprob" in (report.reason or "")
+
+
+def test_quantile_low_picks_the_kth_lowest():
+    """k = ceil(quantile * n), so 0.001 of 4097 positions ignores four."""
+    values = [-3.0] * 4096 + [-15.979]
+    assert quantile_low(values, 0.001) == -3.0
+    assert quantile_low(values, 0.0) == -15.979
+    assert quantile_low([-9.0, -1.0, -5.0], 0.0) == -9.0
+    # A sample too small for the quantile to reach a second position, and a
+    # quantile large enough to reach past the last one, both stay in range.
+    assert quantile_low([-9.0, -1.0], 0.001) == -9.0
+    assert quantile_low([-9.0, -1.0], 0.99) == -1.0
+
+
+def test_quantile_low_rejects_an_empty_sample():
+    with pytest.raises(ValueError, match="at least one value"):
+        quantile_low([], 0.001)
+
+
+def _long_output(n_tokens: int) -> str:
+    return " " + " ".join(f"w{i}" for i in range(n_tokens))
+
+
+def test_one_outlier_token_no_longer_disqualifies(tmp_path: Path):
+    """PAR-94: round 7 disqualified a noop on one token in 4097.
+
+    The scorer rates position 5 at -15.979 and everything else at -3.0, the
+    shape of the real evidence. At the default quantile that single position
+    is ignored; at quantile 0 it fails, which is what shipped and what round 7
+    hit.
+    """
+    prompt = "Hello world "
+    text = _long_output(1400)
+    n_positions = len(prompt.split()) + 1400 + 8  # generous upper bound
+    logprobs = [-3.0] * n_positions
+    logprobs[5] = -15.979
+    outputs = [_captured("r1", prompt, text, tokens=1400)]
+    cfg = MockEngineConfig(host="127.0.0.1", port=0, logprobs=logprobs)
+    with MockEngine(cfg) as scorer:
+        passing = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1, quantile=0.001),
+            evidence_path=tmp_path / "pass" / "candidate_0.jsonl",
+        )
+        failing = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1, quantile=0.0),
+            evidence_path=tmp_path / "fail" / "candidate_0.jsonl",
+        )
+    assert passing.num_positions_scored >= 1001  # or the quantile ignores nothing
+    assert passing.verdict == "pass"
+    assert passing.min_logprob == -15.979
+    assert passing.quantile_logprob == -3.0
+    assert failing.verdict == "fail_correctness"
+    assert "-15.979" in (failing.reason or "")
+
+
+def test_garbage_still_fails_at_the_default_quantile(tmp_path: Path):
+    """The quantile ignores a few positions, not a wrong answer."""
+    outputs = [_captured("r1", "Hello world", GARBAGE_TEXT, tokens=3)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1, quantile=0.001),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert report.quantile_logprob <= -30.0
 
 
 def test_a_different_but_plausible_output_still_passes(tmp_path: Path):

@@ -167,6 +167,13 @@ def test_invalid_request_coverage_ratio_out_of_range():
         validate_bench_request_dict(raw)
 
 
+def test_invalid_request_token_quantile_out_of_range():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["thresholds"]["min_token_quantile"] = 1.0
+    with pytest.raises(RequestValidationError, match="min_token_quantile"):
+        validate_bench_request_dict(raw)
+
+
 def test_invalid_request_zero_num_prompts():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["correctness"]["num_prompts"] = 0

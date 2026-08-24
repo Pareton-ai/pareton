@@ -111,6 +111,7 @@ def _normalize_status(status: str) -> str:
 CORRECTNESS_THRESHOLD_KEYS = (
     "min_mean_logprob",
     "min_token_logprob",
+    "min_token_quantile",
     "min_coverage_ratio",
 )
 
@@ -121,12 +122,17 @@ def _correctness_thresholds(thresholds: dict | None) -> dict:
     defaults = {
         "min_mean_logprob": config.BENCH_CORRECTNESS_MIN_MEAN_LOGPROB,
         "min_token_logprob": config.BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB,
+        "min_token_quantile": config.BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE,
         "min_coverage_ratio": config.BENCH_CORRECTNESS_MIN_COVERAGE_RATIO,
     }
     out = {k: float(src.get(k, defaults[k])) for k in CORRECTNESS_THRESHOLD_KEYS}
     if not 0.0 < out["min_coverage_ratio"] <= 1.0:
         raise ValueError(
             "bench.correctness.thresholds.min_coverage_ratio must be in (0, 1]"
+        )
+    if not 0.0 <= out["min_token_quantile"] < 1.0:
+        raise ValueError(
+            "bench.correctness.thresholds.min_token_quantile must be in [0, 1)"
         )
     return out
 
@@ -408,7 +414,13 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-correctness-min-token-logprob",
         type=float,
         default=None,
-        help="Scorer bar: lowest single-token logprob allowed",
+        help="Scorer bar: lowest allowed token logprob at --*-min-token-quantile",
+    )
+    p.add_argument(
+        "--bench-correctness-min-token-quantile",
+        type=float,
+        default=None,
+        help="Fraction of worst-scored positions the min-token bar ignores",
     )
     p.add_argument(
         "--bench-correctness-min-coverage-ratio",
@@ -525,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides = {
             "min_mean_logprob": args.bench_correctness_min_mean_logprob,
             "min_token_logprob": args.bench_correctness_min_token_logprob,
+            "min_token_quantile": args.bench_correctness_min_token_quantile,
             "min_coverage_ratio": args.bench_correctness_min_coverage_ratio,
         }
         correctness_thresholds = {k: v for k, v in overrides.items() if v is not None}

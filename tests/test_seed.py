@@ -81,6 +81,7 @@ def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatc
     assert set(bench["correctness"]["thresholds"]) == {
         "min_mean_logprob",
         "min_token_logprob",
+        "min_token_quantile",
         "min_coverage_ratio",
     }
     assert "num_prompts" not in bench["correctness"]
@@ -97,6 +98,7 @@ def test_open_requires_correctness_thresholds():
                 "thresholds": {
                     "min_mean_logprob": -4.0,
                     "min_token_logprob": -12.0,
+                    "min_token_quantile": 0.001,
                     "min_coverage_ratio": 0.5,
                 }
             }
@@ -115,6 +117,20 @@ def test_coverage_ratio_must_be_a_fraction():
 
     with pytest.raises(ValueError, match="min_coverage_ratio"):
         build_seed_bench_spec(correctness_thresholds={"min_coverage_ratio": 0.0})
+
+
+def test_token_quantile_must_be_a_fraction():
+    """0 is allowed and means the plain minimum; 1 would gate on the maximum."""
+    from campaign.seed import build_seed_bench_spec
+
+    assert (
+        build_seed_bench_spec(correctness_thresholds={"min_token_quantile": 0.0})[
+            "correctness"
+        ]["thresholds"]["min_token_quantile"]
+        == 0.0
+    )
+    with pytest.raises(ValueError, match="min_token_quantile"):
+        build_seed_bench_spec(correctness_thresholds={"min_token_quantile": 1.0})
 
 
 def test_https_url_with_matching_sha(monkeypatch: pytest.MonkeyPatch):

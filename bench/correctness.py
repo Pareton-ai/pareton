@@ -15,6 +15,13 @@ asks whether an output is plausible under the pinned model, not whether it
 matches the baseline engine token for token: a candidate that answers
 differently but sensibly passes.
 
+The min-token bar is applied to the k-th lowest scored position rather than
+the outright minimum (PAR-94). Scorer and candidate are separate instances of
+the same image, so numerical divergence can flip the argmax at a single
+high-entropy position and have the scorer rate the candidate's own token near
+zero probability. Round 7 of campaign de622a8d disqualified a behaviourally
+identical noop on exactly one such token out of 4097.
+
 Pure URL-based logic. The scorer container's lifecycle lives in bench/main.py,
 which starts it once, grades every candidate through it, and stops it.
 """
@@ -23,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
@@ -323,6 +331,19 @@ def extract_output_logprobs(
     return out
 
 
+def quantile_low(values: list[float], quantile: float) -> float:
+    """The k-th lowest of ``values``, k = ceil(``quantile`` * len(values)).
+
+    k is clamped to at least 1, so a quantile of 0 and any sample too small
+    for the quantile to reach a second position both give the plain minimum.
+    """
+    if not values:
+        raise ValueError("quantile_low requires at least one value")
+    k = max(1, math.ceil(quantile * len(values)))
+    k = min(k, len(values))
+    return sorted(values)[k - 1]
+
+
 @dataclass(frozen=True)
 class CapturedOutput:
     """One request's output as the candidate actually produced it."""
@@ -468,6 +489,7 @@ def grade_candidate(
             num_positions_scored=len(logprobs),
             mean_logprob=0.0,
             min_logprob=0.0,
+            quantile_logprob=0.0,
             coverage_ratio=0.0,
             evidence=rel_evidence,
             reason=f"engine returned no output for {len(empty)} prompt(s): {empty[0]}",
@@ -480,6 +502,7 @@ def grade_candidate(
             num_positions_scored=0,
             mean_logprob=0.0,
             min_logprob=0.0,
+            quantile_logprob=0.0,
             coverage_ratio=0.0,
             evidence=rel_evidence,
             reason="scorer produced no logprobs for any captured output",
@@ -492,12 +515,19 @@ def grade_candidate(
 
     mean_lp = statistics.fmean(logprobs)
     min_lp = min(logprobs)
+    # The bar is applied to the k-th lowest position, so one high-entropy
+    # position the scorer and the candidate disagreed on cannot fail an
+    # otherwise faithful output. See the module docstring.
+    q_lp = quantile_low(logprobs, thr.min_token_quantile)
     reason: str | None = None
     verdict = "pass"
     if mean_lp < thr.min_mean_logprob:
         reason = f"mean logprob {mean_lp:.3f} below {thr.min_mean_logprob}"
-    elif min_lp < thr.min_token_logprob:
-        reason = f"min token logprob {min_lp:.3f} below {thr.min_token_logprob}"
+    elif q_lp < thr.min_token_logprob:
+        reason = (
+            f"token logprob at quantile {thr.min_token_quantile} is "
+            f"{q_lp:.3f}, below {thr.min_token_logprob}"
+        )
 
     if reason:
         # Whatever the scorer did manage to read was bad. Thin coverage is no
@@ -513,11 +543,12 @@ def grade_candidate(
             f"below the {thr.min_coverage_ratio:.0%} floor"
         )
     logger.info(
-        "correctness %s positions=%d mean=%.4f min=%.4f coverage=%.3f",
+        "correctness %s positions=%d mean=%.4f min=%.4f q=%.4f coverage=%.3f",
         verdict,
         len(logprobs),
         mean_lp,
         min_lp,
+        q_lp,
         coverage,
     )
     return CorrectnessReport(
@@ -526,6 +557,7 @@ def grade_candidate(
         num_positions_scored=len(logprobs),
         mean_logprob=mean_lp,
         min_logprob=min_lp,
+        quantile_logprob=q_lp,
         coverage_ratio=coverage,
         evidence=rel_evidence,
         reason=reason,
@@ -569,6 +601,7 @@ def grade_all(
                 num_positions_scored=0,
                 mean_logprob=0.0,
                 min_logprob=0.0,
+                quantile_logprob=0.0,
                 coverage_ratio=0.0,
                 evidence=f"evidence/correctness/candidate_{item.candidate_index}.jsonl",
                 reason=f"scorer could not grade this output: {exc}",
