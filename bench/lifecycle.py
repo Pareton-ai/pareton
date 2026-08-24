@@ -85,6 +85,14 @@ class EngineError(Exception):
         self.error_role = error_role
 
 
+class EngineCrashedError(EngineError):
+    """The engine process exited before becoming healthy.
+
+    Distinct from a pull/inspect/timeout EngineError: the image started and
+    its own code died, which is the candidate's fault, not infrastructure.
+    """
+
+
 class HostEnvironmentError(Exception):
     """Host/tooling unavailable (maps to CLI exit code 2): Docker missing/down."""
 
@@ -404,7 +412,7 @@ def wait_until_healthy(
     last_err: str | None = None
     while time.monotonic() < deadline:
         if is_alive is not None and not is_alive():
-            raise EngineError(
+            raise EngineCrashedError(
                 f"engine died before becoming healthy (last error: {last_err})"
             )
         try:
@@ -650,7 +658,9 @@ class EngineContainer:
                     )
                 except EngineError:
                     tail = ""
-                raise EngineError(
+                # Keep the subclass: a crash must still read as a crash once
+                # the log tail is attached.
+                raise err.__class__(
                     f"{err}; container log tail:\n{tail[-4000:]}"
                 ) from err
         except BaseException:

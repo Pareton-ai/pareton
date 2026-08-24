@@ -52,6 +52,7 @@ from bench.env import (
 from bench.lifecycle import (
     BenchNetwork,
     EngineContainer,
+    EngineCrashedError,
     EngineError,
     HostEnvironmentError,
     new_run_id,
@@ -313,12 +314,14 @@ class MockCandidatePlan:
     """One mock candidate's behaviour.
 
     Together these cover every outcome a real candidate can reach: faster than
-    the baseline, barely different from it, wrong, or unable to start.
+    the baseline, barely different from it, wrong, unable to start, or dead
+    before healthy.
     """
 
     speed_factor: float = 1.0
     garbage: bool = False
     infra_fail: bool = False
+    crash: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> MockCandidatePlan:
@@ -326,6 +329,7 @@ class MockCandidatePlan:
             speed_factor=float(d.get("speed_factor", 1.0)),
             garbage=bool(d.get("garbage", False)),
             infra_fail=bool(d.get("infra_fail", False)),
+            crash=bool(d.get("crash", False)),
         )
 
 
@@ -406,6 +410,11 @@ class _EngineProvider:
                 if start.candidate_index is not None
                 else None
             )
+            if plan is not None and plan.crash:
+                raise EngineCrashedError(
+                    f"mock engine {start.role} died before becoming healthy",
+                    error_role=start.role,
+                )
             if plan is not None and plan.infra_fail:
                 raise EngineError(
                     f"mock engine {start.role} failed to start",
@@ -516,6 +525,15 @@ def run_round(
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
                     )
+            except EngineCrashedError as exc:
+                # The engine process exited during startup: the image ran and
+                # its own code died. That is the candidate's fault, so the
+                # entry is terminally disqualified rather than requeued.
+                logger.warning("candidate %d engine crashed: %s", index, exc)
+                runs.append(
+                    _CandidateRun(index=index, status="disqualified", reason=str(exc))
+                )
+                continue
             except EngineError as exc:
                 # One candidate failing to run is that entry's problem, not
                 # the round's. The round continues with the rest.
@@ -567,6 +585,17 @@ def _build_entries(
     entries: list[RoundEntryReport] = []
     for run in runs:
         digest = digests[run.index] if run.index < len(digests) else ""
+        if run.status == "disqualified":
+            # Engine crashed at startup: no SLA, no correctness, no score.
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="disqualified",
+                    reason=run.reason,
+                )
+            )
+            continue
         if run.status == "infra_failed" or run.replay is None:
             entries.append(
                 RoundEntryReport(
@@ -878,7 +907,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=(
             "With --mock-engine, a JSON list scripting each candidate, e.g. "
-            '\'[{"speed_factor": 1.5}, {"garbage": true}, {"infra_fail": true}]\''
+            '\'[{"speed_factor": 1.5}, {"garbage": true}, {"infra_fail": true}, '
+            '{"crash": true}]\''
         ),
     )
     p.add_argument("--version", action="version", version=f"bench {__version__}")

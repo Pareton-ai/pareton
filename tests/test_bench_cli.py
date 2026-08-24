@@ -84,8 +84,8 @@ def test_cli_mock_round_scores_every_entry(tmp_path: Path):
 
 def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
     """Baseline 1.0, two close challengers, a leader, a correctness fail, an
-    infra fail: every outcome a round can produce, in one run."""
-    req = _write_request(tmp_path, candidates=5)
+    infra fail, a startup crash: every outcome a round can produce, in one run."""
+    req = _write_request(tmp_path, candidates=6)
     out = tmp_path / "out"
     code = main(
         [
@@ -104,6 +104,7 @@ def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
                     {"speed_factor": 3.0},
                     {"garbage": True},
                     {"infra_fail": True},
+                    {"crash": True},
                 ]
             ),
         ]
@@ -111,7 +112,7 @@ def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
     assert code == EXIT_OK
     report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
     by_index = {e["index"]: e for e in report["entries"]}
-    assert len(by_index) == 5
+    assert len(by_index) == 6
 
     assert by_index[0]["status"] == "scored"
     assert by_index[1]["status"] == "scored"
@@ -123,6 +124,12 @@ def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
     # A candidate that will not start is that entry's problem, not the round's.
     assert by_index[4]["status"] == "infra_failed"
     assert by_index[4]["score"] is None
+    # An engine whose own process dies at startup is disqualified, terminal:
+    # no requeue, unlike an infra flake.
+    assert by_index[5]["status"] == "disqualified"
+    assert by_index[5]["score"] is None
+    assert "correctness" not in by_index[5]
+    assert "died before becoming healthy" in by_index[5]["reason"]
 
     # The clear leader must out-score the two close challengers.
     assert by_index[2]["score"] > by_index[0]["score"]

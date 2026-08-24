@@ -18,6 +18,7 @@ from bench.lifecycle import (
     BenchNetwork,
     DockerResult,
     EngineContainer,
+    EngineCrashedError,
     EngineError,
     HostEnvironmentError,
     _redact_cmd_for_log,
@@ -562,7 +563,10 @@ def test_fail_fast_when_container_exits_during_health():
     fake.logs["ciddeadbeef01"] = "traceback: boom\n"
 
     with BenchNetwork(run_id="diedearly000", runner=fake, cmd_timeout_s=30) as net:
-        with pytest.raises(EngineError, match="died before becoming healthy"):
+        # EngineCrashedError, not plain EngineError: the log-tail wrap in
+        # __enter__ must preserve the subclass so the round can tell a
+        # candidate crash apart from an infra flake.
+        with pytest.raises(EngineCrashedError, match="died before becoming healthy"):
             with EngineContainer(
                 spec=spec,
                 network=net,
@@ -682,17 +686,20 @@ def test_wait_until_healthy_respects_startup_delay_via_cli():
 
 
 def test_wait_until_healthy_timeout():
-    with pytest.raises(EngineError, match="timed out"):
+    # A live-but-unhealthy engine is ambiguous (candidate hang or infra
+    # slowness), so the timeout keeps the requeueable infra classification.
+    with pytest.raises(EngineError, match="timed out") as exc_info:
         wait_until_healthy(
             "http://127.0.0.1:1",  # nothing listening
             timeout_s=0.3,
             poll_s=0.05,
             is_alive=lambda: True,
         )
+    assert not isinstance(exc_info.value, EngineCrashedError)
 
 
 def test_wait_until_healthy_fail_fast_when_alive_false():
-    with pytest.raises(EngineError, match="died before becoming healthy"):
+    with pytest.raises(EngineCrashedError, match="died before becoming healthy"):
         wait_until_healthy(
             "http://127.0.0.1:1",
             timeout_s=5.0,
