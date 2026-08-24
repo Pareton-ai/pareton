@@ -291,6 +291,34 @@ def test_entry_results_from_report_copies_score_and_sla():
     assert results[2]["disqualify_reason"] == "fail_correctness"
 
 
+def test_entry_results_leader_crash_keeps_the_infra_path():
+    """A crash-disqualified incumbent maps back to infra_failed (void path);
+    the same crash on a challenger stays a terminal disqualification."""
+    entries = _entries()
+    crash = {
+        "image_digest": CAND_A,
+        "status": "disqualified",
+        "score": None,
+        "reason": "engine died before becoming healthy",
+        "engine_crashed": True,
+    }
+    report = {
+        "baseline": {"role": "baseline", "timings": {}, "cross_rep_variance": {}},
+        "baseline_drift": 0.001,
+        "entries": [
+            {"index": 0, **crash},
+            {"index": 1, **crash, "image_digest": CAND_B},
+        ],
+    }
+    results = entry_results_from_report(entries, report)
+    assert results[1]["role"] == "leader"
+    assert results[1]["status"] == "infra_failed"
+    # The harness's original verdict survives in the stored report.
+    assert results[1]["report"]["status"] == "disqualified"
+    assert results[2]["role"] == "challenger"
+    assert results[2]["status"] == "disqualified"
+
+
 def test_materialize_round_trace_sha_mismatch(tmp_path):
     trace = tmp_path / "t.json"
     raw = _write_trace(trace)
