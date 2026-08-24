@@ -10,12 +10,17 @@ import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 import config
 from bench.correctness import resolve_trace_path
 from bench.output import PHASE_FILENAME
-from bench.phases import POD_REPORTABLE_PHASES, BenchPhase, coerce_phase
+from bench.phases import (
+    POD_REPORTABLE_PHASES,
+    BenchPhase,
+    coerce_phase,
+    coerce_progress,
+)
 from bench.validate import (
     RequestValidationError,
     load_bench_request,
@@ -52,10 +57,10 @@ class RegistryAddError(GpuError):
     """registry.add failed after a successful rent; not a provider failure."""
 
 
-PhaseSink = Callable[[str], None]
+PhaseSink = Callable[..., None]
 
 
-def _noop_phase(_phase: str) -> None:
+def _noop_phase(_phase: str, **_progress: Any) -> None:
     return None
 
 
@@ -496,8 +501,14 @@ def read_pod_phase(
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
     max_bytes: int = 4096,
-) -> str | None:
-    """Harness phase on the pod, or None. Untrusted: byte-capped and vocabulary-checked."""
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Harness phase and display detail on the pod. Both may be None.
+
+    Untrusted: byte-capped, the name is vocabulary-checked, and the detail is
+    clamped to short scalars by ``coerce_progress``. A pod that reports no
+    progress, or a harness too old to write any, yields ``None`` detail rather
+    than an error.
+    """
     path = shlex.quote(f"{remote_out}/{PHASE_FILENAME}")
     result = ssh_exec(
         pod,
@@ -508,14 +519,15 @@ def read_pod_phase(
         check=False,
     )
     if result.exit_code != 0:
-        return None
+        return None, None
     try:
         record = json.loads((result.stdout or "").strip() or "{}")
     except json.JSONDecodeError:
-        return None
+        return None, None
     if not isinstance(record, dict):
-        return None
-    return coerce_phase(record.get("phase"), allowed=POD_REPORTABLE_PHASES)
+        return None, None
+    phase = coerce_phase(record.get("phase"), allowed=POD_REPORTABLE_PHASES)
+    return phase, coerce_progress(record.get("progress"))
 
 
 class _PodPhasePoller:
@@ -545,7 +557,7 @@ class _PodPhasePoller:
 
     def poll_once(self) -> None:
         try:
-            phase = read_pod_phase(
+            phase, progress = read_pod_phase(
                 self._pod,
                 remote_out=self._remote_out,
                 runner=self._runner,
@@ -561,7 +573,7 @@ class _PodPhasePoller:
             # a later worker-owned phase such as teardown.
             if self._stop.is_set():
                 return
-            self._on_phase(phase)
+            self._on_phase(phase, **(progress or {}))
 
     def _loop(self) -> None:
         self.poll_once()

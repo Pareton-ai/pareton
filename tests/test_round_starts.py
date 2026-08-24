@@ -124,6 +124,24 @@ def test_sglang_scorer_skips_the_vllm_only_flags_and_still_costs_one_start():
     assert scorers[0].spec.serve_args == SGLANG_SERVE_ARGS
 
 
+def test_every_start_carries_its_position_in_the_plan():
+    """PAR-98: nine starts share two phase names, so position is the only signal."""
+    plan = plan_round_starts(
+        validate_bench_request_dict(_request(VLLM_SERVE_ARGS)).engines
+    )
+    assert [s.step for s in plan] == list(range(1, EXPECTED_STARTS + 1))
+    assert {s.steps for s in plan} == {EXPECTED_STARTS}
+
+
+def test_position_counts_the_plan_actually_returned():
+    """sla_bench mode drops the scorer, so `steps` must drop with it."""
+    plan = plan_round_starts(
+        validate_bench_request_dict(_request(VLLM_SERVE_ARGS)).engines,
+        mode="sla_bench",
+    )
+    assert {s.steps for s in plan} == {len(plan)} == {EXPECTED_STARTS - 1}
+
+
 def test_sla_bench_mode_skips_the_scorer():
     req = validate_bench_request_dict(_request(VLLM_SERVE_ARGS))
     plan = plan_round_starts(req.engines, mode="sla_bench")

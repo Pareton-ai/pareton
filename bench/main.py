@@ -30,7 +30,7 @@ import json
 import logging
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
@@ -143,6 +143,12 @@ class EngineStart:
     spec: EngineSpec
     mount_engine_cache: bool
     candidate_index: int | None = None
+    # 1-based position in the plan and the plan's length, filled in by
+    # ``plan_round_starts`` once the list is complete. The runner reports both
+    # as live progress: a round is nine near-identical engine starts, and the
+    # phase name alone cannot tell the first from the seventh.
+    step: int = 0
+    steps: int = 0
 
 
 def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[EngineStart]:
@@ -193,7 +199,10 @@ def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[Engine
             mount_engine_cache=True,
         )
     )
-    return starts
+    # Stamp positions here rather than at the call sites: the plan is the only
+    # place a start is defined, so it is the only place that can number them
+    # without two callers disagreeing.
+    return [replace(s, step=i, steps=len(starts)) for i, s in enumerate(starts, 1)]
 
 
 def _utc_now_iso() -> str:
@@ -359,7 +368,7 @@ class _EngineProvider:
         mock_plan: MockPlan | None = None,
         logs_dir: Path | None = None,
         weights_dir: Path | None = None,
-        phase_sink: Callable[[str], None] | None = None,
+        phase_sink: Callable[..., None] | None = None,
         docker_runner=None,
     ) -> None:
         self._req = req
@@ -376,9 +385,11 @@ class _EngineProvider:
         ]
         self.starts: list[str] = []
 
-    def _write_phase(self, phase: BenchPhase) -> None:
+    def _write_phase(self, phase: BenchPhase, start: EngineStart) -> None:
         if self._phase_sink is not None:
-            self._phase_sink(phase.value)
+            self._phase_sink(
+                phase.value, step=start.step, steps=start.steps, role=start.role
+            )
 
     def _mock_config(self, start: EngineStart) -> MockEngineConfig:
         latency = self._mock_plan.baseline_token_latency_s
@@ -403,7 +414,7 @@ class _EngineProvider:
     def start(self, start: EngineStart, *, phase: BenchPhase) -> Iterator[str]:
         """Bring one planned engine up, yield its base URL, always tear it down."""
         self.starts.append(start.role)
-        self._write_phase(BenchPhase.STARTING_ENGINE)
+        self._write_phase(BenchPhase.STARTING_ENGINE, start)
         if self._mock:
             plan = (
                 self._mock_plan.candidate(start.candidate_index)
@@ -423,7 +434,7 @@ class _EngineProvider:
             engine = MockEngine(self._mock_config(start))
             engine.__enter__()
             try:
-                self._write_phase(phase)
+                self._write_phase(phase, start)
                 yield engine.base_url
             finally:
                 engine.__exit__(None, None, None)
@@ -443,7 +454,7 @@ class _EngineProvider:
                 pull=_should_pull_image(start.spec.image),
                 logs_dir=self._logs_dir,
                 mount_engine_cache=start.mount_engine_cache,
-                on_ready=lambda: self._write_phase(phase),
+                on_ready=lambda: self._write_phase(phase, start),
             )
             with container as handle:
                 if start.kind == "baseline":

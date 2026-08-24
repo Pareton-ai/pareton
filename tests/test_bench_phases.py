@@ -327,6 +327,23 @@ def test_reporter_writes_once_per_phase_change():
     ]
 
 
+def test_reporter_writes_when_only_the_progress_moves():
+    """A round holds one phase across nine starts; position is the only change.
+
+    The pod is re-polled every BENCH_PHASE_POLL_S and repeats its marker, so
+    an unchanged report must still collapse (PAR-98).
+    """
+    writer = _Writer()
+    reporter = _reporter(writer)
+    reporter.set(BenchPhase.SLA_BENCH, step=4, steps=9, role="candidate-2")
+    reporter.set(BenchPhase.SLA_BENCH, step=4, steps=9, role="candidate-2")
+    reporter.set(BenchPhase.SLA_BENCH, step=5, steps=9, role="candidate-3")
+    assert writer.phases == [
+        ("sla_bench", {"step": 4, "steps": 9, "role": "candidate-2"}),
+        ("sla_bench", {"step": 5, "steps": 9, "role": "candidate-3"}),
+    ]
+
+
 def test_reporter_forwards_and_clamps_progress():
     writer = _Writer()
     _reporter(writer).set(BenchPhase.DOWNLOADING_MODEL, percent=12, junk={"a": 1})
@@ -435,7 +452,7 @@ def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Pa
     req: BenchRequest = load_bench_request(
         ROOT / "fixtures" / "bench" / "sample_request.json"
     )[0]
-    seen: list[str] = []
+    seen: list[tuple[str, dict]] = []
     fake = FakeDocker()
     fake.image_digests[req.engines.baseline.image] = [
         f"{req.engines.baseline.image}@sha256:" + ("a" * 64)
@@ -443,7 +460,7 @@ def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Pa
     provider = _EngineProvider(
         req=req,
         mock=False,
-        phase_sink=seen.append,
+        phase_sink=lambda phase, **progress: seen.append((phase, progress)),
         logs_dir=tmp_path / "logs",
         docker_runner=fake,
     )
@@ -453,11 +470,17 @@ def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Pa
     original_wait = life.wait_until_healthy
     life.wait_until_healthy = lambda *_a, **_k: None  # type: ignore[assignment]
     try:
-        start = plan_round_starts(req.engines)[0]
+        plan = plan_round_starts(req.engines)
+        start = plan[0]
         with provider.start(start, phase=BenchPhase.SLA_BENCH):
             pass
     finally:
         life.wait_until_healthy = original_wait  # type: ignore[assignment]
 
-    assert seen[0] == "starting_engine"
-    assert "sla_bench" in seen
+    names = [phase for phase, _ in seen]
+    assert names[0] == "starting_engine"
+    assert "sla_bench" in names
+    # Every report carries the plan position, so a viewer can tell the first
+    # of nine near-identical starts from the seventh (PAR-98).
+    for _, progress in seen:
+        assert progress == {"step": 1, "steps": len(plan), "role": "baseline"}

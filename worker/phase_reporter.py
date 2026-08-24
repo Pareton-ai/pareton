@@ -69,6 +69,7 @@ class PhaseReporter:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._current: str | None = None
+        self._current_detail: dict[str, Any] | None = None
         # Set once a write is rejected: this attempt no longer owns the row.
         self._orphaned = False
 
@@ -97,7 +98,10 @@ class PhaseReporter:
             if self._orphaned:
                 return
             # Same phase, no new detail: heartbeat already covers liveness.
-            if name == self._current and not detail:
+            # The pod is polled every BENCH_PHASE_POLL_S and re-reports the
+            # same marker each time, so without the detail comparison a round
+            # would write this row on every poll for hours.
+            if name == self._current and detail == self._current_detail:
                 return
         try:
             landed = self._resolve_phase_writer()(
@@ -115,6 +119,7 @@ class PhaseReporter:
         with self._lock:
             if not self._orphaned:
                 self._current = name
+                self._current_detail = detail
         logger.info("bench phase %s attempt=%s %s", self._label, self.attempt, name)
 
     def _mark_orphaned(self, source: str) -> None:
