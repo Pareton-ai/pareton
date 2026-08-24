@@ -135,22 +135,19 @@ def _say(msg: str, *, file=None) -> None:
     out.flush()
 
 
-def _unlock_coldkey(wallet) -> None:
-    """Prompt for the coldkey password, then show that work has started.
-
-    ``bt.Transfer`` unlocks the key inside ``execute``, so without this the
-    CLI sits silent after the password until the chain returns.
-    """
-    _say("The next prompt unlocks the coldkey so we can pay the submission fee.")
-    _ = wallet.coldkey
-    _say("⏳ Password accepted. Submitting the transfer now (this can take a minute).")
-
-
 def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int, int]:
     """Send the fee from the coldkey and return the proof reference."""
     import bittensor as bt
 
-    _unlock_coldkey(wallet)
+    # The signer unlocks the coldkey lazily inside execute and caches it for
+    # the process, so this run prompts once. Unlocking here too would prompt
+    # twice: ``wallet.coldkey`` decrypts the keyfile on every access and
+    # shares nothing with the signer. After the prompt the CLI sits silent
+    # until the chain returns, so set that expectation up front.
+    _say(
+        "The next prompt unlocks the coldkey to pay the submission fee. "
+        "After it, the transfer runs silently (this can take a minute)."
+    )
     result = subtensor.execute(
         bt.Transfer(dest_ss58=recipient, amount_tao=str(fee_tao)), wallet
     )
