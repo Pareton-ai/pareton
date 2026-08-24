@@ -167,6 +167,15 @@ BENCH_CORRECTNESS_MIN_MEAN_LOGPROB: float = float(
 BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB", "-12.0")
 )
+# The min-token bar is applied to the k-th lowest scored position rather than
+# the outright minimum, with k = ceil(quantile * positions). Scorer and
+# candidate are separate instances of the same image, so numerical divergence
+# can flip the argmax at one high-entropy position and have the scorer rate
+# the candidate's own token near zero probability. At 0.001 that costs four
+# positions in a 4097-position round and leaves the bar otherwise untouched.
+BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE", "0.001")
+)
 # Below this fraction of the candidate's streamed tokens, the scorer never saw
 # the output: infrastructure, not a wrong answer.
 BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(

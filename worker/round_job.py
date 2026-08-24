@@ -264,6 +264,12 @@ def build_round_request(
                     "min_token_logprob", config.BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB
                 )
             ),
+            "min_token_quantile": float(
+                thresholds.get(
+                    "min_token_quantile",
+                    config.BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE,
+                )
+            ),
             "min_coverage_ratio": float(
                 thresholds.get(
                     "min_coverage_ratio",

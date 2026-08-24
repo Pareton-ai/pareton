@@ -60,6 +60,7 @@ def _campaign(*, engine: dict | None = None) -> SimpleNamespace:
                 "thresholds": {
                     "min_mean_logprob": -4.0,
                     "min_token_logprob": -12.0,
+                    "min_token_quantile": 0.001,
                     "min_coverage_ratio": 0.5,
                 },
             },

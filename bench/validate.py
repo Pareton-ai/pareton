@@ -199,13 +199,23 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         raise RequestValidationError("correctness.thresholds must be an object")
     _require_keys(
         thr,
-        ["min_mean_logprob", "min_token_logprob", "min_coverage_ratio"],
+        [
+            "min_mean_logprob",
+            "min_token_logprob",
+            "min_token_quantile",
+            "min_coverage_ratio",
+        ],
         ctx="correctness.thresholds",
     )
     coverage = float(thr["min_coverage_ratio"])
     if not 0.0 < coverage <= 1.0:
         raise RequestValidationError(
             "correctness.thresholds.min_coverage_ratio must be in (0, 1]"
+        )
+    quantile = float(thr["min_token_quantile"])
+    if not 0.0 <= quantile < 1.0:
+        raise RequestValidationError(
+            "correctness.thresholds.min_token_quantile must be in [0, 1)"
         )
 
     sla = d["sla_bench"]

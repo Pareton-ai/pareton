@@ -186,10 +186,15 @@ class CorrectnessThresholds:
     of logprobs to compare against and the bars stand on their own. A greedy
     continuation of the pinned model scores around -0.5 to -2.0 per token
     under that same model; garbage scores below -15.
+
+    ``min_token_logprob`` is applied to the k-th lowest scored position, with
+    k = ceil(``min_token_quantile`` * positions), not to the outright minimum
+    (PAR-94). A quantile of 0 is the plain minimum.
     """
 
     min_mean_logprob: float
     min_token_logprob: float
+    min_token_quantile: float
     min_coverage_ratio: float
 
     @classmethod
@@ -197,6 +202,7 @@ class CorrectnessThresholds:
         return cls(
             min_mean_logprob=float(d["min_mean_logprob"]),
             min_token_logprob=float(d["min_token_logprob"]),
+            min_token_quantile=float(d["min_token_quantile"]),
             min_coverage_ratio=float(d["min_coverage_ratio"]),
         )
 
@@ -358,6 +364,10 @@ class CorrectnessReport:
     num_positions_scored: int
     mean_logprob: float
     min_logprob: float
+    # The k-th lowest scored position, which is what the min-token bar is
+    # actually applied to. ``min_logprob`` stays the outright minimum, kept
+    # because it is how PAR-94 was diagnosed in the first place.
+    quantile_logprob: float
     coverage_ratio: float
     evidence: str
     reason: str | None = None
