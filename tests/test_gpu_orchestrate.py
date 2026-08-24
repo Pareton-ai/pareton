@@ -366,20 +366,102 @@ def test_read_pod_phase_accepts_only_the_fixed_vocabulary(tmp_path: Path):
         return SshResult(0, payloads.pop(0), "")
 
     payloads.append(json.dumps({"phase": "downloading_model"}) + "\n")
-    assert read_pod_phase(pod, remote_out="/o", runner=runner) == "downloading_model"
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == (
+        "downloading_model",
+        None,
+    )
 
     # A pod does not rent or destroy itself; claiming otherwise is dropped.
     payloads.append(json.dumps({"phase": "provisioning"}))
-    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == (None, None)
 
     payloads.append(json.dumps({"phase": "rm -rf /"}))
-    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == (None, None)
 
     payloads.append("not json at all")
-    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == (None, None)
 
     payloads.append("")
-    assert read_pod_phase(pod, remote_out="/o", runner=runner) is None
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == (None, None)
+
+
+def test_read_pod_phase_returns_plan_position(tmp_path: Path):
+    """The whole point of PAR-98: a round's phase repeats, its position does not."""
+    from gpu.orchestrate import read_pod_phase
+
+    pod = _fake_pod(tmp_path)
+    record = {
+        "phase": "sla_bench",
+        "progress": {"step": 4, "steps": 9, "role": "candidate-2"},
+    }
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, json.dumps(record), "")
+
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == (
+        "sla_bench",
+        {"step": 4, "steps": 9, "role": "candidate-2"},
+    )
+
+
+def test_read_pod_phase_clamps_hostile_progress(tmp_path: Path):
+    """A pod is untrusted. Bad detail is dropped; the phase still gets through."""
+    from bench.phases import MAX_PROGRESS_KEYS, MAX_PROGRESS_VALUE_LEN
+    from gpu.orchestrate import read_pod_phase
+
+    pod = _fake_pod(tmp_path)
+    hostile = {
+        "role": "x" * 500,
+        "nested": {"not": "a scalar"},
+        "list": [1, 2, 3],
+        "not an identifier": 1,
+        **{f"k{i}": i for i in range(20)},
+    }
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, json.dumps({"phase": "sla_bench", "progress": hostile}), "")
+
+    phase, progress = read_pod_phase(pod, remote_out="/o", runner=runner)
+    assert phase == "sla_bench"
+    assert progress is not None
+    assert len(progress) <= MAX_PROGRESS_KEYS
+    assert len(progress["role"]) == MAX_PROGRESS_VALUE_LEN
+    assert "nested" not in progress and "list" not in progress
+    assert "not an identifier" not in progress
+
+
+def test_read_pod_phase_tolerates_a_harness_with_no_progress(tmp_path: Path):
+    """An older harness writes phase only. That is no progress, not an error."""
+    from gpu.orchestrate import read_pod_phase
+
+    pod = _fake_pod(tmp_path)
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, json.dumps({"phase": "sla_bench", "progress": {}}), "")
+
+    assert read_pod_phase(pod, remote_out="/o", runner=runner) == ("sla_bench", None)
+
+
+def test_pod_phase_poller_relays_progress_as_kwargs(tmp_path: Path):
+    """The sink is called the way PhaseReporter.set is declared: name, then detail."""
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[tuple[str, dict]] = []
+    record = {"phase": "sla_bench", "progress": {"step": 7, "steps": 9}}
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, json.dumps(record), "")
+
+    poller = _PodPhasePoller(
+        pod,
+        remote_out="/o",
+        on_phase=lambda phase, **progress: seen.append((phase, progress)),
+        runner=runner,
+        interval_s=60.0,
+    )
+    poller.poll_once()
+    assert seen == [("sla_bench", {"step": 7, "steps": 9})]
 
 
 def test_read_pod_phase_caps_the_bytes_it_reads(tmp_path: Path):
