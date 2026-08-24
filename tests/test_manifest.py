@@ -101,6 +101,29 @@ def test_public_dict_reports_created_at_and_no_window():
     out = m.to_public_dict()
     assert "window" not in out
     assert out["created_at"] == "2026-08-04T00:00:00+00:00"
+    assert out["workload_trace_url"] == "https://example.com/t"
+    assert "sampling_rule" not in out
+
+
+def test_public_dict_omits_trace_when_sampling_rule_is_set():
+    rule = {
+        "type": "hf_rows",
+        "dataset": "nebius/SWE-agent-trajectories",
+        "revision": "a" * 40,
+        "n_rows": 1000,
+        "n_prompts": 32,
+    }
+    m = build_manifest(
+        **_manifest_kwargs(
+            workload_trace_url="file:///Users/xavierlu/Desktop/trace.json",
+            sampling_rule=rule,
+        )
+    )
+    out = m.to_public_dict()
+    assert "workload_trace_url" not in out
+    assert "workload_trace_sha256" not in out
+    assert out["sampling_rule"]["type"] == "hf_rows"
+    assert out["sampling_rule"]["dataset"] == rule["dataset"]
 
 
 def test_created_at_is_not_hashed():

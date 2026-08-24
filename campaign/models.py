@@ -165,8 +165,6 @@ class CampaignManifest:
             "baseline_commit": self.baseline_commit,
             "base_image_digest": self.base_image_digest,
             "gpu_skus": list(self.gpu_skus),
-            "workload_trace_sha256": self.workload_trace_sha256,
-            "workload_trace_url": self.workload_trace_url,
             "sla": self.sla.to_dict(),
             "scoring_config_sha256": self.scoring_config_sha256,
             "scoring_config_url": self.scoring_config_url,
@@ -187,5 +185,11 @@ class CampaignManifest:
         if self.workload_pool is not None:
             out["workload_pool"] = list(self.workload_pool)
         if self.sampling_rule is not None:
+            # The pin is the sampler. Campaign-level workload_trace_* is a
+            # leftover seed fallback (often a local file://) and is not the
+            # trace any round ran.
             out["sampling_rule"] = dict(self.sampling_rule)
+        else:
+            out["workload_trace_sha256"] = self.workload_trace_sha256
+            out["workload_trace_url"] = self.workload_trace_url
         return out
