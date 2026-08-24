@@ -585,6 +585,9 @@ def _build_entries(
     entries: list[RoundEntryReport] = []
     for run in runs:
         digest = digests[run.index] if run.index < len(digests) else ""
+        # Order matters: a crashed run has no replay, so the disqualified
+        # branch must precede the replay-None fallback below, which maps to
+        # infra_failed.
         if run.status == "disqualified":
             # Engine crashed at startup: no SLA, no correctness, no score.
             entries.append(
@@ -593,6 +596,7 @@ def _build_entries(
                     image_digest=digest,
                     status="disqualified",
                     reason=run.reason,
+                    engine_crashed=True,
                 )
             )
             continue

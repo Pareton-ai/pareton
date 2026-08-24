@@ -355,27 +355,42 @@ def published_host_port(
         raise EngineError(f"unexpected docker port output: {result.stdout!r}") from exc
 
 
-def container_running(
+def container_exit_state(
     container_id: str,
     *,
     runner: DockerRunner,
     cmd_timeout_s: float,
-) -> bool:
-    """Return True iff Docker reports State.Running.
+) -> tuple[int, bool] | None:
+    """None while the container runs; (exit_code, oom_killed) once it exits.
 
     Inspect/daemon failures raise ``EngineError`` — they must not be treated
     as "container exited" (that hides the real Docker error in the health loop).
     """
     result = runner(
-        ["docker", "inspect", "--format", "{{.State.Running}}", container_id],
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}",
+            container_id,
+        ],
         timeout=cmd_timeout_s,
     )
     if result.returncode != 0:
         raise EngineError(
-            f"docker inspect Running failed for {container_id[:12]}: "
+            f"docker inspect state failed for {container_id[:12]}: "
             f"{result.stderr.strip() or result.stdout}"
         )
-    return result.stdout.strip().lower() == "true"
+    parts = result.stdout.strip().split("|")
+    if len(parts) != 3:
+        raise EngineError(f"unexpected docker inspect state output: {result.stdout!r}")
+    if parts[0].lower() == "true":
+        return None
+    try:
+        exit_code = int(parts[1])
+    except ValueError:
+        exit_code = -1
+    return exit_code, parts[2].lower() == "true"
 
 
 def fetch_container_logs(
@@ -635,11 +650,23 @@ class EngineContainer:
 
             def _alive() -> bool:
                 assert self.runner is not None and self.cmd_timeout_s is not None
-                return container_running(
+                exited = container_exit_state(
                     container_id,
                     runner=self.runner,
                     cmd_timeout_s=self.cmd_timeout_s,
                 )
+                if exited is None:
+                    return True
+                exit_code, oom_killed = exited
+                # SIGKILL/SIGTERM or the host OOM killer means something
+                # outside the image ended the process: infrastructure, not a
+                # candidate crash.
+                if oom_killed or exit_code in (137, 143):
+                    raise EngineError(
+                        f"engine container was killed before becoming healthy "
+                        f"(exit {exit_code}, oom_killed={oom_killed})"
+                    )
+                return False
 
             try:
                 wait_until_healthy(
@@ -660,8 +687,9 @@ class EngineContainer:
                     tail = ""
                 # Keep the subclass: a crash must still read as a crash once
                 # the log tail is attached.
-                raise err.__class__(
-                    f"{err}; container log tail:\n{tail[-4000:]}"
+                raise type(err)(
+                    f"{err}; container log tail:\n{tail[-4000:]}",
+                    error_role=err.error_role,
                 ) from err
         except BaseException:
             self._teardown()

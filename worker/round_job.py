@@ -399,6 +399,17 @@ def entry_results_from_report(
         if not isinstance(payload, dict):
             raise RoundInfraError(VOID_POD_FAILED, "bench_report_entry_not_object")
         status = str(payload.get("status") or "infra_failed")
+        if (
+            row["role"] == "leader"
+            and status == "disqualified"
+            and payload.get("engine_crashed") is True
+        ):
+            # A crash-disqualified incumbent keeps the infra path: its image
+            # already started and scored on a prior pod, so a startup crash
+            # is far more likely infra than a deterministic patch bug, and
+            # the leader-infra void keeps the crown parked instead of moving
+            # it on a flake. The harness's original verdict stays in report.
+            status = "infra_failed"
         score = payload.get("score")
         results.append(
             {

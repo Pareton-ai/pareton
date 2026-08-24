@@ -129,6 +129,7 @@ def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
     assert by_index[5]["status"] == "disqualified"
     assert by_index[5]["score"] is None
     assert "correctness" not in by_index[5]
+    assert by_index[5]["engine_crashed"] is True
     assert "died before becoming healthy" in by_index[5]["reason"]
 
     # The clear leader must out-score the two close challengers.

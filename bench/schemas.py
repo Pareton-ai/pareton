@@ -434,6 +434,11 @@ class RoundEntryReport:
     sla: EngineSlaResult | None = None
     correctness: CorrectnessReport | None = None
     reason: str | None = None
+    # True only when the engine's own process died before becoming healthy.
+    # The worker keys the incumbent's infra remap on this flag; inferring the
+    # crash from a missing correctness block would conflate fixtures and any
+    # future disqualified payload that omits it.
+    engine_crashed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -443,6 +448,8 @@ class RoundEntryReport:
             "score": self.score,
             "reason": self.reason,
         }
+        if self.engine_crashed:
+            out["engine_crashed"] = True
         if self.score_report is not None:
             out["score_report"] = self.score_report
         if self.sla is not None:

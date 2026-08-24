@@ -54,6 +54,8 @@ class FakeDocker:
         self.image_ids: dict[str, str] = {}
         self.published_ports: dict[str, str] = {}
         self.running: dict[str, bool] = {}
+        self.exit_codes: dict[str, int] = {}
+        self.oom_killed: dict[str, bool] = {}
         self.logs: dict[str, str] = {}
         self.fail_cmds: set[str] = set()  # first token after docker to fail
         self.pull_ok = True
@@ -135,7 +137,20 @@ class FakeDocker:
             for cid, is_up in self.running.items():
                 if target.startswith(cid) or cid.startswith(target):
                     running = is_up
-            return DockerResult(0, ("true" if running else "false") + "\n", "")
+            if "ExitCode" not in fmt:
+                return DockerResult(0, ("true" if running else "false") + "\n", "")
+            exit_code = 0
+            oom = False
+            for cid in self.running:
+                if target.startswith(cid) or cid.startswith(target):
+                    # An exited engine dies by its own code (1) unless the
+                    # test scripts otherwise.
+                    exit_code = self.exit_codes.get(cid, 1)
+                    oom = self.oom_killed.get(cid, False)
+            state = "true" if running else "false"
+            return DockerResult(
+                0, f"{state}|{exit_code}|{'true' if oom else 'false'}\n", ""
+            )
         return DockerResult(0, "{}\n", "")
 
     def _run(self, argv: list[str]) -> DockerResult:
@@ -583,13 +598,42 @@ def test_fail_fast_when_container_exits_during_health():
 
 def test_inspect_failure_is_not_reported_as_engine_death():
     """Non-zero docker inspect must raise about inspect, not 'engine died'."""
-    from bench.lifecycle import container_running
+    from bench.lifecycle import container_exit_state
 
     def fail_inspect(cmd, *, timeout, input_text=None):
         return DockerResult(1, "", "Cannot connect to the Docker daemon")
 
-    with pytest.raises(EngineError, match="docker inspect Running failed"):
-        container_running("ciddeadbeef01", runner=fail_inspect, cmd_timeout_s=30)
+    with pytest.raises(EngineError, match="docker inspect state failed"):
+        container_exit_state("ciddeadbeef01", runner=fail_inspect, cmd_timeout_s=30)
+
+
+@pytest.mark.parametrize("exit_code,oom", [(137, False), (143, False), (1, True)])
+def test_killed_container_is_infra_not_a_crash(exit_code: int, oom: bool):
+    """SIGKILL/SIGTERM/host-OOM end the process from outside the image, so
+    they keep the requeueable infra classification instead of disqualifying."""
+    fake = FakeDocker()
+    fake.container_exits_after_n_inspects = 2
+    fake.running["ciddeadbeef01"] = True
+    fake.exit_codes["ciddeadbeef01"] = exit_code
+    fake.oom_killed["ciddeadbeef01"] = oom
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("6" * 64)
+
+    with BenchNetwork(run_id="killed000001", runner=fake, cmd_timeout_s=30) as net:
+        with pytest.raises(EngineError, match="was killed") as exc_info:
+            with EngineContainer(
+                spec=spec,
+                network=net,
+                pull=False,
+                publish_port=True,
+                health_timeout_s=2.0,
+                health_poll_s=0.05,
+                cmd_timeout_s=30,
+                port=8000,
+            ):
+                pass
+    assert not isinstance(exc_info.value, EngineCrashedError)
 
 
 def test_pull_timeout_budget_is_generous():
