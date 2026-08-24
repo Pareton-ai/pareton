@@ -127,8 +127,8 @@ class CampaignManifest:
     baseline_commit: str
     base_image_digest: str
     gpu_skus: list[str]
-    workload_trace_sha256: str
-    workload_trace_url: str
+    workload_trace_sha256: str | None
+    workload_trace_url: str | None
     sla: SLA
     scoring_config_sha256: str | None
     scoring_config_url: str | None

@@ -1,4 +1,4 @@
-"""Round creation policy: dedupe, the fire trigger, and the fixed-trace path."""
+"""Round creation policy: dedupe, the fire trigger, and the hf_rows path."""
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -88,27 +88,19 @@ def _capture(monkeypatch) -> list[dict]:
     return calls
 
 
-def test_fixed_trace_campaign_rounds_on_the_pinned_trace(monkeypatch):
+def test_no_sampling_rule_skips_the_round(monkeypatch):
     calls = _capture(monkeypatch)
     monkeypatch.setattr(config, "ROUND_SIZE", 5)
-    campaign = _campaign()
 
     out = try_create_round(
-        campaign,
+        _campaign(),
         {"queued": 5, "oldest_queued_at": NOW},
         seed_block=1000,
         seed_block_hash="0x" + "ab" * 32,
     )
 
-    assert out == {"round_id": "r1", "ordinal": 1}
-    (kw,) = calls
-    assert kw["sampled_trace_sha256"] == campaign.workload_trace_sha256
-    assert kw["sampling_receipt"]["type"] == "fixed_trace"
-    assert kw["gpu_sku"] == "H200"
-    assert kw["cohort_limit"] == 5
-    assert kw["baseline_image_ref"].endswith(f"@{DIGEST_A}")
-    assert kw["scoring_rule"] == {"name": "median_e2e_speedup"}
-    assert len(kw["seed_hex"]) == 64
+    assert out is None
+    assert calls == []
 
 
 def test_no_round_before_the_queue_earns_one(monkeypatch):

@@ -112,27 +112,21 @@ def try_create_round(
         return None
 
     seed_hex = compute_sample_seed(block_hash=seed_block_hash, campaign_id=campaign_id)
-    if campaign.sampling_rule:
-        # The default row fetcher indexes config/split directly; parsing fills
-        # the defaults a minimal rule omits.
-        rule = parse_sampling_rule(campaign.sampling_rule)
-        sampled = generate_trace(
-            rule=rule,
-            seed_hex=seed_hex,
-            row_fetcher=row_fetcher or (lambda idx: fetch_hf_row(rule, idx)),
-            sample_seed_block=seed_block,
-            sample_seed_block_hash=seed_block_hash,
-        )
-        sampled_trace_sha256 = sampled.sha256
-        sampling_receipt = sampled.receipt
-    else:
-        # No sampling rule means the campaign pins one fixed trace, and every
-        # round draws that same one.
-        sampled_trace_sha256 = campaign.workload_trace_sha256
-        sampling_receipt = {
-            "type": "fixed_trace",
-            "workload_trace_url": campaign.workload_trace_url,
-        }
+    if not campaign.sampling_rule:
+        logger.warning("campaign %s: no sampling_rule; cannot run a round", campaign_id)
+        return None
+    # The default row fetcher indexes config/split directly; parsing fills
+    # the defaults a minimal rule omits.
+    rule = parse_sampling_rule(campaign.sampling_rule)
+    sampled = generate_trace(
+        rule=rule,
+        seed_hex=seed_hex,
+        row_fetcher=row_fetcher or (lambda idx: fetch_hf_row(rule, idx)),
+        sample_seed_block=seed_block,
+        sample_seed_block_hash=seed_block_hash,
+    )
+    sampled_trace_sha256 = sampled.sha256
+    sampling_receipt = sampled.receipt
 
     return create_round(
         campaign_id=campaign_id,

@@ -192,6 +192,27 @@ def test_workload_pool_and_sampling_rule_change_hash():
     assert b.workload_pool is not None
 
 
+def test_sampling_rule_drops_trace_from_the_pin_set():
+    rule = {
+        "type": "hf_rows",
+        "dataset": "nebius/SWE-agent-trajectories",
+        "revision": "a" * 40,
+        "n_rows": 8,
+        "n_prompts": 3,
+    }
+    shared = _manifest_kwargs(sampling_rule=rule)
+    leftover = freeze_manifest_fields(
+        **{**shared, "workload_trace_url": "file:///Users/xavierlu/Desktop/trace.json"}
+    )
+    clean = freeze_manifest_fields(
+        **{**shared, "workload_trace_sha256": None, "workload_trace_url": None}
+    )
+    assert "workload_trace_url" not in leftover
+    assert "workload_trace_sha256" not in leftover
+    assert leftover == clean
+    assert leftover["sampling_rule"]["type"] == "hf_rows"
+
+
 def test_scoring_rule_is_always_pinned_and_defaults():
     """The scoring formula is part of what a miner competes on, so two
     campaigns with the same hash must rank identically."""

@@ -48,6 +48,16 @@ def _image(i: int) -> str:
 
 
 @pytest.fixture(autouse=True)
+def _fake_hf_rows(monkeypatch: pytest.MonkeyPatch):
+    """Round creation must not hit HuggingFace from the e2e suite."""
+
+    def _fetch(rule, idx):
+        return {"trajectory": [{"role": "user", "content": f"prompt-{idx}"}]}
+
+    monkeypatch.setattr("round.create.fetch_hf_row", _fetch)
+
+
+@pytest.fixture(autouse=True)
 def _bind_e2e_database(monkeypatch: pytest.MonkeyPatch):
     """Point store/connection code at the Neon test branch for this module."""
     url = require_e2e_database_url()
@@ -79,8 +89,15 @@ def _campaign(**over) -> UUID:
         "baseline_commit": "deadbeef",
         "base_image_digest": "sha256:" + "d" * 64,
         "gpu_skus": ["H200", "B200"],
-        "workload_trace_sha256": "sha256:" + "e" * 64,
-        "workload_trace_url": "https://cdn.test/trace.json",
+        "workload_trace_sha256": None,
+        "workload_trace_url": None,
+        "sampling_rule": {
+            "type": "hf_rows",
+            "dataset": "d",
+            "revision": "r",
+            "n_rows": 8,
+            "n_prompts": 2,
+        },
         "sla": SLA(),
         "scoring_config_sha256": None,
         "scoring_config_url": None,

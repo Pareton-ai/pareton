@@ -1,0 +1,11 @@
+{
+  "type": "hf_rows",
+  "dataset": "nebius/SWE-agent-trajectories",
+  "revision": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "config": "default",
+  "split": "train",
+  "n_rows": 8,
+  "n_prompts": 3,
+  "max_tokens": 128,
+  "algo_version": 1
+}

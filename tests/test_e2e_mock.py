@@ -217,10 +217,12 @@ def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
     monkeypatch.setattr(config, "ALLOW_MOCK_BENCH", True)
 
-    trace = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "bench" / "sample_trace.json"
-    )
-    trace_sha = "sha256:" + hashlib.sha256(trace.read_bytes()).hexdigest()
+    def _fetch(_rule, idx):
+        return {"trajectory": [{"role": "user", "content": f"prompt-{idx}"}]}
+
+    monkeypatch.setattr("round.create.fetch_hf_row", _fetch)
+    monkeypatch.setattr("worker.round_job.fetch_hf_row", _fetch)
+
     engine_digest = "sha256:" + "a" * 64
     image_a = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "1" * 64
     image_b = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "2" * 64
@@ -234,8 +236,15 @@ def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
         baseline_commit="deadbeef",
         base_image_digest="sha256:" + "d" * 64,
         gpu_skus=["H200"],
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=f"file://{trace}",
+        workload_trace_sha256=None,
+        workload_trace_url=None,
+        sampling_rule={
+            "type": "hf_rows",
+            "dataset": "d",
+            "revision": "r",
+            "n_rows": 8,
+            "n_prompts": 2,
+        },
         sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
         scoring_config_sha256=None,
         scoring_config_url=None,

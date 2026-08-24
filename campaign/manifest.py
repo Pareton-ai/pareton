@@ -38,8 +38,8 @@ def freeze_manifest_fields(
     baseline_commit: str,
     base_image_digest: str,
     gpu_skus: list[str],
-    workload_trace_sha256: str,
-    workload_trace_url: str,
+    workload_trace_sha256: str | None = None,
+    workload_trace_url: str | None = None,
     sla: SLA | dict[str, Any],
     scoring_config_sha256: str | None,
     scoring_config_url: str | None,
@@ -59,9 +59,11 @@ def freeze_manifest_fields(
     ``engine`` follows the same rule: absent means the vLLM default, and every
     campaign hashed before engine profiles existed keeps its hash.
     ``workload_pool`` and ``sampling_rule`` use the same absent-means-unpinned
-    rule. ``scoring_rule`` does not: it is always pinned, because the scoring
-    formula is part of what a miner competes on, so two campaigns with the same
-    hash must rank identically. None means the default rule.
+    rule. When ``sampling_rule`` is set, ``workload_trace_*`` stay out of the
+    pin: they are a leftover seed fallback, not the prompts a round runs.
+    ``scoring_rule`` is always pinned, because the scoring formula is part of
+    what a miner competes on, so two campaigns with the same hash must rank
+    identically. None means the default rule.
 
     The submission window used to be pinned here as ``window``. It was dropped
     with the feature, so campaigns hashed before that no longer recompute to
@@ -76,8 +78,6 @@ def freeze_manifest_fields(
         "baseline_commit": baseline_commit.lower(),
         "base_image_digest": base_image_digest.lower(),
         "gpu_skus": list(gpu_skus),
-        "workload_trace_sha256": workload_trace_sha256.lower(),
-        "workload_trace_url": workload_trace_url,
         "sla": sla_obj.to_dict(),
         "scoring_config_sha256": (
             scoring_config_sha256.lower() if scoring_config_sha256 else None
@@ -97,6 +97,14 @@ def freeze_manifest_fields(
         out["workload_pool"] = _canon(list(workload_pool))
     if sampling_rule is not None:
         out["sampling_rule"] = _canon(dict(sampling_rule))
+    elif workload_trace_sha256 and workload_trace_url:
+        out["workload_trace_sha256"] = workload_trace_sha256.lower()
+        out["workload_trace_url"] = workload_trace_url
+    else:
+        raise ValueError(
+            "sampling_rule is required (or both workload_trace_sha256 and "
+            "workload_trace_url for a leftover pin)"
+        )
     return out
 
 
@@ -115,8 +123,8 @@ def build_manifest(
     baseline_commit: str,
     base_image_digest: str,
     gpu_skus: list[str],
-    workload_trace_sha256: str,
-    workload_trace_url: str,
+    workload_trace_sha256: str | None = None,
+    workload_trace_url: str | None = None,
     sla: SLA | dict[str, Any],
     scoring_config_sha256: str | None,
     scoring_config_url: str | None,
@@ -171,7 +179,9 @@ def build_manifest(
         baseline_commit=baseline_commit.lower(),
         base_image_digest=base_image_digest.lower(),
         gpu_skus=list(gpu_skus),
-        workload_trace_sha256=workload_trace_sha256.lower(),
+        workload_trace_sha256=(
+            workload_trace_sha256.lower() if workload_trace_sha256 else None
+        ),
         workload_trace_url=workload_trace_url,
         sla=sla_obj,
         scoring_config_sha256=(

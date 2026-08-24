@@ -7,15 +7,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import config
+from bench.sampler import parse_sampling_rule
 from campaign.engine import ENGINE_PRESETS, preset as engine_preset
 from campaign.manifest import build_manifest
 from campaign.models import (
@@ -27,8 +26,8 @@ from campaign.models import (
 from campaign.store import insert_campaign, insert_profile, list_campaigns
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_TRACE = (
-    REPO_ROOT / "fixtures" / "campaigns" / "synthetic_v1" / "workload_trace.json"
+FIXTURE_SAMPLING_RULE = (
+    REPO_ROOT / "fixtures" / "campaigns" / "synthetic_v1" / "sampling_rule.json"
 )
 
 # Manual pins for the first synthetic campaign (ops can override via flags).
@@ -53,15 +52,6 @@ KNOWN_SEED_STATUSES = frozenset({"draft", "open", "closed"})
 # Partner-facing framing; at pinned gpu_count this is the same lever as throughput.
 DEFAULT_PRIORITY_METRIC = "gpu_hours"
 DEFAULT_SUCCESS_THRESHOLD = ">=10% GPU-hour reduction at SLA"
-_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return f"sha256:{h.hexdigest()}"
 
 
 def _is_placeholder_digest(digest: str) -> bool:
@@ -72,24 +62,19 @@ def _is_placeholder_digest(digest: str) -> bool:
     }
 
 
-def _normalize_trace_url(url: str) -> str:
-    cleaned = url.strip()
-    if not cleaned:
-        raise ValueError("workload_trace_url is empty")
-    if cleaned.startswith("https://") or cleaned.startswith("file://"):
-        return cleaned
-    raise ValueError(
-        f"workload_trace_url must start with file:// or https:// (got {cleaned!r})"
-    )
-
-
-def _require_sha256(value: str) -> str:
-    cleaned = value.strip().lower()
-    if not _SHA256_RE.fullmatch(cleaned):
-        raise ValueError(
-            f"workload_trace_sha256 must be sha256:<64 hex> (got {value!r})"
-        )
-    return cleaned
+def _load_sampling_rule(rule: dict | None) -> dict:
+    """Normalize an hf_rows pin. Missing input loads the synthetic fixture."""
+    if rule is None:
+        if not FIXTURE_SAMPLING_RULE.is_file():
+            raise ValueError(
+                "sampling_rule is required; pass --sampling-rule-json or add "
+                f"{FIXTURE_SAMPLING_RULE}"
+            )
+        raw = json.loads(FIXTURE_SAMPLING_RULE.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("sampling_rule fixture must be a JSON object")
+        rule = raw
+    return parse_sampling_rule(rule)
 
 
 def _normalize_gpu_skus(gpu_skus: list[str]) -> list[str]:
@@ -210,8 +195,6 @@ def seed_synthetic_campaign(
     bench_serve_args: list[str] | None = None,
     bench_correctness_num_prompts: int | None = None,
     bench_correctness_thresholds: dict | None = None,
-    workload_trace_url: str | None = None,
-    workload_trace_sha256: str | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
     scoring_rule: dict | None = None,
@@ -242,27 +225,7 @@ def seed_synthetic_campaign(
             "--baseline-engine-image-digest, or --allow-placeholders"
         )
 
-    if workload_trace_url is None:
-        trace_url = f"file://{FIXTURE_TRACE.resolve()}"
-    else:
-        trace_url = _normalize_trace_url(workload_trace_url)
-
-    if not FIXTURE_TRACE.is_file():
-        raise FileNotFoundError(f"missing fixture trace: {FIXTURE_TRACE}")
-
-    trace_sha = _sha256_file(FIXTURE_TRACE)
-    if workload_trace_sha256 is not None:
-        expected = _require_sha256(workload_trace_sha256)
-        if expected != trace_sha.lower():
-            raise ValueError(
-                "workload_trace_sha256 does not match local fixture "
-                f"(expected {trace_sha}, got {workload_trace_sha256})"
-            )
-    elif trace_url.startswith("https://"):
-        raise ValueError(
-            "https workload_trace_url requires --workload-trace-sha256 "
-            "matching the local fixture"
-        )
+    rule = _load_sampling_rule(sampling_rule)
 
     if status == "open":
         existing = list_campaigns(status="open")
@@ -309,7 +272,6 @@ def seed_synthetic_campaign(
         require_correctness_thresholds(bench)
 
     pool = list(workload_pool) if workload_pool is not None else None
-    rule = dict(sampling_rule) if sampling_rule is not None else None
     scoring = validate_scoring_rule(scoring_rule)
 
     fields_manifest = build_manifest(
@@ -319,8 +281,8 @@ def seed_synthetic_campaign(
         baseline_commit=baseline_commit,
         base_image_digest=base_image_digest,
         gpu_skus=skus,
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=trace_url,
+        workload_trace_sha256=None,
+        workload_trace_url=None,
         sla=SLA(
             p99_ttft_ms=2000.0,
             p99_itl_ms=50.0,
@@ -353,8 +315,8 @@ def seed_synthetic_campaign(
         baseline_commit=baseline_commit,
         base_image_digest=base_image_digest,
         gpu_skus=skus,
-        workload_trace_sha256=trace_sha,
-        workload_trace_url=trace_url,
+        workload_trace_sha256=None,
+        workload_trace_url=None,
         sla=SLA(
             p99_ttft_ms=2000.0,
             p99_itl_ms=50.0,
@@ -474,24 +436,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p.add_argument(
-        "--workload-trace-url",
-        default=None,
-        help="file:// or https:// URL stored in the campaign (default: local fixture)",
-    )
-    p.add_argument(
-        "--workload-trace-sha256",
-        default=None,
-        help="Must match local fixture hash; required when URL is https://",
-    )
-    p.add_argument(
         "--workload-pool-json",
         default=None,
         help="Path to JSON list of {sha256,url} (legacy; unused by hf_rows sampler)",
     )
     p.add_argument(
         "--sampling-rule-json",
-        default=None,
-        help="Path to JSON sampling rule (hf_rows: dataset, revision, n_rows, n_prompts)",
+        default=str(FIXTURE_SAMPLING_RULE),
+        help="Path to JSON hf_rows sampling rule (default: synthetic_v1 fixture)",
     )
     p.add_argument(
         "--scoring-rule-json",
@@ -556,8 +508,6 @@ def main(argv: list[str] | None = None) -> int:
             bench_serve_args=args.bench_serve_args,
             bench_correctness_num_prompts=args.bench_correctness_num_prompts,
             bench_correctness_thresholds=correctness_thresholds,
-            workload_trace_url=args.workload_trace_url,
-            workload_trace_sha256=args.workload_trace_sha256,
             workload_pool=pool,
             sampling_rule=rule,
             scoring_rule=scoring,
