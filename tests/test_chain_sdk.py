@@ -287,7 +287,8 @@ def test_fee_is_paid_before_commit_and_referenced_in_payload(
     # Last encode is the committed one; the earlier call is the size pre-flight.
     assert committed[-1].endswith("|900|2")
     out = capsys.readouterr().out
-    assert "Password accepted. Submitting the transfer now" in out
+    assert "The next prompt unlocks the coldkey to pay the submission fee" in out
+    assert "After it, the transfer runs silently" in out
     assert "💸 Paid 0.05 TAO" in out
     assert "✅ Committed" in out
 
@@ -326,7 +327,6 @@ def test_payment_ref_parses_zero_padded_extrinsic_id():
 
 
 def test_reuse_payment_flags_skip_a_second_transfer(monkeypatch, tmp_path):
-    from types import SimpleNamespace
 
     def _execute(_intent, _wallet, **_k):
         raise AssertionError("transfer must not run when reusing a payment")
