@@ -974,3 +974,24 @@ def test_weights_with_no_stored_row_is_404_not_an_empty_vector(
     assert resp.status_code == 404
     assert "uids" not in resp.json()
     assert "weights" not in resp.json()
+    # 404 is the live path until the first row. A cache holding it would hide
+    # the first published vector from other validators.
+    assert resp.headers.get("Cache-Control") == "no-store"
+
+
+def test_weights_all_zero_row_is_404_not_pay_nobody(monkeypatch, client: TestClient):
+    """The reader cannot trust the writer across a deploy version skew."""
+    from api import server
+
+    def zeros() -> dict:
+        row = _stored_weight_set()
+        row["weights"] = [0.0] * len(row["weights"])
+        return row
+
+    monkeypatch.setattr(server, "get_latest_weight_set", zeros)
+
+    resp = client.get("/v1/weights")
+    assert resp.status_code == 404
+    assert "uids" not in resp.json()
+    assert "weights" not in resp.json()
+    assert resp.headers.get("Cache-Control") == "no-store"

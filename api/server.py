@@ -489,17 +489,27 @@ def latest_weights(response: Response):
     This reads; it never computes. The process that writes `weight_sets` is
     the same one that signs the chain transaction, so recomputing here would
     be a second source of truth that could disagree with what was actually
-    set.
+    set. The newest row is served whatever `set_ok` says: that column records
+    whether our own chain call landed, not what the vector is.
 
     No stored row is a 404, never an empty vector: an empty vector is a valid
     on-chain instruction meaning "pay nobody", and we must not publish that by
-    accident.
+    accident. An all-zero stored row takes the same 404: the writer should
+    refuse it, but the reader cannot trust that across a version skew.
     """
     row = get_latest_weight_set()
-    if row is None:
-        raise HTTPException(status_code=404, detail="no weight set computed yet")
+    if row is not None:
+        uids, values = dense_to_sparse(row["weights"])
+    else:
+        uids, values = [], []
+    if not uids:
+        # HTTPException builds a new response; headers on `response` would drop.
+        raise HTTPException(
+            status_code=404,
+            detail="no weight set computed yet",
+            headers={"Cache-Control": _NO_STORE},
+        )
     response.headers["Cache-Control"] = _NO_STORE
-    uids, values = dense_to_sparse(row["weights"])
     return {
         "computed_at_block": row["computed_at_block"],
         "version_key": row["version_key"],
