@@ -6,19 +6,20 @@ re-install it on the box, so the two never drift.
 
 ## Layout
 
-| Path | Installed to | Notes |
-|---|---|---|
-| `systemd/pareton-api.service` | `/etc/systemd/system/` | uvicorn on `0.0.0.0:8000` |
-| `systemd/pareton-worker.service` | `/etc/systemd/system/` | Gate + bench worker |
-| `systemd/pareton-watcher.service` | `/etc/systemd/system/` | Chain ingest, `python -m worker.watcher` |
-| `systemd/pareton-deploy.service` | `/etc/systemd/system/` | Oneshot, invoked by the timer |
-| `systemd/pareton-deploy.timer` | `/etc/systemd/system/` | **Fires every 60s** |
-| `deploy.sh` | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself |
-| `gpu/pareton-gpu-reap.service` | `/etc/systemd/system/` | Oneshot GPU TTL reap |
-| `gpu/pareton-gpu-reap.timer` | `/etc/systemd/system/` | Fires every 10 min |
-| `vector/vector.service` | `/etc/systemd/system/` | Log shipping |
-| `vector/vector.toml` | `/etc/vector/` | Axiom sink, dataset `pareton-prod` |
-| `caddy/Caddyfile` | `/etc/caddy/` | TLS terminator, proxies to `127.0.0.1:8000` |
+| Path                              | Installed to                    | Notes                                                            |
+| --------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
+| `systemd/pareton-api.service`     | `/etc/systemd/system/`          | uvicorn on `0.0.0.0:8000`                                        |
+| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Gate + bench worker                                              |
+| `systemd/pareton-watcher.service` | `/etc/systemd/system/`          | Chain ingest, `python -m worker.watcher`                         |
+| `systemd/pareton-weights.service` | `/etc/systemd/system/`          | Weight cadence, `python -m weights`. Holds the validator wallet. |
+| `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer                                    |
+| `systemd/pareton-deploy.timer`    | `/etc/systemd/system/`          | **Fires every 60s**                                              |
+| `deploy.sh`                       | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself                                    |
+| `gpu/pareton-gpu-reap.service`    | `/etc/systemd/system/`          | Oneshot GPU TTL reap                                             |
+| `gpu/pareton-gpu-reap.timer`      | `/etc/systemd/system/`          | Fires every 10 min                                               |
+| `vector/vector.service`           | `/etc/systemd/system/`          | Log shipping                                                     |
+| `vector/vector.toml`              | `/etc/vector/`                  | Axiom sink, dataset `pareton-prod`                               |
+| `caddy/Caddyfile`                 | `/etc/caddy/`                   | TLS terminator, proxies to `127.0.0.1:8000`                      |
 
 `deploy.sh` installs to `/usr/local/bin` rather than running from the repo
 checkout so that a `git pull` cannot rewrite the script while it is executing.
@@ -27,16 +28,16 @@ That is also why it needs re-installing by hand after a change here.
 ## A merge to `main` is a production deploy
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
-separate promote step. Any merge restarts `pareton-api` and `pareton-watcher`
-within a minute, and restarts `pareton-worker` on the next tick where no
-`submission_jobs` row is `running`.
+separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
+and `pareton-weights` within a minute, and restarts `pareton-worker` on the
+next tick where no `submission_jobs` row is `running`.
 
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.
 
 ## Known drift — needs a decision
 
-Captured from the live boxes on 2026-08-17. These are *not* resolved here,
+Captured from the live boxes on 2026-08-17. These are _not_ resolved here,
 because each one changes production behavior:
 
 1. **`systemd/pareton-worker.service` does not match the live unit.** The
@@ -60,7 +61,7 @@ because each one changes production behavior:
 
 4. **`vector/vector.toml` does not match the live config.** The committed file
    reads the Axiom token from `${PARETON_AXIOM_TOKEN}`; the live file has a
-   literal token inlined, and the env var holds a *different* token that the
+   literal token inlined, and the env var holds a _different_ token that the
    Vector Axiom sink rejects. The env-var form is the better design — it needs
    the correct token in `.env` before it will work.
 

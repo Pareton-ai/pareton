@@ -318,7 +318,28 @@ def bench_failed(
     )
 
 
-# -- Rounds ------------------------------------------------------------------
+# -- Weights -----------------------------------------------------------------
+
+
+def weights_computed(
+    *,
+    computed_at_block: int,
+    version_key: int,
+    uid_count: int,
+    burn_share: float,
+    set_ok: bool | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """A ``weight_sets`` row was written. Absence of this event is the stall alert."""
+    return _emit(
+        "weights_computed",
+        computed_at_block=computed_at_block,
+        version_key=version_key,
+        uid_count=uid_count,
+        burn_share=round(burn_share, 4),
+        set_ok=set_ok,
+        enabled=enabled,
+    )
 
 
 def round_voided(

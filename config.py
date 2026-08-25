@@ -19,6 +19,20 @@ WALLET_HOTKEY: str = os.environ.get("PARETON_WALLET_HOTKEY", "default")
 VERSION_KEY: int = int(os.environ.get("PARETON_VERSION_KEY", "2032"))
 # Emission not claimed by a seated leader goes here.
 BURN_UID: int = int(os.environ.get("PARETON_BURN_UID", "201"))
+# How often pareton-weights recomputes. 360 blocks is about 72 minutes.
+WEIGHTS_CADENCE_BLOCKS: int = int(
+    os.environ.get("PARETON_WEIGHTS_CADENCE_BLOCKS", "360")
+)
+# Kill switch, not a dry-run default. Off means compute and store but never
+# sign, so /v1/weights stays truthful while the chain call is paused.
+WEIGHTS_ENABLED: bool = os.environ.get(
+    "PARETON_WEIGHTS_ENABLED", "true"
+).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 POLL_INTERVAL_S: int = int(os.environ.get("PARETON_POLL_INTERVAL_S", "30"))
 CHAIN_RETRY_ATTEMPTS: int = int(os.environ.get("PARETON_CHAIN_RETRY_ATTEMPTS", "3"))

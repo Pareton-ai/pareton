@@ -1,0 +1,22 @@
+# Cadence process: compute the subnet weight vector, store it, and sign it.
+# This unit holds the validator wallet. pareton-worker and pareton-watcher do not.
+# Safe to restart at any time: an in-flight set that dies leaves the previous
+# on-chain vector standing, which is the correct failure mode.
+[Unit]
+Description=Pareton weight setter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/pareton
+EnvironmentFile=/opt/pareton/.env
+ExecStart=/opt/pareton/.venv/bin/python -m weights
+Restart=always
+RestartSec=10
+# One cycle is a metagraph read plus set_weights with finalization and retries.
+TimeoutStopSec=15min
+
+[Install]
+WantedBy=multi-user.target

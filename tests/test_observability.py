@@ -40,6 +40,7 @@ _ALL_EVENTS = [
     "bench_failed",
     "provider_balance_low",
     "job_failed",
+    "weights_computed",
 ]
 
 _JOB_SCOPED_EVENTS = [
@@ -133,6 +134,14 @@ def _call_event(name: str) -> dict:
             "job_id": "42",
             "stage": "bench",
             "error": "oom",
+        }
+    elif name == "weights_computed":
+        kwargs = {
+            "computed_at_block": 6123456,
+            "version_key": 2032,
+            "uid_count": 256,
+            "burn_share": 0.9,
+            "set_ok": True,
         }
     return fn(**kwargs)
 

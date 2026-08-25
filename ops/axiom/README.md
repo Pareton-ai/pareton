@@ -13,7 +13,8 @@ incoming events and emails you when something breaks.
 pareton-worker  --+
 pareton-watcher --+
 pareton-api      +--> journald --> Vector --> Axiom dataset "pareton-prod" --> monitors --> email
-pareton-gpu-reap-+   (on VPS)    (on VPS)    (cloud, 30-day retention)
+pareton-weights -+   (on VPS)    (on VPS)    (cloud, 30-day retention)
+pareton-gpu-reap-+
 ```
 
 Postgres stays the source of truth for job state. Axiom is for search,
@@ -21,15 +22,15 @@ debugging, and alerts. Nothing is installed on GPU pods.
 
 ## The moving parts
 
-| Piece                  | Where it lives                                                                           | What it does                                                                                                                                 |
-| ---------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Lifecycle events       | `observability/events.py`                                                                | Code emits one JSON object per event (`heartbeat`, `job_failed`, ...) through the logger `pareton.lifecycle`.                                |
-| journald               | VPS, automatic                                                                           | Systemd log store. `journalctl -u pareton-worker` reads it.                                                                                  |
-| Vector                 | VPS, systemd unit `vector`                                                               | Ships journald lines to Axiom. Config: `/etc/vector/vector.toml` (copy in repo: `ops/vector/vector.toml`). Buffers to disk if Axiom is down. |
-| Dataset `pareton-prod` | Axiom console                                                                            | Where logs land. Keeps 30 days.                                                                                                              |
-| Ingest token           | `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN`                                             | Password that lets Vector write to the dataset. `vector.toml` refers to it as `${PARETON_AXIOM_TOKEN}`; Vector reads the real value from the environment. |
-| Monitors               | Axiom console                                                                            | Alert rules. See "When an alert email arrives".                                                                                              |
-| Axiom MCP              | Cursor settings                                                                          | Lets an agent query logs without SSH. Server `https://mcp.axiom.co/mcp`, browser OAuth sign-in.                                              |
+| Piece                  | Where it lives                               | What it does                                                                                                                                              |
+| ---------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lifecycle events       | `observability/events.py`                    | Code emits one JSON object per event (`heartbeat`, `job_failed`, ...) through the logger `pareton.lifecycle`.                                             |
+| journald               | VPS, automatic                               | Systemd log store. `journalctl -u pareton-worker` reads it.                                                                                               |
+| Vector                 | VPS, systemd unit `vector`                   | Ships journald lines to Axiom. Config: `/etc/vector/vector.toml` (copy in repo: `ops/vector/vector.toml`). Buffers to disk if Axiom is down.              |
+| Dataset `pareton-prod` | Axiom console                                | Where logs land. Keeps 30 days.                                                                                                                           |
+| Ingest token           | `/opt/pareton/.env` as `PARETON_AXIOM_TOKEN` | Password that lets Vector write to the dataset. `vector.toml` refers to it as `${PARETON_AXIOM_TOKEN}`; Vector reads the real value from the environment. |
+| Monitors               | Axiom console                                | Alert rules. See "When an alert email arrives".                                                                                                           |
+| Axiom MCP              | Cursor settings                              | Lets an agent query logs without SSH. Server `https://mcp.axiom.co/mcp`, browser OAuth sign-in.                                                           |
 
 ## Search logs
 
@@ -63,7 +64,7 @@ Then confirm events arrive: run the first query in "Task: search the logs".
 ssh root@162.243.21.87
 cd /opt/pareton && git pull
 .venv/bin/pip install -r requirements.txt
-systemctl restart pareton-worker pareton-watcher pareton-api
+systemctl restart pareton-worker pareton-watcher pareton-api pareton-weights
 ```
 
 You do not need to restart `vector` for code deploys. Deploys need Xavier's
@@ -106,21 +107,23 @@ and that `vector.service` still has the `EnvironmentFile` line.
 
 Alerts go to bohdan@pareton.ai and xavier@pareton.ai.
 
-| Monitor                   | Fires when                                                                     | First check                                                                                                       | Usual fix                                                                                                                                                      |
-| ------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck. `pareton-watcher` does not emit `heartbeat`. A green heartbeat does not mean the chain is being read. Use `chain-scan-stalled` for chain reads. | `systemctl status pareton-worker` on the VPS.                                                                     | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                  |
-| `chain-scan-stalled`      | Fewer than 1 `chain_scanned` event in 10 min. The watcher stopped reading the chain. A long worker build does not fire this: `pareton-watcher` is a separate process. | Axiom: `['pareton-prod'] \| where event == "chain_scanned" \| sort by _time desc` for the last scan and its block. Then `journalctl -u pareton-watcher -n 100` for `chain scan failed`. | A dead subtensor websocket or an RPC outage. Restart `pareton-watcher` only. Do not restart `pareton-worker`: that strands the in-flight job and can orphan a GPU pod. New submissions stay on chain, so they are ingested on the next good scan. |
-| `lifecycle-failures`      | A `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low` event.       | Search Axiom for the event; it carries `pod`, `provider`, and `error`.                                            | `destroy_failed`: a GPU pod may still be running and billing; destroy it by hand in the provider console. `provider_balance_low`: top up the provider balance. |
-| `job-failure-spike`       | More than 5 `job_failed` in 1 hour. Systemic breakage, not one bad submission. | Axiom: `['pareton-prod'] \| where event == "job_failed" \| summarize count() by stage` to find the failing stage. | Usually a bad deploy or a provider outage. Roll back or wait, then watch the monitor resolve.                                                                  |
+| Monitor                   | Fires when                                                                                                                                                                                                                     | First check                                                                                                                                                                             | Usual fix                                                                                                                                                                                                                                         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `worker-heartbeat-absent` | No `heartbeat` event for 15 min. The worker is dead or stuck. `pareton-watcher` does not emit `heartbeat`. A green heartbeat does not mean the chain is being read. Use `chain-scan-stalled` for chain reads.                  | `systemctl status pareton-worker` on the VPS.                                                                                                                                           | `systemctl restart pareton-worker`. Read `journalctl -u pareton-worker -n 100` for the cause.                                                                                                                                                     |
+| `chain-scan-stalled`      | Fewer than 1 `chain_scanned` event in 10 min. The watcher stopped reading the chain. A long worker build does not fire this: `pareton-watcher` is a separate process.                                                          | Axiom: `['pareton-prod'] \| where event == "chain_scanned" \| sort by _time desc` for the last scan and its block. Then `journalctl -u pareton-watcher -n 100` for `chain scan failed`. | A dead subtensor websocket or an RPC outage. Restart `pareton-watcher` only. Do not restart `pareton-worker`: that strands the in-flight job and can orphan a GPU pod. New submissions stay on chain, so they are ingested on the next good scan. |
+| `weights-set-stalled`     | No `weights_computed` event for 3 hours. The cadence is 360 blocks (~72 min), so two missed cycles means the process is dead or stuck. The event fires when a `weight_sets` row is written; that is the age of the newest row. | `systemctl status pareton-weights` on the VPS. Axiom: `['pareton-prod'] \| where event == "weights_computed" \| sort by _time desc`. Then `journalctl -u pareton-weights -n 100`.       | Restart `pareton-weights` only. Do not restart the worker. An outage of ours leaves the last on-chain vector standing; miners keep getting paid at a frozen rate.                                                                                 |
+| `lifecycle-failures`      | A `destroy_failed`, `pod_ttl_exceeded`, or `provider_balance_low` event.                                                                                                                                                       | Search Axiom for the event; it carries `pod`, `provider`, and `error`.                                                                                                                  | `destroy_failed`: a GPU pod may still be running and billing; destroy it by hand in the provider console. `provider_balance_low`: top up the provider balance.                                                                                    |
+| `job-failure-spike`       | More than 5 `job_failed` in 1 hour. Systemic breakage, not one bad submission.                                                                                                                                                 | Axiom: `['pareton-prod'] \| where event == "job_failed" \| summarize count() by stage` to find the failing stage.                                                                       | Usually a bad deploy or a provider outage. Roll back or wait, then watch the monitor resolve.                                                                                                                                                     |
 
-### Is the worker alive, or is the chain being read?
+### Is the worker alive, is the chain being read, are weights moving?
 
-Two processes, two events. Read both before you restart anything.
+Three processes, three events. Read the matching one before you restart anything.
 
-| Event           | Process            | Cadence     | What it proves                                                                     |
-| --------------- | ------------------ | ----------- | ---------------------------------------------------------------------------------- |
-| `heartbeat`     | `pareton-worker`   | Every 5 min | The worker process is alive. It carries `queue_depth`, the number of jobs waiting. |
-| `chain_scanned` | `pareton-watcher`  | Every 30 s  | We read the chain. It carries `block`, `commitments_seen`, and `ingested`.         |
+| Event              | Process           | Cadence       | What it proves                                                                     |
+| ------------------ | ----------------- | ------------- | ---------------------------------------------------------------------------------- |
+| `heartbeat`        | `pareton-worker`  | Every 5 min   | The worker process is alive. It carries `queue_depth`, the number of jobs waiting. |
+| `chain_scanned`    | `pareton-watcher` | Every 30 s    | We read the chain. It carries `block`, `commitments_seen`, and `ingested`.         |
+| `weights_computed` | `pareton-weights` | Every ~72 min | A `weight_sets` row was written. It carries `computed_at_block` and `set_ok`.      |
 
 `chain_scanned` fires on every successful scan, including a scan that finds
 nothing. That is why its absence is an alert. `submission_ingested` cannot do
