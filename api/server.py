@@ -26,7 +26,6 @@ from campaign.store import (
     list_submission_jobs,
     list_submissions,
 )
-from chain.weights import dense_to_sparse
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from gate.types import SubmissionState
 from round.store import (
@@ -336,12 +335,11 @@ class WeightBreakdownModel(BaseModel):
 
 
 class WeightsModel(BaseModel):
-    """`GET /v1/weights`. `uids` and `weights` are the sparse wire form."""
+    """`GET /v1/weights`. `weights[i]` is the weight for UID `i`."""
 
     computed_at_block: int
     version_key: int
     burn_uid: int
-    uids: list[int]
     weights: list[float]
     breakdown: list[WeightBreakdownModel]
 
@@ -480,29 +478,15 @@ def round_detail(round_id: UUID, response: Response):
 
 @app.get("/v1/weights", responses={200: {"model": WeightsModel}})
 def latest_weights(response: Response):
-    """The newest stored weight vector.
+    """The newest stored weight vector. Reads only; never computes.
 
-    A consensus surface. Other validators read this to set their own weights,
-    so the response shape is a contract: breaking it silently desynchronises
-    the subnet.
-
-    This reads; it never computes. The newest row is served whatever `set_ok`
-    says: that column records whether our own chain call landed, not what the
-    vector is. Null means the chain call has not returned; false means it was
-    rejected. If the setter dies between insert and sign, this row was never
-    sent on chain.
-
-    No stored row is a 404, never an empty vector: an empty vector is a valid
-    on-chain instruction meaning "pay nobody", and we must not publish that by
-    accident. An all-zero stored row takes the same 404: the writer should
-    refuse it, but the reader cannot trust that across a version skew.
+    `weights[i]` is UID `i`. Pass it to `SetWeights` with
+    `uids=range(len(weights))`. A missing or all-zero row is 404: an empty
+    vector is a valid on-chain instruction to pay nobody.
     """
     row = get_latest_weight_set()
-    if row is not None:
-        uids, values = dense_to_sparse(row["weights"])
-    else:
-        uids, values = [], []
-    if not uids:
+    values = [float(w) for w in row["weights"]] if row is not None else []
+    if not any(w != 0 for w in values):
         # HTTPException builds a new response; headers on `response` would drop.
         raise HTTPException(
             status_code=404,
@@ -514,7 +498,6 @@ def latest_weights(response: Response):
         "computed_at_block": row["computed_at_block"],
         "version_key": row["version_key"],
         "burn_uid": row["burn_uid"],
-        "uids": uids,
         "weights": values,
         "breakdown": row["breakdown"],
     }

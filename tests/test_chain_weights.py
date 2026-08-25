@@ -17,7 +17,6 @@ from chain.weights import (
     ValidatorPermitError,
     WeightSetError,
     assert_validator_permit,
-    dense_to_sparse,
     set_weights,
 )
 
@@ -171,17 +170,6 @@ def test_mismatched_lengths_raise_before_any_submit(wallet):
     with pytest.raises(WeightSetError):
         set_weights(sub, wallet, FakeMeta(), netuid=10, uids=[1, 2], weights=[1.0])
     assert sub.calls == []
-
-
-def test_dense_to_sparse_drops_zeros_and_stays_ascending():
-    uids, vals = dense_to_sparse([0.0, 0.25, 0.0, 0.0, 0.75])
-    assert uids == [1, 4]
-    assert vals == [0.25, 0.75]
-    assert uids == sorted(uids)
-
-
-def test_dense_to_sparse_all_zero_is_empty():
-    assert dense_to_sparse([0.0] * 256) == ([], [])
 
 
 def test_failure_never_emits_wallet_material(wallet, caplog):

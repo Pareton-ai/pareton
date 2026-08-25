@@ -14,7 +14,6 @@ import config
 from chain.weights import (
     WeightSetError,
     assert_validator_permit,
-    dense_to_sparse,
     set_weights,
 )
 from observability import events as obs
@@ -152,11 +151,9 @@ def run_cycle(
         weights=list(vector.weights),
         breakdown=list(vector.breakdown),
     )
-    uids, values = dense_to_sparse(vector.weights)
-    burn_share = next(
-        (float(w) for uid, w in zip(uids, values) if uid == config.BURN_UID),
-        0.0,
-    )
+    values = list(vector.weights)
+    uids = list(range(len(values)))
+    burn_share = float(values[config.BURN_UID])
 
     if not enabled:
         logger.info(

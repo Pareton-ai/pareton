@@ -935,9 +935,7 @@ def _stored_weight_set() -> dict:
     }
 
 
-def test_weights_serves_the_stored_dense_vector_as_sparse(
-    monkeypatch, client: TestClient
-):
+def test_weights_serves_the_stored_dense_vector(monkeypatch, client: TestClient):
     from api import server
 
     monkeypatch.setattr(server, "get_latest_weight_set", _stored_weight_set)
@@ -946,12 +944,11 @@ def test_weights_serves_the_stored_dense_vector_as_sparse(
     assert resp.status_code == 200
     body = resp.json()
     server.WeightsModel.model_validate(body)
-    # Sparse wire form: the two non-zero slots of a 202-slot dense vector.
-    assert body["uids"] == [12, 201]
-    assert body["weights"] == pytest.approx([0.1, 0.9])
-    assert len(body["uids"]) == len(body["weights"])
-    assert body["uids"] == sorted(body["uids"])
-    assert all(w != 0 for w in body["weights"])
+    assert "uids" not in body
+    # Dense wire form: index is UID. Length is the stored vector, not padded.
+    assert body["weights"][12] == pytest.approx(0.1)
+    assert body["weights"][201] == pytest.approx(0.9)
+    assert len(body["weights"]) == 202
     assert sum(body["weights"]) == pytest.approx(1.0)
     assert body["computed_at_block"] == 6123456
     assert body["version_key"] == 2032
