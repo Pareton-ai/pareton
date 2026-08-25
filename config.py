@@ -190,6 +190,22 @@ BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
 )
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 
+# Seed-time defaults for campaigns.emission_rule: what a campaign's leader is
+# paid, decaying from start to floor over decay_blocks since the crown was won.
+# Blocks, not days, because other validators recompute the same vector and the
+# chain is the only clock we share; 201600 blocks is two weeks at 12s. Like the
+# correctness bars, these are copied onto the campaign and signed into
+# manifest_hash, so editing them cannot move a live campaign's pay schedule.
+EMISSION_START_WEIGHT: float = float(
+    os.environ.get("PARETON_EMISSION_START_WEIGHT", "0.10")
+)
+EMISSION_FLOOR_WEIGHT: float = float(
+    os.environ.get("PARETON_EMISSION_FLOOR_WEIGHT", "0.02")
+)
+EMISSION_DECAY_BLOCKS: int = int(
+    os.environ.get("PARETON_EMISSION_DECAY_BLOCKS", "201600")
+)
+
 # Round seeding reads the block this many behind the head, so the seed block is
 # already settled and the watcher never blocks waiting for the tip to finalize.
 CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "1"))

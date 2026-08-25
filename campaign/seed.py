@@ -20,6 +20,7 @@ from campaign.manifest import build_manifest
 from campaign.models import (
     CustomerSignoff,
     SLA,
+    validate_emission_rule,
     validate_priority_metric,
     validate_scoring_rule,
 )
@@ -144,6 +145,36 @@ def require_correctness_thresholds(bench: dict | None) -> None:
         )
 
 
+DEFAULT_EMISSION_RULE_NAME = "linear_decay"
+
+
+def _emission_rule(rule: dict | None) -> dict:
+    """Complete the campaign's pay schedule, defaulting from config."""
+    merged = {
+        "name": DEFAULT_EMISSION_RULE_NAME,
+        "start_weight": config.EMISSION_START_WEIGHT,
+        "floor_weight": config.EMISSION_FLOOR_WEIGHT,
+        "decay_blocks": config.EMISSION_DECAY_BLOCKS,
+        **dict(rule or {}),
+    }
+    return validate_emission_rule(merged)
+
+
+def require_emission_rule(emission_rule: dict | None) -> None:
+    """A campaign may not open without its pay schedule in the manifest.
+
+    No rule means the campaign pays nothing at all: honest for a draft, and a
+    silent no-emission bug for an open one. Like the correctness bars, the rule
+    is pinned in manifest_hash, so it has to be written down before miners
+    start competing under it.
+    """
+    if not emission_rule:
+        raise ValueError(
+            "status=open requires campaigns.emission_rule; a campaign without "
+            "one is excluded from the weight vector and pays nothing"
+        )
+
+
 def build_seed_bench_spec(
     *,
     model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -198,6 +229,7 @@ def seed_synthetic_campaign(
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
     scoring_rule: dict | None = None,
+    emission_rule: dict | None = None,
     allow_placeholders: bool = False,
     priority_metric: str = DEFAULT_PRIORITY_METRIC,
     success_threshold: str = DEFAULT_SUCCESS_THRESHOLD,
@@ -268,8 +300,11 @@ def seed_synthetic_campaign(
         )
     )
 
+    emission = _emission_rule(emission_rule)
+
     if status == "open":
         require_correctness_thresholds(bench)
+        require_emission_rule(emission)
 
     pool = list(workload_pool) if workload_pool is not None else None
     scoring = validate_scoring_rule(scoring_rule)
@@ -301,6 +336,7 @@ def seed_synthetic_campaign(
         workload_pool=pool,
         sampling_rule=rule,
         scoring_rule=scoring,
+        emission_rule=emission,
     )
 
     signoff = CustomerSignoff(
@@ -336,6 +372,7 @@ def seed_synthetic_campaign(
         workload_pool=pool,
         sampling_rule=rule,
         scoring_rule=scoring,
+        emission_rule=emission,
     )
 
     inserted = insert_campaign(manifest)
@@ -389,6 +426,24 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=None,
         help="Below this share of streamed tokens scored, the run is infra_failed",
+    )
+    p.add_argument(
+        "--emission-start-weight",
+        type=float,
+        default=None,
+        help="Share of subnet emission a fresh leader earns (default: config)",
+    )
+    p.add_argument(
+        "--emission-floor-weight",
+        type=float,
+        default=None,
+        help="Share a leader still earns once the decay has run out",
+    )
+    p.add_argument(
+        "--emission-decay-blocks",
+        type=int,
+        default=None,
+        help="Blocks from start_weight down to floor_weight (12s per block)",
     )
     p.add_argument(
         "--baseline-engine-image-digest",
@@ -493,6 +548,12 @@ def main(argv: list[str] | None = None) -> int:
             "min_coverage_ratio": args.bench_correctness_min_coverage_ratio,
         }
         correctness_thresholds = {k: v for k, v in overrides.items() if v is not None}
+        emission_overrides = {
+            "start_weight": args.emission_start_weight,
+            "floor_weight": args.emission_floor_weight,
+            "decay_blocks": args.emission_decay_blocks,
+        }
+        emission = {k: v for k, v in emission_overrides.items() if v is not None}
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -511,6 +572,7 @@ def main(argv: list[str] | None = None) -> int:
             workload_pool=pool,
             sampling_rule=rule,
             scoring_rule=scoring,
+            emission_rule=emission,
             allow_placeholders=args.allow_placeholders,
             priority_metric=args.priority_metric,
             success_threshold=args.success_threshold,

@@ -36,6 +36,7 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
     workload_pool = _parse_json_obj(row.get("workload_pool"))
     sampling_rule = _parse_json_obj(row.get("sampling_rule"))
     scoring_rule = _parse_json_obj(row.get("scoring_rule"))
+    emission_rule = _parse_json_obj(row.get("emission_rule"))
     return build_manifest(
         campaign_id=row["id"],
         profile_id=row.get("profile_id"),
@@ -60,6 +61,7 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         workload_pool=list(workload_pool) if isinstance(workload_pool, list) else None,
         sampling_rule=dict(sampling_rule) if isinstance(sampling_rule, dict) else None,
         scoring_rule=dict(scoring_rule) if isinstance(scoring_rule, dict) else None,
+        emission_rule=dict(emission_rule) if isinstance(emission_rule, dict) else None,
         created_at=(
             _parse_ts(row["created_at"]) if row.get("created_at") is not None else None
         ),
@@ -95,7 +97,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   allowed_paths, denied_paths,
                   manifest_hash, customer_signoff, status, bench, engine,
                   priority_metric, success_threshold,
-                  workload_pool, sampling_rule, scoring_rule
+                  workload_pool, sampling_rule, scoring_rule, emission_rule
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
@@ -103,7 +105,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s
+                  %s, %s, %s, %s
                 )
                 RETURNING id
                 """,
@@ -139,6 +141,11 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                         else None
                     ),
                     Json(manifest.scoring_rule),
+                    (
+                        Json(manifest.emission_rule)
+                        if manifest.emission_rule is not None
+                        else None
+                    ),
                 ),
             )
             return cur.fetchone()[0]

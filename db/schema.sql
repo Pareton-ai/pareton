@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- Named ranking rule, pinned in manifest_hash: {name: "median_e2e_speedup"}.
   -- Fixed once the campaign leaves 'draft'.
   scoring_rule JSONB NOT NULL,
+  -- Pay schedule, pinned in manifest_hash:
+  -- {name: "linear_decay", start_weight, floor_weight, decay_blocks}.
+  -- NULL means the campaign pays nothing and is left out of the weight
+  -- vector, which keeps campaigns pinned before emission rules on their hash.
+  emission_rule JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)
@@ -63,6 +68,69 @@ CREATE TABLE IF NOT EXISTS campaigns (
 
 CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns (status);
 CREATE INDEX IF NOT EXISTS campaigns_profile_id_idx ON campaigns (profile_id);
+
+-- The first trigger in this schema. The open campaigns must not promise more
+-- emission than the subnet has: sum(start_weight) over status='open' <= 1.0.
+-- A CHECK constraint sees only its own row, so it cannot express this, and an
+-- application-level gate would be bypassed by the manual UPDATEs run against
+-- campaigns. Checking start_weight rather than the decayed weight is
+-- deliberate: decayed is always lower, so the start values bound the sum at
+-- every block without the trigger needing to know the block.
+-- A rule's start_weight, or an exception. Never NULL: `->>` on a missing key
+-- yields SQL NULL, and NULL propagates through the comparison below as
+-- unknown, so the guard would silently pass the row it exists to stop.
+-- Treating a malformed rule as 0 was considered and rejected: an open campaign
+-- whose rule cannot be read is broken, not free, and admitting it here just
+-- moves the failure to the weight builder that reads the same field later.
+CREATE OR REPLACE FUNCTION campaigns_emission_start_weight(rule JSONB)
+RETURNS NUMERIC AS $$
+DECLARE
+  raw JSONB;
+  weight NUMERIC;
+BEGIN
+  raw := rule -> 'start_weight';
+  IF raw IS NULL OR jsonb_typeof(raw) <> 'number' THEN
+    RAISE EXCEPTION
+      'emission_rule.start_weight must be a number, got %',
+      COALESCE(jsonb_typeof(raw), 'missing');
+  END IF;
+  weight := raw::TEXT::NUMERIC;
+  IF weight < 0.0 OR weight > 1.0 THEN
+    RAISE EXCEPTION
+      'emission_rule.start_weight must be in [0, 1], got %', weight;
+  END IF;
+  RETURN weight;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION campaigns_emission_sum_guard() RETURNS trigger AS $$
+DECLARE
+  new_start NUMERIC;
+  others NUMERIC;
+BEGIN
+  IF NEW.status <> 'open' OR NEW.emission_rule IS NULL THEN
+    RETURN NEW;
+  END IF;
+  new_start := campaigns_emission_start_weight(NEW.emission_rule);
+  -- SUM skips NULLs, so a malformed sibling row would under-count the budget.
+  -- The helper raises instead, which can only fire on a row that predates this
+  -- trigger or was written with it disabled: exactly when you want to know.
+  SELECT COALESCE(SUM(campaigns_emission_start_weight(emission_rule)), 0)
+    INTO others
+    FROM campaigns
+    WHERE status = 'open' AND emission_rule IS NOT NULL AND id <> NEW.id;
+  IF new_start + others > 1.0 THEN
+    RAISE EXCEPTION
+      'emission_rule.start_weight % would take the open campaigns to %, over 1.0',
+      new_start, new_start + others;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER campaigns_emission_sum_trg
+  BEFORE INSERT OR UPDATE ON campaigns
+  FOR EACH ROW EXECUTE FUNCTION campaigns_emission_sum_guard();
 
 CREATE TABLE IF NOT EXISTS submissions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -233,3 +301,27 @@ CREATE TABLE IF NOT EXISTS leader_history (
 
 CREATE INDEX IF NOT EXISTS leader_history_campaign_id_idx
   ON leader_history (campaign_id, created_at);
+
+-- Append-only: one row per weight compute cycle. Never updated after its
+-- set_ok is written.
+CREATE TABLE IF NOT EXISTS weight_sets (
+  id BIGSERIAL PRIMARY KEY,
+  computed_at_block INTEGER NOT NULL,
+  version_key INTEGER NOT NULL,
+  burn_uid INTEGER NOT NULL,
+  -- The full dense vector, index 0..n-1, floats summing to 1.0.
+  weights JSONB NOT NULL,
+  -- Per-campaign inputs, so any row can be recomputed and checked:
+  -- [{campaign_id, hotkey, uid, blocks_held, weight, note}, ...]
+  -- `uid` is what the metagraph said at compute time and is NOT authoritative
+  -- afterwards. `note` records why a share was withheld (vacant, dereg, closed).
+  breakdown JSONB NOT NULL,
+  -- Null until the chain call returns. Non-null with `set_ok=false` records a
+  -- rejected attempt, so a run of failures is visible without reading logs.
+  set_ok BOOLEAN,
+  set_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS weight_sets_created_at_idx
+  ON weight_sets (created_at DESC);

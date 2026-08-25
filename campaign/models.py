@@ -47,6 +47,66 @@ def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
     return {"name": name, **out}
 
 
+# Named emission rules: how a campaign pays its leader over time. One
+# implementation ships today; the weight vector dispatches on the name.
+EMISSION_RULE_NAMES = frozenset({"linear_decay"})
+
+EMISSION_RULE_KEYS = ("name", "start_weight", "floor_weight", "decay_blocks")
+
+
+def _emission_weight(value: Any, *, field: str) -> float:
+    """A share of subnet emission: a real number in [0, 1]. NaN/inf fail here."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"emission_rule.{field} must be a number")
+    out = float(value)
+    if not 0.0 <= out <= 1.0:
+        raise ValueError(f"emission_rule.{field} must be in [0, 1], got {out!r}")
+    return out
+
+
+def validate_emission_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    """Validate a campaigns.emission_rule block; return a normalized copy.
+
+    Normalization is total, like validate_engine: the returned dict holds
+    exactly the known keys, so an equal rule always hashes identically. Every
+    number is bounded here rather than where the weight vector is built,
+    because a rule that over-commits the subnet must never reach a manifest a
+    miner competes under.
+    """
+    if not isinstance(rule, dict):
+        raise ValueError("emission_rule must be an object")
+    name = str(rule.get("name") or "").strip()
+    if name not in EMISSION_RULE_NAMES:
+        raise ValueError(
+            f"emission_rule.name must be one of {sorted(EMISSION_RULE_NAMES)}, "
+            f"got {rule.get('name')!r}"
+        )
+    unknown = set(rule) - set(EMISSION_RULE_KEYS)
+    if unknown:
+        raise ValueError(
+            f"emission_rule has unknown keys: {sorted(unknown)} "
+            f"(allowed: {sorted(EMISSION_RULE_KEYS)})"
+        )
+    start_weight = _emission_weight(rule.get("start_weight"), field="start_weight")
+    floor_weight = _emission_weight(rule.get("floor_weight"), field="floor_weight")
+    if floor_weight > start_weight:
+        raise ValueError(
+            "emission_rule.floor_weight must be <= start_weight, got "
+            f"{floor_weight} > {start_weight}"
+        )
+    decay_blocks = rule.get("decay_blocks")
+    if isinstance(decay_blocks, bool) or not isinstance(decay_blocks, int):
+        raise ValueError("emission_rule.decay_blocks must be an integer")
+    if decay_blocks < 1:
+        raise ValueError(f"emission_rule.decay_blocks must be >= 1, got {decay_blocks}")
+    return {
+        "name": name,
+        "start_weight": start_weight,
+        "floor_weight": floor_weight,
+        "decay_blocks": decay_blocks,
+    }
+
+
 def validate_priority_metric(value: str) -> str:
     """Validate campaigns.priority_metric; return the normalized value."""
     cleaned = str(value).strip().lower()
@@ -152,6 +212,10 @@ class CampaignManifest:
     scoring_rule: dict[str, Any] = field(
         default_factory=lambda: dict(DEFAULT_SCORING_RULE)
     )
+    # Pay schedule, pinned in manifest_hash when set. None means the campaign
+    # pays nothing and is excluded from the weight vector; absent also keeps
+    # every campaign pinned before emission rules existed on its stored hash.
+    emission_rule: dict[str, Any] | None = None
     # Row creation time, read from the DB rather than pinned. Campaigns run
     # open ended, so this is the only date they carry; None for a manifest
     # built in memory and not yet inserted.
@@ -181,6 +245,7 @@ class CampaignManifest:
             "bench": self.bench,
             "engine": self.engine,
             "scoring_rule": dict(self.scoring_rule),
+            "emission_rule": self.emission_rule,
         }
         if self.workload_pool is not None:
             out["workload_pool"] = list(self.workload_pool)
