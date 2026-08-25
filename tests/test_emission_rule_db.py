@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import psycopg2
 import pytest
+from psycopg2.extras import Json
 
 pytestmark = pytest.mark.e2e
 
@@ -123,6 +124,38 @@ def test_draft_and_closed_campaigns_do_not_spend_the_budget():
     _insert(status="closed", emission_rule=_weighted(0.9))
     _insert(status="open", emission_rule=_weighted(1.0))
     assert _open_start_weight_sum() == 1.0
+
+
+@pytest.mark.parametrize(
+    "broken, expected",
+    [
+        ({"name": "linear_decay"}, "must be a number, got missing"),
+        ({"name": "linear_decay", "start_weight": None}, "must be a number, got null"),
+        (
+            {"name": "linear_decay", "start_weight": "0.4"},
+            "must be a number, got string",
+        ),
+        ({"name": "linear_decay", "start_weight": -0.5}, r"must be in \[0, 1\]"),
+    ],
+)
+def test_a_rule_whose_start_weight_cannot_be_read_is_rejected(broken, expected):
+    """A missing or unreadable start_weight must not slip past the cap.
+
+    `->>` on a missing key yields SQL NULL, and `NULL + others > 1.0` is
+    unknown, so the guard used to pass exactly the row it exists to stop.
+    Reaching this needs raw SQL, which is the threat model the trigger is for:
+    validate_emission_rule already blocks these through the Python path.
+    """
+    _insert(status="open", emission_rule=_weighted(1.0))
+    spare = _insert(status="draft", emission_rule=_weighted(0.0))
+    with pytest.raises(psycopg2.errors.RaiseException, match=expected):
+        with db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE campaigns SET status = 'open', emission_rule = %s "
+                    "WHERE id = %s",
+                    (Json(broken), str(spare.campaign_id)),
+                )
 
 
 def test_the_trigger_catches_a_manual_update_too():

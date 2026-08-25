@@ -76,6 +76,33 @@ CREATE INDEX IF NOT EXISTS campaigns_profile_id_idx ON campaigns (profile_id);
 -- campaigns. Checking start_weight rather than the decayed weight is
 -- deliberate: decayed is always lower, so the start values bound the sum at
 -- every block without the trigger needing to know the block.
+-- A rule's start_weight, or an exception. Never NULL: `->>` on a missing key
+-- yields SQL NULL, and NULL propagates through the comparison below as
+-- unknown, so the guard would silently pass the row it exists to stop.
+-- Treating a malformed rule as 0 was considered and rejected: an open campaign
+-- whose rule cannot be read is broken, not free, and admitting it here just
+-- moves the failure to the weight builder that reads the same field later.
+CREATE OR REPLACE FUNCTION campaigns_emission_start_weight(rule JSONB)
+RETURNS NUMERIC AS $$
+DECLARE
+  raw JSONB;
+  weight NUMERIC;
+BEGIN
+  raw := rule -> 'start_weight';
+  IF raw IS NULL OR jsonb_typeof(raw) <> 'number' THEN
+    RAISE EXCEPTION
+      'emission_rule.start_weight must be a number, got %',
+      COALESCE(jsonb_typeof(raw), 'missing');
+  END IF;
+  weight := raw::TEXT::NUMERIC;
+  IF weight < 0.0 OR weight > 1.0 THEN
+    RAISE EXCEPTION
+      'emission_rule.start_weight must be in [0, 1], got %', weight;
+  END IF;
+  RETURN weight;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION campaigns_emission_sum_guard() RETURNS trigger AS $$
 DECLARE
   new_start NUMERIC;
@@ -84,8 +111,11 @@ BEGIN
   IF NEW.status <> 'open' OR NEW.emission_rule IS NULL THEN
     RETURN NEW;
   END IF;
-  new_start := (NEW.emission_rule ->> 'start_weight')::NUMERIC;
-  SELECT COALESCE(SUM((emission_rule ->> 'start_weight')::NUMERIC), 0)
+  new_start := campaigns_emission_start_weight(NEW.emission_rule);
+  -- SUM skips NULLs, so a malformed sibling row would under-count the budget.
+  -- The helper raises instead, which can only fire on a row that predates this
+  -- trigger or was written with it disabled: exactly when you want to know.
+  SELECT COALESCE(SUM(campaigns_emission_start_weight(emission_rule)), 0)
     INTO others
     FROM campaigns
     WHERE status = 'open' AND emission_rule IS NOT NULL AND id <> NEW.id;
