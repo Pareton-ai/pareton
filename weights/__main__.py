@@ -13,10 +13,16 @@ import threading
 
 import config
 from chain.rpc import fetch_metagraph
-from worker.main import _configure_logging
 from weights.loop import WeightsProcess, cycle_due, last_computed_block
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    )
 
 
 def _connect_subtensor():
@@ -71,41 +77,33 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 subtensor = _connect_subtensor()
             head = int(subtensor.block)
-        except Exception:
-            logger.exception("subtensor connect or head read failed; will retry")
-            subtensor = None
-            return
-
-        if not args.once and not cycle_due(process.last_block, head, process.cadence):
-            return
-
-        try:
+            if not args.once and not cycle_due(
+                process.last_block, head, process.cadence
+            ):
+                return
             meta, head, _hash = fetch_metagraph(
                 subtensor,
                 config.NETUID,
                 network=config.SUBTENSOR_NETWORK,
             )
+            if config.WEIGHTS_ENABLED and wallet is None:
+                wallet = _load_wallet()
+            outcome = process.tick(
+                head=head,
+                subtensor=subtensor,
+                wallet=wallet,
+                meta=meta,
+                enabled=config.WEIGHTS_ENABLED,
+            )
+            logger.info("weights cycle %s at block %d", outcome, head)
         except Exception:
-            logger.exception("metagraph fetch failed; will reconnect")
-            try:
-                subtensor.close()
-            except Exception:
-                pass
-            subtensor = None
-            return
-
-        if config.WEIGHTS_ENABLED and wallet is None:
-            wallet = _load_wallet()
-
-        outcome = process.tick(
-            head=head,
-            subtensor=subtensor,
-            wallet=wallet,
-            meta=meta,
-            enabled=config.WEIGHTS_ENABLED,
-            force=args.once,
-        )
-        logger.info("weights cycle %s at block %d", outcome, head)
+            logger.exception("weights cycle failed; will retry")
+            if subtensor is not None:
+                try:
+                    subtensor.close()
+                except Exception:
+                    pass
+                subtensor = None
 
     if args.once:
         _cycle()

@@ -1,7 +1,8 @@
 """The pareton-weights cadence: compute, store, and sign one vector.
 
-One process owns all three so `/v1/weights` can never serve a vector that was
-not also sent to the chain. The builder is pure; this module is the I/O.
+The builder is pure; this module is the I/O. The ``weight_sets`` row is
+inserted before the chain call returns, so `/v1/weights` can serve a vector
+that is still in flight, or that never landed if this process dies in between.
 """
 
 from __future__ import annotations
@@ -38,9 +39,28 @@ def cycle_due(last_block: int | None, head: int, cadence: int) -> bool:
 
 
 def _hotkey_uids(meta: Any) -> tuple[dict[str, int], int]:
-    """Live ``hotkey -> uid`` map and metagraph length. UIDs are never stored."""
+    """Live ``hotkey -> uid`` map from ``by_hotkey().uid``. UIDs are never stored.
+
+    ``enumerate(meta.hotkeys)`` is not an authority. If a listed hotkey is
+    missing from ``by_hotkey`` or the uid is outside the metagraph length,
+    raise rather than pay the wrong miner.
+    """
     hotkeys = [str(hk) for hk in getattr(meta, "hotkeys", [])]
-    return {hk: uid for uid, hk in enumerate(hotkeys)}, len(hotkeys)
+    uid_count = len(hotkeys)
+    mapping: dict[str, int] = {}
+    for hotkey in hotkeys:
+        neuron = meta.by_hotkey(hotkey)
+        if neuron is None:
+            raise WeightVectorError(
+                "metagraph lists a hotkey that by_hotkey does not resolve"
+            )
+        uid = int(neuron.uid)
+        if not 0 <= uid < uid_count:
+            raise WeightVectorError(
+                f"uid {uid} is outside the metagraph (uid_count={uid_count})"
+            )
+        mapping[hotkey] = uid
+    return mapping, uid_count
 
 
 def _campaigns(rows: list[dict[str, Any]]) -> list[CampaignEmission]:
@@ -88,14 +108,13 @@ def run_cycle(
     current_block: int,
     enabled: bool,
 ) -> int | None:
-    """One compute cycle. Returns the block used, or None if nothing was stored.
+    """One compute cycle. Returns the block if a row was stored, else None.
 
     A builder guard abort leaves no ``weight_sets`` row. A chain rejection
-    stores the row with ``set_ok=false`` and the loop keeps running.
+    stores the row with ``set_ok=false`` and the loop keeps running. The
+    caller advances ``last_block`` either way so a persistent abort retries
+    at cadence, not every poll.
     """
-    hotkey_uids, uid_count = _hotkey_uids(meta)
-    reconcile_deregistrations(hotkey_uids)
-
     if enabled:
         try:
             uid = assert_validator_permit(
@@ -105,6 +124,14 @@ def run_cycle(
         except WeightSetError as exc:
             logger.warning("skipping cycle before compute: %s", exc)
             return None
+
+    try:
+        hotkey_uids, uid_count = _hotkey_uids(meta)
+    except WeightVectorError:
+        logger.exception("weight vector failed structural guards; not stored")
+        return None
+
+    reconcile_deregistrations(hotkey_uids)
 
     try:
         vector = build_weight_vector(
@@ -181,12 +208,11 @@ def run_cycle(
 
 
 class WeightsProcess:
-    """Single-flight cadence. A long cycle skips the next tick, never overlaps."""
+    """Cadence state. The loop is one thread; overlap cannot occur."""
 
     def __init__(self, *, last_block: int | None, cadence: int):
         self.last_block = last_block
         self.cadence = cadence
-        self._running = False
 
     def tick(
         self,
@@ -196,27 +222,18 @@ class WeightsProcess:
         wallet: Any,
         meta: Any,
         enabled: bool,
-        force: bool = False,
     ) -> str:
-        if self._running:
-            return "skipped_overlap"
-        if not force and not cycle_due(self.last_block, head, self.cadence):
-            return "waiting"
-        self._running = True
-        try:
-            block = run_cycle(
-                subtensor,
-                wallet,
-                meta,
-                current_block=head,
-                enabled=enabled,
-            )
-            if block is not None:
-                self.last_block = block
-                return "computed"
-            return "aborted"
-        finally:
-            self._running = False
+        stored = run_cycle(
+            subtensor,
+            wallet,
+            meta,
+            current_block=head,
+            enabled=enabled,
+        )
+        # Permit skip and builder abort both return None. Advance either way
+        # so a persistent failure retries at cadence, not every poll.
+        self.last_block = head
+        return "computed" if stored is not None else "aborted"
 
 
 def last_computed_block() -> int | None:

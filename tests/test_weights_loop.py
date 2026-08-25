@@ -21,15 +21,21 @@ BURN = 3
 
 
 class FakeMeta:
-    def __init__(self, hotkeys, *, permit: bool = True):
+    def __init__(self, hotkeys, *, permit: bool = True, uid_of: dict | None = None):
         self.hotkeys = list(hotkeys)
         self._permit = permit
+        self._uid_of = uid_of
 
     def by_hotkey(self, hotkey: str):
         if hotkey not in self.hotkeys:
             return None
+        uid = (
+            self._uid_of[hotkey]
+            if self._uid_of is not None and hotkey in self._uid_of
+            else self.hotkeys.index(hotkey)
+        )
         return SimpleNamespace(
-            uid=self.hotkeys.index(hotkey),
+            uid=uid,
             validator_permit=self._permit if hotkey == SIGNER else False,
         )
 
@@ -80,14 +86,13 @@ def wired(monkeypatch, calls):
     return calls
 
 
-def _tick(process, *, head, wallet, meta, enabled=True, force=False):
+def _tick(process, *, head, wallet, meta, enabled=True):
     return process.tick(
         head=head,
         subtensor=SimpleNamespace(),
         wallet=wallet,
         meta=meta,
         enabled=enabled,
-        force=force,
     )
 
 
@@ -97,28 +102,20 @@ def test_cycle_due_on_first_run_and_after_cadence():
     assert loop.cycle_due(1000, 1360, 360) is True
 
 
-def test_long_cycle_skips_the_next_tick_instead_of_overlapping(
-    monkeypatch, wallet, meta, wired
-):
-    process = loop.WeightsProcess(last_block=None, cadence=360)
-    nested = []
+def test_hotkey_uids_uses_by_hotkey_and_raises_on_mismatch(meta):
+    mapping, uid_count = loop._hotkey_uids(meta)
+    assert uid_count == 4
+    assert mapping[SIGNER] == 0
+    assert mapping["5Burn"] == 3
 
-    real = loop.run_cycle
+    missing = FakeMeta([SIGNER, "5Ghost"])
+    missing.by_hotkey = lambda hk: None
+    with pytest.raises(WeightVectorError, match="by_hotkey"):
+        loop._hotkey_uids(missing)
 
-    def reentrant(*args, **kwargs):
-        nested.append(_tick(process, head=1000, wallet=wallet, meta=meta, enabled=True))
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(loop, "run_cycle", reentrant)
-    assert _tick(process, head=1000, wallet=wallet, meta=meta) == "computed"
-    assert nested == ["skipped_overlap"]
-    assert process.last_block == 1000
-
-
-def test_waiting_when_cadence_has_not_elapsed(wallet, meta, wired):
-    process = loop.WeightsProcess(last_block=1000, cadence=360)
-    assert _tick(process, head=1100, wallet=wallet, meta=meta) == "waiting"
-    assert wired["insert"] == []
+    bad = FakeMeta([SIGNER, "5Other"], uid_of={SIGNER: 99, "5Other": 1})
+    with pytest.raises(WeightVectorError, match="outside"):
+        loop._hotkey_uids(bad)
 
 
 def test_running_round_is_skipped_by_reconcile(monkeypatch, wallet, meta, wired):
@@ -137,6 +134,20 @@ def test_idle_deregistered_leader_is_vacated(monkeypatch, wallet, meta, wired):
     assert wired["vacate"] == ["c1"]
 
 
+def test_missing_permit_does_not_vacate(monkeypatch, wallet, wired):
+    meta = FakeMeta([SIGNER, "5Other", "5Third", "5Burn"], permit=False)
+    monkeypatch.setattr(
+        loop,
+        "list_idle_seated_leaders",
+        lambda: [{"campaign_id": "c1", "hotkey": LEADER}],
+    )
+    process = loop.WeightsProcess(last_block=None, cadence=360)
+    assert _tick(process, head=50, wallet=wallet, meta=meta) == "aborted"
+    assert wired["vacate"] == []
+    assert wired["insert"] == []
+    assert process.last_block == 50
+
+
 def test_set_weights_failure_records_set_ok_false_and_survives(
     monkeypatch, wallet, meta, wired
 ):
@@ -151,7 +162,7 @@ def test_set_weights_failure_records_set_ok_false_and_survives(
         {"row_id": 7, "ok": False, "error": "chain rejected the weight vector"}
     ]
     assert process.last_block == 50
-    assert _tick(process, head=51, wallet=wallet, meta=meta) == "waiting"
+    assert loop.cycle_due(process.last_block, 51, 360) is False
 
 
 def test_kill_switch_stores_and_never_calls_chain(wallet, meta, wired):
@@ -164,7 +175,9 @@ def test_kill_switch_stores_and_never_calls_chain(wallet, meta, wired):
     assert wired["mark"] == []
 
 
-def test_guard_violation_stores_nothing(monkeypatch, wallet, meta, wired):
+def test_guard_violation_stores_nothing_and_advances_last_block(
+    monkeypatch, wallet, meta, wired
+):
     def bad(*args, **kwargs):
         raise WeightVectorError("burn is negative")
 
@@ -174,4 +187,24 @@ def test_guard_violation_stores_nothing(monkeypatch, wallet, meta, wired):
     assert wired["insert"] == []
     assert wired["set"] == []
     assert wired["mark"] == []
-    assert process.last_block is None
+    assert process.last_block == 10
+
+
+def test_uid_map_mismatch_aborts_and_advances(wallet, wired):
+    missing = FakeMeta([SIGNER, "5Ghost"])
+    missing.by_hotkey = lambda hk: None
+    process = loop.WeightsProcess(last_block=None, cadence=360)
+    assert _tick(process, head=10, wallet=wallet, meta=missing) == "aborted"
+    assert wired["insert"] == []
+    assert wired["vacate"] == []
+    assert process.last_block == 10
+
+
+def test_tick_does_not_catch_unexpected_errors(monkeypatch, wallet, meta, wired):
+    def boom(*args, **kwargs):
+        raise RuntimeError("metagraph shape changed")
+
+    monkeypatch.setattr(loop, "run_cycle", boom)
+    process = loop.WeightsProcess(last_block=None, cadence=360)
+    with pytest.raises(RuntimeError, match="metagraph shape changed"):
+        _tick(process, head=10, wallet=wallet, meta=meta)

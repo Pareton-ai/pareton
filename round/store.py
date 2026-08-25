@@ -805,9 +805,19 @@ def vacate_leader_if_idle(campaign_id: UUID | str, *, epsilon: float) -> bool:
     already vacant. The caller must log that: a silent no-op would hide a
     skipped vacate. ``epsilon`` is required by ``leader_history``; this event
     is not a ranking, so the live overtake epsilon records the rule in force.
+
+    Takes the same ``campaigns`` row lock as ``create_round`` first, so a
+    vacate and a round create serialize. The round re-check is the correctness
+    test; the campaigns lock is what makes it hold.
     """
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                (str(campaign_id),),
+            )
+            if cur.fetchone() is None:
+                return False
             cur.execute(
                 """
                 SELECT submission_id, hotkey, last_score,
