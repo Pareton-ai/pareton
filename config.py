@@ -13,6 +13,13 @@ SUBTENSOR_NETWORK: str = os.environ.get("PARETON_NETWORK", "finney")
 WALLET_NAME: str = os.environ.get("PARETON_WALLET_NAME", "default")
 WALLET_HOTKEY: str = os.environ.get("PARETON_WALLET_HOTKEY", "default")
 
+# Tags the weight vector with our mechanism version. Other validators only
+# trust-weight us while their key agrees with ours, so a bump is a coordinated
+# announcement, never a deploy artifact: it is set by hand in the env file.
+VERSION_KEY: int = int(os.environ.get("PARETON_VERSION_KEY", "2032"))
+# Emission not claimed by a seated leader goes here.
+BURN_UID: int = int(os.environ.get("PARETON_BURN_UID", "201"))
+
 POLL_INTERVAL_S: int = int(os.environ.get("PARETON_POLL_INTERVAL_S", "30"))
 CHAIN_RETRY_ATTEMPTS: int = int(os.environ.get("PARETON_CHAIN_RETRY_ATTEMPTS", "3"))
 CHAIN_RETRY_DELAY_S: int = int(os.environ.get("PARETON_CHAIN_RETRY_DELAY_S", "30"))
