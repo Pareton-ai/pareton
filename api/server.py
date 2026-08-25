@@ -480,17 +480,17 @@ def round_detail(round_id: UUID, response: Response):
 
 @app.get("/v1/weights", responses={200: {"model": WeightsModel}})
 def latest_weights(response: Response):
-    """The newest stored weight vector, exactly as it went to the chain.
+    """The newest stored weight vector.
 
     A consensus surface. Other validators read this to set their own weights,
     so the response shape is a contract: breaking it silently desynchronises
     the subnet.
 
-    This reads; it never computes. The process that writes `weight_sets` is
-    the same one that signs the chain transaction, so recomputing here would
-    be a second source of truth that could disagree with what was actually
-    set. The newest row is served whatever `set_ok` says: that column records
-    whether our own chain call landed, not what the vector is.
+    This reads; it never computes. The newest row is served whatever `set_ok`
+    says: that column records whether our own chain call landed, not what the
+    vector is. Null means the chain call has not returned; false means it was
+    rejected. If the setter dies between insert and sign, this row was never
+    sent on chain.
 
     No stored row is a 404, never an empty vector: an empty vector is a valid
     on-chain instruction meaning "pay nobody", and we must not publish that by

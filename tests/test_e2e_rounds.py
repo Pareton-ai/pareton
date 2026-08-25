@@ -27,9 +27,11 @@ from round.store import (
     claim_pending_round,
     complete_round,
     get_leader,
+    list_idle_seated_leaders,
     reap_stale_rounds,
     set_round_phase,
     touch_round_heartbeat,
+    vacate_leader_if_idle,
     void_round,
 )
 
@@ -944,3 +946,31 @@ def test_complete_seats_first_leader():
     assert seated is not None
     assert str(seated["submission_id"]) == challenger
     assert _history(campaign_id) == [(EVENT_SEATED, challenger, None)]
+
+
+def test_vacate_if_idle_writes_history_when_no_live_round():
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    idle = {str(r["campaign_id"]) for r in list_idle_seated_leaders()}
+    assert str(campaign_id) in idle
+    assert vacate_leader_if_idle(campaign_id, epsilon=0.01) is True
+    assert get_leader(campaign_id) is None
+    assert _history(campaign_id) == [(EVENT_VACATED, None, leader_sid)]
+
+
+def test_vacate_if_idle_skips_a_running_round():
+    campaign_id = _campaign()
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    idle = {str(r["campaign_id"]) for r in list_idle_seated_leaders()}
+    assert str(campaign_id) not in idle
+    assert vacate_leader_if_idle(campaign_id, epsilon=0.01) is False
+    seated = get_leader(campaign_id)
+    assert seated is not None
+    assert str(seated["submission_id"]) == leader_sid
+    assert _history(campaign_id) == []

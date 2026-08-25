@@ -774,6 +774,166 @@ def get_latest_weight_set() -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def list_idle_seated_leaders() -> list[dict[str, Any]]:
+    """Seated leaders on campaigns with no pending or running round.
+
+    The weights process uses this to decide who may be vacated for
+    deregistration. A live round keeps the round-settle path as the sole
+    writer of that campaign's crown.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT l.campaign_id, l.hotkey, l.submission_id,
+                       l.last_score, l.won_at_round_id, l.won_at_ordinal
+                FROM leaders l
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM rounds r
+                  WHERE r.campaign_id = l.campaign_id
+                    AND r.status IN ('pending', 'running')
+                )
+                """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def vacate_leader_if_idle(campaign_id: UUID | str, *, epsilon: float) -> bool:
+    """Drop the crown when the campaign has no live round.
+
+    Returns False if a pending or running round appeared, or the crown was
+    already vacant. The caller must log that: a silent no-op would hide a
+    skipped vacate. ``epsilon`` is required by ``leader_history``; this event
+    is not a ranking, so the live overtake epsilon records the rule in force.
+
+    Takes the same ``campaigns`` row lock as ``create_round`` first, so a
+    vacate and a round create serialize. The round re-check is the correctness
+    test; the campaigns lock is what makes it hold.
+    """
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                (str(campaign_id),),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                """
+                SELECT submission_id, hotkey, last_score,
+                       won_at_round_id, won_at_ordinal
+                FROM leaders
+                WHERE campaign_id = %s
+                FOR UPDATE
+                """,
+                (str(campaign_id),),
+            )
+            leader = cur.fetchone()
+            if leader is None:
+                return False
+            cur.execute(
+                """
+                SELECT 1 FROM rounds
+                WHERE campaign_id = %s AND status IN ('pending', 'running')
+                LIMIT 1
+                """,
+                (str(campaign_id),),
+            )
+            if cur.fetchone() is not None:
+                return False
+            cur.execute(
+                "DELETE FROM leaders WHERE campaign_id = %s",
+                (str(campaign_id),),
+            )
+            cur.execute(
+                """
+                INSERT INTO leader_history (
+                  campaign_id, round_id, ordinal, event,
+                  new_submission_id, new_hotkey, new_score,
+                  prev_submission_id, prev_hotkey, prev_score,
+                  overtake_threshold, epsilon
+                ) VALUES (
+                  %s, %s, %s, %s,
+                  NULL, NULL, NULL,
+                  %s, %s, %s,
+                  NULL, %s
+                )
+                """,
+                (
+                    str(campaign_id),
+                    str(leader["won_at_round_id"]),
+                    int(leader["won_at_ordinal"]),
+                    EVENT_VACATED,
+                    str(leader["submission_id"]),
+                    leader["hotkey"],
+                    leader["last_score"],
+                    float(epsilon),
+                ),
+            )
+    return True
+
+
+def list_open_campaign_emissions() -> list[dict[str, Any]]:
+    """Open campaigns plus seated leader and the decay-clock seed block."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.id AS campaign_id, c.status, c.emission_rule,
+                       l.hotkey AS leader_hotkey, r.seed_block
+                FROM campaigns c
+                LEFT JOIN leaders l ON l.campaign_id = c.id
+                LEFT JOIN rounds r ON r.id = l.won_at_round_id
+                WHERE c.status = 'open'
+                ORDER BY c.created_at
+                """
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def insert_weight_set(
+    *,
+    computed_at_block: int,
+    version_key: int,
+    burn_uid: int,
+    weights: list[float],
+    breakdown: list[dict[str, Any]],
+) -> int:
+    """Append one compute cycle. ``set_ok`` stays null until the chain returns."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO weight_sets (
+                  computed_at_block, version_key, burn_uid, weights, breakdown
+                ) VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(computed_at_block),
+                    int(version_key),
+                    int(burn_uid),
+                    Json(weights),
+                    Json(breakdown),
+                ),
+            )
+            return int(cur.fetchone()[0])
+
+
+def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
+    """First and only write of ``set_ok``. A later call is a no-op."""
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE weight_sets
+                SET set_ok = %s, set_error = %s
+                WHERE id = %s AND set_ok IS NULL
+                """,
+                (ok, error, int(row_id)),
+            )
+
+
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
     """Every entry of one round, in run order.
 

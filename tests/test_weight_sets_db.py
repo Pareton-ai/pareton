@@ -14,7 +14,7 @@ pytestmark = pytest.mark.e2e
 
 from db.connection import db_connection
 from e2e_db import require_e2e_database_url
-from round.store import get_latest_weight_set
+from round.store import get_latest_weight_set, insert_weight_set, mark_weight_set_result
 
 _INSERTED: list[int] = []
 
@@ -87,3 +87,27 @@ def test_the_newest_row_is_the_one_in_force():
     # Only the vector is served. How the chain call went is not part of it.
     assert "set_ok" not in row
     assert "set_error" not in row
+
+
+def test_insert_then_mark_writes_set_ok_once():
+    dense = [0.0] * 202
+    dense[201] = 1.0
+    row_id = insert_weight_set(
+        computed_at_block=6_111_000,
+        version_key=2032,
+        burn_uid=201,
+        weights=dense,
+        breakdown=[],
+    )
+    _INSERTED.append(row_id)
+    mark_weight_set_result(row_id, ok=False, error="chain rejected")
+    mark_weight_set_result(row_id, ok=True, error=None)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT set_ok, set_error FROM weight_sets WHERE id = %s",
+                (row_id,),
+            )
+            ok, error = cur.fetchone()
+    assert ok is False
+    assert error == "chain rejected"
