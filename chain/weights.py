@@ -41,17 +41,12 @@ def dense_to_sparse(dense: Sequence[float]) -> tuple[list[int], list[float]]:
 
 
 def _outcome(result: Any) -> tuple[bool, str]:
-    """`(ok, reason)` out of whatever the SDK handed back.
+    """`(ok, reason)` out of the SDK's ExtrinsicResult.
 
-    11.x returns an ExtrinsicResult (`success` / `message`); other releases
-    return a bare bool or an `(ok, reason)` tuple. Normalise all three so the
-    retry loop reads one shape.
+    Same shape ``miner/commit_patch.py`` already reads off ``execute``. A
+    result missing ``success`` reads as a failure, so an SDK that changes this
+    shape retries and then raises loudly rather than reporting a silent win.
     """
-    if isinstance(result, bool):
-        return result, ""
-    if isinstance(result, tuple):
-        ok = bool(result[0])
-        return ok, str(result[1]) if len(result) > 1 else ""
     ok = bool(getattr(result, "success", False))
     reason = getattr(result, "message", None) or getattr(result, "error", None)
     return ok, str(reason) if reason else ""

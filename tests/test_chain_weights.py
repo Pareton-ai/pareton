@@ -35,6 +35,15 @@ class FakeMeta:
         return self._neuron
 
 
+def result(ok: bool, message: str = ""):
+    """The shape `Subtensor.execute` actually returns on the pinned SDK.
+
+    Scripting bare bools here would test a shape bittensor 11.x never
+    produces, which is how a retry path can look covered and not be.
+    """
+    return SimpleNamespace(success=ok, message=message)
+
+
 class FakeSubtensor:
     """Records every execute call and replays a scripted list of returns."""
 
@@ -72,24 +81,24 @@ def _set(subtensor, wallet, meta, **kwargs):
     )
 
 
-@pytest.mark.parametrize("accepted", [True, (True, ""), (True, "ignored")])
-def test_bool_and_tuple_acceptance_agree(accepted, wallet):
-    """A bare bool and an (ok, reason) tuple parse to the same outcome."""
-    sub = FakeSubtensor(accepted)
+def test_accepted_result_submits_once(wallet):
+    sub = FakeSubtensor(result(True))
     _set(sub, wallet, FakeMeta())
     assert len(sub.calls) == 1
 
 
-@pytest.mark.parametrize("rejected", [False, (False, "rate limit")])
-def test_bool_and_tuple_rejection_agree(rejected, wallet):
-    sub = FakeSubtensor(rejected)
+def test_a_result_without_success_is_a_failure(wallet):
+    """An SDK that changes this shape must retry and raise, never silently win."""
+    sub = FakeSubtensor(SimpleNamespace())
     with pytest.raises(WeightSetError):
         _set(sub, wallet, FakeMeta(), attempts=2)
     assert len(sub.calls) == 2
 
 
 def test_rejection_retries_then_raises_with_last_reason(wallet):
-    sub = FakeSubtensor((False, "first"), (False, "second"), (False, "last"))
+    sub = FakeSubtensor(
+        result(False, "first"), result(False, "second"), result(False, "last")
+    )
     with pytest.raises(WeightSetError) as excinfo:
         _set(sub, wallet, FakeMeta(), attempts=3)
     assert len(sub.calls) == 3
@@ -98,7 +107,7 @@ def test_rejection_retries_then_raises_with_last_reason(wallet):
 
 
 def test_exception_mid_attempt_is_retried_not_propagated(wallet):
-    sub = FakeSubtensor(ConnectionError("substrate closed"), True)
+    sub = FakeSubtensor(ConnectionError("substrate closed"), result(True))
     _set(sub, wallet, FakeMeta(), attempts=3)
     assert len(sub.calls) == 2
 
@@ -109,22 +118,21 @@ def test_exception_on_every_attempt_raises_typed_error(wallet):
         _set(sub, wallet, FakeMeta(), attempts=2)
 
 
-def test_extrinsic_result_shape_is_normalised(wallet):
-    """11.x returns an object, not a bool or a tuple."""
-    sub = FakeSubtensor(SimpleNamespace(success=False, message="rate limit"))
+def test_rejection_reason_reaches_the_error(wallet):
+    sub = FakeSubtensor(result(False, "rate limit"))
     with pytest.raises(WeightSetError, match="rate limit"):
         _set(sub, wallet, FakeMeta(), attempts=1)
 
 
 def test_missing_permit_raises_before_any_submit(wallet):
-    sub = FakeSubtensor(True)
+    sub = FakeSubtensor(result(True))
     with pytest.raises(ValidatorPermitError):
         _set(sub, wallet, FakeMeta(permit=False))
     assert sub.calls == []
 
 
 def test_unregistered_hotkey_raises_before_any_submit(wallet):
-    sub = FakeSubtensor(True)
+    sub = FakeSubtensor(result(True))
     with pytest.raises(ValidatorPermitError):
         _set(sub, wallet, FakeMeta(registered=False))
     assert sub.calls == []
@@ -140,7 +148,7 @@ def test_assert_validator_permit_returns_uid():
 
 
 def test_submitted_vector_matches_what_was_passed(wallet):
-    sub = FakeSubtensor(True)
+    sub = FakeSubtensor(result(True))
     set_weights(
         sub,
         wallet,
@@ -159,7 +167,7 @@ def test_submitted_vector_matches_what_was_passed(wallet):
 
 
 def test_mismatched_lengths_raise_before_any_submit(wallet):
-    sub = FakeSubtensor(True)
+    sub = FakeSubtensor(result(True))
     with pytest.raises(WeightSetError):
         set_weights(sub, wallet, FakeMeta(), netuid=10, uids=[1, 2], weights=[1.0])
     assert sub.calls == []
@@ -179,7 +187,7 @@ def test_dense_to_sparse_all_zero_is_empty():
 def test_failure_never_emits_wallet_material(wallet, caplog):
     """A leak here would print a real hotkey in CI. Keep it impossible."""
     caplog.set_level(logging.DEBUG, logger=weights.__name__)
-    sub = FakeSubtensor((False, "rate limit"))
+    sub = FakeSubtensor(result(False, "rate limit"))
     with pytest.raises(WeightSetError) as excinfo:
         _set(sub, wallet, FakeMeta(), attempts=2)
     emitted = str(excinfo.value) + caplog.text
