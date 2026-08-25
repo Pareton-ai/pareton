@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+import config
 from campaign import seed
 from campaign.seed import (
     DEFAULT_BASE_IMAGE_DIGEST,
@@ -321,3 +322,56 @@ def test_main_no_bench_wired(monkeypatch: pytest.MonkeyPatch):
     rc = main(["--allow-placeholders", "--no-bench"])
     assert rc == 0
     assert captured["manifest"].bench is None
+
+
+def test_seed_pins_the_emission_rule_from_config(monkeypatch: pytest.MonkeyPatch):
+    """Every seeded campaign carries a pay schedule, signed into the hash."""
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True)
+    m = captured["manifest"]
+    assert m.emission_rule == {
+        "name": "linear_decay",
+        "start_weight": config.EMISSION_START_WEIGHT,
+        "floor_weight": config.EMISSION_FLOOR_WEIGHT,
+        "decay_blocks": config.EMISSION_DECAY_BLOCKS,
+    }
+    assert m.to_public_dict()["emission_rule"] == m.emission_rule
+
+
+def test_seed_rejects_an_emission_rule_that_over_commits_the_subnet(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="emission_rule.start_weight must be in"):
+        seed_synthetic_campaign(
+            allow_placeholders=True, emission_rule={"start_weight": 1.5}
+        )
+    assert captured["inserts"] == 0
+
+
+def test_open_requires_an_emission_rule():
+    """No rule means the campaign is left out of the vector and pays nobody."""
+    from campaign.seed import require_emission_rule
+
+    require_emission_rule({"name": "linear_decay"})
+    with pytest.raises(ValueError, match="status=open requires"):
+        require_emission_rule(None)
+
+
+def test_main_emission_flags_wired(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    rc = main(
+        [
+            "--allow-placeholders",
+            "--emission-start-weight",
+            "0.25",
+            "--emission-decay-blocks",
+            "100800",
+        ]
+    )
+    assert rc == 0
+    rule = captured["manifest"].emission_rule
+    assert rule["start_weight"] == 0.25
+    assert rule["decay_blocks"] == 100800
+    # An override fills one term; the rest still come from the seed defaults.
+    assert rule["floor_weight"] == config.EMISSION_FLOOR_WEIGHT
