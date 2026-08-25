@@ -26,9 +26,11 @@ from campaign.store import (
     list_submission_jobs,
     list_submissions,
 )
+from chain.weights import dense_to_sparse
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from gate.types import SubmissionState
 from round.store import (
+    get_latest_weight_set,
     get_leader,
     get_round,
     list_round_entries,
@@ -314,6 +316,36 @@ class ScoreProgressModel(BaseModel):
     points: list[ScorePointModel]
 
 
+class WeightBreakdownModel(BaseModel):
+    """One campaign's contribution, so the vector is auditable, not magic.
+
+    `uid` is what the metagraph reported at compute time and is NOT
+    authoritative afterwards: a UID is a lease that deregistration reassigns,
+    so nobody may cache it. Resolve a hotkey against the live metagraph.
+
+    `note` says why a share was withheld (`vacant`, `closed`, `deregistered`)
+    and is null for a share that paid. A withheld share burns.
+    """
+
+    campaign_id: str
+    hotkey: str | None = None
+    uid: int | None = None
+    blocks_held: int | None = None
+    weight: float
+    note: str | None = None
+
+
+class WeightsModel(BaseModel):
+    """`GET /v1/weights`. `uids` and `weights` are the sparse wire form."""
+
+    computed_at_block: int
+    version_key: int
+    burn_uid: int
+    uids: list[int]
+    weights: list[float]
+    breakdown: list[WeightBreakdownModel]
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "service": "pareton", "stage": 0}
@@ -443,6 +475,48 @@ def round_detail(round_id: UUID, response: Response):
         "phase": coerce_phase(row.get("phase")),
         "progress": coerce_progress(row.get("progress")),
         "entries": list_round_entries(round_id),
+    }
+
+
+@app.get("/v1/weights", responses={200: {"model": WeightsModel}})
+def latest_weights(response: Response):
+    """The newest stored weight vector, exactly as it went to the chain.
+
+    A consensus surface. Other validators read this to set their own weights,
+    so the response shape is a contract: breaking it silently desynchronises
+    the subnet.
+
+    This reads; it never computes. The process that writes `weight_sets` is
+    the same one that signs the chain transaction, so recomputing here would
+    be a second source of truth that could disagree with what was actually
+    set. The newest row is served whatever `set_ok` says: that column records
+    whether our own chain call landed, not what the vector is.
+
+    No stored row is a 404, never an empty vector: an empty vector is a valid
+    on-chain instruction meaning "pay nobody", and we must not publish that by
+    accident. An all-zero stored row takes the same 404: the writer should
+    refuse it, but the reader cannot trust that across a version skew.
+    """
+    row = get_latest_weight_set()
+    if row is not None:
+        uids, values = dense_to_sparse(row["weights"])
+    else:
+        uids, values = [], []
+    if not uids:
+        # HTTPException builds a new response; headers on `response` would drop.
+        raise HTTPException(
+            status_code=404,
+            detail="no weight set computed yet",
+            headers={"Cache-Control": _NO_STORE},
+        )
+    response.headers["Cache-Control"] = _NO_STORE
+    return {
+        "computed_at_block": row["computed_at_block"],
+        "version_key": row["version_key"],
+        "burn_uid": row["burn_uid"],
+        "uids": uids,
+        "weights": values,
+        "breakdown": row["breakdown"],
     }
 
 
