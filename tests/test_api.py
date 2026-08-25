@@ -902,3 +902,75 @@ def test_score_progress_is_uncacheable_while_a_round_runs(
     )
     resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/score-progress")
     assert resp.headers.get("Cache-Control") == "no-store"
+
+
+def _stored_weight_set() -> dict:
+    """A `weight_sets` row: 202 dense slots, uid 12 paid, the rest burned."""
+    dense = [0.0] * 202
+    dense[12] = 0.1
+    dense[201] = 0.9
+    return {
+        "computed_at_block": 6123456,
+        "version_key": 2032,
+        "burn_uid": 201,
+        "weights": dense,
+        "breakdown": [
+            {
+                "campaign_id": CAMPAIGN_ID,
+                "hotkey": HOTKEY,
+                "uid": 12,
+                "blocks_held": 43200,
+                "weight": 0.1,
+                "note": None,
+            },
+            {
+                "campaign_id": "22222222-2222-2222-2222-222222222222",
+                "hotkey": None,
+                "uid": None,
+                "blocks_held": None,
+                "weight": 0.0,
+                "note": "vacant",
+            },
+        ],
+    }
+
+
+def test_weights_serves_the_stored_dense_vector_as_sparse(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    monkeypatch.setattr(server, "get_latest_weight_set", _stored_weight_set)
+
+    resp = client.get("/v1/weights")
+    assert resp.status_code == 200
+    body = resp.json()
+    server.WeightsModel.model_validate(body)
+    # Sparse wire form: the two non-zero slots of a 202-slot dense vector.
+    assert body["uids"] == [12, 201]
+    assert body["weights"] == pytest.approx([0.1, 0.9])
+    assert len(body["uids"]) == len(body["weights"])
+    assert body["uids"] == sorted(body["uids"])
+    assert all(w != 0 for w in body["weights"])
+    assert sum(body["weights"]) == pytest.approx(1.0)
+    assert body["computed_at_block"] == 6123456
+    assert body["version_key"] == 2032
+    assert body["burn_uid"] == 201
+    # A withheld share stays in the breakdown, so the burn is auditable.
+    assert [b["note"] for b in body["breakdown"]] == [None, "vacant"]
+    # A cached weight vector is worse than none.
+    assert resp.headers.get("Cache-Control") == "no-store"
+
+
+def test_weights_with_no_stored_row_is_404_not_an_empty_vector(
+    monkeypatch, client: TestClient
+):
+    """An empty vector is a valid on-chain instruction meaning pay nobody."""
+    from api import server
+
+    monkeypatch.setattr(server, "get_latest_weight_set", lambda: None)
+
+    resp = client.get("/v1/weights")
+    assert resp.status_code == 404
+    assert "uids" not in resp.json()
+    assert "weights" not in resp.json()

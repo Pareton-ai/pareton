@@ -748,6 +748,32 @@ def get_round(round_id: UUID | str) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def get_latest_weight_set() -> dict[str, Any] | None:
+    """The newest stored weight vector, or None before any cycle has run.
+
+    ``weight_sets`` is append-only, so the newest row is the one in force.
+    ``weights`` is the dense vector; converting it to the sparse wire form is
+    the caller's job. None means no cycle has run yet and must never be read
+    as an empty vector: empty is a valid on-chain instruction to pay nobody.
+
+    ``set_ok`` and ``set_error`` stay unselected. They record how the chain
+    call went, not what the vector is.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT computed_at_block, version_key, burn_uid,
+                       weights, breakdown
+                FROM weight_sets
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
     """Every entry of one round, in run order.
 
