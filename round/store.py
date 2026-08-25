@@ -752,9 +752,9 @@ def get_latest_weight_set() -> dict[str, Any] | None:
     """The newest stored weight vector, or None before any cycle has run.
 
     ``weight_sets`` is append-only, so the newest row is the one in force.
-    ``weights`` is the dense vector; converting it to the sparse wire form is
-    the caller's job. None means no cycle has run yet and must never be read
-    as an empty vector: empty is a valid on-chain instruction to pay nobody.
+    ``weights`` is the dense vector (`weights[i]` is UID `i`). The API serves
+    it as-is. None means no cycle has run yet and must never be read as an
+    empty vector: empty is a valid on-chain instruction to pay nobody.
 
     ``set_ok`` and ``set_error`` stay unselected. They record how the chain
     call went, not what the vector is.

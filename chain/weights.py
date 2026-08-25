@@ -1,7 +1,7 @@
 """Set the subnet weight vector on chain (bittensor 11.x SDK).
 
 The first validator-side signing path in the repo: the rest of `chain/` only
-reads. Everything here takes an already-built sparse vector, so building it,
+reads. Everything here takes an already-built dense vector, so building it,
 storing it, and deciding when to set it live elsewhere.
 
 A set that fails every attempt raises and writes nothing else. The previous
@@ -28,16 +28,6 @@ class WeightSetError(RuntimeError):
 
 class ValidatorPermitError(WeightSetError):
     """Raised when the signing hotkey may not set weights on the netuid."""
-
-
-def dense_to_sparse(dense: Sequence[float]) -> tuple[list[int], list[float]]:
-    """Non-zero entries of a dense vector as `(uids, weights)`, ascending by uid.
-
-    The single dense-to-sparse conversion point. A dense vector is an internal
-    representation and never goes on the wire.
-    """
-    pairs = [(uid, float(weight)) for uid, weight in enumerate(dense) if weight]
-    return [uid for uid, _ in pairs], [weight for _, weight in pairs]
 
 
 def _outcome(result: Any) -> tuple[bool, str]:
@@ -87,9 +77,9 @@ def set_weights(
 ) -> None:
     """Sign and submit `(uids, weights)`, retrying a rejection.
 
-    `uids` and `weights` are the sparse form: non-zero entries only, ascending
-    by uid. They are submitted as given. Raises `WeightSetError` after the last
-    attempt so the caller can log it and keep its loop running.
+    `weights[i]` is UID `uids[i]`. The loop passes the dense vector with
+    `uids=range(len(weights))`. Submitted as given. Raises `WeightSetError`
+    after the last attempt so the caller can log it and keep its loop running.
     """
     if len(uids) != len(weights):
         raise WeightSetError(
