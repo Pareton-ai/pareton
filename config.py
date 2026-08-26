@@ -248,7 +248,12 @@ BASELINE_DRIFT_CEILING: float = float(
 
 # Ordered GPU control-plane try list (first → last). Prefer this over the
 # legacy primary + fallbacks pair.
-_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "targon")
+#
+# Targon is out until its API is updated: /tha/v2/inventory has returned HTTP
+# 410 Gone since 2026-08-26 (v1 is 404), so every attempt costs a round trip
+# and can never yield an offer. The provider module is kept, so restoring it
+# is a one-word change here or a PARETON_GPU_PROVIDERS override.
+_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform")
 
 
 def _parse_gpu_providers(raw: str) -> list[str]:
