@@ -1433,8 +1433,7 @@ def test_real_failure_is_not_downgraded_to_no_capacity(tmp_path: Path, monkeypat
 
 def test_dead_inventory_does_not_spend_the_round(tmp_path: Path, monkeypatch):
     """A provider that cannot list stock rents nothing, so it must not turn an
-    otherwise empty market into a void. Round 9 hit this: Targon's HTTP 410 was
-    a plain ProvisionError and voided the round despite nothing being rented."""
+    otherwise empty market into a void."""
     ensure_durable_keypair(tmp_path / "st")
     monkeypatch.setattr(
         "gpu.orchestrate.get_provider",

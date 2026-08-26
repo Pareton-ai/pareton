@@ -270,10 +270,8 @@ class ShadeformProvider:
 
     def search(self, spec: PodSpec) -> list[Offer]:
         want = max(1, int(spec.gpu_count or 1))
-        # Deliberately no num_gpus filter: the API matches it exactly, which
-        # would hide the larger nodes the fallback below exists to find. The
-        # unfiltered catalogue is ~60 instance types, so filtering locally
-        # costs nothing.
+        # No num_gpus filter: the API matches it exactly, hiding the larger
+        # nodes the fallback below looks for. Filter locally instead.
         resp = self._get(
             "/instances/types",
             params={
@@ -289,10 +287,9 @@ class ShadeformProvider:
             cfg = item.get("configuration") or {}
             gpu_type = _normalize_gpu_type(str(cfg.get("gpu_type", "")))
             gpu_count = int(cfg.get("num_gpus", 0) or 0)
-            # Prefer an exact match; a larger node is a fallback, not the
-            # default, so the sort below puts the smallest that fits first.
-            # The container is pinned to hardware.gpu_count either way, so a
-            # bigger box changes the topology the run lands on, not its TP.
+            # Larger nodes are a fallback; the sort puts the smallest that
+            # fits first. The container is pinned to hardware.gpu_count, so a
+            # bigger box changes which GPUs we land on, not the TP size.
             if gpu_count < want:
                 continue
             if spec.gpu_type and gpu_type.upper() != spec.gpu_type.upper():

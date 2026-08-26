@@ -113,11 +113,9 @@ def _select_offer(provider, spec: PodSpec):
     try:
         offers = provider.search(spec)
     except ProvisionError as exc:
-        # Inventory is unreachable, so this provider's stock is unknown and
-        # nothing was rented. That is an availability problem, not a failed
-        # rent, and it must not force the round to be spent: Targon's
-        # /tha/v2/inventory has returned HTTP 410 since 2026-08-26, which
-        # would otherwise void every round no matter what the others had.
+        # Stock is unknown and nothing was rented, so this is an availability
+        # problem rather than a failed rent. Counting it as a failure would let
+        # one provider with a dead inventory endpoint void every round.
         raise NoCapacityError(f"{provider.name} inventory unavailable: {exc}") from exc
     if not offers:
         raise NoCapacityError(
@@ -341,10 +339,9 @@ def provision_pod(
                     f"{blocking.name} ({blocking.provider}); pass --force to override"
                 )
         last_exc: ProvisionError | None = None
-        # The question that decides defer-vs-void is whether anything was
-        # rented. Failing to find an offer rents nothing, so the round can be
-        # retried unchanged; failing to rent one we picked may leave state
-        # behind and spends the round. One rent failure downgrades the attempt.
+        # Defer or void turns on whether anything was rented. Finding no offer
+        # rents nothing, so the round retries unchanged; failing to rent one we
+        # picked may leave state behind and spends the round.
         all_out_of_stock = True
         for i, p in enumerate(providers):
             try:
