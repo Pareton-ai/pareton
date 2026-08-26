@@ -227,6 +227,13 @@ def test_search_accepts_oversized_node_when_no_exact_match(state_dir: Path):
     offers = p.search(PodSpec(gpu_count=1, max_hourly_cents=10000))
     assert [o.gpu_count for o in offers] == [2, 8]
 
+    # The count filter must stay local. Sending num_gpus makes the API match it
+    # exactly and hides every larger node, which is how a 4x request kept
+    # reporting an empty market while four 8x boxes were listed. FakeTransport
+    # returns all types regardless of params, so only this assertion catches it.
+    _method, _url, sent = tr.calls[0]
+    assert "num_gpus" not in (sent["params"] or {})
+
     # Nothing large enough is not a fallback, it is an empty market.
     assert p.search(PodSpec(gpu_count=16, max_hourly_cents=10000)) == []
 

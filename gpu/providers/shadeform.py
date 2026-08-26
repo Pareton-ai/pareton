@@ -270,10 +270,13 @@ class ShadeformProvider:
 
     def search(self, spec: PodSpec) -> list[Offer]:
         want = max(1, int(spec.gpu_count or 1))
+        # Deliberately no num_gpus filter: the API matches it exactly, which
+        # would hide the larger nodes the fallback below exists to find. The
+        # unfiltered catalogue is ~60 instance types, so filtering locally
+        # costs nothing.
         resp = self._get(
             "/instances/types",
             params={
-                "num_gpus": str(want),
                 "available": "true",
                 "sort": "price",
             },
