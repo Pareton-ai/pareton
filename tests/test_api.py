@@ -58,11 +58,9 @@ def test_campaign_detail_db_unavailable_is_503(monkeypatch, client: TestClient):
 def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     from api import server
 
-    campaign = SimpleNamespace(status="open", to_public_dict=lambda: {"id": "c1"})
-    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
     monkeypatch.setattr(
         server,
-        "list_submissions",
+        "list_campaign_submissions",
         lambda _cid, *, limit=50, offset=0: {
             "total": 120,
             "items": [
@@ -76,27 +74,17 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
                     "commit_block": 1,
                     "committed_at": "2026-07-22T00:00:00+00:00",
                     "engine_image_ref": None,
+                    "latest_state": "scored",
+                    "round": {
+                        "round_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "ordinal": 3,
+                        "status": "scored",
+                        "score": 0.31,
+                        "disqualify_reason": None,
+                    },
                 }
             ],
         },
-    )
-    monkeypatch.setattr(
-        server,
-        "list_submission_round_entries",
-        lambda _ids: {
-            "11111111-1111-1111-1111-111111111111": {
-                "round_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                "ordinal": 3,
-                "status": "scored",
-                "score": 0.31,
-                "disqualify_reason": None,
-            }
-        },
-    )
-    monkeypatch.setattr(
-        server,
-        "list_latest_states",
-        lambda ids: {str(ids[0]): "scored"},
     )
 
     resp = client.get("/v1/campaigns/c1/submissions")
@@ -121,16 +109,9 @@ def test_submissions_offset_past_end(monkeypatch, client: TestClient):
 
     monkeypatch.setattr(
         server,
-        "get_campaign",
-        lambda _cid: SimpleNamespace(status="open"),
-    )
-    monkeypatch.setattr(
-        server,
-        "list_submissions",
+        "list_campaign_submissions",
         lambda _cid, *, limit=50, offset=0: {"total": 3, "items": []},
     )
-    monkeypatch.setattr(server, "list_submission_round_entries", lambda *_a: {})
-    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {})
 
     resp = client.get("/v1/campaigns/c1/submissions?limit=50&offset=100")
     assert resp.status_code == 200
@@ -158,7 +139,7 @@ def test_submissions_bad_params_422(monkeypatch, client: TestClient, query: str)
 def test_submissions_campaign_404(monkeypatch, client: TestClient):
     from api import server
 
-    monkeypatch.setattr(server, "get_campaign", lambda _cid: None)
+    monkeypatch.setattr(server, "list_campaign_submissions", lambda *_a, **_k: None)
     resp = client.get("/v1/campaigns/missing/submissions")
     assert resp.status_code == 404
 
@@ -293,12 +274,10 @@ def test_submissions_payload_matches_the_documented_model(
     """`responses=` documents but does not validate; assert the real payload."""
     from api import server
 
-    campaign = SimpleNamespace(status="open", to_public_dict=lambda: {"id": "c1"})
     sid = "11111111-1111-1111-1111-111111111111"
-    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
     monkeypatch.setattr(
         server,
-        "list_submissions",
+        "list_campaign_submissions",
         lambda _cid, *, limit=50, offset=0: {
             "total": 1,
             "items": [
@@ -312,13 +291,11 @@ def test_submissions_payload_matches_the_documented_model(
                     "commit_block": 1,
                     "committed_at": "2026-08-14T00:00:00+00:00",
                     "engine_image_ref": None,
+                    "latest_state": "round_assigned",
+                    "round": None,
                 }
             ],
         },
-    )
-    monkeypatch.setattr(server, "list_submission_round_entries", lambda _ids: {})
-    monkeypatch.setattr(
-        server, "list_latest_states", lambda _ids: {sid: "round_assigned"}
     )
 
     resp = client.get("/v1/campaigns/c1/submissions")
@@ -700,6 +677,14 @@ def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
     body = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds").json()
     assert [r["ordinal"] for r in body["rounds"]] == [3, 2, 1]
     assert body["rounds"][1]["void_reason"] == "baseline_drift"
+
+
+def test_rounds_list_campaign_404(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "list_rounds", lambda *_a, **_k: None)
+    resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds")
+    assert resp.status_code == 404
 
 
 ROUND_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"

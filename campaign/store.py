@@ -635,6 +635,95 @@ def list_submissions(
     return {"total": total, "items": [dict(r) for r in rows]}
 
 
+def list_campaign_submissions(
+    campaign_id: UUID | str,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any] | None:
+    """One-connection page for ``GET /v1/campaigns/{id}/submissions``.
+
+    Returns ``None`` when the campaign is missing. Each item already has
+    ``latest_state`` and ``round`` attached, so the handler does not open
+    extra Neon round-trips for those lookups.
+    """
+    cid = str(campaign_id)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                         SELECT 1 FROM campaigns WHERE id = %s
+                       ) AS ok,
+                       (SELECT COUNT(*) FROM submissions
+                        WHERE campaign_id = %s) AS n
+                """,
+                (cid, cid),
+            )
+            meta = cur.fetchone()
+            if meta is None or not meta["ok"]:
+                return None
+            total = int(meta["n"])
+            cur.execute(
+                """
+                SELECT s.id, s.campaign_id, s.patch_hash, s.hotkey,
+                       s.baseline_commit, s.retrieval_url, s.commit_block,
+                       s.committed_at, s.engine_image_ref,
+                       st.state AS latest_state,
+                       re.round_id, re.ordinal AS round_ordinal,
+                       re.status AS round_entry_status, re.score AS round_score,
+                       re.disqualify_reason AS round_disqualify_reason
+                FROM submissions s
+                LEFT JOIN LATERAL (
+                    SELECT e.state
+                    FROM submission_events e
+                    WHERE e.submission_id = s.id
+                    ORDER BY e.created_at DESC, e.id DESC
+                    LIMIT 1
+                ) st ON true
+                LEFT JOIN LATERAL (
+                    SELECT e.round_id, r.ordinal, e.status, e.score,
+                           e.disqualify_reason
+                    FROM round_entries e
+                    JOIN rounds r ON r.id = e.round_id
+                    WHERE e.submission_id = s.id AND r.status <> 'void'
+                    ORDER BY (e.status IN (
+                                 'scored', 'disqualified', 'infra_failed'
+                             )) DESC,
+                             r.ordinal DESC
+                    LIMIT 1
+                ) re ON true
+                WHERE s.campaign_id = %s
+                ORDER BY s.committed_at DESC, s.id DESC
+                LIMIT %s OFFSET %s
+                """,
+                (cid, int(limit), int(offset)),
+            )
+            rows = cur.fetchall()
+    items: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        round_id = row.pop("round_id")
+        ordinal = row.pop("round_ordinal")
+        entry_status = row.pop("round_entry_status")
+        score = row.pop("round_score")
+        disqualify_reason = row.pop("round_disqualify_reason")
+        latest_state = row.pop("latest_state")
+        round_info = None
+        if round_id is not None:
+            round_info = {
+                "round_id": str(round_id),
+                "ordinal": int(ordinal),
+                "status": entry_status,
+                "score": score,
+                "disqualify_reason": disqualify_reason,
+            }
+        row["latest_state"] = None if latest_state is None else str(latest_state)
+        row["round"] = round_info
+        items.append(row)
+    return {"total": total, "items": items}
+
+
 def list_latest_states(
     submission_ids: list[UUID | str],
 ) -> dict[str, str | None]:

@@ -695,19 +695,30 @@ def list_rounds(
     *,
     limit: int = 50,
     offset: int = 0,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Paginated rounds for a campaign, newest ordinal first.
 
-    Returns ``{"total": int, "items": [row, ...]}``. A void round keeps its
-    ordinal, so the list shows honest gaps rather than renumbering.
+    Returns ``{"total": int, "items": [row, ...]}``, or ``None`` when the
+    campaign id does not exist. One connection: existence + count in a
+    single statement, then the page. A void round keeps its ordinal, so
+    the list shows honest gaps rather than renumbering.
     """
+    cid = str(campaign_id)
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT COUNT(*) AS n FROM rounds WHERE campaign_id = %s",
-                (str(campaign_id),),
+                """
+                SELECT EXISTS (
+                         SELECT 1 FROM campaigns WHERE id = %s
+                       ) AS ok,
+                       (SELECT COUNT(*) FROM rounds WHERE campaign_id = %s) AS n
+                """,
+                (cid, cid),
             )
-            total = int(cur.fetchone()["n"])
+            meta = cur.fetchone()
+            if meta is None or not meta["ok"]:
+                return None
+            total = int(meta["n"])
             cur.execute(
                 """
                 SELECT r.id, r.ordinal, r.status, r.void_reason, r.gpu_sku,
@@ -720,7 +731,7 @@ def list_rounds(
                 ORDER BY r.ordinal DESC
                 LIMIT %s OFFSET %s
                 """,
-                (str(campaign_id), int(limit), int(offset)),
+                (cid, int(limit), int(offset)),
             )
             rows = cur.fetchall()
     return {"total": total, "items": [dict(r) for r in rows]}
