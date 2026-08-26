@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from gpu.errors import DestroyError, GpuError, ProvisionError
+from gpu.errors import DestroyError, GpuError, NoCapacityError, ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.orchestrate import provision_pod, run_bench_on_pod
 from gpu.providers import provider_order
@@ -1390,6 +1390,36 @@ def test_provision_fallback_all_fail_raises_last(tmp_path: Path, monkeypatch):
         provision_pod(
             PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
         )
+
+
+def test_all_providers_out_of_stock_raises_no_capacity(tmp_path: Path, monkeypatch):
+    """Nothing was rented anywhere, so the caller may wait and retry as-is."""
+    ensure_durable_keypair(tmp_path / "st")
+    shade = CapacityMissProvider()
+    shade.name = "shadeform"
+    _patch_provider_factory(
+        monkeypatch, {"lium": CapacityMissProvider(), "shadeform": shade}
+    )
+    with pytest.raises(NoCapacityError):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+
+
+def test_real_failure_is_not_downgraded_to_no_capacity(tmp_path: Path, monkeypatch):
+    """A rent failure must not read as an empty market just because the last
+    provider in the order happened to have no stock."""
+    ensure_durable_keypair(tmp_path / "st")
+    shade = CapacityMissProvider()
+    shade.name = "shadeform"
+    _patch_provider_factory(
+        monkeypatch, {"lium": ProvisionErrorProvider(), "shadeform": shade}
+    )
+    with pytest.raises(ProvisionError) as caught:
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+    assert not isinstance(caught.value, NoCapacityError)
 
 
 def test_single_flight_blocks_fallback(tmp_path: Path, monkeypatch):

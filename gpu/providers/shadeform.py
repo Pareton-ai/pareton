@@ -286,8 +286,11 @@ class ShadeformProvider:
             cfg = item.get("configuration") or {}
             gpu_type = _normalize_gpu_type(str(cfg.get("gpu_type", "")))
             gpu_count = int(cfg.get("num_gpus", 0) or 0)
-            # Shadeform SKUs are discrete; require exact count (not >=).
-            if gpu_count != want:
+            # Prefer an exact match; a larger node is a fallback, not the
+            # default, so the sort below puts the smallest that fits first.
+            # The container is pinned to hardware.gpu_count either way, so a
+            # bigger box changes the topology the run lands on, not its TP.
+            if gpu_count < want:
                 continue
             if spec.gpu_type and gpu_type.upper() != spec.gpu_type.upper():
                 continue
@@ -323,7 +326,7 @@ class ShadeformProvider:
                         },
                     )
                 )
-        out.sort(key=lambda o: (o.hourly_price_cents, o.gpu_count))
+        out.sort(key=lambda o: (o.gpu_count, o.hourly_price_cents))
         return out
 
     def _create_volume(self, *, cloud: str, region: str, name: str) -> str | None:

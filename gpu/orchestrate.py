@@ -35,7 +35,7 @@ from gpu.bootstrap import (
     bootstrap_pod,
     pull_engine_images,
 )
-from gpu.errors import DestroyError, GpuError, ProvisionError
+from gpu.errors import DestroyError, GpuError, NoCapacityError, ProvisionError
 
 
 from gpu.keys import ensure_durable_keypair, read_public_key
@@ -112,12 +112,25 @@ def _repo_root() -> Path:
 def _select_offer(provider, spec: PodSpec):
     offers = provider.search(spec)
     if not offers:
-        raise ProvisionError(
+        raise NoCapacityError(
             f"no offers from {provider.name} matching "
             f"gpu_type={spec.gpu_type!r} count>={spec.gpu_count} "
             f"max_hourly_cents={spec.max_hourly_cents}"
         )
-    return offers[0]
+    best = offers[0]
+    if best.gpu_count > spec.gpu_count:
+        # Oversized node: no exact SKU was on the market. The run still uses
+        # hardware.gpu_count GPUs, but which ones docker picks (and their
+        # NVLink topology) differs from a dedicated box, so make it greppable.
+        logger.warning(
+            "no exact %sx%s node; falling back to %sx from %s at %s c/h",
+            spec.gpu_count,
+            spec.gpu_type,
+            best.gpu_count,
+            provider.name,
+            best.hourly_price_cents,
+        )
+    return best
 
 
 def _write_remote_env(
@@ -249,6 +262,9 @@ def provision_pod(
     rent/wait-ready failure) tries the next provider; any other exception
     aborts immediately. The single-flight check is local policy and never
     triggers fallback.
+
+    Raises ``NoCapacityError`` only when *every* provider was out of stock, so
+    the caller can tell "wait for the market" from "something broke".
     """
     registry = registry or PodRegistry(state_dir)
     if provider is not None:
@@ -317,6 +333,10 @@ def provision_pod(
                     f"{blocking.name} ({blocking.provider}); pass --force to override"
                 )
         last_exc: ProvisionError | None = None
+        # Every provider empty means the market is out of stock, which is a
+        # different thing from a provider erroring; the caller waits instead of
+        # burning the round. One real error downgrades the whole attempt.
+        all_out_of_stock = True
         for i, p in enumerate(providers):
             try:
                 return _do_provision(p)
@@ -326,6 +346,7 @@ def provision_pod(
                 raise
             except ProvisionError as exc:
                 last_exc = exc
+                all_out_of_stock = all_out_of_stock and isinstance(exc, NoCapacityError)
                 obs.pod_provision_failed(provider=p.name, error=str(exc))
                 if i + 1 < len(providers):
                     logger.warning(
@@ -338,6 +359,10 @@ def provision_pod(
                 obs.pod_provision_failed(provider=p.name, error=str(exc))
                 raise
         assert last_exc is not None
+        if not all_out_of_stock and isinstance(last_exc, NoCapacityError):
+            # A real failure earlier in the order must not be reported as an
+            # empty market just because the last provider happened to be empty.
+            raise ProvisionError(str(last_exc)) from last_exc
         raise last_exc
 
     if providers[0].name == "static_ssh":
