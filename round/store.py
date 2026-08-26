@@ -326,6 +326,7 @@ def claim_pending_round() -> dict[str, Any] | None:
                 WHERE id = (
                     SELECT id FROM rounds
                     WHERE status = 'pending'
+                      AND (retry_after IS NULL OR retry_after <= now())
                     ORDER BY created_at
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
@@ -335,11 +336,40 @@ def claim_pending_round() -> dict[str, Any] | None:
                           sampled_trace_sha256, sampling_receipt, scoring_rule,
                           status, incumbent_submission_id, winner_submission_id,
                           leader_changed, baseline_drift, phase, progress,
+                          provision_attempts,
                           created_at, started_at, heartbeat_at, completed_at
                 """
             )
             row = cur.fetchone()
     return dict(row) if row is not None else None
+
+
+def defer_round_for_capacity(round_id: UUID | str, *, delay_s: float) -> bool:
+    """Put a running round back in the queue after an out-of-stock market.
+
+    The round keeps its ordinal, cohort and seed: nothing was benched, so
+    there is nothing to invalidate. Clearing the liveness fields matters
+    because the PAR-79 reaper keys on COALESCE(heartbeat_at, started_at) and
+    would otherwise reap a round that is only waiting.
+    """
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE rounds
+                SET status = 'pending',
+                    provision_attempts = provision_attempts + 1,
+                    retry_after = now() + make_interval(secs => %s),
+                    started_at = NULL,
+                    heartbeat_at = NULL,
+                    phase = NULL,
+                    phase_started_at = NULL,
+                    progress = NULL
+                WHERE id = %s AND status = 'running'
+                """,
+                (float(delay_s), str(round_id)),
+            )
+            return cur.rowcount > 0
 
 
 def set_round_phase(

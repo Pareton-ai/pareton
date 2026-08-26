@@ -182,7 +182,8 @@ def test_search_filters(state_dir: Path):
             "cloud": "aws",
             "shade_instance_type": "h100_8x_cheap",
             "deployment_type": "vm",
-            # Cheaper than 1x but wrong count — must not be selected.
+            # Cheaper than the 1x but oversized: eligible as a fallback,
+            # yet it must never outrank an exact match on price alone.
             "hourly_price": 100,
             "configuration": {"gpu_type": "H100", "num_gpus": 8, "os_options": []},
             "availability": [{"available": True, "region": "us-east-1"}],
@@ -198,10 +199,42 @@ def test_search_filters(state_dir: Path):
     ]
     p = ShadeformProvider("k", state_dir=state_dir, transport=tr, sleep=lambda _s: None)
     offers = p.search(PodSpec(gpu_count=1, max_hourly_cents=1000))
-    assert len(offers) == 1
-    assert offers[0].instance_id == "aws:us-east-1:h100_1x"
+    # The pricey A100 is filtered on price; the oversized H100 survives as a
+    # fallback but sorts behind the exact match despite being cheaper.
+    assert [o.instance_id for o in offers] == [
+        "aws:us-east-1:h100_1x",
+        "aws:us-east-1:h100_8x_cheap",
+    ]
     assert offers[0].hourly_price_cents == 250
     assert offers[0].gpu_count == 1
+
+
+def test_search_accepts_oversized_node_when_no_exact_match(state_dir: Path):
+    """An empty exact-count market falls back to the smallest node that fits."""
+    tr = FakeTransport()
+    tr.types = [
+        {
+            "cloud": "aws",
+            "shade_instance_type": f"h100_{n}x",
+            "deployment_type": "vm",
+            "hourly_price": 100 * n,
+            "configuration": {"gpu_type": "H100", "num_gpus": n, "os_options": []},
+            "availability": [{"available": True, "region": "us-east-1"}],
+        }
+        for n in (8, 2)
+    ]
+    p = ShadeformProvider("k", state_dir=state_dir, transport=tr, sleep=lambda _s: None)
+    offers = p.search(PodSpec(gpu_count=1, max_hourly_cents=10000))
+    assert [o.gpu_count for o in offers] == [2, 8]
+
+    # The count filter must stay local: sending num_gpus makes the API match
+    # exactly and hides every larger node. FakeTransport ignores params, so
+    # only this assertion catches a regression.
+    _method, _url, sent = tr.calls[0]
+    assert "num_gpus" not in (sent["params"] or {})
+
+    # Nothing large enough is not a fallback, it is an empty market.
+    assert p.search(PodSpec(gpu_count=16, max_hourly_cents=10000)) == []
 
 
 def test_mount_script_refuses_mkfs():

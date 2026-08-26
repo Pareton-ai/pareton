@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from gpu.errors import DestroyError, GpuError, ProvisionError
+from gpu.errors import DestroyError, GpuError, NoCapacityError, ProvisionError
 from gpu.keys import ensure_durable_keypair
 from gpu.orchestrate import provision_pod, run_bench_on_pod
 from gpu.providers import provider_order
@@ -1340,6 +1340,15 @@ class ProvisionErrorProvider(FakeProvider):
         raise ProvisionError("simulated lium rent failure")
 
 
+class DeadInventoryProvider(FakeProvider):
+    """Reachable provider whose inventory endpoint is down (Targon HTTP 410)."""
+
+    name = "targon"
+
+    def search(self, spec: PodSpec) -> list[Offer]:
+        raise ProvisionError("Targon inventory failed HTTP 410")
+
+
 def _shadeform_fake() -> FakeProvider:
     p = FakeProvider()
     p.name = "shadeform"
@@ -1387,6 +1396,56 @@ def test_provision_fallback_all_fail_raises_last(tmp_path: Path, monkeypatch):
     shade.name = "shadeform"
     _patch_provider_factory(monkeypatch, {"lium": lium, "shadeform": shade})
     with pytest.raises(ProvisionError, match="simulated lium rent failure"):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+
+
+def test_all_providers_out_of_stock_raises_no_capacity(tmp_path: Path, monkeypatch):
+    """Nothing was rented anywhere, so the caller may wait and retry as-is."""
+    ensure_durable_keypair(tmp_path / "st")
+    shade = CapacityMissProvider()
+    shade.name = "shadeform"
+    _patch_provider_factory(
+        monkeypatch, {"lium": CapacityMissProvider(), "shadeform": shade}
+    )
+    with pytest.raises(NoCapacityError):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+
+
+def test_real_failure_is_not_downgraded_to_no_capacity(tmp_path: Path, monkeypatch):
+    """A rent failure must not read as an empty market just because the last
+    provider in the order happened to have no stock."""
+    ensure_durable_keypair(tmp_path / "st")
+    shade = CapacityMissProvider()
+    shade.name = "shadeform"
+    _patch_provider_factory(
+        monkeypatch, {"lium": ProvisionErrorProvider(), "shadeform": shade}
+    )
+    with pytest.raises(ProvisionError) as caught:
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
+    assert not isinstance(caught.value, NoCapacityError)
+
+
+def test_dead_inventory_does_not_spend_the_round(tmp_path: Path, monkeypatch):
+    """A provider that cannot list stock rents nothing, so it must not turn an
+    otherwise empty market into a void."""
+    ensure_durable_keypair(tmp_path / "st")
+    monkeypatch.setattr(
+        "gpu.orchestrate.get_provider",
+        lambda name, **kw: {
+            "lium": CapacityMissProvider(),
+            "targon": DeadInventoryProvider(),
+        }[name],
+    )
+    monkeypatch.delenv("PARETON_GPU_PROVIDER", raising=False)
+    monkeypatch.delenv("PARETON_GPU_PROVIDER_FALLBACKS", raising=False)
+    monkeypatch.setenv("PARETON_GPU_PROVIDERS", "lium,targon")
+    with pytest.raises(NoCapacityError):
         provision_pod(
             PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
         )

@@ -270,10 +270,11 @@ class ShadeformProvider:
 
     def search(self, spec: PodSpec) -> list[Offer]:
         want = max(1, int(spec.gpu_count or 1))
+        # No num_gpus filter: the API matches it exactly, hiding the larger
+        # nodes the fallback below looks for. Filter locally instead.
         resp = self._get(
             "/instances/types",
             params={
-                "num_gpus": str(want),
                 "available": "true",
                 "sort": "price",
             },
@@ -286,8 +287,10 @@ class ShadeformProvider:
             cfg = item.get("configuration") or {}
             gpu_type = _normalize_gpu_type(str(cfg.get("gpu_type", "")))
             gpu_count = int(cfg.get("num_gpus", 0) or 0)
-            # Shadeform SKUs are discrete; require exact count (not >=).
-            if gpu_count != want:
+            # Larger nodes are a fallback; the sort puts the smallest that
+            # fits first. The container is pinned to hardware.gpu_count, so a
+            # bigger box changes which GPUs we land on, not the TP size.
+            if gpu_count < want:
                 continue
             if spec.gpu_type and gpu_type.upper() != spec.gpu_type.upper():
                 continue
@@ -323,7 +326,7 @@ class ShadeformProvider:
                         },
                     )
                 )
-        out.sort(key=lambda o: (o.hourly_price_cents, o.gpu_count))
+        out.sort(key=lambda o: (o.gpu_count, o.hourly_price_cents))
         return out
 
     def _create_volume(self, *, cloud: str, region: str, name: str) -> str | None:

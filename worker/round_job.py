@@ -31,7 +31,7 @@ from builder.digest import image_ref_resolves
 from builder.registry import baseline_engine_image_ref
 from campaign.engine import resolve_engine
 from campaign.store import get_campaign
-from gpu.errors import GpuError, ProvisionError
+from gpu.errors import GpuError, NoCapacityError, ProvisionError
 from gpu.orchestrate import EXIT_DESTROY_FAILED, run_bench_on_pod
 from gpu.types import PodSpec
 from observability import events as obs
@@ -47,11 +47,32 @@ from round.store import (
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
+    defer_round_for_capacity,
     void_round,
 )
 from worker.phase_reporter import PhaseReporter
 
 logger = logging.getLogger(__name__)
+
+
+class RoundDeferred(Exception):
+    """The GPU market was empty. Wait and re-claim; the round is not spent."""
+
+    def __init__(self, delay_s: float, detail: str) -> None:
+        super().__init__(detail)
+        self.delay_s = delay_s
+        self.detail = detail
+
+
+def capacity_retry_delay_s(attempts: int) -> float:
+    """Backoff before re-claiming a round no provider could fill.
+
+    Doubles per prior attempt and saturates at PROVISION_RETRY_MAX_S. The
+    exponent is clamped so a long outage cannot build an absurd shift value.
+    """
+    base = float(config.PROVISION_RETRY_BASE_S)
+    cap = float(config.PROVISION_RETRY_MAX_S)
+    return min(base * float(2 ** min(max(attempts, 0), 20)), cap)
 
 
 class RoundInfraError(Exception):
@@ -512,6 +533,20 @@ def _void(round_row: dict[str, Any], reason: str) -> None:
     )
 
 
+def _defer(round_row: dict[str, Any], exc: RoundDeferred) -> None:
+    round_id = str(round_row["id"])
+    if not defer_round_for_capacity(round_id, delay_s=exc.delay_s):
+        logger.info("round %s already settled; skipped defer", round_id)
+        return
+    logger.warning(
+        "deferred round %s (campaign %s) for %.0fs: %s",
+        round_row.get("ordinal"),
+        round_row.get("campaign_id"),
+        exc.delay_s,
+        exc.detail,
+    )
+
+
 def process_round(
     round_row: dict[str, Any],
     *,
@@ -526,7 +561,11 @@ def process_round(
     resolve_image_fn: Callable[..., bool] | None = None,
     now: datetime | None = None,
 ) -> str:
-    """Run one claimed round. Returns 'ok' or the void reason."""
+    """Run one claimed round.
+
+    Returns 'ok', 'deferred' when an empty GPU market sent the round back to
+    the queue, or the void reason.
+    """
     try:
         return _process_round(
             round_row,
@@ -541,6 +580,9 @@ def process_round(
             resolve_image_fn=resolve_image_fn,
             now=now,
         )
+    except RoundDeferred as exc:
+        _defer(round_row, exc)
+        return "deferred"
     except RoundInfraError as exc:
         _void(round_row, exc.reason)
         return exc.reason
@@ -656,6 +698,16 @@ def _process_round(
                     on_phase=reporter.set,
                     bench_timeout_s=leftover,
                 )
+            except NoCapacityError as exc:
+                # Nothing was rented, so the cohort and seed stay valid. Voiding
+                # here is what let an out-of-stock market burn a round every
+                # poll interval; keep the round and wait the market out.
+                raise RoundDeferred(
+                    capacity_retry_delay_s(
+                        int(round_row.get("provision_attempts") or 0)
+                    ),
+                    str(exc),
+                ) from exc
             except ProvisionError as exc:
                 provision_error = True
                 raise RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc)) from exc

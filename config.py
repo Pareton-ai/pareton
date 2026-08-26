@@ -231,15 +231,24 @@ ROUND_MAX_WAIT_S: int = int(os.environ.get("PARETON_ROUND_MAX_WAIT_S", "21600"))
 ROUND_STALE_S: int = int(os.environ.get("PARETON_ROUND_STALE_S", "1800"))
 ROUND_MAX_DURATION_S: int = int(os.environ.get("PARETON_ROUND_MAX_DURATION_S", "21600"))
 OVERTAKE_EPSILON: float = float(os.environ.get("PARETON_OVERTAKE_EPSILON", "0.01"))
+# An out-of-stock market defers a round instead of voiding it. The delay
+# doubles per attempt, so a long outage costs a few provider calls per hour.
+PROVISION_RETRY_BASE_S: int = int(
+    os.environ.get("PARETON_PROVISION_RETRY_BASE_S", "300")
+)
+PROVISION_RETRY_MAX_S: int = int(
+    os.environ.get("PARETON_PROVISION_RETRY_MAX_S", "3600")
+)
 # Drift is in the same units as the crown decision. The overtake moat is 0.01,
 # so a round voids only when the machine moved five times that margin.
 BASELINE_DRIFT_CEILING: float = float(
     os.environ.get("PARETON_BASELINE_DRIFT_CEILING", "0.05")
 )
 
-# Ordered GPU control-plane try list (first → last). Prefer this over the
-# legacy primary + fallbacks pair.
-_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform", "targon")
+# Ordered GPU control-plane try list (first → last), preferred over the legacy
+# primary + fallbacks pair. Targon is omitted while its inventory API is
+# retired; the provider module stays for when it comes back.
+_DEFAULT_GPU_PROVIDERS = ("lium", "shadeform")
 
 
 def _parse_gpu_providers(raw: str) -> list[str]:
