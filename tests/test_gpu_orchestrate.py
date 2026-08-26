@@ -1340,6 +1340,15 @@ class ProvisionErrorProvider(FakeProvider):
         raise ProvisionError("simulated lium rent failure")
 
 
+class DeadInventoryProvider(FakeProvider):
+    """Reachable provider whose inventory endpoint is down (Targon HTTP 410)."""
+
+    name = "targon"
+
+    def search(self, spec: PodSpec) -> list[Offer]:
+        raise ProvisionError("Targon inventory failed HTTP 410")
+
+
 def _shadeform_fake() -> FakeProvider:
     p = FakeProvider()
     p.name = "shadeform"
@@ -1420,6 +1429,27 @@ def test_real_failure_is_not_downgraded_to_no_capacity(tmp_path: Path, monkeypat
             PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
         )
     assert not isinstance(caught.value, NoCapacityError)
+
+
+def test_dead_inventory_does_not_spend_the_round(tmp_path: Path, monkeypatch):
+    """A provider that cannot list stock rents nothing, so it must not turn an
+    otherwise empty market into a void. Round 9 hit this: Targon's HTTP 410 was
+    a plain ProvisionError and voided the round despite nothing being rented."""
+    ensure_durable_keypair(tmp_path / "st")
+    monkeypatch.setattr(
+        "gpu.orchestrate.get_provider",
+        lambda name, **kw: {
+            "lium": CapacityMissProvider(),
+            "targon": DeadInventoryProvider(),
+        }[name],
+    )
+    monkeypatch.delenv("PARETON_GPU_PROVIDER", raising=False)
+    monkeypatch.delenv("PARETON_GPU_PROVIDER_FALLBACKS", raising=False)
+    monkeypatch.setenv("PARETON_GPU_PROVIDERS", "lium,targon")
+    with pytest.raises(NoCapacityError):
+        provision_pod(
+            PodSpec(provider="auto", gpu_type="H200"), state_dir=tmp_path / "st"
+        )
 
 
 def test_single_flight_blocks_fallback(tmp_path: Path, monkeypatch):
