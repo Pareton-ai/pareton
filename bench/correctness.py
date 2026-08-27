@@ -8,12 +8,25 @@ logprob it assigns to the candidate's own tokens. An engine serving the
 pinned model scores near that model's own greedy path; nonsense scores far
 below it.
 
-The bars in ``CorrectnessThresholds`` are absolute logprobs rather than a
-comparison against a reference run, because one scorer grades everything and
-there is no second set of logprobs to compare against. The gate therefore
-asks whether an output is plausible under the pinned model, not whether it
-matches the baseline engine token for token: a candidate that answers
-differently but sensibly passes.
+Most bars in ``CorrectnessThresholds`` are absolute logprobs. The gate asks
+whether an output is plausible under the pinned model, not whether it matches
+the baseline engine token for token: a candidate that answers differently but
+sensibly passes.
+
+Absolute plausibility is not monotone in output quality (PAR-108): a repeat
+loop is the most predictable text there is, so it scores *better* than a real
+answer on every absolute bar. Two additions close the gap from both sides:
+
+* ``min_distinct_ratio`` and ``min_distinct_ngram_ratio`` read the captured
+  text rather than its logprobs, where a loop and a real answer differ. One
+  degenerate answer disqualifies the entry.
+* ``max_mean_logprob_drop`` measures the candidate against the baseline's own
+  mean logprob, catching the opposite move: a candidate that degrades the
+  model and still clears the absolute floor.
+
+The baseline is queued under ``BASELINE_INDEX`` and graded first so that
+reference exists. A baseline that cannot be graded fails the round, never a
+candidate.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -45,6 +58,15 @@ from bench.validate import RequestValidationError, load_workload_trace
 logger = logging.getLogger(__name__)
 
 SHAPE_EVIDENCE_FILENAME = "completion_response_shape.json"
+
+# The baseline queues its outputs under this index so the relative bar has a
+# reference. No candidate index is negative.
+BASELINE_INDEX = -1
+
+# N-gram width for the repetition bar, and the length below which neither
+# text bar applies: a short answer has nothing to repeat.
+DEGENERACY_NGRAM = 4
+DEGENERACY_MIN_WORDS = 24
 
 
 @dataclass(frozen=True)
@@ -331,6 +353,64 @@ def extract_output_logprobs(
     return out
 
 
+def distinct_word_ratio(words: list[str]) -> float:
+    """Share of the output's words that are unique. A loop drives this to ~0."""
+    if not words:
+        return 1.0
+    return len(set(words)) / len(words)
+
+
+def distinct_ngram_ratio(words: list[str], n: int = DEGENERACY_NGRAM) -> float:
+    """Share of the output's word n-grams that are distinct.
+
+    Counting distinct n-grams rather than the most common one is what makes
+    this period-independent: text that repeats a unit of any length k times
+    lands near 1/k, so widening the loop does not evade the bar. Prose sits
+    near 1.0 because almost every n-gram in it occurs once.
+    """
+    if len(words) < n:
+        return 1.0
+    grams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
+    return len(set(grams)) / len(grams)
+
+
+def degeneracy_reason(
+    text: str,
+    *,
+    min_distinct_ratio: float | None,
+    min_distinct_ngram_ratio: float | None,
+) -> str | None:
+    """Why this output reads as a repeat loop, or None if it does not.
+
+    The two bars catch different degeneracies. A tiny vocabulary fails the
+    word bar even when its n-grams vary; a long repeated passage fails the
+    n-gram bar even though its vocabulary is wide.
+
+    Both are optional: a campaign whose manifest predates PAR-108 carries
+    neither and is graded on the absolute logprob bars alone.
+    """
+    if min_distinct_ratio is None and min_distinct_ngram_ratio is None:
+        return None
+    words = text.split()
+    if len(words) < DEGENERACY_MIN_WORDS:
+        return None
+    if min_distinct_ratio is not None:
+        distinct = distinct_word_ratio(words)
+        if distinct < min_distinct_ratio:
+            return (
+                f"distinct word ratio {distinct:.3f} below {min_distinct_ratio} "
+                f"over {len(words)} words"
+            )
+    if min_distinct_ngram_ratio is not None:
+        distinct_grams = distinct_ngram_ratio(words)
+        if distinct_grams < min_distinct_ngram_ratio:
+            return (
+                f"distinct {DEGENERACY_NGRAM}-gram ratio {distinct_grams:.3f} "
+                f"below {min_distinct_ngram_ratio} over {len(words)} words"
+            )
+    return None
+
+
 def quantile_low(values: list[float], quantile: float) -> float:
     """The k-th lowest of ``values``, k = ceil(``quantile`` * len(values)).
 
@@ -356,14 +436,21 @@ class CapturedOutput:
 
 @dataclass
 class PendingCorrectness:
-    """A candidate waiting on the shared scorer.
+    """An engine's outputs waiting on the shared scorer.
 
-    Queued while the candidate's own container is still running, graded in one
-    batch once every candidate has stopped and the single scorer is up.
+    Queued while the engine's own container is still running, graded in one
+    batch once every engine has stopped and the single scorer is up. The
+    baseline is queued the same way, under ``BASELINE_INDEX``.
     """
 
     candidate_index: int
     outputs: list[CapturedOutput]
+
+    @property
+    def evidence_name(self) -> str:
+        if self.candidate_index == BASELINE_INDEX:
+            return "baseline"
+        return f"candidate_{self.candidate_index}"
 
 
 def capture_outputs(
@@ -438,8 +525,9 @@ def grade_candidate(
     cfg: CorrectnessConfig,
     evidence_path: Path,
     request_timeout_s: float = 300.0,
+    baseline_mean_logprob: float | None = None,
 ) -> CorrectnessReport:
-    """Teacher-force one candidate's captured outputs through the scorer.
+    """Teacher-force one engine's captured outputs through the scorer.
 
     Three outcomes, and the difference between the last two matters:
 
@@ -447,11 +535,17 @@ def grade_candidate(
     * ``fail_correctness``: the output is wrong. The entry is disqualified.
     * ``infra_failed``: the scorer produced too few logprobs to judge on.
       That is a harness problem, and the entry is requeued, not disqualified.
+
+    ``baseline_mean_logprob`` is the baseline's own mean through this same
+    scorer. It is None when grading the baseline itself, and when the
+    campaign carries no ``max_mean_logprob_drop``; either way the relative
+    bar is skipped.
     """
     thr = cfg.thresholds
     logprobs: list[float] = []
     span_positions = 0
     empty: list[str] = []
+    degenerate: str | None = None
 
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
@@ -465,6 +559,14 @@ def grade_candidate(
             )
             logprobs.extend(scored)
             span_positions += span
+            words = captured.output_text.split()
+            this_degenerate = degeneracy_reason(
+                captured.output_text,
+                min_distinct_ratio=thr.min_distinct_ratio,
+                min_distinct_ngram_ratio=thr.min_distinct_ngram_ratio,
+            )
+            if this_degenerate and degenerate is None:
+                degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
                 json.dumps(
                     {
@@ -474,6 +576,9 @@ def grade_candidate(
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),
                         "min_logprob": min(scored) if scored else None,
+                        "distinct_word_ratio": distinct_word_ratio(words),
+                        "distinct_ngram_ratio": distinct_ngram_ratio(words),
+                        "degenerate": this_degenerate,
                     },
                     sort_keys=True,
                 )
@@ -528,6 +633,19 @@ def grade_candidate(
             f"token logprob at quantile {thr.min_token_quantile} is "
             f"{q_lp:.3f}, below {thr.min_token_logprob}"
         )
+    elif degenerate is not None:
+        # A loop clears both bars above by scoring near zero.
+        reason = f"degenerate output ({degenerate})"
+    elif (
+        thr.max_mean_logprob_drop is not None
+        and baseline_mean_logprob is not None
+        and mean_lp < baseline_mean_logprob - thr.max_mean_logprob_drop
+    ):
+        reason = (
+            f"mean logprob {mean_lp:.3f} is more than "
+            f"{thr.max_mean_logprob_drop} below the baseline's "
+            f"{baseline_mean_logprob:.3f}"
+        )
 
     if reason:
         # Whatever the scorer did manage to read was bad. Thin coverage is no
@@ -572,30 +690,43 @@ def grade_all(
     evidence_dir: Path,
     request_timeout_s: float = 300.0,
 ) -> dict[int, CorrectnessReport]:
-    """Grade every queued candidate against one already-running scorer.
+    """Grade everything queued against one already-running scorer.
 
     The caller starts the scorer, calls this, and stops it, so correctness
     costs one engine start per round however many candidates the round holds.
+
+    The baseline is graded first when it is queued, and its mean logprob
+    becomes the reference every candidate's relative bar is measured against.
+    A baseline that does not grade cleanly leaves that reference unset, and
+    candidates are then graded on the absolute bars alone; the caller decides
+    what a failed baseline means for the round.
     """
     probe_resp = probe_logprob_capability(scorer_url, timeout=request_timeout_s)
     write_completion_response_shape(evidence_dir, probe_resp)
     reports: dict[int, CorrectnessReport] = {}
-    for item in pending:
+    ordered = [p for p in pending if p.candidate_index == BASELINE_INDEX] + [
+        p for p in pending if p.candidate_index != BASELINE_INDEX
+    ]
+    baseline_mean: float | None = None
+    for item in ordered:
+        is_baseline = item.candidate_index == BASELINE_INDEX
+        evidence_rel = f"evidence/correctness/{item.evidence_name}.jsonl"
         try:
-            reports[item.candidate_index] = grade_candidate(
+            report = grade_candidate(
                 scorer_url,
                 item.outputs,
                 cfg=cfg,
-                evidence_path=evidence_dir / f"candidate_{item.candidate_index}.jsonl",
+                evidence_path=evidence_dir / f"{item.evidence_name}.jsonl",
                 request_timeout_s=request_timeout_s,
+                baseline_mean_logprob=None if is_baseline else baseline_mean,
             )
         except EngineError as exc:
-            # The text being forced through the scorer is whatever a candidate
-            # engine chose to emit, so grading one can fail on input nobody
-            # else in the round sent. That is this entry's outcome, not the
-            # round's: keep going and grade the others.
-            logger.warning("scoring candidate %d failed: %s", item.candidate_index, exc)
-            reports[item.candidate_index] = CorrectnessReport(
+            # The text being forced through the scorer is whatever an engine
+            # chose to emit, so grading one can fail on input nobody else in
+            # the round sent. That is this entry's outcome, not the round's:
+            # keep going and grade the others.
+            logger.warning("scoring %s failed: %s", item.evidence_name, exc)
+            report = CorrectnessReport(
                 verdict="infra_failed",
                 num_prompts=len(item.outputs),
                 num_positions_scored=0,
@@ -603,7 +734,10 @@ def grade_all(
                 min_logprob=0.0,
                 quantile_logprob=0.0,
                 coverage_ratio=0.0,
-                evidence=f"evidence/correctness/candidate_{item.candidate_index}.jsonl",
+                evidence=evidence_rel,
                 reason=f"scorer could not grade this output: {exc}",
             )
+        if is_baseline and report.verdict == "pass":
+            baseline_mean = report.mean_logprob
+        reports[item.candidate_index] = report
     return reports

@@ -99,17 +99,23 @@ CORRECTNESS_THRESHOLD_KEYS = (
     "min_token_logprob",
     "min_token_quantile",
     "min_coverage_ratio",
+    "min_distinct_ratio",
+    "min_distinct_ngram_ratio",
+    "max_mean_logprob_drop",
 )
 
 
 def _correctness_thresholds(thresholds: dict | None) -> dict:
-    """Complete absolute correctness bars, defaulting from config."""
+    """Complete correctness bars, defaulting from config."""
     src = dict(thresholds or {})
     defaults = {
         "min_mean_logprob": config.BENCH_CORRECTNESS_MIN_MEAN_LOGPROB,
         "min_token_logprob": config.BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB,
         "min_token_quantile": config.BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE,
         "min_coverage_ratio": config.BENCH_CORRECTNESS_MIN_COVERAGE_RATIO,
+        "min_distinct_ratio": config.BENCH_CORRECTNESS_MIN_DISTINCT_RATIO,
+        "min_distinct_ngram_ratio": (config.BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO),
+        "max_mean_logprob_drop": config.BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP,
     }
     out = {k: float(src.get(k, defaults[k])) for k in CORRECTNESS_THRESHOLD_KEYS}
     if not 0.0 < out["min_coverage_ratio"] <= 1.0:
@@ -119,6 +125,18 @@ def _correctness_thresholds(thresholds: dict | None) -> dict:
     if not 0.0 <= out["min_token_quantile"] < 1.0:
         raise ValueError(
             "bench.correctness.thresholds.min_token_quantile must be in [0, 1)"
+        )
+    if not 0.0 <= out["min_distinct_ratio"] < 1.0:
+        raise ValueError(
+            "bench.correctness.thresholds.min_distinct_ratio must be in [0, 1)"
+        )
+    if not 0.0 <= out["min_distinct_ngram_ratio"] < 1.0:
+        raise ValueError(
+            "bench.correctness.thresholds.min_distinct_ngram_ratio must be in [0, 1)"
+        )
+    if out["max_mean_logprob_drop"] <= 0.0:
+        raise ValueError(
+            "bench.correctness.thresholds.max_mean_logprob_drop must be > 0"
         )
     return out
 
@@ -428,6 +446,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Below this share of streamed tokens scored, the run is infra_failed",
     )
     p.add_argument(
+        "--bench-correctness-min-distinct-ratio",
+        type=float,
+        default=None,
+        help="Degeneracy bar: share of an output's words that must be unique",
+    )
+    p.add_argument(
+        "--bench-correctness-min-distinct-ngram-ratio",
+        type=float,
+        default=None,
+        help="Degeneracy bar: share of an output's word n-grams that must be distinct",
+    )
+    p.add_argument(
+        "--bench-correctness-max-mean-logprob-drop",
+        type=float,
+        default=None,
+        help="How far below the baseline's mean logprob a candidate may score",
+    )
+    p.add_argument(
         "--emission-start-weight",
         type=float,
         default=None,
@@ -546,6 +582,11 @@ def main(argv: list[str] | None = None) -> int:
             "min_token_logprob": args.bench_correctness_min_token_logprob,
             "min_token_quantile": args.bench_correctness_min_token_quantile,
             "min_coverage_ratio": args.bench_correctness_min_coverage_ratio,
+            "min_distinct_ratio": args.bench_correctness_min_distinct_ratio,
+            "min_distinct_ngram_ratio": (
+                args.bench_correctness_min_distinct_ngram_ratio
+            ),
+            "max_mean_logprob_drop": args.bench_correctness_max_mean_logprob_drop,
         }
         correctness_thresholds = {k: v for k, v in overrides.items() if v is not None}
         emission_overrides = {

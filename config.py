@@ -202,6 +202,21 @@ BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE: float = float(
 BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_COVERAGE_RATIO", "0.5")
 )
+# A repeat loop scores near zero, so it clears every bar above (PAR-108).
+# These two read the captured text instead, where a loop and a real answer
+# differ. Per prompt: one degenerate answer disqualifies the entry.
+BENCH_CORRECTNESS_MIN_DISTINCT_RATIO: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_DISTINCT_RATIO", "0.10")
+)
+BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO", "0.35")
+)
+# How far below the baseline's own mean logprob, through the same scorer, a
+# candidate may score. The other half of PAR-108: a loop scores above the
+# baseline, a degraded model scores below it and clears the absolute bar.
+BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP", "1.5")
+)
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 
 # Seed-time defaults for campaigns.emission_rule: what a campaign's leader is

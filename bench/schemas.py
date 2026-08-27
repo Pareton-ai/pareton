@@ -180,30 +180,53 @@ class WorkloadTraceRef:
 
 @dataclass
 class CorrectnessThresholds:
-    """Absolute logprob bars the shared scorer grades a captured output against.
+    """The bars the shared scorer grades a captured output against.
 
-    One scorer grades every candidate's own output, so there is no second set
-    of logprobs to compare against and the bars stand on their own. A greedy
-    continuation of the pinned model scores around -0.5 to -2.0 per token
-    under that same model; garbage scores below -15.
+    The first four are absolute logprob bars: a greedy continuation of the
+    pinned model scores around -0.5 to -2.0 per token under that same model,
+    and garbage scores below -15. ``min_token_logprob`` is applied to the
+    k-th lowest scored position, with k = ceil(``min_token_quantile`` *
+    positions), not to the outright minimum (PAR-94). A quantile of 0 is the
+    plain minimum.
 
-    ``min_token_logprob`` is applied to the k-th lowest scored position, with
-    k = ceil(``min_token_quantile`` * positions), not to the outright minimum
-    (PAR-94). A quantile of 0 is the plain minimum.
+    The last three close what absolute bars cannot see (PAR-108):
+
+    * ``min_distinct_ratio`` and ``min_distinct_ngram_ratio`` read the
+      captured text, because a repeat loop is the most predictable text there
+      is and scores *above* a real answer on every bar above. The n-gram bar
+      counts distinct n-grams, so a loop is caught whatever its period.
+    * ``max_mean_logprob_drop`` measures the candidate against the baseline's
+      own mean logprob, same scorer and same prompts, catching the opposite
+      move: a candidate that degrades the model and clears the floor anyway.
+
+    They are ``None`` when the campaign's manifest does not carry them, so a
+    campaign seeded before PAR-108 behaves as it did and picking up the bars
+    means re-seeding. A bar outside the manifest is one that could move under
+    a live campaign without the manifest hash changing.
     """
 
     min_mean_logprob: float
     min_token_logprob: float
     min_token_quantile: float
     min_coverage_ratio: float
+    min_distinct_ratio: float | None = None
+    min_distinct_ngram_ratio: float | None = None
+    max_mean_logprob_drop: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessThresholds:
+        def optional(key: str) -> float | None:
+            raw = d.get(key)
+            return None if raw is None else float(raw)
+
         return cls(
             min_mean_logprob=float(d["min_mean_logprob"]),
             min_token_logprob=float(d["min_token_logprob"]),
             min_token_quantile=float(d["min_token_quantile"]),
             min_coverage_ratio=float(d["min_coverage_ratio"]),
+            min_distinct_ratio=optional("min_distinct_ratio"),
+            min_distinct_ngram_ratio=optional("min_distinct_ngram_ratio"),
+            max_mean_logprob_drop=optional("max_mean_logprob_drop"),
         )
 
 
