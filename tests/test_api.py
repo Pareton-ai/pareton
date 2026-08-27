@@ -579,6 +579,7 @@ def test_leader_404_when_campaign_is_unknown(monkeypatch, client: TestClient):
     from api import server
 
     monkeypatch.setattr(server, "get_campaign", lambda _cid: None)
+    monkeypatch.setattr(server, "list_rounds", lambda *_a, **_k: None)
     for path in ("leader", "rounds", "score-progress"):
         resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/{path}")
         assert resp.status_code == 404
@@ -593,6 +594,7 @@ def test_round_reads_reject_a_malformed_campaign_id(monkeypatch, client: TestCli
         raise AssertionError("store must not be reached")
 
     monkeypatch.setattr(server, "get_campaign", _boom)
+    monkeypatch.setattr(server, "list_rounds", _boom)
     for path in ("leader", "rounds", "score-progress"):
         resp = client.get(f"/v1/campaigns/not-a-uuid/{path}")
         assert resp.status_code == 422, path
@@ -685,6 +687,7 @@ def test_rounds_list_campaign_404(monkeypatch, client: TestClient):
     monkeypatch.setattr(server, "list_rounds", lambda *_a, **_k: None)
     resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds")
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "campaign not found"
 
 
 ROUND_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
