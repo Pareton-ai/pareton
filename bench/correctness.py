@@ -17,9 +17,9 @@ Absolute plausibility is not monotone in output quality (PAR-108): a repeat
 loop is the most predictable text there is, so it scores *better* than a real
 answer on every absolute bar. Two additions close the gap from both sides:
 
-* ``min_distinct_ratio`` and ``min_distinct_ngram_ratio`` read the captured
-  text rather than its logprobs, where a loop and a real answer differ. One
-  degenerate answer disqualifies the entry.
+* ``min_distinct_ngram_ratio`` reads the captured text rather than its
+  logprobs, where a loop and a real answer differ. One degenerate answer
+  disqualifies the entry.
 * ``max_mean_logprob_drop`` measures the candidate against the baseline's own
   mean logprob, catching the opposite move: a candidate that degrades the
   model and still clears the absolute floor.
@@ -63,10 +63,12 @@ SHAPE_EVIDENCE_FILENAME = "completion_response_shape.json"
 # reference. No candidate index is negative.
 BASELINE_INDEX = -1
 
-# N-gram width for the repetition bar, and the length below which neither
-# text bar applies: a short answer has nothing to repeat.
-DEGENERACY_NGRAM = 4
-DEGENERACY_MIN_WORDS = 24
+# N-gram width for the repetition bar, in characters, and the length below
+# which the bar does not apply: a short answer has nothing to repeat. An
+# output that clears the round's token tolerance is always far longer than
+# this, so the guard cannot be used to duck the bar.
+DEGENERACY_NGRAM = 16
+DEGENERACY_MIN_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -353,61 +355,45 @@ def extract_output_logprobs(
     return out
 
 
-def distinct_word_ratio(words: list[str]) -> float:
-    """Share of the output's words that are unique. A loop drives this to ~0."""
-    if not words:
-        return 1.0
-    return len(set(words)) / len(words)
+def distinct_ngram_ratio(text: str, n: int = DEGENERACY_NGRAM) -> float:
+    """Share of the output's character n-grams that are distinct.
 
+    Characters, not words, because splitting on whitespace hands the miner a
+    one-character evasion: a loop emitted without spaces is a single word and
+    no word-level statistic sees it.
 
-def distinct_ngram_ratio(words: list[str], n: int = DEGENERACY_NGRAM) -> float:
-    """Share of the output's word n-grams that are distinct.
+    Counting distinct n-grams rather than the share taken by the most common
+    one gives a statable property: text repeating a unit of p characters over
+    a length L lands near p/L, so the bar catches any repeated unit shorter
+    than ``floor * L``. A tuned loop with a long enough period still clears
+    it; this bar is the cheap stop, not a proof.
 
-    Counting distinct n-grams rather than the most common one is what makes
-    this period-independent: text that repeats a unit of any length k times
-    lands near 1/k, so widening the loop does not evade the bar. Prose sits
-    near 1.0 because almost every n-gram in it occurs once.
+    Prose and code sit near 1.0 because almost every n-gram occurs once.
     """
-    if len(words) < n:
+    if len(text) < n:
         return 1.0
-    grams = [tuple(words[i : i + n]) for i in range(len(words) - n + 1)]
+    grams = [text[i : i + n] for i in range(len(text) - n + 1)]
     return len(set(grams)) / len(grams)
 
 
 def degeneracy_reason(
     text: str,
     *,
-    min_distinct_ratio: float | None,
     min_distinct_ngram_ratio: float | None,
 ) -> str | None:
     """Why this output reads as a repeat loop, or None if it does not.
 
-    The two bars catch different degeneracies. A tiny vocabulary fails the
-    word bar even when its n-grams vary; a long repeated passage fails the
-    n-gram bar even though its vocabulary is wide.
-
-    Both are optional: a campaign whose manifest predates PAR-108 carries
-    neither and is graded on the absolute logprob bars alone.
+    Optional: a campaign whose manifest predates PAR-108 does not carry the
+    bar and is graded on the absolute logprob bars alone.
     """
-    if min_distinct_ratio is None and min_distinct_ngram_ratio is None:
+    if min_distinct_ngram_ratio is None or len(text) < DEGENERACY_MIN_CHARS:
         return None
-    words = text.split()
-    if len(words) < DEGENERACY_MIN_WORDS:
-        return None
-    if min_distinct_ratio is not None:
-        distinct = distinct_word_ratio(words)
-        if distinct < min_distinct_ratio:
-            return (
-                f"distinct word ratio {distinct:.3f} below {min_distinct_ratio} "
-                f"over {len(words)} words"
-            )
-    if min_distinct_ngram_ratio is not None:
-        distinct_grams = distinct_ngram_ratio(words)
-        if distinct_grams < min_distinct_ngram_ratio:
-            return (
-                f"distinct {DEGENERACY_NGRAM}-gram ratio {distinct_grams:.3f} "
-                f"below {min_distinct_ngram_ratio} over {len(words)} words"
-            )
+    ratio = distinct_ngram_ratio(text)
+    if ratio < min_distinct_ngram_ratio:
+        return (
+            f"distinct {DEGENERACY_NGRAM}-gram ratio {ratio:.3f} below "
+            f"{min_distinct_ngram_ratio} over {len(text)} chars"
+        )
     return None
 
 
@@ -559,10 +545,8 @@ def grade_candidate(
             )
             logprobs.extend(scored)
             span_positions += span
-            words = captured.output_text.split()
             this_degenerate = degeneracy_reason(
                 captured.output_text,
-                min_distinct_ratio=thr.min_distinct_ratio,
                 min_distinct_ngram_ratio=thr.min_distinct_ngram_ratio,
             )
             if this_degenerate and degenerate is None:
@@ -576,8 +560,9 @@ def grade_candidate(
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),
                         "min_logprob": min(scored) if scored else None,
-                        "distinct_word_ratio": distinct_word_ratio(words),
-                        "distinct_ngram_ratio": distinct_ngram_ratio(words),
+                        "distinct_ngram_ratio": distinct_ngram_ratio(
+                            captured.output_text
+                        ),
                         "degenerate": this_degenerate,
                     },
                     sort_keys=True,

@@ -14,7 +14,6 @@ from bench.correctness import (
     PromptCase,
     capture_outputs,
     distinct_ngram_ratio,
-    distinct_word_ratio,
     extract_output_logprobs,
     grade_all,
     grade_candidate,
@@ -47,7 +46,6 @@ def _cfg(
     quantile: float = 0.0,
     coverage: float = 0.5,
     num_prompts: int = 2,
-    min_distinct: float | None = None,
     min_distinct_ngram: float | None = None,
     max_drop: float | None = None,
 ) -> CorrectnessConfig:
@@ -63,7 +61,6 @@ def _cfg(
             min_token_logprob=min_token,
             min_token_quantile=quantile,
             min_coverage_ratio=coverage,
-            min_distinct_ratio=min_distinct,
             min_distinct_ngram_ratio=min_distinct_ngram,
             max_mean_logprob_drop=max_drop,
         ),
@@ -74,10 +71,15 @@ def _cfg(
 # nonsense at the token level, so the scorer rates every token near its own
 # greedy path.
 LOOP_TEXT = " apple" * 200
-# The same attack with a wide vocabulary, to prove the n-gram bar does not
-# depend on the loop being short: 150 distinct words repeated 4 times clears
-# the word bar comfortably and still reads as a loop.
-WIDE_LOOP_TEXT = (" " + " ".join(f"w{i}" for i in range(150))) * 4
+# The same loop with the spaces stripped out of each repeat: 20 whitespace
+# "words" of 200 characters each. A word-level statistic sees 20 words and
+# lets this through, which is why the bar counts characters.
+GLUED_LOOP_TEXT = (" " + "apple" * 40) * 20
+# Honest output that repeats heavily: 30 list items differing only by index.
+# The worst false-positive case found, and it still clears the floor by 2x.
+REPETITIVE_LIST_TEXT = "\n".join(
+    f"- step {i}: run the migration and verify the row count" for i in range(30)
+)
 PROSE_TEXT = (
     " The function reads the manifest, verifies its hash against the campaign "
     "row, and refuses to continue when the two disagree. That check runs "
@@ -615,19 +617,13 @@ def test_partial_evidence_left_on_engine_error(
 # ---------------------------------------------------------------------------
 
 
-def test_degeneracy_metrics_separate_a_loop_from_prose():
-    """Both metrics are period-independent, which is the point of the n-gram one."""
-    loop = LOOP_TEXT.split()
-    wide = WIDE_LOOP_TEXT.split()
-    prose = PROSE_TEXT.split()
-
-    assert distinct_word_ratio(loop) < 0.10
-    assert distinct_ngram_ratio(loop) < 0.35
-    # Widening the loop's vocabulary clears the word bar and not the n-gram one.
-    assert distinct_word_ratio(wide) > 0.10
-    assert distinct_ngram_ratio(wide) < 0.35
-    assert distinct_word_ratio(prose) > 0.10
-    assert distinct_ngram_ratio(prose) > 0.35
+def test_distinct_ngram_ratio_separates_loops_from_honest_output():
+    """Counting characters is what closes the unspaced-loop evasion."""
+    assert distinct_ngram_ratio(LOOP_TEXT) < 0.15
+    assert distinct_ngram_ratio(GLUED_LOOP_TEXT) < 0.15
+    assert distinct_ngram_ratio(PROSE_TEXT) > 0.15
+    # The heaviest honest repetition found still clears the floor by 2x.
+    assert distinct_ngram_ratio(REPETITIVE_LIST_TEXT) > 0.30
 
 
 def test_a_repeat_loop_clears_every_absolute_logprob_bar(tmp_path: Path):
@@ -655,7 +651,7 @@ def test_a_repeat_loop_is_disqualified_by_the_degeneracy_bars(tmp_path: Path):
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct=0.10, min_distinct_ngram=0.35),
+            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "fail_correctness"
@@ -664,60 +660,60 @@ def test_a_repeat_loop_is_disqualified_by_the_degeneracy_bars(tmp_path: Path):
     assert report.mean_logprob > -4.0
 
 
-def test_a_wide_loop_is_caught_by_the_ngram_bar(tmp_path: Path):
-    """Widening the repeated unit evades the word bar, not the n-gram one."""
-    outputs = [_captured("r1", "Hello world", WIDE_LOOP_TEXT, tokens=600)]
+def test_a_loop_without_spaces_is_still_caught(tmp_path: Path):
+    """The evasion a word-level bar would allow: emit the loop with no spaces."""
+    outputs = [_captured("r1", "Hello world", GLUED_LOOP_TEXT, tokens=20)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct=0.10, min_distinct_ngram=0.35),
+            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "fail_correctness"
-    assert "4-gram" in (report.reason or "")
+    assert "16-gram" in (report.reason or "")
 
 
-def test_prose_passes_the_degeneracy_bars(tmp_path: Path):
-    outputs = [_captured("r1", "Hello world", PROSE_TEXT, tokens=49)]
+def test_heavily_repetitive_honest_output_still_passes(tmp_path: Path):
+    """A numbered list differing only by index is repetitive, not degenerate."""
+    outputs = [_captured("r1", "Hello world", REPETITIVE_LIST_TEXT, tokens=300)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct=0.10, min_distinct_ngram=0.35),
+            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "pass"
 
 
 def test_a_short_output_is_never_read_as_degenerate(tmp_path: Path):
-    """Below DEGENERACY_MIN_WORDS there is nothing to repeat, and an honest
-    short answer must not be disqualified for having few words."""
+    """Below DEGENERACY_MIN_CHARS there is nothing to repeat, and an honest
+    short answer must not be disqualified for being short."""
     outputs = [_captured("r1", "Hello world", " yes yes yes", tokens=3)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct=0.10, min_distinct_ngram=0.35),
+            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "pass"
 
 
-def test_degeneracy_evidence_records_both_metrics(tmp_path: Path):
+def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
     evidence = tmp_path / "correctness" / "candidate_0.jsonl"
     outputs = [_captured("r1", "Hello world", LOOP_TEXT, tokens=200)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct=0.10, min_distinct_ngram=0.35),
+            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
             evidence_path=evidence,
         )
     line = json.loads(evidence.read_text(encoding="utf-8").strip().splitlines()[0])
-    assert line["distinct_word_ratio"] < 0.10
-    assert line["distinct_ngram_ratio"] < 0.35
-    assert "distinct word ratio" in line["degenerate"]
+    assert line["distinct_ngram_ratio"] < 0.15
+    assert "16-gram" in line["degenerate"]
 
 
 # ---------------------------------------------------------------------------
@@ -772,7 +768,7 @@ def test_grade_all_grades_the_baseline_first_and_keys_it_separately(tmp_path: Pa
         reports = grade_all(
             scorer.base_url,
             pending,
-            cfg=_cfg(num_prompts=1, min_distinct=0.10, min_distinct_ngram=0.35),
+            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
             evidence_dir=evidence,
         )
     assert set(reports) == {BASELINE_INDEX, 0}

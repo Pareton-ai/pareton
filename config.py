@@ -203,13 +203,12 @@ BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_COVERAGE_RATIO", "0.5")
 )
 # A repeat loop scores near zero, so it clears every bar above (PAR-108).
-# These two read the captured text instead, where a loop and a real answer
-# differ. Per prompt: one degenerate answer disqualifies the entry.
-BENCH_CORRECTNESS_MIN_DISTINCT_RATIO: float = float(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_DISTINCT_RATIO", "0.10")
-)
+# This one reads the captured text instead, where a loop and a real answer
+# differ. Per prompt: one degenerate answer disqualifies the entry. The
+# floor leaves honest repetitive output (numbered lists, tables) at roughly
+# 2x margin; see bench/correctness.distinct_ngram_ratio for what it catches.
 BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO: float = float(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO", "0.35")
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO", "0.15")
 )
 # How far below the baseline's own mean logprob, through the same scorer, a
 # candidate may score. The other half of PAR-108: a loop scores above the

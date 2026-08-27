@@ -86,7 +86,6 @@ def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatc
         "min_token_logprob",
         "min_token_quantile",
         "min_coverage_ratio",
-        "min_distinct_ratio",
         "min_distinct_ngram_ratio",
         "max_mean_logprob_drop",
     }
@@ -106,7 +105,6 @@ def test_open_requires_correctness_thresholds():
                     "min_token_logprob": -12.0,
                     "min_token_quantile": 0.001,
                     "min_coverage_ratio": 0.5,
-                    "min_distinct_ratio": 0.10,
                     "min_distinct_ngram_ratio": 0.35,
                     "max_mean_logprob_drop": 1.5,
                 }

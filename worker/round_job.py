@@ -299,6 +299,12 @@ def build_round_request(
             ),
         },
     }
+    # The PAR-108 bars are forwarded only when the campaign manifest carries
+    # them, and never defaulted from config: a bar the manifest does not pin
+    # is one that could move under a live campaign without the hash changing.
+    for key in ("min_distinct_ngram_ratio", "max_mean_logprob_drop"):
+        if thresholds.get(key) is not None:
+            correctness["thresholds"][key] = float(thresholds[key])
 
     scoring_rule = _parse_json_field(round_row.get("scoring_rule")) or {}
     req = {
