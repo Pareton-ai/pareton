@@ -64,34 +64,79 @@ def patch_fingerprint_bytes(data: bytes) -> str:
 
     Normalization removes blank lines, trailing whitespace, and ``#``, ``//``,
     and ``/* ... */`` comments outside quoted strings. Git hunk content markers
-    (``+``, ``-``, or space) are ignored when classifying a source line, while
-    diff metadata remains part of the fingerprint. The policy is deliberately
-    language-agnostic. Consequently, a line beginning with ``#`` inside a
-    multiline Python docstring is treated as a comment and removed.
+    (``+``, ``-``, or space) are ignored when classifying a source line. Git
+    blob hashes and hunk coordinates are omitted because comment-only changes
+    alter them. The policy is deliberately language-agnostic. Consequently, a
+    line beginning with ``#`` inside a multiline Python docstring is treated as
+    a comment and removed.
     """
     normalized: list[bytes] = []
-    in_block_comment = {b"+": False, b"-": False, b" ": False, b"": False}
     is_git_diff = data.startswith(b"diff --git ") or b"\ndiff --git " in data
+    old_in_block_comment = False
+    new_in_block_comment = False
+    plain_in_block_comment = False
+    in_hunk = False
 
     for raw_line in data.splitlines():
         line = raw_line.rstrip()
-        marker = b""
-        content = line
-        if line[:1] in (b"+", b"-", b" ") and not line.startswith((b"+++", b"---")):
-            marker = line[:1]
-            content = line[1:]
+        if not is_git_diff:
+            content, plain_in_block_comment = _strip_comments(
+                line, plain_in_block_comment
+            )
+            if content.strip():
+                normalized.append(content)
+            continue
 
-        if is_git_diff and not marker:
+        if line.startswith(b"diff --git "):
+            old_in_block_comment = False
+            new_in_block_comment = False
+            in_hunk = False
+            normalized.append(line)
+            continue
+        if line.startswith(b"index "):
+            continue
+        if line.startswith(b"@@"):
+            in_hunk = True
+            header_end = line.find(b"@@", 2)
+            suffix = line[header_end + 2 :].strip() if header_end != -1 else b""
+            normalized.append(b"@@" + (b" " + suffix if suffix else b""))
+            continue
+        if not in_hunk or line[:1] not in (b"+", b"-", b" "):
             if line:
                 normalized.append(line)
             continue
 
-        content, in_block_comment[marker] = _strip_comments(
-            content, in_block_comment[marker]
-        )
-        if not content.strip():
+        marker = line[:1]
+        content = line[1:]
+        if marker == b"-":
+            content, old_in_block_comment = _strip_comments(
+                content, old_in_block_comment
+            )
+            if content.strip():
+                normalized.append(marker + content)
             continue
-        normalized.append(marker + content)
+        if marker == b"+":
+            content, new_in_block_comment = _strip_comments(
+                content, new_in_block_comment
+            )
+            if content.strip():
+                normalized.append(marker + content)
+            continue
+
+        old_content, old_in_block_comment = _strip_comments(
+            content, old_in_block_comment
+        )
+        new_content, new_in_block_comment = _strip_comments(
+            content, new_in_block_comment
+        )
+        if old_content == new_content:
+            if old_content.strip():
+                normalized.append(marker + old_content)
+            continue
+        if old_content.strip():
+            normalized.append(b"< " + old_content)
+        if new_content.strip():
+            normalized.append(b"> " + new_content)
 
     payload = b"\n".join(normalized)
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"

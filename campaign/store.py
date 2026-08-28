@@ -796,7 +796,7 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
                 SELECT state, evidence_ref, detail, created_at
                 FROM submission_events
                 WHERE submission_id = %s
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """,
                 (str(submission_id),),
             )

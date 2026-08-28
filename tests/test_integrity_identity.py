@@ -192,6 +192,44 @@ def test_patch_fingerprint_strips_comments_from_git_hunk_content():
     assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
 
 
+def test_patch_fingerprint_ignores_volatile_git_metadata():
+    first = b"""diff --git a/vllm/x.py b/vllm/x.py
+index 1111111..2222222 100644
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1,2 @@ def run():
+ x = 1
++# first note
+"""
+    second = b"""diff --git a/vllm/x.py b/vllm/x.py
+index 1111111..3333333 100644
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1,3 @@ def run():
+ x = 1
++# changed note
++// another note
+"""
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_tracks_block_comments_across_hunk_sides():
+    first = b"""diff --git a/vllm/x.py b/vllm/x.py
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1,4 +1,4 @@
+ /*
+-old note
++first note
+ */
+ x = 1
+"""
+    second = first.replace(b"first note", b"changed note")
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
 @pytest.mark.parametrize(
     ("first", "second"),
     [
