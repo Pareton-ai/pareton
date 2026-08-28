@@ -21,10 +21,10 @@ from campaign.store import (
     get_submission,
     get_submission_for_campaign,
     list_campaigns,
+    list_campaign_submissions,
     list_events,
     list_latest_states,
     list_submission_jobs,
-    list_submissions,
 )
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from gate.types import SubmissionState
@@ -372,14 +372,9 @@ def campaign_submissions(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    c = get_campaign(campaign_id)
-    if c is None:
+    page = list_campaign_submissions(campaign_id, limit=limit, offset=offset)
+    if page is None:
         raise HTTPException(status_code=404, detail="campaign not found")
-    page = list_submissions(campaign_id, limit=limit, offset=offset)
-    rows = page["items"]
-    ids = [r["id"] for r in rows]
-    entries = list_submission_round_entries(ids)
-    states = list_latest_states(ids)
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -390,11 +385,12 @@ def campaign_submissions(
                 **{
                     k: (str(v) if k in ("id", "campaign_id") else v)
                     for k, v in r.items()
+                    if k not in ("latest_state", "round")
                 },
-                "latest_state": states.get(str(r["id"])),
-                "round": entries.get(str(r["id"])),
+                "latest_state": r.get("latest_state"),
+                "round": r.get("round"),
             }
-            for r in rows
+            for r in page["items"]
         ],
     }
 
@@ -432,8 +428,9 @@ def campaign_rounds(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    _require_campaign(str(campaign_id))
     page = list_rounds(str(campaign_id), limit=limit, offset=offset)
+    if page is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
     rows = page["items"]
     _set_live_round_cache_control(response, [r["status"] for r in rows])
     return {
