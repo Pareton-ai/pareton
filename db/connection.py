@@ -15,8 +15,10 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL: str = os.environ.get("PARETON_DATABASE_URL", "")
 
-_POOL_MIN = 1
-_POOL_MAX = 10
+# Keep a few sockets warm. A campaign page hits several list queries at
+# once; min=1 made each extra checkout pay a Neon TLS handshake.
+_POOL_MIN = int(os.environ.get("PARETON_DB_POOL_MIN", "4"))
+_POOL_MAX = int(os.environ.get("PARETON_DB_POOL_MAX", "10"))
 _KEEPALIVES = {
     "keepalives": 1,
     "keepalives_idle": 30,
