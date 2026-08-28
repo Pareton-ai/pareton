@@ -199,6 +199,9 @@ class CampaignManifest:
     status: str  # draft | open | closed
     priority_metric: str  # one of PRIORITY_METRICS
     success_threshold: str  # human-readable win condition for the pilot
+    # Fee paid for each patch submission. Every campaign pins the exact amount
+    # and recipient.
+    submission_fee: dict[str, str]
     bench: dict[str, Any] | None = None
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
@@ -246,6 +249,7 @@ class CampaignManifest:
             "engine": self.engine,
             "scoring_rule": dict(self.scoring_rule),
             "emission_rule": self.emission_rule,
+            "submission_fee": self.submission_fee,
         }
         if self.workload_pool is not None:
             out["workload_pool"] = list(self.workload_pool)

@@ -117,6 +117,7 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash="pending",
@@ -141,6 +142,7 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
         status="open",
         customer_signoff=CustomerSignoff(
             approved_manifest_hash=manifest.manifest_hash,
@@ -252,6 +254,7 @@ def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
         status="open",
         bench=build_seed_bench_spec(baseline_engine_image_digest=engine_digest),
         scoring_rule={"name": "median_e2e_speedup"},
@@ -360,6 +363,7 @@ def test_e2e_campaign_scoped_lookup_disambiguates(tmp_path, monkeypatch):
             denied_paths=["tests/**"],
             priority_metric="throughput",
             success_threshold=">=10% at SLA",
+            submission_fee={"amount_tao": "0", "recipient": "5Test"},
             status="open",
             customer_signoff=CustomerSignoff(
                 approved_manifest_hash="pending",

@@ -6,7 +6,7 @@ import logging
 from functools import partial
 from typing import Any, Callable
 
-import config
+from campaign.fees import submission_fee_rao
 from campaign.store import get_campaign, insert_submission, payment_ref_consumed
 from chain.commitment import (
     PatchCommitment,
@@ -15,7 +15,6 @@ from chain.commitment import (
 from chain.payment import (
     BlockPaymentView,
     PaymentCheck,
-    fee_rao,
     fetch_block_payment_view,
     verify_payment,
 )
@@ -31,6 +30,7 @@ BlockFetcher = Callable[[int], BlockPaymentView | None]
 def check_fee_proof(
     com: PatchCommitment,
     fetch_block: BlockFetcher | None,
+    submission_fee: dict[str, str],
 ) -> PaymentCheck:
     """Verify the commitment's fee proof. Only called when the fee is on."""
     if com.payment_block is None or com.payment_tx is None:
@@ -46,8 +46,8 @@ def check_fee_proof(
         extrinsics=view.extrinsics,
         events=view.events,
         extrinsic_index=com.payment_tx,
-        recipient=config.PAYMENT_RECIPIENT_ADDRESS,
-        min_amount_rao=fee_rao(config.SUBMISSION_FEE_TAO),
+        recipient=submission_fee["recipient"],
+        min_amount_rao=submission_fee_rao(submission_fee),
         hotkey=com.hotkey,
         coldkey=com.coldkey,
     )
@@ -95,8 +95,9 @@ def ingest_commitment(
     # No GPU spend without proof the miner paid: reject before insert so a
     # missing or junk proof cannot burn the first-seen dedupe slot either.
     payment_block = payment_tx = None
-    if config.SUBMISSION_FEE_TAO > 0:
-        check = check_fee_proof(com, fetch_block)
+    submission_fee = campaign.submission_fee
+    if submission_fee_rao(submission_fee) > 0:
+        check = check_fee_proof(com, fetch_block, submission_fee)
         if not check.ok:
             logger.info(
                 "skip commitment: %s hotkey=%s patch_hash=%s",

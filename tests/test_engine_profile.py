@@ -43,6 +43,7 @@ def _fields_kwargs(**overrides):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
     )
     kwargs.update(overrides)
     return kwargs
@@ -75,14 +76,12 @@ def test_absent_engine_leaves_manifest_hash_unchanged():
 def test_engine_none_matches_known_pre_engine_hash():
     """Golden hash: locks the pin set against accidental future drift.
 
-    Rebaselined twice: once when the submission window left the pin set, and
-    once when the round revamp added scoring_rule and dropped z_threshold.
-    Campaigns hashed before a rebaseline keep their stored hash; nothing
-    recomputes it, so every campaign is reseeded instead (PAR-85).
+    Rebaselined when the submission window left the pin set, the round revamp
+    changed scoring, and campaign submission fees became required.
     """
     fields = freeze_manifest_fields(**_fields_kwargs(campaign_id=None, profile_id=None))
     assert compute_manifest_hash(fields) == (
-        "sha256:36b3877597c061ebd8ec09a0d8e4c47ba19babed71fcd0174bdd4faf55a9fa67"
+        "sha256:5e2322da0dc073d919ec4f98caa710c0fdbc243e63c340197c8549beccb14707"
     )
 
 

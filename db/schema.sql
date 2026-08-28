@@ -61,6 +61,9 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- NULL means the campaign pays nothing and is left out of the weight
   -- vector, which keeps campaigns pinned before emission rules on their hash.
   emission_rule JSONB,
+  -- Per-submission payment terms: {amount_tao, recipient}, pinned in
+  -- manifest_hash and published by the campaign API.
+  submission_fee JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)

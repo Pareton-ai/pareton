@@ -77,6 +77,7 @@ def _insert(*, status: str, emission_rule: dict | None):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
         status=status,
         emission_rule=emission_rule,
     )

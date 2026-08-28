@@ -8,10 +8,10 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+import config
+from chain import watcher
 from chain.commitment import PatchCommitment
 from chain.payment import BlockPaymentView
-from chain import watcher
-import config
 
 
 def _com(**overrides) -> PatchCommitment:
@@ -120,7 +120,12 @@ def _paid_view(
 def inserted(monkeypatch):
     """Open campaign + captured insert kwargs, with no DB behind either."""
     monkeypatch.setattr(
-        watcher, "get_campaign", lambda _cid: SimpleNamespace(status="open")
+        watcher,
+        "get_campaign",
+        lambda _cid: SimpleNamespace(
+            status="open",
+            submission_fee={"amount_tao": str(FEE_TAO), "recipient": RECIPIENT},
+        ),
     )
     monkeypatch.setattr(watcher, "payment_ref_consumed", lambda _b, _t: False)
     seen: dict = {}
@@ -133,27 +138,28 @@ def inserted(monkeypatch):
     return seen
 
 
-@pytest.fixture()
-def fee_on(monkeypatch):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", FEE_TAO)
-    monkeypatch.setattr(config, "PAYMENT_RECIPIENT_ADDRESS", RECIPIENT)
-
-
 def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher,
+        "get_campaign",
+        lambda _cid: SimpleNamespace(
+            status="open",
+            submission_fee={"amount_tao": "0", "recipient": RECIPIENT},
+        ),
+    )
     sid = watcher.ingest_commitment(_com())
     assert sid == "sid"
     assert inserted["payment_block"] is None
     assert inserted["payment_tx"] is None
 
 
-def test_ingest_with_fee_rejects_missing_proof(fee_on, inserted):
+def test_ingest_with_fee_rejects_missing_proof(inserted):
     sid = watcher.ingest_commitment(_com())
     assert sid is None
     assert inserted == {}
 
 
-def test_ingest_with_fee_accepts_verified_proof(fee_on, inserted):
+def test_ingest_with_fee_accepts_verified_proof(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=2),
         fetch_block=lambda _b: _paid_view(index=2),
@@ -163,7 +169,7 @@ def test_ingest_with_fee_accepts_verified_proof(fee_on, inserted):
     assert inserted["payment_tx"] == 2
 
 
-def test_ingest_with_fee_rejects_reused_proof(monkeypatch, fee_on, inserted):
+def test_ingest_with_fee_rejects_reused_proof(monkeypatch, inserted):
     monkeypatch.setattr(watcher, "payment_ref_consumed", lambda _b, _t: True)
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
@@ -173,7 +179,7 @@ def test_ingest_with_fee_rejects_reused_proof(monkeypatch, fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_payment_from_another_miner(fee_on, inserted):
+def test_ingest_with_fee_rejects_payment_from_another_miner(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(signer="ck-of-someone-else"),
@@ -182,7 +188,7 @@ def test_ingest_with_fee_rejects_payment_from_another_miner(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_underpayment(fee_on, inserted):
+def test_ingest_with_fee_rejects_underpayment(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(amount=FEE_RAO - 1),
@@ -191,7 +197,7 @@ def test_ingest_with_fee_rejects_underpayment(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_wrong_recipient(fee_on, inserted):
+def test_ingest_with_fee_rejects_wrong_recipient(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(dest="5SomeoneElse"),
@@ -200,7 +206,7 @@ def test_ingest_with_fee_rejects_wrong_recipient(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_failed_transfer(fee_on, inserted):
+def test_ingest_with_fee_rejects_failed_transfer(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(succeeded=False),
@@ -209,7 +215,7 @@ def test_ingest_with_fee_rejects_failed_transfer(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_unreadable_payment_block(fee_on, inserted):
+def test_ingest_with_fee_rejects_unreadable_payment_block(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: None,
@@ -218,7 +224,7 @@ def test_ingest_with_fee_rejects_unreadable_payment_block(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_when_chain_is_unreachable(fee_on, inserted):
+def test_ingest_with_fee_rejects_when_chain_is_unreachable(inserted):
     # No fetcher wired means the proof cannot be checked, so nothing proceeds.
     sid = watcher.ingest_commitment(_com(payment_block=900, payment_tx=0))
     assert sid is None

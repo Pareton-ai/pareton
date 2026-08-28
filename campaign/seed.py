@@ -15,11 +15,13 @@ from uuid import uuid4
 
 import config
 from bench.sampler import parse_sampling_rule
-from campaign.engine import ENGINE_PRESETS, preset as engine_preset
+from campaign.engine import ENGINE_PRESETS
+from campaign.engine import preset as engine_preset
+from campaign.fees import validate_submission_fee
 from campaign.manifest import build_manifest
 from campaign.models import (
-    CustomerSignoff,
     SLA,
+    CustomerSignoff,
     validate_emission_rule,
     validate_priority_metric,
     validate_scoring_rule,
@@ -301,6 +303,12 @@ def seed_synthetic_campaign(
     )
 
     emission = _emission_rule(emission_rule)
+    fee = validate_submission_fee(
+        {
+            "amount_tao": config.SUBMISSION_FEE_TAO,
+            "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
+        }
+    )
 
     if status == "open":
         require_correctness_thresholds(bench)
@@ -337,6 +345,7 @@ def seed_synthetic_campaign(
         sampling_rule=rule,
         scoring_rule=scoring,
         emission_rule=emission,
+        submission_fee=fee,
     )
 
     signoff = CustomerSignoff(
@@ -373,6 +382,7 @@ def seed_synthetic_campaign(
         sampling_rule=rule,
         scoring_rule=scoring,
         emission_rule=emission,
+        submission_fee=fee,
     )
 
     inserted = insert_campaign(manifest)
@@ -459,7 +469,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Insert even if an open campaign already exists (only applies with --status open)",
+        help=(
+            "Insert even if an open campaign already exists "
+            "(only applies with --status open)"
+        ),
     )
     p.add_argument(
         "--gpu-skus",

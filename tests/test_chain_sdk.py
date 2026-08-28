@@ -98,15 +98,18 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
 
     import bittensor as bt
 
-    import config
     import miner.commit_patch as cp
 
     patch = tmp_path / "p.diff"
     patch.write_bytes(b"diff --git a/x b/x\n")
 
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0.0)
     monkeypatch.setattr(
-        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+        cp,
+        "_http_json",
+        lambda *_a, **_k: {
+            "baseline_commit": "a" * 40,
+            "submission_fee": {"amount_tao": "0", "recipient": "5Recipient"},
+        },
     )
     monkeypatch.setattr(
         cp,
@@ -161,7 +164,12 @@ def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
     patch.write_bytes(b"diff --git a/x b/x\n")
 
     monkeypatch.setattr(
-        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+        cp,
+        "_http_json",
+        lambda *_a, **_k: {
+            "baseline_commit": "a" * 40,
+            "submission_fee": {"amount_tao": "0", "recipient": "5Recipient"},
+        },
     )
     monkeypatch.setattr(
         bt,
@@ -200,16 +208,18 @@ def _fee_cli_stubs(monkeypatch, tmp_path, *, execute, submit=None):
 
     import bittensor as bt
 
-    import config
     import miner.commit_patch as cp
 
     patch = tmp_path / "p.diff"
     patch.write_bytes(b"diff --git a/x b/x\n")
 
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0.05)
-    monkeypatch.setattr(config, "PAYMENT_RECIPIENT_ADDRESS", "5Recipient")
     monkeypatch.setattr(
-        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+        cp,
+        "_http_json",
+        lambda *_a, **_k: {
+            "baseline_commit": "a" * 40,
+            "submission_fee": {"amount_tao": "0.05", "recipient": "5Recipient"},
+        },
     )
     monkeypatch.setattr(
         cp,
@@ -257,6 +267,7 @@ def _fee_cli_argv(patch) -> list[str]:
         "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
         "--wallet-name",
         "w",
+        "--yes",
     ]
 
 
@@ -293,6 +304,36 @@ def test_fee_is_paid_before_commit_and_referenced_in_payload(
     assert "✅ Committed" in out
 
 
+def test_fee_prompt_can_cancel_before_payment(monkeypatch, tmp_path, capsys):
+    def _execute(_intent, _wallet, **_k):
+        raise AssertionError("cancelled submission must not transfer a fee")
+
+    cp, patch, order = _fee_cli_stubs(monkeypatch, tmp_path, execute=_execute)
+    monkeypatch.setattr(cp.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    argv = [arg for arg in _fee_cli_argv(patch) if arg != "--yes"]
+    assert cp.main(argv) == 1
+    assert order == []
+    out = capsys.readouterr().out
+    assert "Campaign submission fee: 0.05 TAO" in out
+    assert "Submission cancelled before upload or payment." in out
+
+
+def test_miner_refuses_campaign_without_api_fee(monkeypatch, tmp_path, capsys):
+    def _execute(_intent, _wallet, **_k):
+        raise AssertionError("missing API fee must stop before payment")
+
+    cp, patch, order = _fee_cli_stubs(monkeypatch, tmp_path, execute=_execute)
+    monkeypatch.setattr(
+        cp, "_http_json", lambda *_a, **_k: {"baseline_commit": "a" * 40}
+    )
+
+    assert cp.main(_fee_cli_argv(patch)) == 1
+    assert order == []
+    assert "returned no submission_fee" in capsys.readouterr().err
+
+
 def test_commit_aborts_when_the_fee_transfer_fails(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -319,8 +360,9 @@ def test_commit_aborts_when_payment_cannot_be_referenced(monkeypatch, tmp_path):
 
 
 def test_payment_ref_parses_zero_padded_extrinsic_id():
-    import miner.commit_patch as cp
     from types import SimpleNamespace
+
+    import miner.commit_patch as cp
 
     # SDK formats ids as "{block}-{idx:04d}".
     assert cp._payment_ref(SimpleNamespace(extrinsic_id="900-0002")) == (900, 2)

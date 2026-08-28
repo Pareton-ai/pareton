@@ -107,6 +107,7 @@ def _campaign(**over) -> UUID:
         "denied_paths": ["tests/**"],
         "priority_metric": "throughput",
         "success_threshold": ">=10% at SLA",
+        "submission_fee": {"amount_tao": "0", "recipient": "5Test"},
         "status": "open",
         "bench": {"baseline_engine_image_digest": ENGINE_DIGEST},
         "scoring_rule": {"name": "median_e2e_speedup"},
