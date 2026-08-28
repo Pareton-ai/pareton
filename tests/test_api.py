@@ -564,9 +564,7 @@ def _open_campaign(monkeypatch) -> None:
     )
 
 
-def test_presign_rejects_campaign_disqualified_hotkey(
-    monkeypatch, client: TestClient
-):
+def test_presign_rejects_campaign_disqualified_hotkey(monkeypatch, client: TestClient):
     from api import server
 
     _open_campaign(monkeypatch)
@@ -609,9 +607,7 @@ def test_presign_response_is_typed_in_openapi(monkeypatch, client: TestClient):
     )
     assert resp.status_code == 200
     server.PresignResponse.model_validate(resp.json())
-    operation = client.get("/openapi.json").json()["paths"]["/v1/uploads/patch"][
-        "post"
-    ]
+    operation = client.get("/openapi.json").json()["paths"]["/v1/uploads/patch"]["post"]
     schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
     assert schema["$ref"] == "#/components/schemas/PresignResponse"
     assert "403" in operation["responses"]

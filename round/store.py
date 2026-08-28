@@ -1221,9 +1221,7 @@ def disqualify_campaign_hotkey(
         replacement_submission_id=(
             str(replacement["submission_id"]) if replacement is not None else None
         ),
-        replacement_hotkey=(
-            replacement["hotkey"] if replacement is not None else None
-        ),
+        replacement_hotkey=(replacement["hotkey"] if replacement is not None else None),
     )
 
 

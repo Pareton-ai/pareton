@@ -37,9 +37,7 @@ def _campaign_hotkey_is_disqualified(cur, campaign_id: UUID | str, hotkey: str) 
     return cur.fetchone() is not None
 
 
-def campaign_hotkey_is_disqualified(
-    campaign_id: UUID | str, hotkey: str
-) -> bool:
+def campaign_hotkey_is_disqualified(campaign_id: UUID | str, hotkey: str) -> bool:
     """Whether a manual append-only event permanently excludes this hotkey."""
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
