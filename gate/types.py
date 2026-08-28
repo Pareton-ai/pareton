@@ -50,6 +50,8 @@ class SubmissionState(StrEnum):
     DISQUALIFIED = "disqualified"
     # Terminal. The submission never ran.
     REJECTED = "rejected"
+    # Terminal. Normalized content was already submitted in this campaign.
+    REJECTED_DUPLICATE = "rejected_duplicate"
 
 
 SUBMISSION_STATES: tuple[str, ...] = tuple(s.value for s in SubmissionState)

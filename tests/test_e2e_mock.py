@@ -18,8 +18,10 @@ from campaign.store import (
     insert_profile,
     insert_submission,
     list_events,
+    list_submission_jobs,
 )
 from e2e_db import cleanup_e2e_rows, require_e2e_database_url
+from gate.integrity import patch_fingerprint_bytes
 from worker.pipeline import process_submission
 
 pytestmark = pytest.mark.e2e
@@ -49,7 +51,7 @@ def _patch_for_repo(repo: Path) -> bytes:
         check=True,
         capture_output=True,
     )
-    target.write_text("x = 2\n", encoding="utf-8")
+    target.write_text("x = 2\n# first note\n", encoding="utf-8")
     diff = subprocess.run(
         ["git", "diff"],
         cwd=repo,
@@ -158,6 +160,7 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
         baseline_commit=commit,
         retrieval_url=url,
         commit_block=1,
+        patch_fingerprint=patch_fingerprint_bytes(patch),
     )
     assert sid is not None
 
@@ -201,6 +204,27 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
             jobs = cur.fetchall()
     assert jobs == [("done",)]
     assert "bench_queued" not in events
+    copied_patch = patch.replace(b"first note", b"changed note")
+    copied_hash = "sha256:" + hashlib.sha256(copied_patch).hexdigest()
+    assert (
+        insert_submission(
+            campaign_id=campaign_id,
+            patch_hash=copied_hash,
+            hotkey=row["hotkey"],
+            baseline_commit=commit,
+            retrieval_url=url.replace("e2e.diff", "copy.diff"),
+            commit_block=2,
+            patch_fingerprint=patch_fingerprint_bytes(copied_patch),
+        )
+        is None
+    )
+    copied = get_submission(copied_hash)
+    assert copied is not None
+    assert [e["state"] for e in list_events(copied["id"])] == [
+        "committed",
+        "rejected_duplicate",
+    ]
+    assert list_submission_jobs(copied["id"]) == []
 
 
 def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):

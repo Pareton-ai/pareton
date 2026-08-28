@@ -7,7 +7,12 @@ from functools import partial
 from typing import Any, Callable
 
 import config
-from campaign.store import get_campaign, insert_submission, payment_ref_consumed
+from campaign.store import (
+    get_campaign,
+    get_submission_for_campaign,
+    insert_submission,
+    payment_ref_consumed,
+)
 from chain.commitment import (
     PatchCommitment,
     build_patch_commitments,
@@ -20,12 +25,14 @@ from chain.payment import (
     verify_payment,
 )
 from chain.rpc import fetch_chain_view
+from gate.integrity import check_integrity, patch_fingerprint_bytes
 from observability import events as obs
-from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
+from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_hotkey
 
 logger = logging.getLogger(__name__)
 
 BlockFetcher = Callable[[int], BlockPaymentView | None]
+PatchFetcher = Callable[[str], bytes]
 
 
 def check_fee_proof(
@@ -57,6 +64,7 @@ def ingest_commitment(
     com: PatchCommitment,
     *,
     fetch_block: BlockFetcher | None = None,
+    fetcher: PatchFetcher | None = None,
 ) -> str | None:
     """Insert a submission from a commitment. Returns submission id or None if dupe/invalid."""
     campaign = get_campaign(com.campaign_id)
@@ -73,6 +81,8 @@ def ingest_commitment(
             com.campaign_id,
             campaign.status,
         )
+        return None
+    if get_submission_for_campaign(com.campaign_id, com.patch_hash) is not None:
         return None
     # Reject before insert so a mismatched/junk URL cannot burn the
     # (campaign_id, patch_hash) first-seen dedupe slot.
@@ -107,6 +117,22 @@ def ingest_commitment(
             return None
         payment_block, payment_tx = com.payment_block, com.payment_tx
 
+    integrity = check_integrity(
+        retrieval_url=com.retrieval_url,
+        expected_patch_hash=com.patch_hash,
+        hotkey=com.hotkey,
+        fetcher=fetcher or fetch_patch_bytes,
+    )
+    if not integrity.ok:
+        logger.info(
+            "skip commitment: integrity failed patch_hash=%s reason=%s",
+            com.patch_hash,
+            integrity.reason,
+        )
+        return None
+    patch_bytes = integrity.evidence["patch_bytes"]
+    patch_fingerprint = patch_fingerprint_bytes(patch_bytes)
+
     sid = insert_submission(
         campaign_id=com.campaign_id,
         patch_hash=com.patch_hash,
@@ -116,11 +142,12 @@ def ingest_commitment(
         commit_block=com.commit_block,
         payment_block=payment_block,
         payment_tx=payment_tx,
+        patch_fingerprint=patch_fingerprint,
     )
     if sid is None:
         logger.info(
-            "skip commitment: duplicate patch_hash=%s campaign=%s",
-            com.patch_hash,
+            "skip commitment: duplicate fingerprint=%s campaign=%s",
+            patch_fingerprint,
             com.campaign_id,
         )
         return None

@@ -485,6 +485,7 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
         ("built", V1_CACHE_CONTROL_EXPECTED),
         ("scored", V1_CACHE_CONTROL_EXPECTED),
         ("rejected", V1_CACHE_CONTROL_EXPECTED),
+        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
     ],
 )
 def test_submission_detail_cache_control_by_state(
@@ -511,6 +512,7 @@ def test_submission_detail_cache_control_by_state(
         ("built", V1_CACHE_CONTROL_EXPECTED),
         ("scored", V1_CACHE_CONTROL_EXPECTED),
         ("rejected", V1_CACHE_CONTROL_EXPECTED),
+        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
     ],
 )
 def test_build_log_cache_control_by_state(

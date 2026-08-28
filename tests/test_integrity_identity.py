@@ -12,7 +12,7 @@ from uuid import uuid4
 from campaign.manifest import build_manifest
 from campaign.models import SLA
 from gate.identity import check_identity
-from gate.integrity import check_integrity, hash_patch_bytes
+from gate.integrity import check_integrity, hash_patch_bytes, patch_fingerprint_bytes
 from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
 import config
 
@@ -163,3 +163,76 @@ def test_integrity_accepts_matching_hotkey(monkeypatch):
         fetcher=lambda _u: data,
     )
     assert res.ok
+
+
+def test_patch_fingerprint_strips_comment_styles_and_blank_lines():
+    commented = b"alpha\n# one\n// two\n/*\nblock\n*/\n\n\nomega\n"
+    assert patch_fingerprint_bytes(commented) == patch_fingerprint_bytes(
+        b"alpha\nomega\n"
+    )
+
+
+def test_patch_fingerprint_strips_trailing_whitespace():
+    assert patch_fingerprint_bytes(b"alpha   \nomega\t\n") == patch_fingerprint_bytes(
+        b"alpha\nomega\n"
+    )
+
+
+def test_patch_fingerprint_strips_comments_from_git_hunk_content():
+    first = b"""diff --git a/vllm/x.py b/vllm/x.py
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1,2 +1,2 @@
+-# old note
++# first note
+ x = 1
+"""
+    second = first.replace(b"first note", b"changed note")
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (b"+x = 1  # first\n", b"+x = 1  # changed\n"),
+        (b"+x = 1; // first\n", b"+x = 1; // changed\n"),
+        (b"+x = /* first */ 1;\n", b"+x = /* changed */ 1;\n"),
+    ],
+)
+def test_patch_fingerprint_strips_inline_comments(first, second):
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (b'+value = "# first"\n', b'+value = "# changed"\n'),
+        (b'+url = "https://one.example"\n', b'+url = "https://two.example"\n'),
+        (b"+value = '/* first */'\n", b"+value = '/* changed */'\n"),
+        (b"+value = `// first`\n", b"+value = `// changed`\n"),
+    ],
+)
+def test_patch_fingerprint_keeps_comment_markers_in_strings(first, second):
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_keeps_code_changes():
+    first = b"+result = original\n"
+    second = b"+renamed = original\n"
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_keeps_code_after_block_comment():
+    first = b"/* note */ result = original\n"
+    second = b"/* note */ renamed = original\n"
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_documents_python_docstring_edge_case():
+    with_hash_line = b'"""\n# this is docstring content\n"""\n'
+    without_hash_line = b'"""\n"""\n'
+    assert patch_fingerprint_bytes(with_hash_line) == patch_fingerprint_bytes(
+        without_hash_line
+    )
