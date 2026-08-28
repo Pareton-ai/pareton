@@ -43,11 +43,11 @@ from round.store import (
     VOID_ROUND_TIMEOUT,
     VOID_TRACE_UNAVAILABLE,
     complete_round,
+    defer_round_for_capacity,
     get_leader,
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
-    defer_round_for_capacity,
     void_round,
 )
 from worker.phase_reporter import PhaseReporter
@@ -167,6 +167,7 @@ def materialize_round_trace(
                     "n_rows": receipt.get("n_rows"),
                     "n_prompts": receipt.get("n_prompts"),
                     "max_tokens": receipt.get("max_tokens"),
+                    "ignore_eos": receipt.get("ignore_eos"),
                     "algo_version": receipt.get("algo_version"),
                     "seed_block_offset": receipt.get("seed_block_offset"),
                 }

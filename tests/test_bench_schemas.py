@@ -78,6 +78,16 @@ def test_sample_trace_valid_and_sha_matches_request():
     assert req["workload_trace"]["sha256"] == digest
 
 
+def test_trace_sampling_accepts_only_boolean_ignore_eos():
+    trace_obj = json.loads(SAMPLE_TRACE.read_text(encoding="utf-8"))
+    trace_obj["requests"][0]["sampling"]["ignore_eos"] = True
+    trace = validate_workload_trace_dict(trace_obj)
+    assert trace.requests[0].sampling.ignore_eos is True
+    trace_obj["requests"][0]["sampling"]["ignore_eos"] = "true"
+    with pytest.raises(ValueError, match="ignore_eos must be a boolean"):
+        validate_workload_trace_dict(trace_obj)
+
+
 def test_synthetic_v0_trace_validates():
     raw = json.loads(SYNTHETIC_TRACE.read_text(encoding="utf-8"))
     assert all("messages" not in r for r in raw["requests"])

@@ -9,9 +9,11 @@ import pytest
 
 from bench.correctness import (
     BASELINE_INDEX,
+    BaselineDegeneracyReference,
     CapturedOutput,
     PendingCorrectness,
     PromptCase,
+    build_baseline_degeneracy_references,
     capture_outputs,
     distinct_ngram_ratio,
     extract_output_logprobs,
@@ -31,9 +33,11 @@ from bench.mock_engine import (
     MockEngine,
     MockEngineConfig,
     build_completion_response,
+    mock_tokenize,
 )
 from bench.schemas import CorrectnessConfig, CorrectnessThresholds
 from bench.score import PromptTiming
+from bench.sla_bench import NaturalStopReference
 from bench.validate import RequestValidationError, sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -771,6 +775,109 @@ def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
     assert line["distinct_ngram_ratio"] < 0.15
     assert line["longest_repeated_substring_ratio"] > 0.90
     assert "16-gram" in line["degenerate"]
+
+
+def _baseline_reference(natural_text: str, forced_text: str):
+    return {
+        "r1": BaselineDegeneracyReference(
+            natural_stop_tokens=len(mock_tokenize(natural_text)),
+            full_distinct_ngram_ratio=distinct_ngram_ratio(forced_text),
+            full_repeated_span_ratio=longest_repeated_substring_ratio(forced_text),
+        )
+    }
+
+
+def test_forced_baseline_padding_is_not_disqualified(tmp_path: Path):
+    """Expected repetition after the trusted baseline stop is baseline-relative."""
+    forced = PROSE_TEXT + LOOP_TEXT
+    outputs = [_captured("r1", "Hello world", forced, tokens=240)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(PROSE_TEXT, forced),
+        )
+    assert report.verdict == "pass"
+
+
+def test_baseline_relative_bounds_cover_all_measured_repetitions():
+    first = PROSE_TEXT + REPETITIVE_LIST_TEXT
+    second = PROSE_TEXT + LOOP_TEXT
+    references = build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", first)],
+        {
+            "r1": NaturalStopReference(
+                request_id="r1",
+                completion_tokens=len(mock_tokenize(PROSE_TEXT)),
+                finish_reason="stop",
+                text=PROSE_TEXT,
+            )
+        },
+        {"r1": (first, second)},
+    )
+    reference = references["r1"]
+    assert reference.full_distinct_ngram_ratio == min(
+        distinct_ngram_ratio(first), distinct_ngram_ratio(second)
+    )
+    assert reference.full_repeated_span_ratio == max(
+        longest_repeated_substring_ratio(first),
+        longest_repeated_substring_ratio(second),
+    )
+
+
+def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
+    """The candidate cannot move the inspected boundary by claiming an early stop."""
+    baseline_forced = PROSE_TEXT + LOOP_TEXT
+    candidate = LOOP_TEXT + baseline_forced
+    outputs = [_captured("r1", "Hello world", candidate, tokens=440)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(PROSE_TEXT, baseline_forced),
+        )
+    assert report.verdict == "fail_correctness"
+    assert "degenerate" in (report.reason or "")
+
+
+def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Path):
+    """The full output remains watched without imposing one absolute tail shape."""
+    baseline_forced = PROSE_TEXT + REPETITIVE_LIST_TEXT
+    candidate = PROSE_TEXT + LOOP_TEXT
+    outputs = [_captured("r1", "Hello world", candidate, tokens=240)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(PROSE_TEXT, baseline_forced),
+        )
+    assert report.verdict == "fail_correctness"
+    assert "baseline" in (report.reason or "")
+
+
+def test_baseline_relative_loop_check_is_not_tied_to_one_output_budget(
+    tmp_path: Path,
+):
+    natural = PROSE_TEXT * 2
+    period = " ".join(f"symbol_{i:03d}" for i in range(137))
+    baseline_forced = natural + (" " + period) * 3
+    candidate = natural + (" " + period) * 6
+    outputs = [_captured("r1", "Hello world", candidate, tokens=900)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(natural, baseline_forced),
+        )
+    assert report.verdict == "fail_correctness"
 
 
 # ---------------------------------------------------------------------------

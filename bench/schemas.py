@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from bench.score import PromptTiming
 
-
 # ---------------------------------------------------------------------------
 # Workload trace
 # ---------------------------------------------------------------------------
@@ -17,10 +16,18 @@ from bench.score import PromptTiming
 class TraceSampling:
     temperature: float
     top_p: float
+    ignore_eos: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceSampling:
-        return cls(temperature=float(d["temperature"]), top_p=float(d["top_p"]))
+        ignore_eos = d.get("ignore_eos", False)
+        if not isinstance(ignore_eos, bool):
+            raise ValueError("sampling.ignore_eos must be a boolean")
+        return cls(
+            temperature=float(d["temperature"]),
+            top_p=float(d["top_p"]),
+            ignore_eos=ignore_eos,
+        )
 
 
 @dataclass

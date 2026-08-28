@@ -15,17 +15,22 @@ sensibly passes.
 
 Absolute plausibility is not monotone in output quality (PAR-108): a repeat
 loop is the most predictable text there is, so it scores *better* than a real
-answer on every absolute bar. Two mandatory harness checks close that exploit:
+answer on every absolute bar. Two mandatory harness checks identify it:
 
 * distinct character n-grams separate short-period loops from real answers;
 * the longest repeated span catches a miner that scales the loop period with
   the output budget.
 
 They are exploit checks, not competition parameters, and therefore do not
-live in the campaign manifest or bench request. One degenerate answer on
-either check disqualifies the entry. The manifest-pinned
-``max_mean_logprob_drop`` separately catches a candidate that degrades the
-model and still clears the absolute floor.
+live in the campaign manifest or bench request. For an ordinary completion,
+the checks grade the whole output. For a forced-length completion, the pinned
+baseline is replayed once with EOS handling restored. Absolute checks grade
+the candidate only through that trusted, prompt-specific stop boundary, while
+the complete forced output must not be more degenerate than the baseline's
+complete output. Candidate-reported stop positions are never used.
+
+The manifest-pinned ``max_mean_logprob_drop`` separately catches a candidate
+that degrades the model and still clears the absolute floor.
 
 When the relative bar is enabled, the baseline is queued under
 ``BASELINE_INDEX`` and graded first so that reference exists. A baseline that
@@ -51,13 +56,18 @@ import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bench.http import post_completion
 from bench.lifecycle import EngineError
 from bench.mock_engine import response_shape_fingerprint
 from bench.schemas import CorrectnessConfig, CorrectnessReport, TraceRequest
 from bench.validate import RequestValidationError, load_workload_trace
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from bench.sla_bench import NaturalStopReference
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +78,9 @@ SHAPE_EVIDENCE_FILENAME = "completion_response_shape.json"
 BASELINE_INDEX = -1
 
 # N-gram width for the repetition bar, in characters, and the small length
-# below which neither text bar applies. The floor exempts genuinely short
-# answers but still catches compact loops that can satisfy short workloads.
+# below which neither text bar applies. These are harness policy, not campaign
+# parameters. The baseline stop boundary is prompt-specific, so none of them
+# encode or assume a particular output-token budget.
 DEGENERACY_NGRAM = 16
 DEGENERACY_MIN_CHARS = 64
 DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
@@ -487,6 +498,50 @@ def degeneracy_reason(
     return None
 
 
+def relative_degeneracy_reason(
+    text: str,
+    *,
+    baseline_distinct_ratio: float,
+    baseline_repeated_span_ratio: float,
+    distinct_ratio: float | None = None,
+    repeated_span_ratio: float | None = None,
+) -> str | None:
+    """Why a forced output is more degenerate than the same baseline output.
+
+    The absolute bars still define the suspicious region. The baseline only
+    prevents expected forced-length padding from becoming a false positive;
+    it does not make ordinary non-degenerate text compete on tiny metric
+    differences.
+    """
+    if len(text) < DEGENERACY_MIN_CHARS:
+        return None
+    distinct = (
+        distinct_ratio if distinct_ratio is not None else distinct_ngram_ratio(text)
+    )
+    if (
+        distinct < DEGENERACY_MIN_DISTINCT_NGRAM_RATIO
+        and distinct < baseline_distinct_ratio
+    ):
+        return (
+            f"distinct {DEGENERACY_NGRAM}-gram ratio {distinct:.3f} below "
+            f"baseline {baseline_distinct_ratio:.3f} over {len(text)} chars"
+        )
+    repeated = (
+        repeated_span_ratio
+        if repeated_span_ratio is not None
+        else longest_repeated_substring_ratio(text)
+    )
+    if (
+        repeated >= DEGENERACY_MAX_REPEATED_SPAN_RATIO
+        and repeated > baseline_repeated_span_ratio
+    ):
+        return (
+            f"longest repeated span ratio {repeated:.3f} above baseline "
+            f"{baseline_repeated_span_ratio:.3f} over {len(text)} chars"
+        )
+    return None
+
+
 def quantile_low(values: list[float], quantile: float) -> float:
     """The k-th lowest of ``values``, k = ceil(``quantile`` * len(values)).
 
@@ -508,6 +563,15 @@ class CapturedOutput:
     prompt: str
     output_text: str
     completion_tokens: int
+
+
+@dataclass(frozen=True)
+class BaselineDegeneracyReference:
+    """Trusted prompt-specific bounds for forced-length loop checks."""
+
+    natural_stop_tokens: int
+    full_distinct_ngram_ratio: float
+    full_repeated_span_ratio: float
 
 
 @dataclass
@@ -557,17 +621,64 @@ def capture_outputs(
     return captured
 
 
+def build_baseline_degeneracy_references(
+    outputs: list[CapturedOutput],
+    natural_stops: Mapping[str, NaturalStopReference],
+    output_samples: Mapping[str, tuple[str, ...]] | None = None,
+) -> dict[str, BaselineDegeneracyReference]:
+    """Build prompt-specific bounds from every measured baseline repetition."""
+    references: dict[str, BaselineDegeneracyReference] = {}
+    for captured in outputs:
+        stop = natural_stops.get(captured.request_id)
+        if stop is None:
+            raise EngineError(
+                "baseline natural-stop reference missing correctness request "
+                f"{captured.request_id!r}"
+            )
+        if stop.completion_tokens < 1 or not stop.text:
+            raise EngineError(
+                "baseline natural-stop reference is empty for correctness request "
+                f"{captured.request_id!r}"
+            )
+        natural_reason = degeneracy_reason(stop.text)
+        if natural_reason is not None:
+            raise EngineError(
+                f"baseline natural output {captured.request_id!r} is degenerate: "
+                f"{natural_reason}"
+            )
+        samples = (
+            (captured.output_text,)
+            if output_samples is None
+            else output_samples.get(captured.request_id, ())
+        )
+        if not samples:
+            raise EngineError(
+                "baseline output samples missing correctness request "
+                f"{captured.request_id!r}"
+            )
+        references[captured.request_id] = BaselineDegeneracyReference(
+            natural_stop_tokens=stop.completion_tokens,
+            full_distinct_ngram_ratio=min(
+                distinct_ngram_ratio(text) for text in samples
+            ),
+            full_repeated_span_ratio=max(
+                longest_repeated_substring_ratio(text) for text in samples
+            ),
+        )
+    return references
+
+
 def score_captured_output(
     scorer_url: str,
     captured: CapturedOutput,
     *,
     request_timeout_s: float = 300.0,
-) -> tuple[list[float], int]:
-    """Logprobs the scorer assigns to the candidate's own forced tokens.
+) -> tuple[list[_PositionScore], int]:
+    """Scored token positions in the candidate's forced output.
 
-    Returns those logprobs and the number of token positions the scorer saw in
-    the forced span, scored or not. Both numbers come from the scorer, so
-    neither is something the candidate engine can report about itself.
+    Returns the scorer's token-aligned positions and the size of the forced
+    span. Both come from the scorer, so the candidate cannot choose where the
+    trusted baseline stop boundary lands in its own text.
     """
     full = captured.prompt + captured.output_text
     resp = post_completion(
@@ -591,7 +702,7 @@ def score_captured_output(
     # dropped when the scorer returned no logprob for it, so first..last spans
     # everything the scorer saw of this output.
     span = scores[-1].position - scores[0].position + 1
-    return [s.logprob for s in scores], span
+    return scores, span
 
 
 def grade_candidate(
@@ -602,6 +713,7 @@ def grade_candidate(
     evidence_path: Path,
     request_timeout_s: float = 300.0,
     baseline_mean_logprob: float | None = None,
+    baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
 ) -> CorrectnessReport:
     """Teacher-force one engine's captured outputs through the scorer.
 
@@ -630,18 +742,57 @@ def grade_candidate(
             if not captured.output_text:
                 empty.append(captured.request_id)
                 continue
-            scored, span = score_captured_output(
+            positions, span = score_captured_output(
                 scorer_url, captured, request_timeout_s=request_timeout_s
             )
+            scored = [position.logprob for position in positions]
             logprobs.extend(scored)
             span_positions += span
             distinct_ratio = distinct_ngram_ratio(captured.output_text)
             repeated_span_ratio = longest_repeated_substring_ratio(captured.output_text)
-            this_degenerate = degeneracy_reason(
-                captured.output_text,
-                distinct_ratio=distinct_ratio,
-                repeated_span_ratio=repeated_span_ratio,
+            reference = (
+                None
+                if baseline_degeneracy is None
+                else baseline_degeneracy.get(captured.request_id)
             )
+            if baseline_degeneracy is not None and reference is None:
+                raise EngineError(
+                    "baseline degeneracy reference missing correctness request "
+                    f"{captured.request_id!r}"
+                )
+            if reference is None:
+                prefix_text = captured.output_text
+                prefix_distinct_ratio = distinct_ratio
+                prefix_repeated_span_ratio = repeated_span_ratio
+                this_degenerate = degeneracy_reason(
+                    prefix_text,
+                    distinct_ratio=prefix_distinct_ratio,
+                    repeated_span_ratio=prefix_repeated_span_ratio,
+                )
+                relative_degenerate = None
+            else:
+                prefix_text = "".join(
+                    position.token
+                    for position in positions[: reference.natural_stop_tokens]
+                )
+                prefix_distinct_ratio = distinct_ngram_ratio(prefix_text)
+                prefix_repeated_span_ratio = longest_repeated_substring_ratio(
+                    prefix_text
+                )
+                this_degenerate = degeneracy_reason(
+                    prefix_text,
+                    distinct_ratio=prefix_distinct_ratio,
+                    repeated_span_ratio=prefix_repeated_span_ratio,
+                )
+                relative_degenerate = relative_degeneracy_reason(
+                    captured.output_text,
+                    baseline_distinct_ratio=reference.full_distinct_ngram_ratio,
+                    baseline_repeated_span_ratio=reference.full_repeated_span_ratio,
+                    distinct_ratio=distinct_ratio,
+                    repeated_span_ratio=repeated_span_ratio,
+                )
+                if this_degenerate is None:
+                    this_degenerate = relative_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
@@ -653,8 +804,27 @@ def grade_candidate(
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),
                         "min_logprob": min(scored) if scored else None,
+                        "natural_stop_tokens": (
+                            None if reference is None else reference.natural_stop_tokens
+                        ),
+                        "prefix_chars": len(prefix_text),
+                        "prefix_distinct_ngram_ratio": prefix_distinct_ratio,
+                        "prefix_longest_repeated_substring_ratio": (
+                            prefix_repeated_span_ratio
+                        ),
                         "distinct_ngram_ratio": distinct_ratio,
                         "longest_repeated_substring_ratio": repeated_span_ratio,
+                        "baseline_distinct_ngram_ratio": (
+                            None
+                            if reference is None
+                            else reference.full_distinct_ngram_ratio
+                        ),
+                        "baseline_longest_repeated_substring_ratio": (
+                            None
+                            if reference is None
+                            else reference.full_repeated_span_ratio
+                        ),
+                        "relative_degenerate": relative_degenerate,
                         "degenerate": this_degenerate,
                     },
                     sort_keys=True,
@@ -766,6 +936,7 @@ def grade_all(
     cfg: CorrectnessConfig,
     evidence_dir: Path,
     request_timeout_s: float = 300.0,
+    baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
 ) -> dict[int, CorrectnessReport]:
     """Grade everything queued against one already-running scorer.
 
@@ -796,6 +967,7 @@ def grade_all(
                 evidence_path=evidence_dir / f"{item.evidence_name}.jsonl",
                 request_timeout_s=request_timeout_s,
                 baseline_mean_logprob=None if is_baseline else baseline_mean,
+                baseline_degeneracy=baseline_degeneracy,
             )
         except EngineError as exc:
             # The text being forced through the scorer is whatever an engine
