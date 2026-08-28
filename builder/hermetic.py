@@ -196,6 +196,11 @@ def dockerfile_for_patch(
     if skip_apply:
         # Trusted baseline build: warms the cache for miner builds.
         mount_opts = f"id={cache_id},target=/root/.ccache,sharing=locked"
+        # Only this branch writes, so the bound is set here rather than as an
+        # ENV every miner image would carry. The mount id is keyed on
+        # baseline_commit alone, so two CUDA archs on one commit share a dir
+        # that ccache 4.5.1 caps at 5G by default.
+        run_parts.insert(0, "export CCACHE_MAXSIZE=20G")
     else:
         # Miner-patched Python runs during the build (setup.py executes
         # vllm/envs.py), so a writable shared cache would let one submission
