@@ -295,6 +295,7 @@ def test_fee_is_paid_before_commit_and_referenced_in_payload(
     assert cp.main(_fee_cli_argv(patch)) == 0
     assert order == ["pay", "commit"]
     assert paid[0].dest_ss58 == "5Recipient"
+    assert paid[0].amount_tao.rao == 50_000_000
     # Last encode is the committed one; the earlier call is the size pre-flight.
     assert committed[-1].endswith("|900|2")
     out = capsys.readouterr().out
