@@ -15,18 +15,22 @@ sensibly passes.
 
 Absolute plausibility is not monotone in output quality (PAR-108): a repeat
 loop is the most predictable text there is, so it scores *better* than a real
-answer on every absolute bar. Two additions close the gap from both sides:
+answer on every absolute bar. Two mandatory harness checks close that exploit:
 
-* ``min_distinct_ngram_ratio`` reads the captured text rather than its
-  logprobs, where a loop and a real answer differ. One degenerate answer
-  disqualifies the entry.
-* ``max_mean_logprob_drop`` measures the candidate against the baseline's own
-  mean logprob, catching the opposite move: a candidate that degrades the
-  model and still clears the absolute floor.
+* distinct character n-grams separate short-period loops from real answers;
+* the longest repeated span catches a miner that scales the loop period with
+  the output budget.
 
-The baseline is queued under ``BASELINE_INDEX`` and graded first so that
-reference exists. A baseline that cannot be graded fails the round, never a
-candidate.
+They are exploit checks, not competition parameters, and therefore do not
+live in the campaign manifest or bench request. One degenerate answer on
+either check disqualifies the entry. The manifest-pinned
+``max_mean_logprob_drop`` separately catches a candidate that degrades the
+model and still clears the absolute floor.
+
+When the relative bar is enabled, the baseline is queued under
+``BASELINE_INDEX`` and graded first so that reference exists. A baseline that
+cannot be graded fails the round, never a candidate. Campaigns without that
+bar retain the pre-PAR-108 grading path.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -63,12 +67,13 @@ SHAPE_EVIDENCE_FILENAME = "completion_response_shape.json"
 # reference. No candidate index is negative.
 BASELINE_INDEX = -1
 
-# N-gram width for the repetition bar, in characters, and the length below
-# which the bar does not apply: a short answer has nothing to repeat. An
-# output that clears the round's token tolerance is always far longer than
-# this, so the guard cannot be used to duck the bar.
+# N-gram width for the repetition bar, in characters, and the small length
+# below which neither text bar applies. The floor exempts genuinely short
+# answers but still catches compact loops that can satisfy short workloads.
 DEGENERACY_NGRAM = 16
-DEGENERACY_MIN_CHARS = 200
+DEGENERACY_MIN_CHARS = 64
+DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
+DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
 
 
 @dataclass(frozen=True)
@@ -376,23 +381,108 @@ def distinct_ngram_ratio(text: str, n: int = DEGENERACY_NGRAM) -> float:
     return len(set(grams)) / len(grams)
 
 
+def longest_repeated_substring_ratio(text: str) -> float:
+    """Length of the longest repeated character span, divided by text length.
+
+    A suffix automaton finds the longest substring occurring at least twice in
+    linear time. Overlapping occurrences count: a periodic output has a ratio
+    near 1.0 however long its repeated unit is, while honest repeated
+    boilerplate occupies only the boilerplate's share of the answer.
+    """
+    if not text:
+        return 0.0
+
+    transitions: list[dict[str, int]] = [{}]
+    links = [-1]
+    lengths = [0]
+    occurrences = [0]
+    last = 0
+
+    for char in text:
+        current = len(transitions)
+        transitions.append({})
+        links.append(0)
+        lengths.append(lengths[last] + 1)
+        occurrences.append(1)
+
+        state = last
+        while state >= 0 and char not in transitions[state]:
+            transitions[state][char] = current
+            state = links[state]
+
+        if state < 0:
+            links[current] = 0
+        else:
+            target = transitions[state][char]
+            if lengths[state] + 1 == lengths[target]:
+                links[current] = target
+            else:
+                clone = len(transitions)
+                transitions.append(dict(transitions[target]))
+                links.append(links[target])
+                lengths.append(lengths[state] + 1)
+                occurrences.append(0)
+                while state >= 0 and transitions[state].get(char) == target:
+                    transitions[state][char] = clone
+                    state = links[state]
+                links[target] = clone
+                links[current] = clone
+        last = current
+
+    length_counts = [0] * (len(text) + 1)
+    for length in lengths:
+        length_counts[length] += 1
+    for length in range(1, len(length_counts)):
+        length_counts[length] += length_counts[length - 1]
+    states_by_length = [0] * len(transitions)
+    for state in range(len(transitions) - 1, -1, -1):
+        length = lengths[state]
+        length_counts[length] -= 1
+        states_by_length[length_counts[length]] = state
+    for state in reversed(states_by_length):
+        if state == 0:
+            continue
+        occurrences[links[state]] += occurrences[state]
+    longest = max(
+        (
+            lengths[state]
+            for state in range(1, len(transitions))
+            if occurrences[state] >= 2
+        ),
+        default=0,
+    )
+    return longest / len(text)
+
+
 def degeneracy_reason(
     text: str,
     *,
-    min_distinct_ngram_ratio: float | None,
+    distinct_ratio: float | None = None,
+    repeated_span_ratio: float | None = None,
 ) -> str | None:
     """Why this output reads as a repeat loop, or None if it does not.
 
-    Optional: a campaign whose manifest predates PAR-108 does not carry the
-    bar and is graded on the absolute logprob bars alone.
+    The thresholds are harness invariants rather than campaign policy. A miner
+    cannot opt out through a legacy manifest or tune a competition around the
+    exact exploit boundary.
     """
-    if min_distinct_ngram_ratio is None or len(text) < DEGENERACY_MIN_CHARS:
+    if len(text) < DEGENERACY_MIN_CHARS:
         return None
-    ratio = distinct_ngram_ratio(text)
-    if ratio < min_distinct_ngram_ratio:
+    ratio = distinct_ratio if distinct_ratio is not None else distinct_ngram_ratio(text)
+    if ratio < DEGENERACY_MIN_DISTINCT_NGRAM_RATIO:
         return (
-            f"distinct {DEGENERACY_NGRAM}-gram ratio {ratio:.3f} below "
-            f"{min_distinct_ngram_ratio} over {len(text)} chars"
+            f"distinct {DEGENERACY_NGRAM}-gram ratio {ratio:.3f} below harness floor "
+            f"over {len(text)} chars"
+        )
+    ratio = (
+        repeated_span_ratio
+        if repeated_span_ratio is not None
+        else longest_repeated_substring_ratio(text)
+    )
+    if ratio >= DEGENERACY_MAX_REPEATED_SPAN_RATIO:
+        return (
+            f"longest repeated span ratio {ratio:.3f} at or above harness ceiling "
+            f"over {len(text)} chars"
         )
     return None
 
@@ -545,9 +635,12 @@ def grade_candidate(
             )
             logprobs.extend(scored)
             span_positions += span
+            distinct_ratio = distinct_ngram_ratio(captured.output_text)
+            repeated_span_ratio = longest_repeated_substring_ratio(captured.output_text)
             this_degenerate = degeneracy_reason(
                 captured.output_text,
-                min_distinct_ngram_ratio=thr.min_distinct_ngram_ratio,
+                distinct_ratio=distinct_ratio,
+                repeated_span_ratio=repeated_span_ratio,
             )
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
@@ -560,9 +653,8 @@ def grade_candidate(
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),
                         "min_logprob": min(scored) if scored else None,
-                        "distinct_ngram_ratio": distinct_ngram_ratio(
-                            captured.output_text
-                        ),
+                        "distinct_ngram_ratio": distinct_ratio,
+                        "longest_repeated_substring_ratio": repeated_span_ratio,
                         "degenerate": this_degenerate,
                     },
                     sort_keys=True,

@@ -174,6 +174,20 @@ def test_invalid_request_token_quantile_out_of_range():
         validate_bench_request_dict(raw)
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("max_mean_logprob_drop", 0.0),
+        ("max_mean_logprob_drop", float("nan")),
+    ],
+)
+def test_invalid_request_relative_logprob_threshold(key: str, value: float):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["thresholds"][key] = value
+    with pytest.raises(RequestValidationError, match=key):
+        validate_bench_request_dict(raw)
+
+
 def test_invalid_request_zero_num_prompts():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["correctness"]["num_prompts"] = 0

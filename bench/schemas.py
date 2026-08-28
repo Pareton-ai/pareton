@@ -189,27 +189,20 @@ class CorrectnessThresholds:
     positions), not to the outright minimum (PAR-94). A quantile of 0 is the
     plain minimum.
 
-    The last two close what absolute bars cannot see (PAR-108):
-
-    * ``min_distinct_ngram_ratio`` reads the captured text, because a repeat
-      loop is the most predictable text there is and scores *above* a real
-      answer on every bar above. It counts distinct character n-grams, so no
-      choice of loop period or whitespace evades it.
-    * ``max_mean_logprob_drop`` measures the candidate against the baseline's
+    ``max_mean_logprob_drop`` measures the candidate against the baseline's
       own mean logprob, same scorer and same prompts, catching the opposite
       move: a candidate that degrades the model and clears the floor anyway.
 
-    Both are ``None`` when the campaign's manifest does not carry them, so a
-    campaign seeded before PAR-108 behaves as it did and picking up the bars
-    means re-seeding. A bar outside the manifest is one that could move under
-    a live campaign without the manifest hash changing.
+    Repeat-loop detection is deliberately absent here. It is a mandatory
+    harness exploit check rather than miner-visible competition policy.
+    ``max_mean_logprob_drop`` remains ``None`` when a legacy campaign does not
+    carry it, so enabling the relative quality bar still means re-seeding.
     """
 
     min_mean_logprob: float
     min_token_logprob: float
     min_token_quantile: float
     min_coverage_ratio: float
-    min_distinct_ngram_ratio: float | None = None
     max_mean_logprob_drop: float | None = None
 
     @classmethod
@@ -223,7 +216,6 @@ class CorrectnessThresholds:
             min_token_logprob=float(d["min_token_logprob"]),
             min_token_quantile=float(d["min_token_quantile"]),
             min_coverage_ratio=float(d["min_coverage_ratio"]),
-            min_distinct_ngram_ratio=optional("min_distinct_ngram_ratio"),
             max_mean_logprob_drop=optional("max_mean_logprob_drop"),
         )
 

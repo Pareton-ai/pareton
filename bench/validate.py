@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,12 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         raise RequestValidationError(
             "correctness.thresholds.min_token_quantile must be in [0, 1)"
         )
+    if thr.get("max_mean_logprob_drop") is not None:
+        max_drop = float(thr["max_mean_logprob_drop"])
+        if not math.isfinite(max_drop) or max_drop <= 0.0:
+            raise RequestValidationError(
+                "correctness.thresholds.max_mean_logprob_drop must be > 0"
+            )
 
     sla = d["sla_bench"]
     if not isinstance(sla, dict):

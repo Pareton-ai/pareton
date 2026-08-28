@@ -503,6 +503,7 @@ def run_round(
     runs: list[_CandidateRun] = []
     pending: list[PendingCorrectness] = []
     correctness: dict[int, CorrectnessReport] = {}
+    relative_correctness = req.correctness.thresholds.max_mean_logprob_drop is not None
 
     for start in plan:
         if start.kind in ("baseline", "drift"):
@@ -523,17 +524,19 @@ def run_round(
             if start.kind == "baseline":
                 baseline = replay
                 # The relative correctness bar needs the baseline's own
-                # outputs through the same scorer (PAR-108).
-                pending.append(
-                    PendingCorrectness(
-                        candidate_index=BASELINE_INDEX,
-                        outputs=capture_outputs(
-                            prompts,
-                            timings=replay.result.timings,
-                            outputs=replay.outputs,
-                        ),
+                # outputs through the same scorer (PAR-108). An older campaign
+                # without that bar keeps its original candidate-only path.
+                if relative_correctness:
+                    pending.append(
+                        PendingCorrectness(
+                            candidate_index=BASELINE_INDEX,
+                            outputs=capture_outputs(
+                                prompts,
+                                timings=replay.result.timings,
+                                outputs=replay.outputs,
+                            ),
+                        )
                     )
-                )
             else:
                 drift = replay
 
@@ -577,9 +580,9 @@ def run_round(
             )
 
         elif start.kind == "scorer":
-            # The baseline is always queued, so nothing to grade means every
-            # candidate crashed or failed to start.
-            if not any(item.candidate_index != BASELINE_INDEX for item in pending):
+            if not pending or not any(
+                item.candidate_index != BASELINE_INDEX for item in pending
+            ):
                 continue
             try:
                 with provider.start(start, phase=BenchPhase.CORRECTNESS) as url:
@@ -594,7 +597,9 @@ def run_round(
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
             baseline_report = correctness.pop(BASELINE_INDEX, None)
-            if baseline_report is None or baseline_report.verdict != "pass":
+            if relative_correctness and (
+                baseline_report is None or baseline_report.verdict != "pass"
+            ):
                 # The baseline runs the campaign's own pinned image, so a
                 # baseline it cannot grade is the harness's fault: requeue
                 # the round rather than disqualify anyone.

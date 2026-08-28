@@ -17,6 +17,7 @@ from bench.correctness import (
     extract_output_logprobs,
     grade_all,
     grade_candidate,
+    longest_repeated_substring_ratio,
     post_completion,
     probe_logprob_capability,
     quantile_low,
@@ -46,13 +47,12 @@ def _cfg(
     quantile: float = 0.0,
     coverage: float = 0.5,
     num_prompts: int = 2,
-    min_distinct_ngram: float | None = None,
     max_drop: float | None = None,
 ) -> CorrectnessConfig:
     """Default quantile is 0, so existing cases still gate on the plain min.
 
-    The PAR-108 bars default to None, matching a campaign whose manifest
-    predates them: cases that want them pass them explicitly.
+    The relative quality bar defaults to None, matching a campaign whose
+    manifest predates it. Repeat-loop checks are mandatory harness policy.
     """
     return CorrectnessConfig(
         num_prompts=num_prompts,
@@ -61,7 +61,6 @@ def _cfg(
             min_token_logprob=min_token,
             min_token_quantile=quantile,
             min_coverage_ratio=coverage,
-            min_distinct_ngram_ratio=min_distinct_ngram,
             max_mean_logprob_drop=max_drop,
         ),
     )
@@ -86,6 +85,9 @@ PROSE_TEXT = (
     "before any container starts, so a bad pin costs nothing but a log line "
     "and an early exit rather than a wasted round on rented hardware."
 )
+# A scaled version of the exploit: its varied period is large enough to clear
+# the 0.15 distinct n-gram floor, then repeats six times to fill a long output.
+LONG_PERIOD_LOOP_TEXT = PROSE_TEXT * 6
 
 
 def _captured(request_id: str, prompt: str, text: str, tokens: int = 2):
@@ -626,13 +628,35 @@ def test_distinct_ngram_ratio_separates_loops_from_honest_output():
     assert distinct_ngram_ratio(REPETITIVE_LIST_TEXT) > 0.30
 
 
-def test_a_repeat_loop_clears_every_absolute_logprob_bar(tmp_path: Path):
+def test_repeated_span_ratio_catches_a_loop_with_a_large_period():
+    assert distinct_ngram_ratio(LONG_PERIOD_LOOP_TEXT) > 0.15
+    assert longest_repeated_substring_ratio(LONG_PERIOD_LOOP_TEXT) > 0.80
+    assert longest_repeated_substring_ratio(REPETITIVE_LIST_TEXT) < 0.25
+
+
+def test_repeated_span_bar_scales_to_the_5120_token_budget():
+    block = " ".join(f"concept_{i:04d}_{i * i:08d}" for i in range(800))
+    text = " ".join([block] * 6)
+    assert len(text.split()) == 4800
+    # Six varied 800-token blocks clear the old 0.15 floor but occupy 94% of
+    # the 5120-token budget and remain an obvious repeated-output exploit.
+    assert distinct_ngram_ratio(text) > 0.15
+    assert longest_repeated_substring_ratio(text) > 0.80
+
+
+def test_a_repeat_loop_clears_every_absolute_logprob_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """The hole PAR-108 closes, kept as a test so it cannot reopen quietly.
 
     Repeated tokens are the most predictable text there is, so the scorer
     rates them near its own greedy path. Absolute plausibility is not monotone
     in output quality, and no logprob floor alone can catch this.
     """
+    from bench import correctness
+
+    monkeypatch.setattr(correctness, "DEGENERACY_MIN_DISTINCT_NGRAM_RATIO", 0.0)
+    monkeypatch.setattr(correctness, "DEGENERACY_MAX_REPEATED_SPAN_RATIO", 1.0)
     outputs = [_captured("r1", "Hello world", LOOP_TEXT, tokens=200)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
@@ -651,7 +675,7 @@ def test_a_repeat_loop_is_disqualified_by_the_degeneracy_bars(tmp_path: Path):
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
+            cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "fail_correctness"
@@ -667,11 +691,29 @@ def test_a_loop_without_spaces_is_still_caught(tmp_path: Path):
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
+            cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "fail_correctness"
     assert "16-gram" in (report.reason or "")
+
+
+def test_a_long_period_loop_is_disqualified_by_the_repeated_span_bar(
+    tmp_path: Path,
+):
+    """Scaling the repeated unit with a 5120-token budget must not evade us."""
+    outputs = [_captured("r1", "Hello world", LONG_PERIOD_LOOP_TEXT, tokens=300)]
+    scorer_cfg = MockEngineConfig(host="127.0.0.1", port=0, logprobs=[-0.5])
+    with MockEngine(scorer_cfg) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert "longest repeated span" in (report.reason or "")
+    assert report.mean_logprob == pytest.approx(-0.5)
 
 
 def test_heavily_repetitive_honest_output_still_passes(tmp_path: Path):
@@ -681,7 +723,7 @@ def test_heavily_repetitive_honest_output_still_passes(tmp_path: Path):
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
+            cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "pass"
@@ -695,10 +737,24 @@ def test_a_short_output_is_never_read_as_degenerate(tmp_path: Path):
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
+            cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
     assert report.verdict == "pass"
+
+
+def test_a_compact_loop_is_not_exempt_from_the_text_bars(tmp_path: Path):
+    text = " apple" * 30
+    assert 64 <= len(text) < 200
+    outputs = [_captured("r1", "Hello world", text, tokens=30)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
 
 
 def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
@@ -708,11 +764,12 @@ def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
         grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
+            cfg=_cfg(num_prompts=1),
             evidence_path=evidence,
         )
     line = json.loads(evidence.read_text(encoding="utf-8").strip().splitlines()[0])
     assert line["distinct_ngram_ratio"] < 0.15
+    assert line["longest_repeated_substring_ratio"] > 0.90
     assert "16-gram" in line["degenerate"]
 
 
@@ -768,7 +825,7 @@ def test_grade_all_grades_the_baseline_first_and_keys_it_separately(tmp_path: Pa
         reports = grade_all(
             scorer.base_url,
             pending,
-            cfg=_cfg(num_prompts=1, min_distinct_ngram=0.15),
+            cfg=_cfg(num_prompts=1),
             evidence_dir=evidence,
         )
     assert set(reports) == {BASELINE_INDEX, 0}

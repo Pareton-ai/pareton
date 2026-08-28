@@ -140,26 +140,24 @@ def test_build_round_request_maps_candidates_in_entry_order(tmp_path):
     assert "perf_screen" not in req
 
 
-def test_build_round_request_forwards_the_par108_bars(tmp_path):
-    """A bar pinned in the manifest has to reach the pod, or it grades nothing."""
+def test_build_round_request_forwards_the_relative_quality_bar(tmp_path):
+    """A quality bar pinned in the manifest has to reach the pod."""
     trace = tmp_path / "trace.json"
     raw = _write_trace(trace)
     row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
     campaign = _campaign()
-    campaign.bench["correctness"]["thresholds"].update(
-        {"min_distinct_ngram_ratio": 0.15, "max_mean_logprob_drop": 1.5}
-    )
+    campaign.bench["correctness"]["thresholds"].update({"max_mean_logprob_drop": 1.5})
     req = build_round_request(
         row, campaign, _entries(), task_id=str(uuid4()), trace_path=str(trace)
     )
     thr = req["correctness"]["thresholds"]
-    assert thr["min_distinct_ngram_ratio"] == 0.15
     assert thr["max_mean_logprob_drop"] == 1.5
 
 
-def test_build_round_request_omits_bars_the_manifest_does_not_pin(tmp_path):
-    """A campaign seeded before PAR-108 must keep grading as it did, so the
-    bars are never defaulted from config on its behalf."""
+def test_build_round_request_keeps_exploit_checks_out_of_competition_policy(
+    tmp_path,
+):
+    """Repeat checks are harness invariants; only relative quality is optional."""
     trace = tmp_path / "trace.json"
     raw = _write_trace(trace)
     row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
@@ -168,6 +166,7 @@ def test_build_round_request_omits_bars_the_manifest_does_not_pin(tmp_path):
     )
     thr = req["correctness"]["thresholds"]
     assert "min_distinct_ngram_ratio" not in thr
+    assert "max_repeated_span_ratio" not in thr
     assert "max_mean_logprob_drop" not in thr
 
 
