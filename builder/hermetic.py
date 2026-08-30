@@ -185,7 +185,7 @@ def dockerfile_for_patch(
     if skip_apply:
         # Trusted baseline build: warms the cache for miner builds.
         mount_opts = f"id={cache_id},target=/root/.ccache,sharing=locked"
-        run_parts.insert(0, "export CCACHE_MAXSIZE=20G") 
+        run_parts.insert(0, "export CCACHE_MAXSIZE=20G")
     else:
         # Miner setup.py runs in-build; a writable shared cache could poison later jobs.
         mount_opts = f"id={cache_id},target=/root/.ccache,readonly"
