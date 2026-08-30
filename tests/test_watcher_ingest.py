@@ -38,8 +38,11 @@ def _com(**overrides) -> PatchCommitment:
 def _cdn(monkeypatch):
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
-    monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url: PATCH)
+    monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url, **_kwargs: PATCH)
     monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: None)
+    watcher._failed_hash_checks.clear()
+    yield
+    watcher._failed_hash_checks.clear()
 
 
 def test_ingest_skips_hotkey_mismatch(monkeypatch):
@@ -89,7 +92,7 @@ def test_ingest_skips_patch_hash_already_seen(monkeypatch):
     monkeypatch.setattr(
         watcher,
         "fetch_patch_bytes",
-        lambda _url: called.__setitem__("fetch", True) or PATCH,
+        lambda _url, **_kwargs: called.__setitem__("fetch", True) or PATCH,
     )
     monkeypatch.setattr(
         watcher,
@@ -189,11 +192,34 @@ def test_ingest_rejects_fingerprint_duplicate(monkeypatch, inserted):
     assert watcher.ingest_commitment(_com()) is None
 
 
-def test_ingest_rejects_raw_hash_mismatch_before_insert(monkeypatch, inserted):
+def test_ingest_caches_raw_hash_mismatch_before_insert(monkeypatch, inserted):
     monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
-    monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url: b"other")
+    attempt_limits: list[int | None] = []
+
+    def _fetch(_url, *, attempts=None):
+        attempt_limits.append(attempts)
+        return b"other"
+
+    monkeypatch.setattr(watcher, "fetch_patch_bytes", _fetch)
+    assert watcher.ingest_commitment(_com()) is None
     assert watcher.ingest_commitment(_com()) is None
     assert inserted == {}
+    assert attempt_limits == [1]
+
+
+def test_ingest_retries_fetch_failure_on_later_scan(monkeypatch, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    attempt_limits: list[int | None] = []
+
+    def _fetch(_url, *, attempts=None):
+        attempt_limits.append(attempts)
+        raise RuntimeError("cdn unavailable")
+
+    monkeypatch.setattr(watcher, "fetch_patch_bytes", _fetch)
+    assert watcher.ingest_commitment(_com()) is None
+    assert watcher.ingest_commitment(_com()) is None
+    assert inserted == {}
+    assert attempt_limits == [1, 1]
 
 
 def test_ingest_with_fee_rejects_missing_proof(fee_on, inserted):

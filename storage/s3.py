@@ -143,13 +143,17 @@ def patch_url_hotkey(url: str) -> str | None:
     return None
 
 
-def fetch_patch_bytes(url: str) -> bytes:
+def fetch_patch_bytes(url: str, *, attempts: int | None = None) -> bytes:
     """Fetch patch bytes with size/timeout/retry bounds."""
     if not is_allowed_retrieval_url(url):
         raise ValueError(f"retrieval_url not allowlisted: {url}")
 
+    attempt_limit = config.PATCH_FETCH_RETRIES if attempts is None else attempts
+    if attempt_limit < 1:
+        raise ValueError("patch fetch attempts must be at least 1")
+
     last_err: Exception | None = None
-    for attempt in range(1, config.PATCH_FETCH_RETRIES + 1):
+    for attempt in range(1, attempt_limit + 1):
         try:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(
@@ -164,7 +168,9 @@ def fetch_patch_bytes(url: str) -> bytes:
         except (urllib.error.URLError, TimeoutError, ValueError) as exc:
             last_err = exc
             logger.warning("patch fetch attempt %d failed: %s", attempt, exc)
-    raise RuntimeError(f"patch fetch failed after retries: {last_err}")
+    raise RuntimeError(
+        f"patch fetch failed after {attempt_limit} attempt(s): {last_err}"
+    )
 
 
 def evidence_object_key(submission_id: str, task_id: str) -> str:
