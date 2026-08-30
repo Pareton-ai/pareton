@@ -64,7 +64,9 @@ def _match_globs(path: str, globs: list[str]) -> bool:
     return False
 
 
-def _git_numstat_paths(patch_bytes: bytes) -> tuple[list[str] | None, GateResult | None]:
+def _git_numstat_paths(
+    patch_bytes: bytes,
+) -> tuple[list[str] | None, GateResult | None]:
     """Return the paths Git resolves from the patch's authoritative headers."""
     try:
         result = subprocess.run(
