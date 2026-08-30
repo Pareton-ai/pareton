@@ -75,6 +75,11 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
     n_rows = int(rule.get("n_rows") or 0)
     n_prompts = int(rule.get("n_prompts") or DEFAULT_N_PROMPTS)
     max_tokens = int(rule.get("max_tokens") or DEFAULT_MAX_TOKENS)
+    ignore_eos = rule.get("ignore_eos", False)
+    if ignore_eos is None:
+        ignore_eos = False
+    if not isinstance(ignore_eos, bool):
+        raise SamplerError("ignore_eos must be a boolean")
     algo_version = int(rule.get("algo_version") or ALGO_VERSION)
     if n_rows < 1:
         raise SamplerError("n_rows must be >= 1")
@@ -86,7 +91,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         raise SamplerError("max_tokens must be >= 1")
     if algo_version != ALGO_VERSION:
         raise SamplerError(f"unsupported algo_version: {algo_version}")
-    return {
+    parsed = {
         "type": "hf_rows",
         "seed_block_offset": offset,
         "dataset": dataset,
@@ -98,6 +103,9 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         "max_tokens": max_tokens,
         "algo_version": algo_version,
     }
+    if ignore_eos:
+        parsed["ignore_eos"] = True
+    return parsed
 
 
 def _call_load_tokenizer_config(**kwargs: Any) -> dict[str, Any]:
@@ -330,16 +338,20 @@ def build_trace_json(
     *,
     max_tokens: int,
     meta_name: str,
+    ignore_eos: bool = False,
 ) -> dict[str, Any]:
     requests = []
     for j, p in enumerate(prompts):
+        sampling: dict[str, Any] = {"temperature": 0.0, "top_p": 1.0}
+        if ignore_eos:
+            sampling["ignore_eos"] = True
         requests.append(
             {
                 "id": f"hf-{j:03d}",
                 "arrival_offset_ms": j * 200,
                 "prompt": p,
                 "max_tokens": int(max_tokens),
-                "sampling": {"temperature": 0.0, "top_p": 1.0},
+                "sampling": sampling,
             }
         )
     return {
@@ -453,6 +465,7 @@ def generate_trace(
         prompts,
         max_tokens=int(parsed["max_tokens"]),
         meta_name=f"hf-rows-{seed_hex[:12]}",
+        ignore_eos=bool(parsed.get("ignore_eos", False)),
     )
     body = encode_trace(trace)
     sha = "sha256:" + hashlib.sha256(body).hexdigest()
@@ -474,6 +487,8 @@ def generate_trace(
         "sampled_trace_sha256": sha,
     }
     receipt.update(formatter.receipt)
+    if parsed.get("ignore_eos", False):
+        receipt["ignore_eos"] = True
     return SampledTrace(
         sha256=sha,
         body=body,

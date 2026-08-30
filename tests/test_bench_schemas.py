@@ -78,6 +78,16 @@ def test_sample_trace_valid_and_sha_matches_request():
     assert req["workload_trace"]["sha256"] == digest
 
 
+def test_trace_sampling_accepts_only_boolean_ignore_eos():
+    trace_obj = json.loads(SAMPLE_TRACE.read_text(encoding="utf-8"))
+    trace_obj["requests"][0]["sampling"]["ignore_eos"] = True
+    trace = validate_workload_trace_dict(trace_obj)
+    assert trace.requests[0].sampling.ignore_eos is True
+    trace_obj["requests"][0]["sampling"]["ignore_eos"] = "true"
+    with pytest.raises(ValueError, match="ignore_eos must be a boolean"):
+        validate_workload_trace_dict(trace_obj)
+
+
 def test_synthetic_v0_trace_validates():
     raw = json.loads(SYNTHETIC_TRACE.read_text(encoding="utf-8"))
     assert all("messages" not in r for r in raw["requests"])
@@ -171,6 +181,20 @@ def test_invalid_request_token_quantile_out_of_range():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["correctness"]["thresholds"]["min_token_quantile"] = 1.0
     with pytest.raises(RequestValidationError, match="min_token_quantile"):
+        validate_bench_request_dict(raw)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("max_mean_logprob_drop", 0.0),
+        ("max_mean_logprob_drop", float("nan")),
+    ],
+)
+def test_invalid_request_relative_logprob_threshold(key: str, value: float):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["thresholds"][key] = value
+    with pytest.raises(RequestValidationError, match=key):
         validate_bench_request_dict(raw)
 
 

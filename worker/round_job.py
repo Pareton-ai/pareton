@@ -171,6 +171,7 @@ def materialize_round_trace(
                     "n_rows": receipt.get("n_rows"),
                     "n_prompts": receipt.get("n_prompts"),
                     "max_tokens": receipt.get("max_tokens"),
+                    "ignore_eos": receipt.get("ignore_eos"),
                     "algo_version": receipt.get("algo_version"),
                     "seed_block_offset": receipt.get("seed_block_offset"),
                 }
@@ -343,6 +344,13 @@ def build_round_request(
             ),
         },
     }
+    # The relative model-quality bar is campaign policy and is forwarded only
+    # when the manifest carries it. Repeat-loop rejection is mandatory harness
+    # policy in bench/correctness.py and is intentionally absent here.
+    if thresholds.get("max_mean_logprob_drop") is not None:
+        correctness["thresholds"]["max_mean_logprob_drop"] = float(
+            thresholds["max_mean_logprob_drop"]
+        )
 
     scoring_rule = _parse_json_field(round_row.get("scoring_rule")) or {}
     req = {

@@ -15,6 +15,7 @@ import config
 from bench.phases import BenchPhase, coerce_phase, coerce_progress
 from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
+    campaign_hotkey_is_disqualified,
     count_submission_campaigns,
     get_campaign,
     get_public_stats,
@@ -127,6 +128,13 @@ async def _db_unavailable(_request, exc: DatabaseUnavailable):
 class PresignRequest(BaseModel):
     campaign_id: str
     hotkey: str = Field(min_length=8, max_length=128)
+
+
+class PresignResponse(BaseModel):
+    upload_url: str
+    retrieval_url: str
+    object_key: str
+    expires_in: int
 
 
 # `str` fallback is deliberate: submission_events.state is unconstrained TEXT,
@@ -632,13 +640,22 @@ def submission_build_log(
     return _build_log_response(row, tail)
 
 
-@app.post("/v1/uploads/patch")
+@app.post(
+    "/v1/uploads/patch",
+    response_model=PresignResponse,
+    responses={403: {"description": "Hotkey is disqualified from this campaign"}},
+)
 def presign_patch(body: PresignRequest):
     c = get_campaign(body.campaign_id)
     if c is None:
         raise HTTPException(status_code=404, detail="campaign not found")
     if c.status != "open":
         raise HTTPException(status_code=400, detail="campaign is not open")
+    if campaign_hotkey_is_disqualified(body.campaign_id, body.hotkey):
+        raise HTTPException(
+            status_code=403,
+            detail="hotkey is disqualified from campaign",
+        )
     try:
         result = create_presigned_patch_upload(
             campaign_id=body.campaign_id,

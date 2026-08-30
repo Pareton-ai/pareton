@@ -88,13 +88,14 @@ def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatc
         "min_token_logprob",
         "min_token_quantile",
         "min_coverage_ratio",
+        "max_mean_logprob_drop",
     }
     assert "num_prompts" not in bench["correctness"]
 
 
 def test_open_requires_correctness_thresholds():
     """A bar that is not in the manifest can move under a live campaign
-    without the manifest hash changing, so opening requires all three."""
+    without the manifest hash changing, so opening requires every one."""
     from campaign.seed import require_correctness_thresholds
 
     require_correctness_thresholds(
@@ -105,6 +106,7 @@ def test_open_requires_correctness_thresholds():
                     "min_token_logprob": -12.0,
                     "min_token_quantile": 0.001,
                     "min_coverage_ratio": 0.5,
+                    "max_mean_logprob_drop": 1.5,
                 }
             }
         }
@@ -136,6 +138,15 @@ def test_token_quantile_must_be_a_fraction():
     )
     with pytest.raises(ValueError, match="min_token_quantile"):
         build_seed_bench_spec(correctness_thresholds={"min_token_quantile": 1.0})
+
+
+def test_relative_logprob_threshold_must_be_finite():
+    from campaign.seed import build_seed_bench_spec
+
+    with pytest.raises(ValueError, match="max_mean_logprob_drop"):
+        build_seed_bench_spec(
+            correctness_thresholds={"max_mean_logprob_drop": float("nan")}
+        )
 
 
 def test_bad_sampling_rule_raises_before_insert(monkeypatch: pytest.MonkeyPatch):

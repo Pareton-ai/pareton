@@ -37,8 +37,10 @@ from typing import Callable, Iterator
 
 from bench import __version__
 from bench.correctness import (
+    BASELINE_INDEX,
     PendingCorrectness,
     PromptCase,
+    build_baseline_degeneracy_references,
     capture_outputs,
     grade_all,
     load_correctness_prompts,
@@ -71,7 +73,12 @@ from bench.schemas import (
     WorkloadTrace,
 )
 from bench.score import score_candidate
-from bench.sla_bench import REPRO_BAR_MAX_REL_RANGE, EngineReplay, run_sla_engine
+from bench.sla_bench import (
+    REPRO_BAR_MAX_REL_RANGE,
+    EngineReplay,
+    capture_baseline_natural_stops,
+    run_sla_engine,
+)
 from bench.validate import (
     RequestValidationError,
     extract_image_digest,
@@ -502,6 +509,8 @@ def run_round(
     runs: list[_CandidateRun] = []
     pending: list[PendingCorrectness] = []
     correctness: dict[int, CorrectnessReport] = {}
+    baseline_degeneracy = None
+    relative_correctness = req.correctness.thresholds.max_mean_logprob_drop is not None
 
     for start in plan:
         if start.kind in ("baseline", "drift"):
@@ -515,12 +524,39 @@ def run_round(
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
                     )
+                    if start.kind == "baseline" and req.mode == "all":
+                        natural_stops = capture_baseline_natural_stops(
+                            url,
+                            requests=requests,
+                            replay=replay,
+                            evidence_dir=layout.correctness_dir,
+                        )
+                        baseline_outputs = capture_outputs(
+                            prompts,
+                            timings=replay.result.timings,
+                            outputs=replay.outputs,
+                        )
+                        baseline_degeneracy = build_baseline_degeneracy_references(
+                            baseline_outputs,
+                            natural_stops,
+                            replay.output_samples,
+                        )
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
                 # scored against, so the round cannot continue without it.
                 raise EngineError(str(exc), error_role="baseline") from exc
             if start.kind == "baseline":
                 baseline = replay
+                # The relative correctness bar needs the baseline's own
+                # outputs through the same scorer (PAR-108). An older campaign
+                # without that bar keeps its original candidate-only path.
+                if req.mode == "all" and relative_correctness:
+                    pending.append(
+                        PendingCorrectness(
+                            candidate_index=BASELINE_INDEX,
+                            outputs=baseline_outputs,
+                        )
+                    )
             else:
                 drift = replay
 
@@ -564,7 +600,9 @@ def run_round(
             )
 
         elif start.kind == "scorer":
-            if not pending:
+            if not pending or not any(
+                item.candidate_index != BASELINE_INDEX for item in pending
+            ):
                 continue
             try:
                 with provider.start(start, phase=BenchPhase.CORRECTNESS) as url:
@@ -574,11 +612,28 @@ def run_round(
                         cfg=req.correctness,
                         evidence_dir=layout.correctness_dir,
                         baseline_outputs=(baseline.outputs if baseline else None),
+                        baseline_degeneracy=baseline_degeneracy,
                     )
             except EngineError as exc:
                 # Correctness is a hard gate, so an unusable scorer means no
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
+            baseline_report = correctness.pop(BASELINE_INDEX, None)
+            if relative_correctness and (
+                baseline_report is None or baseline_report.verdict != "pass"
+            ):
+                # The baseline runs the campaign's own pinned image, so a
+                # baseline it cannot grade is the harness's fault: requeue
+                # the round rather than disqualify anyone.
+                detail = (
+                    baseline_report.reason
+                    if baseline_report is not None
+                    else "baseline was never graded"
+                )
+                raise EngineError(
+                    f"scorer could not grade the baseline: {detail}",
+                    error_role="scorer",
+                )
 
     if baseline is None or drift is None:
         raise EngineError("round plan did not produce both baseline runs")

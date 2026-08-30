@@ -4,29 +4,30 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from bench.lifecycle import EngineError
-from bench.sla_bench import (
-    aggregate_rep_metrics,
-    percentile,
-    recompute_sla_metrics,
-    run_sla_engine,
-    _engine_metrics_from_reps,
-    _median_rep_row,
-)
+from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.schemas import (
     SlaBenchConfig,
     SlaThresholds,
     TraceMeta,
-    WorkloadTrace,
     TraceRequest,
     TraceSampling,
+    WorkloadTrace,
 )
-from bench.mock_engine import MockEngine, MockEngineConfig
+from bench.sla_bench import (
+    _engine_metrics_from_reps,
+    _median_rep_row,
+    aggregate_rep_metrics,
+    capture_baseline_natural_stops,
+    percentile,
+    recompute_sla_metrics,
+    run_sla_engine,
+)
 from bench.validate import RequestValidationError
-
 
 # --- percentile helper -------------------------------------------------------
 
@@ -199,11 +200,13 @@ def test_recompute_matches_report(tmp_path: Path):
     # The contract bench/score.py consumes: request id -> PromptTiming.
     assert set(replay.result.timings) == {"r1", "r2"}
     assert set(replay.outputs) == {"r1", "r2"}
+    assert set(replay.output_samples) == {"r1", "r2"}
     for rid, timing in replay.result.timings.items():
         assert timing.completion_tokens == 6
         assert len(timing.itl_s) == 5
         assert timing.ttft_s > 0
         assert replay.outputs[rid]
+        assert len(replay.output_samples[rid]) == cfg.repetitions
 
 
 def test_warmup_excluded_from_metrics(tmp_path: Path):
@@ -309,3 +312,45 @@ def test_median_rep_row_keeps_one_real_repetition():
         {"e2e_ms": 20.0, "text": "median"},
     ]
     assert _median_rep_row(rows)["text"] == "median"
+
+
+def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    request = TraceRequest(
+        id="forced",
+        arrival_offset_ms=0,
+        max_tokens=5120,
+        sampling=TraceSampling(0.0, 1.0, ignore_eos=True),
+        prompt="solve this",
+    )
+    replay = SimpleNamespace(result=SimpleNamespace(timings={}), outputs={})
+
+    def fake_replay(base_url, requests, **kwargs):
+        assert base_url == "http://baseline"
+        assert len(requests) == 1
+        assert requests[0].sampling.ignore_eos is False
+        return (
+            [
+                {
+                    "request_id": "forced",
+                    "completion_tokens": 417,
+                    "finish_reason": "stop",
+                    "text": "natural answer",
+                }
+            ],
+            1.0,
+            [],
+        )
+
+    monkeypatch.setattr("bench.sla_bench._replay", fake_replay)
+    references = capture_baseline_natural_stops(
+        "http://baseline",
+        requests=[request],
+        replay=replay,
+        evidence_dir=tmp_path,
+    )
+    assert references["forced"].completion_tokens == 417
+    assert references["forced"].text == "natural answer"
+    evidence = tmp_path / "baseline_natural_stops.jsonl"
+    assert json.loads(evidence.read_text(encoding="utf-8"))["request_id"] == ("forced")
