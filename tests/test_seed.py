@@ -86,13 +86,15 @@ def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatc
         "min_token_logprob",
         "min_token_quantile",
         "min_coverage_ratio",
+        "min_distinct_ngram_ratio",
+        "max_mean_logprob_drop",
     }
     assert "num_prompts" not in bench["correctness"]
 
 
 def test_open_requires_correctness_thresholds():
     """A bar that is not in the manifest can move under a live campaign
-    without the manifest hash changing, so opening requires all three."""
+    without the manifest hash changing, so opening requires every one."""
     from campaign.seed import require_correctness_thresholds
 
     require_correctness_thresholds(
@@ -103,6 +105,8 @@ def test_open_requires_correctness_thresholds():
                     "min_token_logprob": -12.0,
                     "min_token_quantile": 0.001,
                     "min_coverage_ratio": 0.5,
+                    "min_distinct_ngram_ratio": 0.35,
+                    "max_mean_logprob_drop": 1.5,
                 }
             }
         }

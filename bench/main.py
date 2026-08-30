@@ -37,6 +37,7 @@ from typing import Callable, Iterator
 
 from bench import __version__
 from bench.correctness import (
+    BASELINE_INDEX,
     PendingCorrectness,
     PromptCase,
     capture_outputs,
@@ -521,6 +522,18 @@ def run_round(
                 raise EngineError(str(exc), error_role="baseline") from exc
             if start.kind == "baseline":
                 baseline = replay
+                # The relative correctness bar needs the baseline's own
+                # outputs through the same scorer (PAR-108).
+                pending.append(
+                    PendingCorrectness(
+                        candidate_index=BASELINE_INDEX,
+                        outputs=capture_outputs(
+                            prompts,
+                            timings=replay.result.timings,
+                            outputs=replay.outputs,
+                        ),
+                    )
+                )
             else:
                 drift = replay
 
@@ -564,7 +577,9 @@ def run_round(
             )
 
         elif start.kind == "scorer":
-            if not pending:
+            # The baseline is always queued, so nothing to grade means every
+            # candidate crashed or failed to start.
+            if not any(item.candidate_index != BASELINE_INDEX for item in pending):
                 continue
             try:
                 with provider.start(start, phase=BenchPhase.CORRECTNESS) as url:
@@ -578,6 +593,20 @@ def run_round(
                 # Correctness is a hard gate, so an unusable scorer means no
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
+            baseline_report = correctness.pop(BASELINE_INDEX, None)
+            if baseline_report is None or baseline_report.verdict != "pass":
+                # The baseline runs the campaign's own pinned image, so a
+                # baseline it cannot grade is the harness's fault: requeue
+                # the round rather than disqualify anyone.
+                detail = (
+                    baseline_report.reason
+                    if baseline_report is not None
+                    else "baseline was never graded"
+                )
+                raise EngineError(
+                    f"scorer could not grade the baseline: {detail}",
+                    error_role="scorer",
+                )
 
     if baseline is None or drift is None:
         raise EngineError("round plan did not produce both baseline runs")
