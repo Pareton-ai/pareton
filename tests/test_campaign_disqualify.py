@@ -9,6 +9,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 from campaign import disqualify
+from campaign.store import _campaign_hotkey_is_disqualified
 from round.store import CampaignHotkeyDisqualification
 
 
@@ -18,6 +19,34 @@ class FakeMeta:
 
     def by_hotkey(self, hotkey: str):
         return SimpleNamespace(uid={"5Alice": 7, "5Bob": 11}[hotkey])
+
+
+class FakeCursor:
+    def __init__(self, row):
+        self.row = row
+
+    def execute(self, query, params):
+        assert "ORDER BY e.created_at DESC, e.id DESC" in query
+        assert params == ("campaign-id", "5Bob")
+
+    def fetchone(self):
+        return self.row
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (None, False),
+        (("disqualified",), True),
+        ({"action": "waived"}, False),
+        ({"action": "unknown"}, True),
+    ],
+)
+def test_latest_manual_action_controls_eligibility(row, expected):
+    assert (
+        _campaign_hotkey_is_disqualified(FakeCursor(row), "campaign-id", "5Bob")
+        is expected
+    )
 
 
 def test_uid_is_resolved_from_by_hotkey_not_list_position():
