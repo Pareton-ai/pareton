@@ -172,6 +172,9 @@ def test_the_runner_performs_exactly_the_planned_starts(tmp_path: Path):
         "scorer",
         "baseline-drift",
     ]
+    # The sample request predates PAR-108's relative bar. It must retain the
+    # original candidate-only correctness path rather than grading a baseline.
+    assert not (layout.correctness_dir / "baseline.jsonl").exists()
 
 
 @pytest.mark.parametrize(

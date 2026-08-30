@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 import config
 from campaign.store import (
+    CampaignHotkeyDisqualified,
     get_campaign,
     get_submission_for_campaign,
     insert_submission,
@@ -156,17 +157,25 @@ def ingest_commitment(
     patch_bytes = integrity.evidence["patch_bytes"]
     patch_fingerprint = patch_fingerprint_bytes(patch_bytes)
 
-    sid = insert_submission(
-        campaign_id=com.campaign_id,
-        patch_hash=com.patch_hash,
-        hotkey=com.hotkey,
-        baseline_commit=com.baseline_commit,
-        retrieval_url=com.retrieval_url,
-        commit_block=com.commit_block,
-        payment_block=payment_block,
-        payment_tx=payment_tx,
-        patch_fingerprint=patch_fingerprint,
-    )
+    try:
+        sid = insert_submission(
+            campaign_id=com.campaign_id,
+            patch_hash=com.patch_hash,
+            hotkey=com.hotkey,
+            baseline_commit=com.baseline_commit,
+            retrieval_url=com.retrieval_url,
+            commit_block=com.commit_block,
+            payment_block=payment_block,
+            payment_tx=payment_tx,
+            patch_fingerprint=patch_fingerprint,
+        )
+    except CampaignHotkeyDisqualified:
+        logger.info(
+            "skip commitment: hotkey disqualified campaign=%s hotkey=%s",
+            com.campaign_id,
+            com.hotkey[:16],
+        )
+        return None
     if sid is None:
         logger.info(
             "skip commitment: duplicate fingerprint=%s campaign=%s",

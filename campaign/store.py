@@ -13,7 +13,35 @@ from db.connection import db_connection
 from gate.types import SUBMISSION_STATES
 
 from .manifest import build_manifest
-from .models import CampaignManifest, CustomerSignoff, SLA, validate_scoring_rule
+from .models import SLA, CampaignManifest, CustomerSignoff, validate_scoring_rule
+
+
+class CampaignHotkeyDisqualified(RuntimeError):
+    """Raised when a campaign has permanently excluded a hotkey."""
+
+
+def _campaign_hotkey_is_disqualified(cur, campaign_id: UUID | str, hotkey: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM submissions prior
+        JOIN submission_events e ON e.submission_id = prior.id
+        WHERE prior.campaign_id = %s AND prior.hotkey = %s
+          AND e.state = 'disqualified'
+          AND e.detail ->> 'source' = 'manual'
+          AND e.detail ->> 'scope' = 'campaign'
+        LIMIT 1
+        """,
+        (str(campaign_id), hotkey),
+    )
+    return cur.fetchone() is not None
+
+
+def campaign_hotkey_is_disqualified(campaign_id: UUID | str, hotkey: str) -> bool:
+    """Whether a manual append-only event permanently excludes this hotkey."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            return _campaign_hotkey_is_disqualified(cur, campaign_id, hotkey)
 
 
 def _parse_ts(value: Any) -> datetime:
@@ -239,8 +267,22 @@ def insert_submission(
     patch_fingerprint: str | None = None,
 ) -> UUID | None:
     """Insert submission. Returns id, or None if (campaign_id, patch_hash) exists."""
+    patch_hash = patch_hash.strip().lower()
     with db_connection() as conn:
         with conn.cursor() as cur:
+            # Serialize with the manual disqualification transaction. Whichever
+            # obtains this row first decides whether this submission existed
+            # before the campaign excluded the hotkey.
+            cur.execute(
+                "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                (str(campaign_id),),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"unknown campaign: {campaign_id}")
+            if _campaign_hotkey_is_disqualified(cur, campaign_id, hotkey):
+                raise CampaignHotkeyDisqualified(
+                    f"hotkey is disqualified from campaign {campaign_id}"
+                )
             duplicate_of = None
             if patch_fingerprint is not None:
                 cur.execute(

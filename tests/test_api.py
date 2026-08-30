@@ -566,6 +566,55 @@ def _open_campaign(monkeypatch) -> None:
     )
 
 
+def test_presign_rejects_campaign_disqualified_hotkey(monkeypatch, client: TestClient):
+    from api import server
+
+    _open_campaign(monkeypatch)
+    monkeypatch.setattr(server, "campaign_hotkey_is_disqualified", lambda *_a: True)
+    called = {"presign": False}
+    monkeypatch.setattr(
+        server,
+        "create_presigned_patch_upload",
+        lambda **_k: called.__setitem__("presign", True),
+    )
+
+    resp = client.post(
+        "/v1/uploads/patch",
+        json={"campaign_id": CAMPAIGN_ID, "hotkey": HOTKEY},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "hotkey is disqualified from campaign"
+    assert called["presign"] is False
+
+
+def test_presign_response_is_typed_in_openapi(monkeypatch, client: TestClient):
+    from api import server
+
+    _open_campaign(monkeypatch)
+    monkeypatch.setattr(server, "campaign_hotkey_is_disqualified", lambda *_a: False)
+    monkeypatch.setattr(
+        server,
+        "create_presigned_patch_upload",
+        lambda **_k: SimpleNamespace(
+            upload_url="https://upload.example/patch",
+            retrieval_url="https://cdn.example/patch",
+            object_key="stage0/campaigns/c/patches/h/p.diff",
+            expires_in=900,
+        ),
+    )
+
+    resp = client.post(
+        "/v1/uploads/patch",
+        json={"campaign_id": CAMPAIGN_ID, "hotkey": HOTKEY},
+    )
+    assert resp.status_code == 200
+    server.PresignResponse.model_validate(resp.json())
+    operation = client.get("/openapi.json").json()["paths"]["/v1/uploads/patch"]["post"]
+    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert schema["$ref"] == "#/components/schemas/PresignResponse"
+    assert "403" in operation["responses"]
+
+
 def test_leader_is_404_when_vacant(monkeypatch, client: TestClient):
     """A vacant crown has no leaders row; the API must not invent an empty one."""
     from api import server

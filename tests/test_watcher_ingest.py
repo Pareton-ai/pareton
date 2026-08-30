@@ -8,10 +8,11 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+import config
+from campaign.store import CampaignHotkeyDisqualified
+from chain import watcher
 from chain.commitment import PatchCommitment
 from chain.payment import BlockPaymentView
-from chain import watcher
-import config
 from gate.integrity import hash_patch_bytes, patch_fingerprint_bytes
 
 
@@ -220,6 +221,14 @@ def test_ingest_retries_fetch_failure_on_later_scan(monkeypatch, inserted):
     assert watcher.ingest_commitment(_com()) is None
     assert inserted == {}
     assert attempt_limits == [1, 1]
+
+
+def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
+    def _blocked(**_kwargs):
+        raise CampaignHotkeyDisqualified("blocked")
+
+    monkeypatch.setattr(watcher, "insert_submission", _blocked)
+    assert watcher.ingest_commitment(_com()) is None
 
 
 def test_ingest_with_fee_rejects_missing_proof(fee_on, inserted):
