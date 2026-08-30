@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import subprocess
 from dataclasses import dataclass
 
 from gate.types import GateResult, SubmissionState
 
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+_RENAME_FROM_RE = re.compile(r"^rename from (.+)$")
 _RENAME_TO_RE = re.compile(r"^rename to (.+)$")
+_COPY_FROM_RE = re.compile(r"^copy from (.+)$")
 _COPY_TO_RE = re.compile(r"^copy to (.+)$")
 _NEW_FILE_RE = re.compile(r"^new file mode (\d+)$")
 _DELETED_FILE_RE = re.compile(r"^deleted file mode (\d+)$")
@@ -63,6 +66,42 @@ def _match_globs(path: str, globs: list[str]) -> bool:
     return False
 
 
+def _git_numstat_paths(patch_bytes: bytes) -> tuple[list[str] | None, GateResult | None]:
+    """Return the paths Git resolves from the patch's authoritative headers."""
+    try:
+        result = subprocess.run(
+            ["git", "apply", "--numstat", "-z"],
+            input=patch_bytes,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return None, GateResult.reject("git_apply_numstat_timeout")
+    except OSError as exc:
+        return None, GateResult.reject("git_apply_numstat_error", error=str(exc))
+
+    if result.returncode != 0:
+        return None, GateResult.reject(
+            "git_apply_numstat_failed",
+            stderr=result.stderr.decode("utf-8", errors="replace")[-2000:],
+        )
+
+    paths: list[str] = []
+    try:
+        records = result.stdout.split(b"\0")
+        for record in records:
+            if not record:
+                continue
+            fields = record.split(b"\t", 2)
+            if len(fields) != 3 or not fields[2]:
+                return None, GateResult.reject("git_apply_numstat_invalid_output")
+            paths.append(fields[2].decode("utf-8"))
+    except UnicodeDecodeError:
+        return None, GateResult.reject("git_apply_numstat_path_not_utf8")
+    return paths, None
+
+
 def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
     """Parse unified/git diff headers into changed file records."""
     changes: list[DiffFileChange] = []
@@ -80,6 +119,7 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
         is_binary = False
         is_new = False
         is_deleted = False
+        rename_from: str | None = None
         rename_to: str | None = None
         j = i + 1
         while j < len(lines) and not lines[j].startswith("diff --git "):
@@ -100,14 +140,20 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
             rm = _RENAME_TO_RE.match(l2)
             if rm:
                 rename_to = _normalize_path(rm.group(1))
+            rfm = _RENAME_FROM_RE.match(l2)
+            if rfm:
+                rename_from = _normalize_path(rfm.group(1))
             cm = _COPY_TO_RE.match(l2)
             if cm:
                 rename_to = _normalize_path(cm.group(1))
+            cfm = _COPY_FROM_RE.match(l2)
+            if cfm:
+                rename_from = _normalize_path(cfm.group(1))
             if l2.startswith("new mode ") and "120000" in l2:
                 is_symlink = True
             j += 1
         final_path = rename_to or (new_p if new_p != "/dev/null" else old_p)
-        old_path = old_p if old_p != "/dev/null" else None
+        old_path = rename_from or (old_p if old_p != "/dev/null" else None)
         changes.append(
             DiffFileChange(
                 path=final_path,
@@ -169,7 +215,23 @@ def check_surface(
                 return GateResult.reject("rename_from_denied", path=ch.old_path)
             if not _match_globs(ch.old_path, allowed_paths):
                 return GateResult.reject("rename_from_not_allowed", path=ch.old_path)
-        touched.append(final)
+
+    git_paths, git_error = _git_numstat_paths(patch_bytes)
+    if git_error is not None:
+        return git_error
+    if not git_paths:
+        return GateResult.reject("empty_patch_no_git_files")
+
+    for path in git_paths:
+        if _is_unsafe_path(path):
+            return GateResult.reject("path_traversal", path=path)
+        if path == ".gitmodules" or path.endswith("/.gitmodules"):
+            return GateResult.reject("submodule_change_forbidden", path=path)
+        if _match_globs(path, denied_paths):
+            return GateResult.reject("path_denied", path=path)
+        if not _match_globs(path, allowed_paths):
+            return GateResult.reject("path_not_allowed", path=path)
+        touched.append(path)
 
     return GateResult.success(
         SubmissionState.SURFACE_OK,

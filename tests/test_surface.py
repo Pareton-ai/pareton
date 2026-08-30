@@ -151,6 +151,21 @@ def test_rejects_setup_py():
     assert not res.ok
 
 
+def test_rejects_when_diff_git_path_disagrees_with_applied_path():
+    bad = b"""diff --git a/vllm/x.py b/vllm/x.py
+index 1111111..2222222 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1 +1 @@
+-safe
++PWNED
+"""
+    res = check_surface(patch_bytes=bad, allowed_paths=ALLOW, denied_paths=DENY)
+    assert not res.ok
+    assert res.reason == "path_denied"
+    assert res.evidence["path"] == "setup.py"
+
+
 def test_parse_diff_paths_basic():
     changes = parse_diff_paths(_ok_diff().decode())
     assert len(changes) == 1
