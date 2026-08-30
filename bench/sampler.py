@@ -183,9 +183,7 @@ def build_prompt_formatter(
     repo = str(model_repo or "").strip()
     revision = str(model_revision or "").strip()
     if not repo or not revision:
-        raise SamplerError(
-            "chat template formatting requires model repo and revision"
-        )
+        raise SamplerError("chat template formatting requires model repo and revision")
     loader = config_loader or _call_load_tokenizer_config
     try:
         config = loader(
@@ -197,8 +195,7 @@ def build_prompt_formatter(
         compiled = _compile_chat_template(template)
     except Exception as exc:
         raise SamplerError(
-            f"failed to load chat template for {repo}@{revision}: "
-            f"{type(exc).__name__}"
+            f"failed to load chat template for {repo}@{revision}: {type(exc).__name__}"
         ) from exc
     if not isinstance(template, str) or not template:
         raise SamplerError(f"model {repo}@{revision} has no usable chat template")

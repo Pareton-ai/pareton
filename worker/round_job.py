@@ -199,8 +199,7 @@ def materialize_round_trace(
                             "chat template receipt is missing its rendering contract"
                         )
                     if model_repo != str(template.get("model_repo") or "") or (
-                        model_revision
-                        != str(template.get("model_revision") or "")
+                        model_revision != str(template.get("model_revision") or "")
                     ):
                         raise SamplerError(
                             "chat template receipt does not match campaign model pin"

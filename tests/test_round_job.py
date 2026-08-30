@@ -388,9 +388,7 @@ def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeyp
         formatter_calls.append((rule_arg, kwargs))
         return formatter
 
-    monkeypatch.setattr(
-        "worker.round_job.build_prompt_formatter", fake_build_formatter
-    )
+    monkeypatch.setattr("worker.round_job.build_prompt_formatter", fake_build_formatter)
 
     path = materialize_round_trace(
         row,

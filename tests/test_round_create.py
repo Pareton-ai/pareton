@@ -214,9 +214,7 @@ def test_round_creation_hashes_chat_formatted_prompts(monkeypatch):
         {"queued": 5, "oldest_queued_at": NOW},
         seed_block=1000,
         seed_block_hash="ab" * 32,
-        row_fetcher=lambda _idx: {
-            "trajectory": [{"role": "user", "content": "issue"}]
-        },
+        row_fetcher=lambda _idx: {"trajectory": [{"role": "user", "content": "issue"}]},
     )
 
     assert out == {"round_id": "r1", "ordinal": 1}
