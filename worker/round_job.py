@@ -43,11 +43,11 @@ from round.store import (
     VOID_ROUND_TIMEOUT,
     VOID_TRACE_UNAVAILABLE,
     complete_round,
+    defer_round_for_capacity,
     get_leader,
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
-    defer_round_for_capacity,
     void_round,
 )
 from worker.phase_reporter import PhaseReporter
@@ -167,6 +167,7 @@ def materialize_round_trace(
                     "n_rows": receipt.get("n_rows"),
                     "n_prompts": receipt.get("n_prompts"),
                     "max_tokens": receipt.get("max_tokens"),
+                    "ignore_eos": receipt.get("ignore_eos"),
                     "algo_version": receipt.get("algo_version"),
                     "seed_block_offset": receipt.get("seed_block_offset"),
                 }
@@ -299,12 +300,13 @@ def build_round_request(
             ),
         },
     }
-    # The PAR-108 bars are forwarded only when the campaign manifest carries
-    # them, and never defaulted from config: a bar the manifest does not pin
-    # is one that could move under a live campaign without the hash changing.
-    for key in ("min_distinct_ngram_ratio", "max_mean_logprob_drop"):
-        if thresholds.get(key) is not None:
-            correctness["thresholds"][key] = float(thresholds[key])
+    # The relative model-quality bar is campaign policy and is forwarded only
+    # when the manifest carries it. Repeat-loop rejection is mandatory harness
+    # policy in bench/correctness.py and is intentionally absent here.
+    if thresholds.get("max_mean_logprob_drop") is not None:
+        correctness["thresholds"]["max_mean_logprob_drop"] = float(
+            thresholds["max_mean_logprob_drop"]
+        )
 
     scoring_rule = _parse_json_field(round_row.get("scoring_rule")) or {}
     req = {

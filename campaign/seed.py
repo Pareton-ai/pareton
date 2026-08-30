@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,7 +100,6 @@ CORRECTNESS_THRESHOLD_KEYS = (
     "min_token_logprob",
     "min_token_quantile",
     "min_coverage_ratio",
-    "min_distinct_ngram_ratio",
     "max_mean_logprob_drop",
 )
 
@@ -112,7 +112,6 @@ def _correctness_thresholds(thresholds: dict | None) -> dict:
         "min_token_logprob": config.BENCH_CORRECTNESS_MIN_TOKEN_LOGPROB,
         "min_token_quantile": config.BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE,
         "min_coverage_ratio": config.BENCH_CORRECTNESS_MIN_COVERAGE_RATIO,
-        "min_distinct_ngram_ratio": (config.BENCH_CORRECTNESS_MIN_DISTINCT_NGRAM_RATIO),
         "max_mean_logprob_drop": config.BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP,
     }
     out = {k: float(src.get(k, defaults[k])) for k in CORRECTNESS_THRESHOLD_KEYS}
@@ -124,11 +123,10 @@ def _correctness_thresholds(thresholds: dict | None) -> dict:
         raise ValueError(
             "bench.correctness.thresholds.min_token_quantile must be in [0, 1)"
         )
-    if not 0.0 <= out["min_distinct_ngram_ratio"] < 1.0:
-        raise ValueError(
-            "bench.correctness.thresholds.min_distinct_ngram_ratio must be in [0, 1)"
-        )
-    if out["max_mean_logprob_drop"] <= 0.0:
+    if (
+        not math.isfinite(out["max_mean_logprob_drop"])
+        or out["max_mean_logprob_drop"] <= 0.0
+    ):
         raise ValueError(
             "bench.correctness.thresholds.max_mean_logprob_drop must be > 0"
         )
@@ -138,10 +136,10 @@ def _correctness_thresholds(thresholds: dict | None) -> dict:
 def require_correctness_thresholds(bench: dict | None) -> None:
     """A campaign may not open without its correctness bars in the manifest.
 
-    The bars are absolute logprobs, so nothing has to be measured before a
-    campaign opens. They still have to be written down: a bar that is not in
-    the manifest is a bar that can move under a live campaign without the
-    manifest hash changing.
+    The bars are fixed seed-time policy, so nothing has to be measured before
+    a campaign opens. They still have to be written down: a bar that is not in
+    the manifest can move under a live campaign without the manifest hash
+    changing.
     """
     corr = (bench or {}).get("correctness") if isinstance(bench, dict) else None
     thr = corr.get("thresholds") if isinstance(corr, dict) else None
@@ -440,12 +438,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Below this share of streamed tokens scored, the run is infra_failed",
     )
     p.add_argument(
-        "--bench-correctness-min-distinct-ngram-ratio",
-        type=float,
-        default=None,
-        help="Degeneracy bar: share of an output's word n-grams that must be distinct",
-    )
-    p.add_argument(
         "--bench-correctness-max-mean-logprob-drop",
         type=float,
         default=None,
@@ -570,9 +562,6 @@ def main(argv: list[str] | None = None) -> int:
             "min_token_logprob": args.bench_correctness_min_token_logprob,
             "min_token_quantile": args.bench_correctness_min_token_quantile,
             "min_coverage_ratio": args.bench_correctness_min_coverage_ratio,
-            "min_distinct_ngram_ratio": (
-                args.bench_correctness_min_distinct_ngram_ratio
-            ),
             "max_mean_logprob_drop": args.bench_correctness_max_mean_logprob_drop,
         }
         correctness_thresholds = {k: v for k, v in overrides.items() if v is not None}
