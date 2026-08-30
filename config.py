@@ -178,10 +178,9 @@ ALLOW_MOCK_BENCH: bool = os.environ.get("PARETON_ALLOW_MOCK_BENCH", "") == "1"
 # bench.correctness.num_prompts, and absent a pin the worker scores every
 # request in the trace (PAR-65).
 #
-# The bars below are absolute logprobs the shared scorer grades a captured
-# output against. They are seed-time defaults only: campaign/seed.py copies
-# them onto campaigns.bench.correctness.thresholds, and the harness reads them
-# from the campaign, so editing these on a pod cannot move a live campaign.
+# The bars below are seed-time defaults only: campaign/seed.py copies them onto
+# campaigns.bench.correctness.thresholds, and the harness reads them from the
+# campaign, so editing these on a pod cannot move a live campaign.
 BENCH_CORRECTNESS_MIN_MEAN_LOGPROB: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_MEAN_LOGPROB", "-4.0")
 )
@@ -201,6 +200,12 @@ BENCH_CORRECTNESS_MIN_TOKEN_QUANTILE: float = float(
 # the output: infrastructure, not a wrong answer.
 BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
     os.environ.get("PARETON_BENCH_CORRECTNESS_MIN_COVERAGE_RATIO", "0.5")
+)
+# How far below the baseline's own mean logprob, through the same scorer, a
+# candidate may score. The other half of PAR-108: a loop scores above the
+# baseline, a degraded model scores below it and clears the absolute bar.
+BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP: float = float(
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP", "1.5")
 )
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 

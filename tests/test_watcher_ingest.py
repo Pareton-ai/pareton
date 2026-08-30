@@ -9,6 +9,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 import config
+from campaign.store import CampaignHotkeyDisqualified
 from chain import watcher
 from chain.commitment import PatchCommitment
 from chain.payment import BlockPaymentView
@@ -151,6 +152,14 @@ def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
     assert sid == "sid"
     assert inserted["payment_block"] is None
     assert inserted["payment_tx"] is None
+
+
+def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
+    def _blocked(**_kwargs):
+        raise CampaignHotkeyDisqualified("blocked")
+
+    monkeypatch.setattr(watcher, "insert_submission", _blocked)
+    assert watcher.ingest_commitment(_com()) is None
 
 
 def test_ingest_with_fee_rejects_missing_proof(inserted):

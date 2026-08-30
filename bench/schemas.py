@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from bench.score import PromptTiming
 
-
 # ---------------------------------------------------------------------------
 # Workload trace
 # ---------------------------------------------------------------------------
@@ -17,10 +16,18 @@ from bench.score import PromptTiming
 class TraceSampling:
     temperature: float
     top_p: float
+    ignore_eos: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceSampling:
-        return cls(temperature=float(d["temperature"]), top_p=float(d["top_p"]))
+        ignore_eos = d.get("ignore_eos", False)
+        if not isinstance(ignore_eos, bool):
+            raise ValueError("sampling.ignore_eos must be a boolean")
+        return cls(
+            temperature=float(d["temperature"]),
+            top_p=float(d["top_p"]),
+            ignore_eos=ignore_eos,
+        )
 
 
 @dataclass
@@ -180,30 +187,43 @@ class WorkloadTraceRef:
 
 @dataclass
 class CorrectnessThresholds:
-    """Absolute logprob bars the shared scorer grades a captured output against.
+    """The bars the shared scorer grades a captured output against.
 
-    One scorer grades every candidate's own output, so there is no second set
-    of logprobs to compare against and the bars stand on their own. A greedy
-    continuation of the pinned model scores around -0.5 to -2.0 per token
-    under that same model; garbage scores below -15.
+    The first four are absolute logprob bars: a greedy continuation of the
+    pinned model scores around -0.5 to -2.0 per token under that same model,
+    and garbage scores below -15. ``min_token_logprob`` is applied to the
+    k-th lowest scored position, with k = ceil(``min_token_quantile`` *
+    positions), not to the outright minimum (PAR-94). A quantile of 0 is the
+    plain minimum.
 
-    ``min_token_logprob`` is applied to the k-th lowest scored position, with
-    k = ceil(``min_token_quantile`` * positions), not to the outright minimum
-    (PAR-94). A quantile of 0 is the plain minimum.
+    ``max_mean_logprob_drop`` measures the candidate against the baseline's
+      own mean logprob, same scorer and same prompts, catching the opposite
+      move: a candidate that degrades the model and clears the floor anyway.
+
+    Repeat-loop detection is deliberately absent here. It is a mandatory
+    harness exploit check rather than miner-visible competition policy.
+    ``max_mean_logprob_drop`` remains ``None`` when a legacy campaign does not
+    carry it, so enabling the relative quality bar still means re-seeding.
     """
 
     min_mean_logprob: float
     min_token_logprob: float
     min_token_quantile: float
     min_coverage_ratio: float
+    max_mean_logprob_drop: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessThresholds:
+        def optional(key: str) -> float | None:
+            raw = d.get(key)
+            return None if raw is None else float(raw)
+
         return cls(
             min_mean_logprob=float(d["min_mean_logprob"]),
             min_token_logprob=float(d["min_token_logprob"]),
             min_token_quantile=float(d["min_token_quantile"]),
             min_coverage_ratio=float(d["min_coverage_ratio"]),
+            max_mean_logprob_drop=optional("max_mean_logprob_drop"),
         )
 
 

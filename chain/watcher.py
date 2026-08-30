@@ -7,7 +7,12 @@ from functools import partial
 from typing import Any, Callable
 
 from campaign.fees import submission_fee_rao
-from campaign.store import get_campaign, insert_submission, payment_ref_consumed
+from campaign.store import (
+    CampaignHotkeyDisqualified,
+    get_campaign,
+    insert_submission,
+    payment_ref_consumed,
+)
 from chain.commitment import (
     PatchCommitment,
     build_patch_commitments,
@@ -108,16 +113,24 @@ def ingest_commitment(
             return None
         payment_block, payment_tx = com.payment_block, com.payment_tx
 
-    sid = insert_submission(
-        campaign_id=com.campaign_id,
-        patch_hash=com.patch_hash,
-        hotkey=com.hotkey,
-        baseline_commit=com.baseline_commit,
-        retrieval_url=com.retrieval_url,
-        commit_block=com.commit_block,
-        payment_block=payment_block,
-        payment_tx=payment_tx,
-    )
+    try:
+        sid = insert_submission(
+            campaign_id=com.campaign_id,
+            patch_hash=com.patch_hash,
+            hotkey=com.hotkey,
+            baseline_commit=com.baseline_commit,
+            retrieval_url=com.retrieval_url,
+            commit_block=com.commit_block,
+            payment_block=payment_block,
+            payment_tx=payment_tx,
+        )
+    except CampaignHotkeyDisqualified:
+        logger.info(
+            "skip commitment: hotkey disqualified campaign=%s hotkey=%s",
+            com.campaign_id,
+            com.hotkey[:16],
+        )
+        return None
     if sid is None:
         logger.info(
             "skip commitment: duplicate patch_hash=%s campaign=%s",

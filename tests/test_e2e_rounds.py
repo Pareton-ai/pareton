@@ -7,18 +7,19 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import pytest
+from e2e_db import cleanup_e2e_rows, require_e2e_database_url
 
 import config
 from campaign.manifest import build_manifest
 from campaign.models import SLA
 from campaign.store import (
+    CampaignHotkeyDisqualified,
     get_campaign,
     insert_campaign,
     insert_profile,
     insert_submission,
 )
 from db.connection import db_connection
-from e2e_db import cleanup_e2e_rows, require_e2e_database_url
 from round.create import create_due_rounds, try_create_round
 from round.rank import EVENT_OVERTAKEN, EVENT_SEATED, EVENT_VACATED, RankDecision
 from round.store import (
@@ -26,6 +27,7 @@ from round.store import (
     campaigns_with_queue,
     claim_pending_round,
     complete_round,
+    disqualify_campaign_hotkey,
     get_leader,
     list_idle_seated_leaders,
     reap_stale_rounds,
@@ -117,12 +119,18 @@ def _campaign(**over) -> UUID:
     return campaign_id
 
 
-def _submission(campaign_id: UUID, *, image_ref: str, block: int) -> str:
+def _submission(
+    campaign_id: UUID,
+    *,
+    image_ref: str,
+    block: int,
+    hotkey: str = "5FakesHotkeyForE2ETesting000000000000000000000",
+) -> str:
     """Insert a built submission that is not in the round queue."""
     sid = insert_submission(
         campaign_id=campaign_id,
         patch_hash="sha256:" + uuid4().hex * 2,
-        hotkey="5FakesHotkeyForE2ETesting000000000000000000000",
+        hotkey=hotkey,
         baseline_commit="deadbeef",
         retrieval_url=f"https://cdn.test/stage0/campaigns/{campaign_id}/p/e2e.diff",
         commit_block=block,
@@ -137,9 +145,16 @@ def _submission(campaign_id: UUID, *, image_ref: str, block: int) -> str:
     return str(sid)
 
 
-def _queued(campaign_id: UUID, *, image_ref: str, block: int, waited_s: int = 0) -> str:
+def _queued(
+    campaign_id: UUID,
+    *,
+    image_ref: str,
+    block: int,
+    waited_s: int = 0,
+    hotkey: str = "5FakesHotkeyForE2ETesting000000000000000000000",
+) -> str:
     """Insert a submission and put it in the round queue, aged by waited_s."""
-    sid = _submission(campaign_id, image_ref=image_ref, block=block)
+    sid = _submission(campaign_id, image_ref=image_ref, block=block, hotkey=hotkey)
     with db_connection() as conn:
         with conn.cursor() as cur:
             # The gate events came first in real time; age them with the queue
@@ -975,3 +990,123 @@ def test_vacate_if_idle_skips_a_running_round():
     assert seated is not None
     assert str(seated["submission_id"]) == leader_sid
     assert _history(campaign_id) == []
+
+
+def test_campaign_hotkey_disqualification_vacates_and_blocks_reentry():
+    campaign_id = _campaign()
+    hotkey = "5FakesHotkeyForE2ETesting000000000000000000000"
+    leader_sid = _submission(campaign_id, image_ref=IMAGE_C, block=1)
+    queued_sid = _queued(campaign_id, image_ref=IMAGE_A, block=2)
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT patch_hash FROM submissions WHERE id = %s", (leader_sid,)
+            )
+            disqualified_patch_hash = cur.fetchone()[0]
+
+    result = disqualify_campaign_hotkey(
+        campaign_id,
+        hotkey,
+        reason="manual policy violation",
+        evidence_ref="PAR-123",
+        disqualified_by="test-operator",
+        epsilon=0.01,
+    )
+
+    assert result.created is True
+    assert result.submissions_disqualified == 2
+    assert result.pending_jobs_stopped == 2
+    assert result.leader_vacated is True
+    assert get_leader(campaign_id) is None
+    assert _history(campaign_id) == [(EVENT_VACATED, None, leader_sid)]
+    assert _latest_state(leader_sid)[0] == "disqualified"
+    assert _latest_state(queued_sid)[0] == "disqualified"
+    assert campaigns_with_queue() == []
+
+    with pytest.raises(CampaignHotkeyDisqualified):
+        insert_submission(
+            campaign_id=campaign_id,
+            patch_hash="sha256:" + "9" * 64,
+            hotkey=hotkey,
+            baseline_commit="deadbeef",
+            retrieval_url="https://cdn.test/reentry.diff",
+            commit_block=3,
+        )
+
+    assert (
+        insert_submission(
+            campaign_id=campaign_id,
+            patch_hash=disqualified_patch_hash.upper(),
+            hotkey="5DifferentHotkeyForE2ETesting0000000000000000000",
+            baseline_commit="deadbeef",
+            retrieval_url="https://cdn.test/copied-solution.diff",
+            commit_block=4,
+        )
+        is None
+    )
+
+
+def test_campaign_hotkey_disqualification_seats_best_eligible_runner_up():
+    campaign_id = _campaign()
+    excluded_hotkey = "5ExcludedLeaderForE2ETesting00000000000000000000"
+    fallback_hotkey = "5FallbackLeaderForE2ETesting00000000000000000000"
+    leader_sid = _submission(
+        campaign_id,
+        image_ref=IMAGE_C,
+        block=1,
+        hotkey=excluded_hotkey,
+    )
+    _seed_incumbent(campaign_id, leader_sid, IMAGE_C)
+    fallback_sid = _queued(
+        campaign_id,
+        image_ref=IMAGE_A,
+        block=2,
+        waited_s=40_000,
+        hotkey=fallback_hotkey,
+    )
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    round_id = str(claimed["id"])
+    by_role = {row["role"]: row for row in _runner_entries(round_id)}
+    assert complete_round(
+        round_id=round_id,
+        campaign_id=campaign_id,
+        ordinal=int(claimed["ordinal"]),
+        decision=RankDecision(
+            leader_submission_id=leader_sid,
+            leader_score=0.30,
+            overtake_threshold=0.303,
+        ),
+        entries=[
+            _result(by_role["baseline"], status="scored", score=0.0),
+            _result(by_role["leader"], status="scored", score=0.30),
+            _result(by_role["challenger"], status="scored", score=0.20),
+        ],
+        baseline_drift=0.0,
+        epsilon=0.01,
+    )
+
+    result = disqualify_campaign_hotkey(
+        campaign_id,
+        excluded_hotkey,
+        reason="manual policy violation",
+        evidence_ref="PAR-123",
+        disqualified_by="test-operator",
+        epsilon=0.01,
+    )
+
+    assert result.leader_vacated is True
+    assert result.replacement_submission_id == fallback_sid
+    assert result.replacement_hotkey == fallback_hotkey
+    replacement = get_leader(campaign_id)
+    assert replacement is not None
+    assert str(replacement["submission_id"]) == fallback_sid
+    assert replacement["hotkey"] == fallback_hotkey
+    assert float(replacement["last_score"]) == pytest.approx(0.20)
+    assert str(replacement["won_at_round_id"]) == round_id
+    assert _history(campaign_id) == [
+        (EVENT_VACATED, None, leader_sid),
+        (EVENT_SEATED, fallback_sid, None),
+    ]
