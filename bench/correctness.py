@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import statistics
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -437,6 +438,7 @@ def grade_candidate(
     *,
     cfg: CorrectnessConfig,
     evidence_path: Path,
+    baseline_outputs: Mapping[str, str] | None = None,
     request_timeout_s: float = 300.0,
 ) -> CorrectnessReport:
     """Teacher-force one candidate's captured outputs through the scorer.
@@ -444,6 +446,9 @@ def grade_candidate(
     Three outcomes, and the difference between the last two matters:
 
     * ``pass``: the scorer finds the output plausible.
+      An empty output also passes for a request where the opening baseline's
+      captured output was empty; there are no continuation tokens to score,
+      and matching the pinned reference must not disqualify a candidate.
     * ``fail_correctness``: the output is wrong. The entry is disqualified.
     * ``infra_failed``: the scorer produced too few logprobs to judge on.
       That is a harness problem, and the entry is requeued, not disqualified.
@@ -452,12 +457,32 @@ def grade_candidate(
     logprobs: list[float] = []
     span_positions = 0
     empty: list[str] = []
+    baseline_empty_matches: list[str] = []
+    baseline_outputs = baseline_outputs or {}
 
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
     with partial.open("w", encoding="utf-8") as ef:
         for captured in outputs:
             if not captured.output_text:
+                if baseline_outputs.get(captured.request_id) == "":
+                    baseline_empty_matches.append(captured.request_id)
+                    ef.write(
+                        json.dumps(
+                            {
+                                "request_id": captured.request_id,
+                                "streamed_tokens": captured.completion_tokens,
+                                "span_positions": 0,
+                                "scored_positions": 0,
+                                "mean_logprob": None,
+                                "min_logprob": None,
+                                "baseline_empty_match": True,
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+                    continue
                 empty.append(captured.request_id)
                 continue
             scored, span = score_captured_output(
@@ -496,6 +521,17 @@ def grade_candidate(
         )
 
     if not logprobs:
+        if baseline_empty_matches and len(baseline_empty_matches) == len(outputs):
+            return CorrectnessReport(
+                verdict="pass",
+                num_prompts=len(outputs),
+                num_positions_scored=0,
+                mean_logprob=0.0,
+                min_logprob=0.0,
+                quantile_logprob=0.0,
+                coverage_ratio=1.0,
+                evidence=rel_evidence,
+            )
         return CorrectnessReport(
             verdict="infra_failed",
             num_prompts=len(outputs),
@@ -570,12 +606,15 @@ def grade_all(
     *,
     cfg: CorrectnessConfig,
     evidence_dir: Path,
+    baseline_outputs: Mapping[str, str] | None = None,
     request_timeout_s: float = 300.0,
 ) -> dict[int, CorrectnessReport]:
     """Grade every queued candidate against one already-running scorer.
 
     The caller starts the scorer, calls this, and stops it, so correctness
     costs one engine start per round however many candidates the round holds.
+    ``baseline_outputs`` comes from the opening baseline replay and supplies
+    the parity exception for empty decoded continuations.
     """
     probe_resp = probe_logprob_capability(scorer_url, timeout=request_timeout_s)
     write_completion_response_shape(evidence_dir, probe_resp)
@@ -587,6 +626,7 @@ def grade_all(
                 item.outputs,
                 cfg=cfg,
                 evidence_path=evidence_dir / f"candidate_{item.candidate_index}.jsonl",
+                baseline_outputs=baseline_outputs,
                 request_timeout_s=request_timeout_s,
             )
         except EngineError as exc:

@@ -431,6 +431,60 @@ def test_empty_output_fails_correctness(tmp_path: Path):
     assert "no output" in (report.reason or "")
 
 
+def test_empty_output_passes_when_baseline_output_is_also_empty(tmp_path: Path):
+    outputs = [_captured("r1", "Hello world", "", tokens=1)]
+    evidence = tmp_path / "correctness" / "candidate_0.jsonl"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=evidence,
+            baseline_outputs={"r1": ""},
+        )
+    assert report.verdict == "pass"
+    assert report.num_positions_scored == 0
+    assert report.coverage_ratio == 1.0
+    row = json.loads(evidence.read_text(encoding="utf-8"))
+    assert row["request_id"] == "r1"
+    assert row["baseline_empty_match"] is True
+
+
+def test_baseline_empty_match_does_not_fail_otherwise_scored_outputs(tmp_path: Path):
+    outputs = [
+        _captured("r1", "First prompt", "", tokens=1),
+        _captured("r2", "Second prompt", " OK OK", tokens=2),
+    ]
+    evidence = tmp_path / "correctness" / "candidate_0.jsonl"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=2),
+            evidence_path=evidence,
+            baseline_outputs={"r1": "", "r2": " OK OK"},
+        )
+    assert report.verdict == "pass"
+    assert report.num_positions_scored > 0
+    rows = [json.loads(line) for line in evidence.read_text().splitlines()]
+    assert rows[0]["baseline_empty_match"] is True
+    assert rows[1]["scored_positions"] > 0
+
+
+def test_empty_output_still_fails_when_baseline_returned_text(tmp_path: Path):
+    outputs = [_captured("r1", "Hello world", "", tokens=1)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_outputs={"r1": "baseline text"},
+        )
+    assert report.verdict == "fail_correctness"
+    assert "no output" in (report.reason or "")
+
+
 def test_no_logprobs_at_all_is_infra_not_disqualification(tmp_path: Path):
     """With nothing scored there is no evidence either way, so the entry is
     requeued rather than disqualified."""
