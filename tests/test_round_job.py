@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 import config
+from bench.sampler import PromptFormatter, generate_trace
 
 pytestmark = pytest.mark.unit
 
@@ -339,6 +340,109 @@ def test_materialize_round_trace_sha_mismatch(tmp_path):
         materialize_round_trace(row, campaign, tmp_path / "out")
     assert exc.value.reason == VOID_TRACE_UNAVAILABLE
     assert sha256_bytes(raw) != row["sampled_trace_sha256"]
+
+
+def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeypatch):
+    rule = {
+        "type": "hf_rows",
+        "dataset": "d",
+        "revision": "r",
+        "config": "default",
+        "split": "train",
+        "n_rows": 2,
+        "n_prompts": 1,
+        "max_tokens": 8,
+        "algo_version": 1,
+    }
+    formatter = PromptFormatter(
+        render=lambda prompt: f"<user>{prompt}</user><assistant>",
+        receipt={
+            "chat_template": {
+                "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+                "model_revision": HF_REV,
+                "sha256": "sha256:" + "d" * 64,
+                "add_generation_prompt": True,
+            },
+        },
+    )
+
+    def row_fetcher(idx):
+        return {"trajectory": [{"role": "user", "content": f"issue-{idx}"}]}
+
+    sampled = generate_trace(
+        rule=rule,
+        seed_hex="ab" * 32,
+        row_fetcher=row_fetcher,
+        prompt_formatter=formatter,
+        sample_seed_block=10,
+        sample_seed_block_hash="cd" * 32,
+    )
+    row = _round_row(
+        sampled_trace_sha256=sampled.sha256,
+        sampling_receipt=sampled.receipt,
+        seed_hex="ab" * 32,
+    )
+    formatter_calls = []
+
+    def fake_build_formatter(rule_arg, **kwargs):
+        formatter_calls.append((rule_arg, kwargs))
+        return formatter
+
+    monkeypatch.setattr(
+        "worker.round_job.build_prompt_formatter", fake_build_formatter
+    )
+
+    path = materialize_round_trace(
+        row,
+        _campaign(),
+        tmp_path / "out",
+        row_fetcher=row_fetcher,
+    )
+
+    assert path.read_bytes() == sampled.body
+    assert "<assistant>" in path.read_text(encoding="utf-8")
+    assert formatter_calls[0][1] == {
+        "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+        "model_revision": HF_REV,
+        "expected_template_sha256": "sha256:" + "d" * 64,
+    }
+
+
+def test_materialize_round_trace_keeps_legacy_v1_raw_prompts(tmp_path):
+    rule = {
+        "type": "hf_rows",
+        "dataset": "d",
+        "revision": "r",
+        "n_rows": 2,
+        "n_prompts": 1,
+        "max_tokens": 8,
+        "algo_version": 1,
+    }
+
+    def row_fetcher(idx):
+        return {"trajectory": [{"role": "user", "content": f"raw-{idx}"}]}
+
+    sampled = generate_trace(
+        rule=rule,
+        seed_hex="ef" * 32,
+        row_fetcher=row_fetcher,
+    )
+    legacy_receipt = dict(sampled.receipt)
+    row = _round_row(
+        sampled_trace_sha256=sampled.sha256,
+        sampling_receipt=legacy_receipt,
+        seed_hex="ef" * 32,
+    )
+
+    path = materialize_round_trace(
+        row,
+        _campaign(),
+        tmp_path / "out",
+        row_fetcher=row_fetcher,
+    )
+
+    assert path.read_bytes() == sampled.body
+    assert "<|im_start|>" not in path.read_text(encoding="utf-8")
 
 
 def test_infra_failed_requeue_once_accounting():

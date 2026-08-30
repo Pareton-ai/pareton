@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 import config
+from bench.sampler import PromptFormatter
 from round.create import dedupe_by_digest, should_create, try_create_round
 
 pytestmark = pytest.mark.unit
@@ -159,6 +160,7 @@ def test_minimal_hf_rule_fetches_with_parsed_defaults(monkeypatch):
         {"queued": 5, "oldest_queued_at": NOW},
         seed_block=1000,
         seed_block_hash="ab" * 32,
+        prompt_formatter=PromptFormatter(render=lambda prompt: prompt, receipt={}),
     )
 
     assert out == {"round_id": "r1", "ordinal": 1}
@@ -166,3 +168,61 @@ def test_minimal_hf_rule_fetches_with_parsed_defaults(monkeypatch):
     assert kw["sampling_receipt"]["type"] == "hf_rows"
     assert kw["sampling_receipt"]["config"] == "default"
     assert kw["sampling_receipt"]["split"] == "train"
+
+
+def test_round_creation_hashes_chat_formatted_prompts(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(config, "ROUND_SIZE", 1)
+    rule = {
+        "type": "hf_rows",
+        "dataset": "d",
+        "revision": "r",
+        "n_rows": 2,
+        "n_prompts": 1,
+        "algo_version": 1,
+    }
+    formatter = PromptFormatter(
+        render=lambda prompt: f"<chat>{prompt}</chat><assistant>",
+        receipt={
+            "chat_template": {
+                "model_repo": "org/model",
+                "model_revision": "a" * 40,
+                "sha256": "sha256:" + "b" * 64,
+                "add_generation_prompt": True,
+            },
+        },
+    )
+    formatter_calls = []
+
+    def fake_build_formatter(rule_arg, **kwargs):
+        formatter_calls.append((rule_arg, kwargs))
+        return formatter
+
+    monkeypatch.setattr("round.create.build_prompt_formatter", fake_build_formatter)
+
+    out = try_create_round(
+        _campaign(
+            sampling_rule=rule,
+            bench={
+                "baseline_engine_image_digest": DIGEST_A,
+                "model": {
+                    "hf_repo": "org/model",
+                    "hf_revision": "a" * 40,
+                },
+            },
+        ),
+        {"queued": 5, "oldest_queued_at": NOW},
+        seed_block=1000,
+        seed_block_hash="ab" * 32,
+        row_fetcher=lambda _idx: {
+            "trajectory": [{"role": "user", "content": "issue"}]
+        },
+    )
+
+    assert out == {"round_id": "r1", "ordinal": 1}
+    (kw,) = calls
+    assert kw["sampling_receipt"]["chat_template"]["add_generation_prompt"] is True
+    assert formatter_calls[0][1] == {
+        "model_repo": "org/model",
+        "model_revision": "a" * 40,
+    }

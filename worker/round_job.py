@@ -6,15 +6,18 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 import config
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
+    PromptFormatter,
     SamplerError,
+    build_prompt_formatter,
     fetch_hf_row,
     generate_trace,
     parse_sampling_rule,
@@ -43,11 +46,11 @@ from round.store import (
     VOID_ROUND_TIMEOUT,
     VOID_TRACE_UNAVAILABLE,
     complete_round,
+    defer_round_for_capacity,
     get_leader,
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
-    defer_round_for_capacity,
     void_round,
 )
 from worker.phase_reporter import PhaseReporter
@@ -150,6 +153,7 @@ def materialize_round_trace(
     *,
     fetcher: Callable[[str], bytes] | None = None,
     row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    prompt_formatter: PromptFormatter | None = None,
 ) -> Path:
     """Rebuild the round's workload trace and verify it against the snapshot sha."""
     expected = str(round_row["sampled_trace_sha256"])
@@ -171,12 +175,53 @@ def materialize_round_trace(
                     "seed_block_offset": receipt.get("seed_block_offset"),
                 }
             )
+            formatter = prompt_formatter
+            if formatter is None:
+                template = receipt.get("chat_template")
+                if isinstance(template, dict):
+                    bench = (
+                        campaign.bench
+                        if isinstance(getattr(campaign, "bench", None), dict)
+                        else {}
+                    )
+                    model = bench.get("model")
+                    if not isinstance(model, dict):
+                        raise SamplerError(
+                            "chat template receipt requires campaign model metadata"
+                        )
+                    model_repo = str(model.get("hf_repo") or "")
+                    model_revision = str(model.get("hf_revision") or "")
+                    template_sha256 = str(template.get("sha256") or "")
+                    if not template_sha256 or (
+                        template.get("add_generation_prompt") is not True
+                    ):
+                        raise SamplerError(
+                            "chat template receipt is missing its rendering contract"
+                        )
+                    if model_repo != str(template.get("model_repo") or "") or (
+                        model_revision
+                        != str(template.get("model_revision") or "")
+                    ):
+                        raise SamplerError(
+                            "chat template receipt does not match campaign model pin"
+                        )
+                    formatter = build_prompt_formatter(
+                        rule,
+                        model_repo=model_repo,
+                        model_revision=model_revision,
+                        expected_template_sha256=template_sha256,
+                    )
+                else:
+                    # Receipts created before template rendering was introduced
+                    # contain no chat_template metadata and remain byte-compatible.
+                    formatter = None
             sampled = generate_trace(
                 rule=rule,
                 seed_hex=str(
                     receipt.get("seed_hex") or round_row.get("seed_hex") or ""
                 ),
                 row_fetcher=row_fetcher or (lambda idx: fetch_hf_row(rule, idx)),
+                prompt_formatter=formatter,
                 sample_seed_block=int(receipt.get("sample_seed_block") or 0),
                 sample_seed_block_hash=str(receipt.get("sample_seed_block_hash") or ""),
             )
