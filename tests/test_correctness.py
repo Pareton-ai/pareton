@@ -8,13 +8,18 @@ from pathlib import Path
 import pytest
 
 from bench.correctness import (
+    BASELINE_INDEX,
+    BaselineDegeneracyReference,
     CapturedOutput,
     PendingCorrectness,
     PromptCase,
+    build_baseline_degeneracy_references,
     capture_outputs,
+    distinct_ngram_ratio,
     extract_output_logprobs,
     grade_all,
     grade_candidate,
+    longest_repeated_substring_ratio,
     post_completion,
     probe_logprob_capability,
     quantile_low,
@@ -28,9 +33,11 @@ from bench.mock_engine import (
     MockEngine,
     MockEngineConfig,
     build_completion_response,
+    mock_tokenize,
 )
 from bench.schemas import CorrectnessConfig, CorrectnessThresholds
 from bench.score import PromptTiming
+from bench.sla_bench import NaturalStopReference
 from bench.validate import RequestValidationError, sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,8 +51,13 @@ def _cfg(
     quantile: float = 0.0,
     coverage: float = 0.5,
     num_prompts: int = 2,
+    max_drop: float | None = None,
 ) -> CorrectnessConfig:
-    """Default quantile is 0, so existing cases still gate on the plain min."""
+    """Default quantile is 0, so existing cases still gate on the plain min.
+
+    The relative quality bar defaults to None, matching a campaign whose
+    manifest predates it. Repeat-loop checks are mandatory harness policy.
+    """
     return CorrectnessConfig(
         num_prompts=num_prompts,
         thresholds=CorrectnessThresholds(
@@ -53,8 +65,33 @@ def _cfg(
             min_token_logprob=min_token,
             min_token_quantile=quantile,
             min_coverage_ratio=coverage,
+            max_mean_logprob_drop=max_drop,
         ),
     )
+
+
+# A 500-token-style repeat loop: the exploit PAR-108 is about. Nothing here is
+# nonsense at the token level, so the scorer rates every token near its own
+# greedy path.
+LOOP_TEXT = " apple" * 200
+# The same loop with the spaces stripped out of each repeat: 20 whitespace
+# "words" of 200 characters each. A word-level statistic sees 20 words and
+# lets this through, which is why the bar counts characters.
+GLUED_LOOP_TEXT = (" " + "apple" * 40) * 20
+# Honest output that repeats heavily: 30 list items differing only by index.
+# The worst false-positive case found, and it still clears the floor by 2x.
+REPETITIVE_LIST_TEXT = "\n".join(
+    f"- step {i}: run the migration and verify the row count" for i in range(30)
+)
+PROSE_TEXT = (
+    " The function reads the manifest, verifies its hash against the campaign "
+    "row, and refuses to continue when the two disagree. That check runs "
+    "before any container starts, so a bad pin costs nothing but a log line "
+    "and an early exit rather than a wasted round on rented hardware."
+)
+# A scaled version of the exploit: its varied period is large enough to clear
+# the 0.15 distinct n-gram floor, then repeats six times to fill a long output.
+LONG_PERIOD_LOOP_TEXT = PROSE_TEXT * 6
 
 
 def _captured(request_id: str, prompt: str, text: str, tokens: int = 2):
@@ -579,3 +616,327 @@ def test_partial_evidence_left_on_engine_error(
     assert (evidence_dir / "candidate_0.jsonl.partial").is_file()
     # Failed retry must not erase a prior successful evidence file.
     assert prior.read_text(encoding="utf-8") == '{"prior":true}\n'
+
+
+# ---------------------------------------------------------------------------
+# PAR-108: a degenerate repeat loop outscores a real answer on absolute bars
+# ---------------------------------------------------------------------------
+
+
+def test_distinct_ngram_ratio_separates_loops_from_honest_output():
+    """Counting characters is what closes the unspaced-loop evasion."""
+    assert distinct_ngram_ratio(LOOP_TEXT) < 0.15
+    assert distinct_ngram_ratio(GLUED_LOOP_TEXT) < 0.15
+    assert distinct_ngram_ratio(PROSE_TEXT) > 0.15
+    # The heaviest honest repetition found still clears the floor by 2x.
+    assert distinct_ngram_ratio(REPETITIVE_LIST_TEXT) > 0.30
+
+
+def test_repeated_span_ratio_catches_a_loop_with_a_large_period():
+    assert distinct_ngram_ratio(LONG_PERIOD_LOOP_TEXT) > 0.15
+    assert longest_repeated_substring_ratio(LONG_PERIOD_LOOP_TEXT) > 0.80
+    assert longest_repeated_substring_ratio(REPETITIVE_LIST_TEXT) < 0.25
+
+
+def test_repeated_span_bar_scales_to_the_5120_token_budget():
+    block = " ".join(f"concept_{i:04d}_{i * i:08d}" for i in range(800))
+    text = " ".join([block] * 6)
+    assert len(text.split()) == 4800
+    # Six varied 800-token blocks clear the old 0.15 floor but occupy 94% of
+    # the 5120-token budget and remain an obvious repeated-output exploit.
+    assert distinct_ngram_ratio(text) > 0.15
+    assert longest_repeated_substring_ratio(text) > 0.80
+
+
+def test_a_repeat_loop_clears_every_absolute_logprob_bar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The hole PAR-108 closes, kept as a test so it cannot reopen quietly.
+
+    Repeated tokens are the most predictable text there is, so the scorer
+    rates them near its own greedy path. Absolute plausibility is not monotone
+    in output quality, and no logprob floor alone can catch this.
+    """
+    from bench import correctness
+
+    monkeypatch.setattr(correctness, "DEGENERACY_MIN_DISTINCT_NGRAM_RATIO", 0.0)
+    monkeypatch.setattr(correctness, "DEGENERACY_MAX_REPEATED_SPAN_RATIO", 1.0)
+    outputs = [_captured("r1", "Hello world", LOOP_TEXT, tokens=200)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "pass"
+    assert report.mean_logprob > -4.0
+
+
+def test_a_repeat_loop_is_disqualified_by_the_degeneracy_bars(tmp_path: Path):
+    outputs = [_captured("r1", "Hello world", LOOP_TEXT, tokens=200)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert "degenerate" in (report.reason or "")
+    # Still comfortably above the absolute bar: the text bars did the work.
+    assert report.mean_logprob > -4.0
+
+
+def test_a_loop_without_spaces_is_still_caught(tmp_path: Path):
+    """The evasion a word-level bar would allow: emit the loop with no spaces."""
+    outputs = [_captured("r1", "Hello world", GLUED_LOOP_TEXT, tokens=20)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert "16-gram" in (report.reason or "")
+
+
+def test_a_long_period_loop_is_disqualified_by_the_repeated_span_bar(
+    tmp_path: Path,
+):
+    """Scaling the repeated unit with a 5120-token budget must not evade us."""
+    outputs = [_captured("r1", "Hello world", LONG_PERIOD_LOOP_TEXT, tokens=300)]
+    scorer_cfg = MockEngineConfig(host="127.0.0.1", port=0, logprobs=[-0.5])
+    with MockEngine(scorer_cfg) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+    assert "longest repeated span" in (report.reason or "")
+    assert report.mean_logprob == pytest.approx(-0.5)
+
+
+def test_heavily_repetitive_honest_output_still_passes(tmp_path: Path):
+    """A numbered list differing only by index is repetitive, not degenerate."""
+    outputs = [_captured("r1", "Hello world", REPETITIVE_LIST_TEXT, tokens=300)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "pass"
+
+
+def test_a_short_output_is_never_read_as_degenerate(tmp_path: Path):
+    """Below DEGENERACY_MIN_CHARS there is nothing to repeat, and an honest
+    short answer must not be disqualified for being short."""
+    outputs = [_captured("r1", "Hello world", " yes yes yes", tokens=3)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "pass"
+
+
+def test_a_compact_loop_is_not_exempt_from_the_text_bars(tmp_path: Path):
+    text = " apple" * 30
+    assert 64 <= len(text) < 200
+    outputs = [_captured("r1", "Hello world", text, tokens=30)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "fail_correctness"
+
+
+def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
+    evidence = tmp_path / "correctness" / "candidate_0.jsonl"
+    outputs = [_captured("r1", "Hello world", LOOP_TEXT, tokens=200)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=evidence,
+        )
+    line = json.loads(evidence.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert line["distinct_ngram_ratio"] < 0.15
+    assert line["longest_repeated_substring_ratio"] > 0.90
+    assert "16-gram" in line["degenerate"]
+
+
+def _baseline_reference(natural_text: str, forced_text: str):
+    return {
+        "r1": BaselineDegeneracyReference(
+            natural_stop_tokens=len(mock_tokenize(natural_text)),
+            full_distinct_ngram_ratio=distinct_ngram_ratio(forced_text),
+            full_repeated_span_ratio=longest_repeated_substring_ratio(forced_text),
+        )
+    }
+
+
+def test_forced_baseline_padding_is_not_disqualified(tmp_path: Path):
+    """Expected repetition after the trusted baseline stop is baseline-relative."""
+    forced = PROSE_TEXT + LOOP_TEXT
+    outputs = [_captured("r1", "Hello world", forced, tokens=240)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(PROSE_TEXT, forced),
+        )
+    assert report.verdict == "pass"
+
+
+def test_baseline_relative_bounds_cover_all_measured_repetitions():
+    first = PROSE_TEXT + REPETITIVE_LIST_TEXT
+    second = PROSE_TEXT + LOOP_TEXT
+    references = build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", first)],
+        {
+            "r1": NaturalStopReference(
+                request_id="r1",
+                completion_tokens=len(mock_tokenize(PROSE_TEXT)),
+                finish_reason="stop",
+                text=PROSE_TEXT,
+            )
+        },
+        {"r1": (first, second)},
+    )
+    reference = references["r1"]
+    assert reference.full_distinct_ngram_ratio == min(
+        distinct_ngram_ratio(first), distinct_ngram_ratio(second)
+    )
+    assert reference.full_repeated_span_ratio == max(
+        longest_repeated_substring_ratio(first),
+        longest_repeated_substring_ratio(second),
+    )
+
+
+def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
+    """The candidate cannot move the inspected boundary by claiming an early stop."""
+    baseline_forced = PROSE_TEXT + LOOP_TEXT
+    candidate = LOOP_TEXT + baseline_forced
+    outputs = [_captured("r1", "Hello world", candidate, tokens=440)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(PROSE_TEXT, baseline_forced),
+        )
+    assert report.verdict == "fail_correctness"
+    assert "degenerate" in (report.reason or "")
+
+
+def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Path):
+    """The full output remains watched without imposing one absolute tail shape."""
+    baseline_forced = PROSE_TEXT + REPETITIVE_LIST_TEXT
+    candidate = PROSE_TEXT + LOOP_TEXT
+    outputs = [_captured("r1", "Hello world", candidate, tokens=240)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(PROSE_TEXT, baseline_forced),
+        )
+    assert report.verdict == "fail_correctness"
+    assert "baseline" in (report.reason or "")
+
+
+def test_baseline_relative_loop_check_is_not_tied_to_one_output_budget(
+    tmp_path: Path,
+):
+    natural = PROSE_TEXT * 2
+    period = " ".join(f"symbol_{i:03d}" for i in range(137))
+    baseline_forced = natural + (" " + period) * 3
+    candidate = natural + (" " + period) * 6
+    outputs = [_captured("r1", "Hello world", candidate, tokens=900)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_degeneracy=_baseline_reference(natural, baseline_forced),
+        )
+    assert report.verdict == "fail_correctness"
+
+
+# ---------------------------------------------------------------------------
+# PAR-108: the relative bar, for the opposite failure
+# ---------------------------------------------------------------------------
+
+
+def test_a_candidate_far_below_the_baseline_is_disqualified(tmp_path: Path):
+    """A candidate that degrades the model clears the absolute floor and still
+    scores well below the baseline on the same prompts."""
+    outputs = [_captured("r1", "Hello world", " something else entirely", tokens=3)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1, max_drop=0.1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_mean_logprob=-0.2,
+        )
+    assert report.verdict == "fail_correctness"
+    assert "below the baseline" in (report.reason or "")
+
+
+def test_the_relative_bar_is_skipped_without_a_baseline(tmp_path: Path):
+    """Grading the baseline itself, and any campaign that predates the bar,
+    both arrive here with no reference and must be graded on the absolute
+    bars alone."""
+    outputs = [_captured("r1", "Hello world", " something else entirely", tokens=3)]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            outputs,
+            cfg=_cfg(num_prompts=1, max_drop=0.1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+        )
+    assert report.verdict == "pass"
+
+
+def test_grade_all_grades_the_baseline_first_and_keys_it_separately(tmp_path: Path):
+    """The baseline is queued like any other engine and becomes the reference."""
+    pending = [
+        PendingCorrectness(
+            candidate_index=0, outputs=[_captured("a", "Hello ", PROSE_TEXT)]
+        ),
+        PendingCorrectness(
+            candidate_index=BASELINE_INDEX,
+            outputs=[_captured("a", "Hello ", PROSE_TEXT)],
+        ),
+    ]
+    evidence = tmp_path / "correctness"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            pending,
+            cfg=_cfg(num_prompts=1),
+            evidence_dir=evidence,
+        )
+    assert set(reports) == {BASELINE_INDEX, 0}
+    assert reports[BASELINE_INDEX].verdict == "pass"
+    assert reports[0].verdict == "pass"
+    assert (evidence / "baseline.jsonl").is_file()
+    assert (evidence / "candidate_0.jsonl").is_file()

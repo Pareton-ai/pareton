@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -70,6 +71,8 @@ def test_parse_sampling_rule_requires_hf_rows():
     parsed = parse_sampling_rule(_rule())
     assert parsed["type"] == "hf_rows"
     assert parsed["n_prompts"] == 3
+    assert "ignore_eos" not in parsed
+    assert parse_sampling_rule(_rule(ignore_eos=True))["ignore_eos"] is True
     omitted = _rule()
     del omitted["seed_block_offset"]
     assert parse_sampling_rule(omitted)["seed_block_offset"] == 1
@@ -77,6 +80,31 @@ def test_parse_sampling_rule_requires_hf_rows():
         parse_sampling_rule({"type": "uniform_index"})
     with pytest.raises(SamplerError, match="must be an object"):
         parse_sampling_rule(None)
+    with pytest.raises(SamplerError, match="ignore_eos must be a boolean"):
+        parse_sampling_rule(_rule(ignore_eos="true"))
+
+
+def test_ignore_eos_is_pinned_only_when_enabled():
+    rows = [_user_row(f"prompt-{i}") for i in range(8)]
+    ordinary = generate_trace(
+        rule=_rule(), seed_hex="aa" * 32, row_fetcher=_fetcher(rows)
+    )
+    forced = generate_trace(
+        rule=_rule(ignore_eos=True),
+        seed_hex="aa" * 32,
+        row_fetcher=_fetcher(rows),
+    )
+    ordinary_doc = json.loads(ordinary.body)
+    forced_doc = json.loads(forced.body)
+    assert "ignore_eos" not in ordinary.receipt
+    assert all(
+        "ignore_eos" not in request["sampling"] for request in ordinary_doc["requests"]
+    )
+    assert forced.receipt["ignore_eos"] is True
+    assert all(
+        request["sampling"]["ignore_eos"] is True for request in forced_doc["requests"]
+    )
+    assert forced.sha256 != ordinary.sha256
 
 
 def test_fixed_seed_identical_trace_sha256_twice():

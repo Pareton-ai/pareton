@@ -22,7 +22,7 @@ import logging
 import statistics
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from bench.http import post_completion_stream
@@ -188,6 +188,7 @@ def _fire(
             temperature=req.sampling.temperature,
             top_p=req.sampling.top_p,
             seed=0,
+            ignore_eos=req.sampling.ignore_eos,
             timeout=timeout_s,
         )
         row = {
@@ -286,6 +287,108 @@ class EngineReplay:
 
     result: EngineSlaResult
     outputs: dict[str, str]
+    output_samples: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class NaturalStopReference:
+    """Where the pinned baseline stopped when EOS handling was enabled."""
+
+    request_id: str
+    completion_tokens: int
+    finish_reason: str | None
+    text: str
+
+
+def capture_baseline_natural_stops(
+    base_url: str,
+    *,
+    requests: list[TraceRequest],
+    replay: EngineReplay,
+    evidence_dir: Path,
+    request_timeout_s: float = 120.0,
+) -> dict[str, NaturalStopReference]:
+    """Capture a trusted per-prompt stop boundary from the pinned baseline.
+
+    Normal requests already stop naturally, so their measured replay is the
+    reference. Requests with ``ignore_eos`` get one additional untimed replay
+    with that switch disabled. Candidate stop claims are never consulted.
+    """
+    references: dict[str, NaturalStopReference] = {}
+    forced: list[TraceRequest] = []
+    for req in requests:
+        if req.sampling.ignore_eos:
+            forced.append(
+                replace(req, sampling=replace(req.sampling, ignore_eos=False))
+            )
+            continue
+        timing = replay.result.timings.get(req.id)
+        text = replay.outputs.get(req.id)
+        if timing is None or text is None:
+            raise EngineError(
+                f"baseline natural-stop reference missing request {req.id!r}"
+            )
+        references[req.id] = NaturalStopReference(
+            request_id=req.id,
+            completion_tokens=timing.completion_tokens,
+            finish_reason=None,
+            text=text,
+        )
+
+    if forced:
+        rows, _, errs = _replay(
+            base_url,
+            forced,
+            role="baseline-natural-stop",
+            rep=0,
+            is_warmup=False,
+            timeout_s=request_timeout_s,
+        )
+        if errs:
+            raise EngineError(
+                "baseline natural-stop probe had "
+                f"{len(errs)} failed request(s): {errs[0]}"
+            )
+        for row in rows:
+            request_id = str(row["request_id"])
+            references[request_id] = NaturalStopReference(
+                request_id=request_id,
+                completion_tokens=int(row.get("completion_tokens") or 0),
+                finish_reason=(
+                    None
+                    if row.get("finish_reason") is None
+                    else str(row["finish_reason"])
+                ),
+                text=str(row.get("text") or ""),
+            )
+
+    missing = [req.id for req in requests if req.id not in references]
+    if missing:
+        raise EngineError(
+            f"baseline natural-stop probe omitted {len(missing)} request(s): "
+            f"{missing[0]}"
+        )
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = evidence_dir / "baseline_natural_stops.jsonl"
+    partial = path.with_suffix(path.suffix + ".partial")
+    with partial.open("w", encoding="utf-8") as ef:
+        for req in requests:
+            ref = references[req.id]
+            ef.write(
+                json.dumps(
+                    {
+                        "request_id": ref.request_id,
+                        "completion_tokens": ref.completion_tokens,
+                        "finish_reason": ref.finish_reason,
+                        "text": ref.text,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    partial.replace(path)
+    return references
 
 
 def _run_engine(
@@ -324,7 +427,8 @@ def _run_engine(
         _write_rep(engine_evidence_dir / f"rep_{rep}", rep_rows, wall_s)
         if errs:
             raise EngineError(
-                f"sla_bench {role} rep {rep} had {len(errs)} failed request(s): {errs[0]}"
+                f"sla_bench {role} rep {rep} had {len(errs)} failed request(s): "
+                f"{errs[0]}"
             )
         measured.extend(rep_rows)
         rep_metrics.append(
@@ -364,6 +468,13 @@ def _per_request(rows: list[dict]) -> tuple[dict[str, PromptTiming], dict[str, s
         )
         outputs[rid] = str(row.get("text") or "")
     return timings, outputs
+
+
+def _output_samples(rows: list[dict]) -> dict[str, tuple[str, ...]]:
+    by_id: dict[str, list[str]] = {}
+    for row in rows:
+        by_id.setdefault(str(row["request_id"]), []).append(str(row.get("text") or ""))
+    return {request_id: tuple(samples) for request_id, samples in by_id.items()}
 
 
 def _rep_dir_paths(base: Path, repetitions: int) -> list[Path]:
@@ -437,7 +548,11 @@ def run_sla_engine(
         timings=timings,
         evidence=f"evidence/sla_bench/{role}",
     )
-    return EngineReplay(result=result, outputs=outputs)
+    return EngineReplay(
+        result=result,
+        outputs=outputs,
+        output_samples=_output_samples(measured),
+    )
 
 
 def _assert_metrics_close(

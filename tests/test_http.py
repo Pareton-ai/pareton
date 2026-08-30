@@ -71,6 +71,29 @@ def test_stream_requests_include_usage(monkeypatch: pytest.MonkeyPatch):
     assert len(res.itl_s) == 0  # usage-only chunk must not add an ITL sample
 
 
+def test_stream_forwards_ignore_eos_only_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: list[dict[str, Any]] = []
+
+    def fake_urlopen(req, timeout=60):
+        captured.append(json.loads(req.data.decode("utf-8")))
+        return _FakeResp(
+            _sse(
+                {
+                    "choices": [{"index": 0, "text": "x", "finish_reason": "length"}],
+                    "usage": {"completion_tokens": 1},
+                }
+            )
+        )
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    post_completion_stream("http://example", prompt="p", max_tokens=1)
+    post_completion_stream("http://example", prompt="p", max_tokens=1, ignore_eos=True)
+    assert "ignore_eos" not in captured[0]
+    assert captured[1]["ignore_eos"] is True
+
+
 def test_stream_usage_only_chunk_without_choices(monkeypatch: pytest.MonkeyPatch):
     def fake_urlopen(req, timeout=60):
         body = _sse(

@@ -9,6 +9,7 @@ existed.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import UUID
 
@@ -32,6 +33,24 @@ VOID_POD_FAILED = "pod_failed"
 VOID_ROUND_TIMEOUT = "round_timeout"
 VOID_TRACE_UNAVAILABLE = "trace_unavailable"
 VOID_LEADER_IMAGE_MISSING = "leader_image_missing"
+
+
+class CampaignHotkeyDisqualificationError(RuntimeError):
+    """The requested campaign hotkey disqualification is not safe to apply."""
+
+
+@dataclass(frozen=True)
+class CampaignHotkeyDisqualification:
+    """Audit summary returned by ``disqualify_campaign_hotkey``."""
+
+    campaign_id: str
+    hotkey: str
+    created: bool
+    submissions_disqualified: int
+    pending_jobs_stopped: int
+    leader_vacated: bool
+    replacement_submission_id: str | None = None
+    replacement_hotkey: str | None = None
 
 
 def campaigns_with_queue() -> list[dict[str, Any]]:
@@ -912,6 +931,298 @@ def vacate_leader_if_idle(campaign_id: UUID | str, *, epsilon: float) -> bool:
                 ),
             )
     return True
+
+
+def disqualify_campaign_hotkey(
+    campaign_id: UUID | str,
+    hotkey: str,
+    *,
+    reason: str,
+    evidence_ref: str,
+    disqualified_by: str,
+    epsilon: float,
+) -> CampaignHotkeyDisqualification:
+    """Permanently exclude one hotkey from one campaign.
+
+    The campaign lock serializes this operation with round creation and
+    submission ingestion. A live round or gate job makes the operation fail
+    without changes because either worker could otherwise publish a later
+    state and restore eligibility after this transaction commits.
+    """
+    reason = reason.strip()
+    evidence_ref = evidence_ref.strip()
+    disqualified_by = disqualified_by.strip()
+    hotkey = hotkey.strip()
+    if not hotkey:
+        raise ValueError("hotkey is required")
+    if not reason:
+        raise ValueError("reason is required")
+    if not evidence_ref:
+        raise ValueError("evidence_ref is required")
+    if not disqualified_by:
+        raise ValueError("disqualified_by is required")
+
+    cid = str(campaign_id)
+    detail = {
+        "source": "manual",
+        "scope": "campaign",
+        "reason": reason,
+        "operator": disqualified_by,
+    }
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                (cid,),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"unknown campaign: {cid}")
+
+            cur.execute(
+                """
+                SELECT 1 FROM rounds
+                WHERE campaign_id = %s AND status IN ('pending', 'running')
+                LIMIT 1
+                """,
+                (cid,),
+            )
+            if cur.fetchone() is not None:
+                raise CampaignHotkeyDisqualificationError(
+                    "campaign has a pending or running round; retry when it is idle"
+                )
+
+            cur.execute(
+                """
+                SELECT id FROM submissions
+                WHERE campaign_id = %s AND hotkey = %s
+                FOR UPDATE
+                """,
+                (cid, hotkey),
+            )
+            if not cur.fetchall():
+                raise ValueError("hotkey has no submissions in this campaign")
+
+            # Lock every gate job before inspecting its state. claim_next_job
+            # uses SKIP LOCKED, so it cannot take a pending job while this
+            # transaction terminalizes the hotkey's work.
+            cur.execute(
+                """
+                SELECT j.id, j.status
+                FROM submission_jobs j
+                JOIN submissions s ON s.id = j.submission_id
+                WHERE s.campaign_id = %s AND s.hotkey = %s
+                  AND j.status IN ('pending', 'running')
+                FOR UPDATE OF j
+                """,
+                (cid, hotkey),
+            )
+            jobs = list(cur.fetchall())
+            if any(row["status"] == "running" for row in jobs):
+                raise CampaignHotkeyDisqualificationError(
+                    "hotkey has a running gate job; retry when it is idle"
+                )
+
+            cur.execute(
+                """
+                SELECT 1
+                FROM submissions s
+                JOIN submission_events e ON e.submission_id = s.id
+                WHERE s.campaign_id = %s AND s.hotkey = %s
+                  AND e.state = 'disqualified'
+                  AND e.detail ->> 'source' = 'manual'
+                  AND e.detail ->> 'scope' = 'campaign'
+                LIMIT 1
+                """,
+                (cid, hotkey),
+            )
+            created = cur.fetchone() is None
+
+            cur.execute(
+                """
+                UPDATE submission_jobs j
+                SET status = 'done',
+                    last_error = 'campaign_hotkey_disqualified',
+                    phase = NULL,
+                    phase_started_at = NULL,
+                    heartbeat_at = NULL,
+                    progress = NULL,
+                    updated_at = now()
+                FROM submissions s
+                WHERE s.id = j.submission_id
+                  AND s.campaign_id = %s AND s.hotkey = %s
+                  AND j.status = 'pending'
+                """,
+                (cid, hotkey),
+            )
+            pending_jobs_stopped = cur.rowcount
+
+            # submission_events is append-only. Historical round entries stay
+            # unchanged; this later event is the administrative verdict.
+            cur.execute(
+                """
+                INSERT INTO submission_events (
+                  submission_id, state, evidence_ref, detail
+                )
+                SELECT s.id, 'disqualified', %s, %s
+                FROM submissions s
+                WHERE s.campaign_id = %s AND s.hotkey = %s
+                  AND NOT EXISTS (
+                    SELECT 1 FROM submission_events e
+                    WHERE e.submission_id = s.id
+                      AND e.state = 'disqualified'
+                      AND e.detail ->> 'source' = 'manual'
+                      AND e.detail ->> 'scope' = 'campaign'
+                  )
+                """,
+                (evidence_ref, Json(detail), cid, hotkey),
+            )
+            submissions_disqualified = cur.rowcount
+
+            cur.execute(
+                """
+                SELECT submission_id, hotkey, last_score,
+                       won_at_round_id, won_at_ordinal, last_scored_round_id
+                FROM leaders
+                WHERE campaign_id = %s AND hotkey = %s
+                FOR UPDATE
+                """,
+                (cid, hotkey),
+            )
+            leader = cur.fetchone()
+            leader_vacated = leader is not None
+            replacement = None
+            if leader is not None:
+                # Scores are comparable only inside one round. Use the current
+                # leader's newest scored round and the cohort's original commit
+                # order to choose an eligible runner-up deterministically.
+                score_round_id = (
+                    leader["last_scored_round_id"] or leader["won_at_round_id"]
+                )
+                cur.execute(
+                    """
+                    SELECT e.submission_id, e.engine_image_ref, e.score,
+                           s.hotkey, r.id AS round_id, r.ordinal
+                    FROM round_entries e
+                    JOIN rounds r ON r.id = e.round_id
+                    JOIN submissions s ON s.id = e.submission_id
+                    JOIN LATERAL (
+                        SELECT se.state
+                        FROM submission_events se
+                        WHERE se.submission_id = s.id
+                        ORDER BY se.created_at DESC, se.id DESC
+                        LIMIT 1
+                    ) latest ON true
+                    WHERE e.round_id = %s
+                      AND e.submission_id <> %s
+                      AND e.status = 'scored'
+                      AND e.score > 0
+                      AND latest.state = 'scored'
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM submissions blocked
+                        JOIN submission_events blocked_event
+                          ON blocked_event.submission_id = blocked.id
+                        WHERE blocked.campaign_id = %s
+                          AND blocked.hotkey = s.hotkey
+                          AND blocked_event.state = 'disqualified'
+                          AND blocked_event.detail ->> 'source' = 'manual'
+                          AND blocked_event.detail ->> 'scope' = 'campaign'
+                      )
+                    ORDER BY e.score DESC, s.commit_block ASC, s.id ASC
+                    LIMIT 1
+                    """,
+                    (str(score_round_id), str(leader["submission_id"]), cid),
+                )
+                replacement = cur.fetchone()
+                cur.execute(
+                    "DELETE FROM leaders WHERE campaign_id = %s AND hotkey = %s",
+                    (cid, hotkey),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO leader_history (
+                      campaign_id, round_id, ordinal, event,
+                      new_submission_id, new_hotkey, new_score,
+                      prev_submission_id, prev_hotkey, prev_score,
+                      overtake_threshold, epsilon
+                    ) VALUES (
+                      %s, %s, %s, %s,
+                      NULL, NULL, NULL,
+                      %s, %s, %s,
+                      NULL, %s
+                    )
+                    """,
+                    (
+                        cid,
+                        str(leader["won_at_round_id"]),
+                        int(leader["won_at_ordinal"]),
+                        EVENT_VACATED,
+                        str(leader["submission_id"]),
+                        leader["hotkey"],
+                        leader["last_score"],
+                        float(epsilon),
+                    ),
+                )
+                if replacement is not None:
+                    cur.execute(
+                        """
+                        INSERT INTO leaders (
+                          campaign_id, submission_id, engine_image_ref, hotkey,
+                          won_at_round_id, won_at_ordinal, last_score,
+                          last_scored_round_id, updated_at
+                        ) VALUES (
+                          %s, %s, %s, %s, %s, %s, %s, %s, now()
+                        )
+                        """,
+                        (
+                            cid,
+                            str(replacement["submission_id"]),
+                            replacement["engine_image_ref"],
+                            replacement["hotkey"],
+                            str(replacement["round_id"]),
+                            int(replacement["ordinal"]),
+                            replacement["score"],
+                            str(replacement["round_id"]),
+                        ),
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO leader_history (
+                          campaign_id, round_id, ordinal, event,
+                          new_submission_id, new_hotkey, new_score,
+                          prev_submission_id, prev_hotkey, prev_score,
+                          overtake_threshold, epsilon
+                        ) VALUES (
+                          %s, %s, %s, %s,
+                          %s, %s, %s,
+                          NULL, NULL, NULL,
+                          0, %s
+                        )
+                        """,
+                        (
+                            cid,
+                            str(replacement["round_id"]),
+                            int(replacement["ordinal"]),
+                            EVENT_SEATED,
+                            str(replacement["submission_id"]),
+                            replacement["hotkey"],
+                            replacement["score"],
+                            float(epsilon),
+                        ),
+                    )
+
+    return CampaignHotkeyDisqualification(
+        campaign_id=cid,
+        hotkey=hotkey,
+        created=created,
+        submissions_disqualified=submissions_disqualified,
+        pending_jobs_stopped=pending_jobs_stopped,
+        leader_vacated=leader_vacated,
+        replacement_submission_id=(
+            str(replacement["submission_id"]) if replacement is not None else None
+        ),
+        replacement_hotkey=(replacement["hotkey"] if replacement is not None else None),
+    )
 
 
 def list_open_campaign_emissions() -> list[dict[str, Any]]:

@@ -96,6 +96,7 @@ def post_completion_stream(
     temperature: float = 0.0,
     top_p: float | None = None,
     seed: int | None = 0,
+    ignore_eos: bool = False,
     timeout: float = 120.0,
 ) -> StreamResult:
     """Streaming /v1/completions client; parses SSE and times TTFT/ITL."""
@@ -112,6 +113,8 @@ def post_completion_stream(
         body["top_p"] = top_p
     if seed is not None:
         body["seed"] = seed
+    if ignore_eos:
+        body["ignore_eos"] = True
     data = json.dumps(body).encode("utf-8")
     req = Request(
         url,

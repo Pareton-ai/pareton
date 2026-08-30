@@ -45,8 +45,8 @@ class SubmissionState(StrEnum):
     INFRA_FAILED = "infra_failed"
     # Terminal. The image ran and holds a round score.
     SCORED = "scored"
-    # Terminal. The image ran and produced wrong output, or its engine
-    # process died during startup.
+    # Terminal. The image failed a round verdict, or ops excluded its hotkey
+    # from the campaign.
     DISQUALIFIED = "disqualified"
     # Terminal. The submission never ran.
     REJECTED = "rejected"
