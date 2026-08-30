@@ -42,14 +42,12 @@ def _is_unsafe_path(path: str) -> bool:
     if not path:
         return True
     # Absolute or drive-like
-    if path.startswith("/") or path.startswith("\\") or path.startswith("//"):
+    if path.startswith(("/", "\\")):
         return True
     if len(path) >= 2 and path[1] == ":":
         return True
     parts = path.replace("\\", "/").split("/")
-    if ".." in parts:
-        return True
-    return False
+    return ".." in parts
 
 
 def _match_globs(path: str, globs: list[str]) -> bool:

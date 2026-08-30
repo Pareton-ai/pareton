@@ -72,13 +72,13 @@ def test_rejects_absolute_path():
     )
     # Prefer a true absolute path in the b/ side
     abs_diff = (
-        "diff --git a/vllm/x.py b/../../../../../../etc/passwd\n"
-        "--- a/vllm/x.py\n"
-        "+++ b/../../../../../../etc/passwd\n"
-        "@@ -1 +1 @@\n"
-        "-x\n"
-        "+y\n"
-    ).encode()
+        b"diff --git a/vllm/x.py b/../../../../../../etc/passwd\n"
+        b"--- a/vllm/x.py\n"
+        b"+++ b/../../../../../../etc/passwd\n"
+        b"@@ -1 +1 @@\n"
+        b"-x\n"
+        b"+y\n"
+    )
     res = check_surface(patch_bytes=abs_diff, allowed_paths=ALLOW, denied_paths=DENY)
     assert not res.ok
     assert res.reason == "path_traversal"
