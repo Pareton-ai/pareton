@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -37,6 +38,25 @@ WEIGHTS_ENABLED: bool = os.environ.get(
 POLL_INTERVAL_S: int = int(os.environ.get("PARETON_POLL_INTERVAL_S", "30"))
 CHAIN_RETRY_ATTEMPTS: int = int(os.environ.get("PARETON_CHAIN_RETRY_ATTEMPTS", "3"))
 CHAIN_RETRY_DELAY_S: int = int(os.environ.get("PARETON_CHAIN_RETRY_DELAY_S", "30"))
+
+
+def _optional_utc_datetime(raw: str) -> datetime | None:
+    """Parse an optional ISO-8601 instant and normalize it to UTC."""
+    value = raw.strip()
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("competition start datetime must include a UTC offset")
+    return parsed.astimezone(timezone.utc)
+
+
+# Validator-wide intake floor for the competition relaunch. The watcher checks
+# the timestamp of a commitment's chain block, never its local observation time,
+# so an old commitment cannot become eligible merely because it is seen later.
+COMPETITION_START_DATETIME: datetime | None = _optional_utc_datetime(
+    os.environ.get("PARETON_COMPETITION_START_DATETIME", "")
+)
 
 # Must stay well under the dashboard stale window (~60s) and PAR-48 reclaim.
 JOB_HEARTBEAT_INTERVAL_S: float = float(

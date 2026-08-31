@@ -11,13 +11,43 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 class ChainError(RuntimeError):
     """Raised when a chain RPC fails after all retries."""
+
+
+def fetch_block_datetime(subtensor: Any, block_number: int) -> datetime | None:
+    """Return a block's UTC datetime, or None when the RPC cannot prove it."""
+    try:
+        info = subtensor.block_info(int(block_number))
+    # SDK transport errors are not exposed as one stable exception hierarchy.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("block_info(%d) timestamp lookup failed: %s", block_number, exc)
+        return None
+    if info is None:
+        return None
+    raw = getattr(info, "timestamp", None)
+    if raw is None and isinstance(info, dict):
+        raw = info.get("timestamp")
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw.astimezone(timezone.utc)
+    try:
+        return datetime.fromtimestamp(float(raw), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "block_info(%d) returned invalid timestamp %r", block_number, raw
+        )
+        return None
 
 
 def _retry(
