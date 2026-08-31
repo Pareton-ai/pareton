@@ -170,6 +170,7 @@ testing/
 # Editors / local agent tooling
 .vscode/
 .cursor/
+.claude/
 .kimi-code/
 *.code-workspace
 AGENTS.md
