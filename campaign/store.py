@@ -253,6 +253,7 @@ def insert_submission(
     commit_block: int | None = None,
     payment_block: int | None = None,
     payment_tx: int | None = None,
+    patch_fingerprint: str | None = None,
 ) -> UUID | None:
     """Insert submission. Returns id, or None if (campaign_id, patch_hash) exists."""
     patch_hash = patch_hash.strip().lower()
@@ -271,6 +272,27 @@ def insert_submission(
                 raise CampaignHotkeyDisqualified(
                     f"hotkey is disqualified from campaign {campaign_id}"
                 )
+            duplicate_of = None
+            if patch_fingerprint is not None:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"{campaign_id}:{patch_fingerprint}",),
+                )
+                cur.execute(
+                    """
+                    SELECT s.id
+                    FROM submissions s
+                    JOIN submission_events e ON e.submission_id = s.id
+                    WHERE s.campaign_id = %s
+                      AND e.state = 'committed'
+                      AND e.detail ->> 'patch_fingerprint' = %s
+                    ORDER BY s.committed_at ASC, s.id ASC
+                    LIMIT 1
+                    """,
+                    (str(campaign_id), patch_fingerprint),
+                )
+                original = cur.fetchone()
+                duplicate_of = original[0] if original is not None else None
             cur.execute(
                 """
                 INSERT INTO submissions (
@@ -295,15 +317,9 @@ def insert_submission(
             if row is None:
                 return None
             submission_id = row[0]
-            cur.execute(
-                """
-                INSERT INTO submission_jobs (submission_id, status)
-                VALUES (%s, 'pending')
-                ON CONFLICT (submission_id) DO NOTHING
-                """,
-                (str(submission_id),),
-            )
             detail: dict[str, Any] = {"commit_block": commit_block, "hotkey": hotkey}
+            if patch_fingerprint is not None:
+                detail["patch_fingerprint"] = patch_fingerprint
             if payment_block is not None:
                 detail["payment_block"] = payment_block
                 detail["payment_tx"] = payment_tx
@@ -313,6 +329,26 @@ def insert_submission(
                 VALUES (%s, 'committed', %s)
                 """,
                 (str(submission_id), Json(detail)),
+            )
+            if duplicate_of is not None:
+                cur.execute(
+                    """
+                    INSERT INTO submission_events (submission_id, state, detail)
+                    VALUES (%s, 'rejected_duplicate', %s)
+                    """,
+                    (
+                        str(submission_id),
+                        Json({"original_submission_id": str(duplicate_of)}),
+                    ),
+                )
+                return None
+            cur.execute(
+                """
+                INSERT INTO submission_jobs (submission_id, status)
+                VALUES (%s, 'pending')
+                ON CONFLICT (submission_id) DO NOTHING
+                """,
+                (str(submission_id),),
             )
             return submission_id
 
@@ -466,7 +502,10 @@ def submission_has_terminal_event(submission_id: UUID | str) -> bool:
             cur.execute(
                 """
                 SELECT 1 FROM submission_events
-                WHERE submission_id = %s AND state IN ('rejected', 'scored', 'disqualified')
+                WHERE submission_id = %s
+                  AND state IN (
+                    'rejected', 'rejected_duplicate', 'scored', 'disqualified'
+                  )
                 LIMIT 1
                 """,
                 (str(submission_id),),
@@ -788,7 +827,7 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
                 SELECT state, evidence_ref, detail, created_at
                 FROM submission_events
                 WHERE submission_id = %s
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """,
                 (str(submission_id),),
             )

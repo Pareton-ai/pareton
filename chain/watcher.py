@@ -10,6 +10,7 @@ import config
 from campaign.store import (
     CampaignHotkeyDisqualified,
     get_campaign,
+    get_submission_for_campaign,
     insert_submission,
     payment_ref_consumed,
 )
@@ -25,12 +26,29 @@ from chain.payment import (
     verify_payment,
 )
 from chain.rpc import fetch_chain_view
+from gate.integrity import (
+    PATCH_HASH_MISMATCH,
+    check_integrity,
+    patch_fingerprint_bytes,
+)
 from observability import events as obs
-from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
+from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_hotkey
 
 logger = logging.getLogger(__name__)
 
 BlockFetcher = Callable[[int], BlockPaymentView | None]
+PatchFetcher = Callable[[str], bytes]
+FailedHashCheck = tuple[str, str, str]
+
+# A hash mismatch is permanent for an unchanged on-chain commitment. Keep it
+# out of the database so it cannot claim the raw-hash dedupe slot, but avoid
+# downloading the same bad bytes on every scan. This intentionally resets when
+# the watcher restarts.
+_failed_hash_checks: set[FailedHashCheck] = set()
+
+
+def _hash_check_key(com: PatchCommitment) -> FailedHashCheck:
+    return com.hotkey, com.patch_hash, com.retrieval_url
 
 
 def check_fee_proof(
@@ -62,6 +80,7 @@ def ingest_commitment(
     com: PatchCommitment,
     *,
     fetch_block: BlockFetcher | None = None,
+    fetcher: PatchFetcher | None = None,
 ) -> str | None:
     """Insert a submission from a commitment. Returns submission id or None if dupe/invalid."""
     campaign = get_campaign(com.campaign_id)
@@ -77,6 +96,16 @@ def ingest_commitment(
             "skip commitment: campaign %s status=%s",
             com.campaign_id,
             campaign.status,
+        )
+        return None
+    if get_submission_for_campaign(com.campaign_id, com.patch_hash) is not None:
+        return None
+    hash_check_key = _hash_check_key(com)
+    if hash_check_key in _failed_hash_checks:
+        logger.info(
+            "skip commitment: known patch_hash mismatch hotkey=%s patch_hash=%s",
+            com.hotkey[:16],
+            com.patch_hash,
         )
         return None
     # Reject before insert so a mismatched/junk URL cannot burn the
@@ -112,6 +141,26 @@ def ingest_commitment(
             return None
         payment_block, payment_tx = com.payment_block, com.payment_tx
 
+    integrity = check_integrity(
+        retrieval_url=com.retrieval_url,
+        expected_patch_hash=com.patch_hash,
+        hotkey=com.hotkey,
+        # scan_chain runs every poll, so one network attempt per scan is enough.
+        # fetch_failed remains retryable without tripling a scan's worst case.
+        fetcher=fetcher or partial(fetch_patch_bytes, attempts=1),
+    )
+    if not integrity.ok:
+        if integrity.reason == PATCH_HASH_MISMATCH:
+            _failed_hash_checks.add(hash_check_key)
+        logger.info(
+            "skip commitment: integrity failed patch_hash=%s reason=%s",
+            com.patch_hash,
+            integrity.reason,
+        )
+        return None
+    patch_bytes = integrity.evidence["patch_bytes"]
+    patch_fingerprint = patch_fingerprint_bytes(patch_bytes)
+
     try:
         sid = insert_submission(
             campaign_id=com.campaign_id,
@@ -122,6 +171,7 @@ def ingest_commitment(
             commit_block=com.commit_block,
             payment_block=payment_block,
             payment_tx=payment_tx,
+            patch_fingerprint=patch_fingerprint,
         )
     except CampaignHotkeyDisqualified:
         logger.info(
@@ -132,8 +182,8 @@ def ingest_commitment(
         return None
     if sid is None:
         logger.info(
-            "skip commitment: duplicate patch_hash=%s campaign=%s",
-            com.patch_hash,
+            "skip commitment: duplicate fingerprint=%s campaign=%s",
+            patch_fingerprint,
             com.campaign_id,
         )
         return None
@@ -172,6 +222,10 @@ def scan_chain(
         subtensor, netuid, network=network
     )
     commitments = build_patch_commitments(meta, revealed)
+    # Drop cached failures once a miner replaces the corresponding commitment.
+    _failed_hash_checks.intersection_update(
+        _hash_check_key(com) for com in commitments.values()
+    )
     # Plaintext makes patch_hash public at commit time; ingest in chain
     # chronology so a later lower-UID copycat cannot win first-seen dedupe.
     ordered = sorted(commitments.values(), key=lambda c: (c.commit_block, c.hotkey))

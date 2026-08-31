@@ -45,7 +45,9 @@ V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # state (PAR-44). Lists / campaigns keep the shared short TTL above.
 # ``built`` is terminal for no-bench campaigns; bench campaigns continue via
 # ``bench_queued`` (and later) in the same worker turn after enqueue.
-_TERMINAL_SUBMISSION_STATES = frozenset({"built", "scored", "disqualified", "rejected"})
+_TERMINAL_SUBMISSION_STATES = frozenset(
+    {"built", "scored", "disqualified", "rejected", "rejected_duplicate"}
+)
 # rounds.status: a pending or running round is live and moves without warning.
 _TERMINAL_ROUND_STATUSES = frozenset({"complete", "void"})
 _NO_STORE = "no-store"

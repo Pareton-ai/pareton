@@ -12,7 +12,12 @@ from uuid import uuid4
 from campaign.manifest import build_manifest
 from campaign.models import SLA
 from gate.identity import check_identity
-from gate.integrity import check_integrity, hash_patch_bytes
+from gate.integrity import (
+    PATCH_HASH_MISMATCH,
+    check_integrity,
+    hash_patch_bytes,
+    patch_fingerprint_bytes,
+)
 from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
 import config
 
@@ -128,7 +133,7 @@ def test_integrity_mismatch(monkeypatch):
         fetcher=lambda _u: b"abc",
     )
     assert not res.ok
-    assert res.reason == "patch_hash mismatch"
+    assert res.reason == PATCH_HASH_MISMATCH
 
 
 def test_patch_url_hotkey_extracts_segment():
@@ -163,3 +168,134 @@ def test_integrity_accepts_matching_hotkey(monkeypatch):
         fetcher=lambda _u: data,
     )
     assert res.ok
+
+
+def test_patch_fingerprint_strips_blank_lines_without_git_diff():
+    assert patch_fingerprint_bytes(b"alpha\n\n\nomega\n") == patch_fingerprint_bytes(
+        b"alpha\nomega\n"
+    )
+
+
+def test_patch_fingerprint_strips_trailing_whitespace():
+    assert patch_fingerprint_bytes(b"alpha   \nomega\t\n") == patch_fingerprint_bytes(
+        b"alpha\nomega\n"
+    )
+
+
+def test_patch_fingerprint_strips_comments_from_git_hunk_content():
+    first = b"""diff --git a/vllm/x.py b/vllm/x.py
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1 @@
+-x = 1  # old note
++x = 1  # first note
+"""
+    second = first.replace(b"first note", b"changed note")
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_ignores_volatile_git_metadata():
+    first = b"""diff --git a/vllm/x.py b/vllm/x.py
+index 1111111..2222222 100644
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1,2 @@ def run():
+ x = 1
++# first note
+"""
+    second = b"""diff --git a/vllm/x.py b/vllm/x.py
+index 1111111..3333333 100644
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1,3 @@ def run():
+ x = 1
++# changed note
++# another note
+"""
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_tracks_block_comments_across_hunk_sides():
+    first = b"""diff --git a/vllm/x.cpp b/vllm/x.cpp
+--- a/vllm/x.cpp
++++ b/vllm/x.cpp
+@@ -1,5 +1,5 @@
+ /*
+-old note
++first note
+ */
+-x = 1; // old note
++x = 1; // first note
+"""
+    second = first.replace(b"first note", b"changed note")
+    assert hash_patch_bytes(first) != hash_patch_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_keeps_python_floor_division():
+    half = b"""diff --git a/vllm/x.py b/vllm/x.py
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1 @@
+-result = n // 1
++result = n // 2
+"""
+    quarter = half.replace(b"n // 2", b"n // 4")
+    assert patch_fingerprint_bytes(half) != patch_fingerprint_bytes(quarter)
+
+
+def test_patch_fingerprint_keeps_c_preprocessor_directives():
+    small = b"""diff --git a/vllm/kernel.cu b/vllm/kernel.cu
+--- a/vllm/kernel.cu
++++ b/vllm/kernel.cu
+@@ -1 +1 @@
+-#define BLOCK_SIZE 64
++#define BLOCK_SIZE 128
+"""
+    large = small.replace(b"BLOCK_SIZE 128", b"BLOCK_SIZE 256")
+    assert patch_fingerprint_bytes(small) != patch_fingerprint_bytes(large)
+
+
+def test_patch_fingerprint_strips_comments_in_any_directory():
+    first = b"""diff --git a/sglang/x.py b/sglang/x.py
+--- a/sglang/x.py
++++ b/sglang/x.py
+@@ -1 +1 @@
+-# old note
++# first note
+"""
+    second = first.replace(b"first note", b"changed note")
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (b'+value = "# first"\n', b'+value = "# changed"\n'),
+        (b'+url = "https://one.example"\n', b'+url = "https://two.example"\n'),
+        (b"+value = '/* first */'\n", b"+value = '/* changed */'\n"),
+        (b"+value = `// first`\n", b"+value = `// changed`\n"),
+    ],
+)
+def test_patch_fingerprint_keeps_comment_markers_in_strings(first, second):
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_keeps_code_changes():
+    first = b"+result = original\n"
+    second = b"+renamed = original\n"
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_keeps_code_after_block_comment():
+    first = b"/* note */ result = original\n"
+    second = b"/* note */ renamed = original\n"
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+
+
+def test_patch_fingerprint_preserves_comments_without_git_diff():
+    assert patch_fingerprint_bytes(b"# first\n") != patch_fingerprint_bytes(
+        b"# changed\n"
+    )

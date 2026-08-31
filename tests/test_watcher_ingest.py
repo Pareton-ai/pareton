@@ -13,6 +13,10 @@ from campaign.store import CampaignHotkeyDisqualified
 from chain import watcher
 from chain.commitment import PatchCommitment
 from chain.payment import BlockPaymentView
+from gate.integrity import hash_patch_bytes, patch_fingerprint_bytes
+
+
+PATCH = b"diff --git a/vllm/x.py b/vllm/x.py\n+x = 1\n"
 
 
 def _com(**overrides) -> PatchCommitment:
@@ -23,7 +27,7 @@ def _com(**overrides) -> PatchCommitment:
         commit_block=10,
         campaign_id="11111111-1111-4111-8111-111111111111",
         baseline_commit="a" * 40,
-        patch_hash="sha256:" + "b" * 64,
+        patch_hash=hash_patch_bytes(PATCH),
         retrieval_url="https://cdn.example.com/stage0/campaigns/c/patches/hk1/1.diff",
         raw="",
     )
@@ -35,6 +39,11 @@ def _com(**overrides) -> PatchCommitment:
 def _cdn(monkeypatch):
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url, **_kwargs: PATCH)
+    monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: None)
+    watcher._failed_hash_checks.clear()
+    yield
+    watcher._failed_hash_checks.clear()
 
 
 def test_ingest_skips_hotkey_mismatch(monkeypatch):
@@ -73,6 +82,27 @@ def test_ingest_skips_non_allowlisted_url(monkeypatch):
     )
     assert sid is None
     assert called["insert"] is False
+
+
+def test_ingest_skips_patch_hash_already_seen(monkeypatch):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: SimpleNamespace(status="open")
+    )
+    monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: {})
+    called = {"fetch": False, "insert": False}
+    monkeypatch.setattr(
+        watcher,
+        "fetch_patch_bytes",
+        lambda _url, **_kwargs: called.__setitem__("fetch", True) or PATCH,
+    )
+    monkeypatch.setattr(
+        watcher,
+        "insert_submission",
+        lambda **_kwargs: called.__setitem__("insert", True),
+    )
+
+    assert watcher.ingest_commitment(_com()) is None
+    assert called == {"fetch": False, "insert": False}
 
 
 RECIPIENT = "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K"
@@ -130,7 +160,11 @@ def inserted(monkeypatch):
         seen.update(kwargs)
         return "sid"
 
-    monkeypatch.setattr(watcher, "insert_submission", _insert)
+    monkeypatch.setattr(
+        watcher,
+        "insert_submission",
+        _insert,
+    )
     return seen
 
 
@@ -146,6 +180,47 @@ def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
     assert sid == "sid"
     assert inserted["payment_block"] is None
     assert inserted["payment_tx"] is None
+    assert inserted["patch_fingerprint"] == patch_fingerprint_bytes(PATCH)
+
+
+def test_ingest_rejects_fingerprint_duplicate(monkeypatch, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher,
+        "insert_submission",
+        lambda **kwargs: None,
+    )
+    assert watcher.ingest_commitment(_com()) is None
+
+
+def test_ingest_caches_raw_hash_mismatch_before_insert(monkeypatch, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    attempt_limits: list[int | None] = []
+
+    def _fetch(_url, *, attempts=None):
+        attempt_limits.append(attempts)
+        return b"other"
+
+    monkeypatch.setattr(watcher, "fetch_patch_bytes", _fetch)
+    assert watcher.ingest_commitment(_com()) is None
+    assert watcher.ingest_commitment(_com()) is None
+    assert inserted == {}
+    assert attempt_limits == [1]
+
+
+def test_ingest_retries_fetch_failure_on_later_scan(monkeypatch, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    attempt_limits: list[int | None] = []
+
+    def _fetch(_url, *, attempts=None):
+        attempt_limits.append(attempts)
+        raise RuntimeError("cdn unavailable")
+
+    monkeypatch.setattr(watcher, "fetch_patch_bytes", _fetch)
+    assert watcher.ingest_commitment(_com()) is None
+    assert watcher.ingest_commitment(_com()) is None
+    assert inserted == {}
+    assert attempt_limits == [1, 1]
 
 
 def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
