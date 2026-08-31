@@ -292,11 +292,7 @@ GPU_PROVIDERS: list[str] = _load_gpu_providers()
 GPU_PROVIDER: str = GPU_PROVIDERS[0] if GPU_PROVIDERS else "lium"
 GPU_PROVIDER_FALLBACKS: list[str] = list(GPU_PROVIDERS[1:])
 
-# Per-submission fee the miner transfers to PAYMENT_RECIPIENT_ADDRESS before
-# committing; > 0 makes a verified fee proof mandatory. Default off so local
-# and mock runs need no payments: set 0.05 in the deployed env (.env.example)
-# and keep it > 0 whenever a campaign is open to external miners.
-SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.05"))
+SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.1"))
 PAYMENT_RECIPIENT_ADDRESS: str = os.environ.get(
     "PARETON_PAYMENT_RECIPIENT_ADDRESS",
     "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
