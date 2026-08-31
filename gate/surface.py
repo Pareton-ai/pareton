@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 
 from gate.types import GateResult, SubmissionState
@@ -69,13 +70,15 @@ def _git_numstat_paths(
 ) -> tuple[list[str] | None, GateResult | None]:
     """Return the paths Git resolves from the patch's authoritative headers."""
     try:
-        result = subprocess.run(
-            ["git", "apply", "--numstat", "-z"],
-            input=patch_bytes,
-            capture_output=True,
-            check=False,
-            timeout=60,
-        )
+        with tempfile.TemporaryDirectory() as empty_dir:
+            result = subprocess.run(
+                ["git", "apply", "--numstat", "-z"],
+                input=patch_bytes,
+                capture_output=True,
+                check=False,
+                timeout=60,
+                cwd=empty_dir,
+            )
     except subprocess.TimeoutExpired:
         return None, GateResult.reject("git_apply_numstat_timeout")
     except OSError as exc:

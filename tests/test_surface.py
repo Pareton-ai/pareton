@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -151,7 +154,17 @@ def test_rejects_setup_py():
     assert not res.ok
 
 
-def test_rejects_when_diff_git_path_disagrees_with_applied_path():
+def test_rejects_when_diff_git_path_disagrees_with_applied_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    nested = repo / "vllm"
+    nested.mkdir(parents=True)
+    (repo / "setup.py").write_text("safe\n")
+    (nested / "setup.py").write_text("safe\n")
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    monkeypatch.chdir(nested)
     bad = b"""diff --git a/vllm/x.py b/vllm/x.py
 index 1111111..2222222 100644
 --- a/setup.py
