@@ -13,6 +13,8 @@ def hash_patch_bytes(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
 
+PATCH_HASH_MISMATCH = "patch_hash mismatch"
+
 _NO_COMMENTS = (False, False)
 _PYTHON_COMMENTS = (True, False)
 _C_FAMILY_COMMENTS = (False, True)
@@ -22,8 +24,6 @@ def _comment_syntax_for_path(path: bytes) -> tuple[bool, bool]:
     normalized = path.split(b"\t", 1)[0].strip().strip(b'"')
     if normalized.startswith((b"a/", b"b/")):
         normalized = normalized[2:]
-    if not normalized.startswith(b"vllm/"):
-        return _NO_COMMENTS
     path_lower = normalized.lower()
     if path_lower.endswith((b".py", b".pyi")):
         return _PYTHON_COMMENTS
@@ -89,8 +89,8 @@ def patch_fingerprint_bytes(data: bytes) -> str:
     """Hash a line-normalized patch for campaign-local copy detection.
 
     Normalization removes blank lines, trailing whitespace, and comments in
-    Python and C-family files under the ``vllm/`` root. Python floor division
-    and C-family preprocessor directives remain code. Git hunk content markers
+    Python and C-family files, in any directory. Python floor division and
+    C-family preprocessor directives remain code. Git hunk content markers
     (``+``, ``-``, or space) are ignored when classifying a source line. Git
     blob hashes and hunk coordinates are omitted because comment-only changes
     alter them. A line beginning with ``#`` inside a multiline Python docstring
@@ -205,7 +205,7 @@ def check_integrity(
     actual = hash_patch_bytes(data)
     if actual != expected_patch_hash.lower():
         return GateResult.reject(
-            "patch_hash mismatch",
+            PATCH_HASH_MISMATCH,
             expected=expected_patch_hash.lower(),
             actual=actual,
             size=len(data),

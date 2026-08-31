@@ -26,7 +26,11 @@ from chain.payment import (
     verify_payment,
 )
 from chain.rpc import fetch_chain_view
-from gate.integrity import check_integrity, patch_fingerprint_bytes
+from gate.integrity import (
+    PATCH_HASH_MISMATCH,
+    check_integrity,
+    patch_fingerprint_bytes,
+)
 from observability import events as obs
 from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_hotkey
 
@@ -146,7 +150,7 @@ def ingest_commitment(
         fetcher=fetcher or partial(fetch_patch_bytes, attempts=1),
     )
     if not integrity.ok:
-        if integrity.reason == "patch_hash mismatch":
+        if integrity.reason == PATCH_HASH_MISMATCH:
             _failed_hash_checks.add(hash_check_key)
         logger.info(
             "skip commitment: integrity failed patch_hash=%s reason=%s",

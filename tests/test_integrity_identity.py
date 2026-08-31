@@ -12,7 +12,12 @@ from uuid import uuid4
 from campaign.manifest import build_manifest
 from campaign.models import SLA
 from gate.identity import check_identity
-from gate.integrity import check_integrity, hash_patch_bytes, patch_fingerprint_bytes
+from gate.integrity import (
+    PATCH_HASH_MISMATCH,
+    check_integrity,
+    hash_patch_bytes,
+    patch_fingerprint_bytes,
+)
 from storage.s3 import is_allowed_retrieval_url, patch_url_hotkey
 import config
 
@@ -128,7 +133,7 @@ def test_integrity_mismatch(monkeypatch):
         fetcher=lambda _u: b"abc",
     )
     assert not res.ok
-    assert res.reason == "patch_hash mismatch"
+    assert res.reason == PATCH_HASH_MISMATCH
 
 
 def test_patch_url_hotkey_extracts_segment():
@@ -253,16 +258,16 @@ def test_patch_fingerprint_keeps_c_preprocessor_directives():
     assert patch_fingerprint_bytes(small) != patch_fingerprint_bytes(large)
 
 
-def test_patch_fingerprint_preserves_comments_outside_vllm_root():
-    first = b"""diff --git a/tests/x.py b/tests/x.py
---- a/tests/x.py
-+++ b/tests/x.py
+def test_patch_fingerprint_strips_comments_in_any_directory():
+    first = b"""diff --git a/sglang/x.py b/sglang/x.py
+--- a/sglang/x.py
++++ b/sglang/x.py
 @@ -1 +1 @@
 -# old note
 +# first note
 """
     second = first.replace(b"first note", b"changed note")
-    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
+    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
 
 
 @pytest.mark.parametrize(
