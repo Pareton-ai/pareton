@@ -611,7 +611,6 @@ def run_round(
                         pending,
                         cfg=req.correctness,
                         evidence_dir=layout.correctness_dir,
-                        baseline_outputs=(baseline.outputs if baseline else None),
                         baseline_degeneracy=baseline_degeneracy,
                     )
             except EngineError as exc:

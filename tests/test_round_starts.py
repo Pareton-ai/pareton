@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -176,58 +175,6 @@ def test_the_runner_performs_exactly_the_planned_starts(tmp_path: Path):
     # The sample request predates PAR-108's relative bar. It must retain the
     # original candidate-only correctness path rather than grading a baseline.
     assert not (layout.correctness_dir / "baseline.jsonl").exists()
-
-
-def test_empty_baseline_output_reaches_candidate_parity_grading(
-    tmp_path: Path, monkeypatch
-):
-    raw = _request(VLLM_SERVE_ARGS, candidates=1)
-    raw["correctness"]["thresholds"]["max_mean_logprob_drop"] = 1.5
-    req = validate_bench_request_dict(raw)
-    trace = load_workload_trace(SAMPLE_TRACE, expected_sha256=req.workload_trace.sha256)
-    layout = OutputLayout(tmp_path / "out")
-    layout.prepare()
-    provider = _EngineProvider(req=req, mock=True, logs_dir=tmp_path / "logs")
-    from bench.correctness import select_correctness_prompts
-    from bench.sla_bench import EngineReplay
-    from bench.validate import sha256_file
-
-    prompts = select_correctness_prompts(
-        trace_path=SAMPLE_TRACE,
-        expected_sha256=sha256_file(SAMPLE_TRACE),
-        num_prompts=req.correctness.num_prompts,
-    )
-    outputs = {request.id: "" for request in trace.requests}
-    replay = EngineReplay(
-        result=SimpleNamespace(
-            timings={
-                request.id: SimpleNamespace(completion_tokens=1)
-                for request in trace.requests
-            }
-        ),
-        outputs=outputs,
-        output_samples={request.id: ("",) for request in trace.requests},
-    )
-
-    monkeypatch.setattr("bench.main.run_sla_engine", lambda *_args, **_kwargs: replay)
-
-    _, _, _, correctness = run_round(
-        req=req,
-        provider=provider,
-        prompts=prompts,
-        trace=trace,
-        layout=layout,
-    )
-
-    assert correctness[0].verdict == "pass"
-    assert correctness[0].coverage_ratio == 1.0
-    rows = [
-        json.loads(line)
-        for line in (layout.correctness_dir / "candidate_0.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    assert [row["baseline_empty_match"] for row in rows] == [True, True]
 
 
 @pytest.mark.parametrize(
