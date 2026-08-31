@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -72,13 +75,13 @@ def test_rejects_absolute_path():
     )
     # Prefer a true absolute path in the b/ side
     abs_diff = (
-        "diff --git a/vllm/x.py b/../../../../../../etc/passwd\n"
-        "--- a/vllm/x.py\n"
-        "+++ b/../../../../../../etc/passwd\n"
-        "@@ -1 +1 @@\n"
-        "-x\n"
-        "+y\n"
-    ).encode()
+        b"diff --git a/vllm/x.py b/../../../../../../etc/passwd\n"
+        b"--- a/vllm/x.py\n"
+        b"+++ b/../../../../../../etc/passwd\n"
+        b"@@ -1 +1 @@\n"
+        b"-x\n"
+        b"+y\n"
+    )
     res = check_surface(patch_bytes=abs_diff, allowed_paths=ALLOW, denied_paths=DENY)
     assert not res.ok
     assert res.reason == "path_traversal"
@@ -149,6 +152,31 @@ def test_rejects_setup_py():
         denied_paths=DENY,
     )
     assert not res.ok
+
+
+def test_rejects_when_diff_git_path_disagrees_with_applied_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    nested = repo / "vllm"
+    nested.mkdir(parents=True)
+    (repo / "setup.py").write_text("safe\n")
+    (nested / "setup.py").write_text("safe\n")
+    subprocess.run(["git", "init", "-q", repo], check=True)
+    monkeypatch.chdir(nested)
+    bad = b"""diff --git a/vllm/x.py b/vllm/x.py
+index 1111111..2222222 100644
+--- a/setup.py
++++ b/setup.py
+@@ -1 +1 @@
+-safe
++PWNED
+"""
+    res = check_surface(patch_bytes=bad, allowed_paths=ALLOW, denied_paths=DENY)
+    assert not res.ok
+    assert res.reason == "path_denied"
+    assert res.evidence["path"] == "setup.py"
 
 
 def test_parse_diff_paths_basic():

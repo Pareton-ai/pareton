@@ -7,5 +7,5 @@
   "n_rows": 8,
   "n_prompts": 3,
   "max_tokens": 128,
-  "algo_version": 1
+  "algo_version": 2
 }

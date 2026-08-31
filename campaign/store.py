@@ -12,34 +12,23 @@ from psycopg2.extras import Json, RealDictCursor
 from db.connection import db_connection
 from gate.types import SUBMISSION_STATES
 
+from .exclusion import ACTION_WAIVED, latest_campaign_hotkey_action
 from .fees import validate_submission_fee
 from .manifest import build_manifest
 from .models import SLA, CampaignManifest, CustomerSignoff, validate_scoring_rule
 
 
 class CampaignHotkeyDisqualified(RuntimeError):
-    """Raised when a campaign has permanently excluded a hotkey."""
+    """Raised when a campaign currently excludes a hotkey."""
 
 
 def _campaign_hotkey_is_disqualified(cur, campaign_id: UUID | str, hotkey: str) -> bool:
-    cur.execute(
-        """
-        SELECT 1
-        FROM submissions prior
-        JOIN submission_events e ON e.submission_id = prior.id
-        WHERE prior.campaign_id = %s AND prior.hotkey = %s
-          AND e.state = 'disqualified'
-          AND e.detail ->> 'source' = 'manual'
-          AND e.detail ->> 'scope' = 'campaign'
-        LIMIT 1
-        """,
-        (str(campaign_id), hotkey),
-    )
-    return cur.fetchone() is not None
+    action = latest_campaign_hotkey_action(cur, campaign_id, hotkey)
+    return action is not None and action != ACTION_WAIVED
 
 
 def campaign_hotkey_is_disqualified(campaign_id: UUID | str, hotkey: str) -> bool:
-    """Whether a manual append-only event permanently excludes this hotkey."""
+    """Whether the latest manual campaign action excludes this hotkey."""
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
             return _campaign_hotkey_is_disqualified(cur, campaign_id, hotkey)
@@ -270,6 +259,7 @@ def insert_submission(
     commit_block: int | None = None,
     payment_block: int | None = None,
     payment_tx: int | None = None,
+    patch_fingerprint: str | None = None,
 ) -> UUID | None:
     """Insert submission. Returns id, or None if (campaign_id, patch_hash) exists."""
     patch_hash = patch_hash.strip().lower()
@@ -288,6 +278,27 @@ def insert_submission(
                 raise CampaignHotkeyDisqualified(
                     f"hotkey is disqualified from campaign {campaign_id}"
                 )
+            duplicate_of = None
+            if patch_fingerprint is not None:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (f"{campaign_id}:{patch_fingerprint}",),
+                )
+                cur.execute(
+                    """
+                    SELECT s.id
+                    FROM submissions s
+                    JOIN submission_events e ON e.submission_id = s.id
+                    WHERE s.campaign_id = %s
+                      AND e.state = 'committed'
+                      AND e.detail ->> 'patch_fingerprint' = %s
+                    ORDER BY s.committed_at ASC, s.id ASC
+                    LIMIT 1
+                    """,
+                    (str(campaign_id), patch_fingerprint),
+                )
+                original = cur.fetchone()
+                duplicate_of = original[0] if original is not None else None
             cur.execute(
                 """
                 INSERT INTO submissions (
@@ -312,15 +323,9 @@ def insert_submission(
             if row is None:
                 return None
             submission_id = row[0]
-            cur.execute(
-                """
-                INSERT INTO submission_jobs (submission_id, status)
-                VALUES (%s, 'pending')
-                ON CONFLICT (submission_id) DO NOTHING
-                """,
-                (str(submission_id),),
-            )
             detail: dict[str, Any] = {"commit_block": commit_block, "hotkey": hotkey}
+            if patch_fingerprint is not None:
+                detail["patch_fingerprint"] = patch_fingerprint
             if payment_block is not None:
                 detail["payment_block"] = payment_block
                 detail["payment_tx"] = payment_tx
@@ -330,6 +335,26 @@ def insert_submission(
                 VALUES (%s, 'committed', %s)
                 """,
                 (str(submission_id), Json(detail)),
+            )
+            if duplicate_of is not None:
+                cur.execute(
+                    """
+                    INSERT INTO submission_events (submission_id, state, detail)
+                    VALUES (%s, 'rejected_duplicate', %s)
+                    """,
+                    (
+                        str(submission_id),
+                        Json({"original_submission_id": str(duplicate_of)}),
+                    ),
+                )
+                return None
+            cur.execute(
+                """
+                INSERT INTO submission_jobs (submission_id, status)
+                VALUES (%s, 'pending')
+                ON CONFLICT (submission_id) DO NOTHING
+                """,
+                (str(submission_id),),
             )
             return submission_id
 
@@ -483,7 +508,10 @@ def submission_has_terminal_event(submission_id: UUID | str) -> bool:
             cur.execute(
                 """
                 SELECT 1 FROM submission_events
-                WHERE submission_id = %s AND state IN ('rejected', 'scored', 'disqualified')
+                WHERE submission_id = %s
+                  AND state IN (
+                    'rejected', 'rejected_duplicate', 'scored', 'disqualified'
+                  )
                 LIMIT 1
                 """,
                 (str(submission_id),),
@@ -805,7 +833,7 @@ def list_events(submission_id: UUID | str) -> list[dict[str, Any]]:
                 SELECT state, evidence_ref, detail, created_at
                 FROM submission_events
                 WHERE submission_id = %s
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, id ASC
                 """,
                 (str(submission_id),),
             )

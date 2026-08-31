@@ -11,17 +11,21 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from typing import Any
 
 _SHA256_HEX_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
-ALGO_VERSION = 1
+ALGO_VERSION = 2
+SUPPORTED_ALGO_VERSIONS = frozenset({1, 2})
+CHAT_TEMPLATE_ALGO_VERSION = 2
 MAX_PROMPT_CHARS = 8000
 DEFAULT_N_PROMPTS = 32
 DEFAULT_MAX_TOKENS = 128
 DEFAULT_SEED_BLOCK_OFFSET = 1
+CHAT_TEMPLATE_ENABLE_THINKING = False
 
 # process-local cache: one Arrow split per pinned (dataset, revision, config, split)
 _HF_SPLIT_CACHE: dict[tuple[str, str, str, str], Any] = {}
@@ -39,6 +43,14 @@ class SampledTrace:
     sample_seed_block: int
     sample_seed_block_hash: str
     row_indices: tuple[int, ...]
+    receipt: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PromptFormatter:
+    """Deterministic conversion from a dataset user message to model input."""
+
+    render: Callable[[str], str]
     receipt: dict[str, Any]
 
 
@@ -71,7 +83,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         ignore_eos = False
     if not isinstance(ignore_eos, bool):
         raise SamplerError("ignore_eos must be a boolean")
-    algo_version = int(rule.get("algo_version") or ALGO_VERSION)
+    algo_version = int(rule.get("algo_version", ALGO_VERSION))
     if n_rows < 1:
         raise SamplerError("n_rows must be >= 1")
     if n_prompts < 1:
@@ -80,7 +92,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         raise SamplerError("n_prompts must be <= n_rows")
     if max_tokens < 1:
         raise SamplerError("max_tokens must be >= 1")
-    if algo_version != ALGO_VERSION:
+    if algo_version not in SUPPORTED_ALGO_VERSIONS:
         raise SamplerError(f"unsupported algo_version: {algo_version}")
     parsed = {
         "type": "hf_rows",
@@ -97,6 +109,157 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
     if ignore_eos:
         parsed["ignore_eos"] = True
     return parsed
+
+
+def _call_load_tokenizer_config(**kwargs: Any) -> dict[str, Any]:
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(filename="tokenizer_config.json", **kwargs)
+    with open(path, encoding="utf-8") as fh:
+        config = json.load(fh)
+    if not isinstance(config, dict):
+        raise TypeError("tokenizer_config.json must contain an object")
+    return config
+
+
+def _resolve_chat_template(config: dict[str, Any]) -> str:
+    value = config.get("chat_template")
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, list):
+        templates = {
+            str(item.get("name") or ""): item.get("template")
+            for item in value
+            if isinstance(item, dict)
+        }
+        default = templates.get("default")
+        if isinstance(default, str) and default:
+            return default
+        usable = [item for item in templates.values() if isinstance(item, str) and item]
+        if len(usable) == 1:
+            return usable[0]
+    raise ValueError("tokenizer_config.json has no unambiguous chat template")
+
+
+def _special_token_value(value: Any) -> Any:
+    if isinstance(value, dict) and isinstance(value.get("content"), str):
+        return value["content"]
+    return value
+
+
+def _compile_chat_template(template: str) -> Any:
+    import jinja2
+    from jinja2.ext import LoopControlExtension
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    def raise_exception(message: str) -> None:
+        raise jinja2.exceptions.TemplateError(message)
+
+    def tojson(
+        value: Any,
+        ensure_ascii: bool = False,
+        indent: int | None = None,
+        separators: tuple[str, str] | None = None,
+        sort_keys: bool = False,
+    ) -> str:
+        return json.dumps(
+            value,
+            ensure_ascii=ensure_ascii,
+            indent=indent,
+            separators=separators,
+            sort_keys=sort_keys,
+        )
+
+    environment = ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=[LoopControlExtension],
+    )
+    environment.filters["tojson"] = tojson
+    environment.globals["raise_exception"] = raise_exception
+    return environment.from_string(template)
+
+
+def build_prompt_formatter(
+    rule: dict[str, Any],
+    *,
+    model_repo: str | None = None,
+    model_revision: str | None = None,
+    expected_template_sha256: str | None = None,
+    enable_thinking: bool = CHAT_TEMPLATE_ENABLE_THINKING,
+    config_loader: Callable[..., dict[str, Any]] | None = None,
+) -> PromptFormatter:
+    """Build a formatter from the campaign's pinned tokenizer config."""
+    parse_sampling_rule(rule)
+    if not isinstance(enable_thinking, bool):
+        raise SamplerError("enable_thinking must be a boolean")
+
+    repo = str(model_repo or "").strip()
+    revision = str(model_revision or "").strip()
+    if not repo or not revision:
+        raise SamplerError("chat template formatting requires model repo and revision")
+    loader = config_loader or _call_load_tokenizer_config
+    try:
+        config = loader(
+            repo_id=repo,
+            revision=revision,
+            token=_hf_token(),
+        )
+        template = _resolve_chat_template(config)
+        compiled = _compile_chat_template(template)
+    except Exception as exc:
+        raise SamplerError(
+            f"failed to load chat template for {repo}@{revision}: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(template, str) or not template:
+        raise SamplerError(f"model {repo}@{revision} has no usable chat template")
+    template_sha256 = "sha256:" + hashlib.sha256(template.encode("utf-8")).hexdigest()
+    if expected_template_sha256:
+        expected = normalize_sha256(expected_template_sha256)
+        if template_sha256 != expected:
+            raise SamplerError(
+                f"chat template sha256 mismatch: expected {expected}, "
+                f"got {template_sha256}"
+            )
+
+    def render(prompt: str) -> str:
+        try:
+            special_tokens = {
+                key: _special_token_value(value)
+                for key, value in config.items()
+                if key.endswith("_token") or key == "additional_special_tokens"
+            }
+            rendered = compiled.render(
+                messages=[{"role": "user", "content": prompt}],
+                tools=None,
+                documents=None,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+                **special_tokens,
+            )
+        except Exception as exc:
+            raise SamplerError(
+                f"chat template render failed for {repo}@{revision}: "
+                f"{type(exc).__name__}"
+            ) from exc
+        if not isinstance(rendered, str) or not rendered:
+            raise SamplerError(
+                f"chat template for {repo}@{revision} rendered an empty prompt"
+            )
+        return rendered
+
+    return PromptFormatter(
+        render=render,
+        receipt={
+            "chat_template": {
+                "model_repo": repo,
+                "model_revision": revision,
+                "sha256": template_sha256,
+                "add_generation_prompt": True,
+                "enable_thinking": enable_thinking,
+            },
+        },
+    )
 
 
 def compute_sample_seed(
@@ -277,6 +440,7 @@ def generate_trace(
     rule: dict[str, Any],
     seed_hex: str,
     row_fetcher: Callable[[int], dict[str, Any]],
+    prompt_formatter: PromptFormatter | None = None,
     sample_seed_block: int = 0,
     sample_seed_block_hash: str = "",
 ) -> SampledTrace:
@@ -300,7 +464,13 @@ def generate_trace(
         n_prompts=int(parsed["n_prompts"]),
         row_ok=row_ok,
     )
-    prompts = [cache[i] for i in indices]
+    if parsed["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+        if prompt_formatter is None:
+            raise SamplerError("algo_version 2 requires a chat prompt formatter")
+        formatter = prompt_formatter
+    else:
+        formatter = PromptFormatter(render=lambda prompt: prompt, receipt={})
+    prompts = [formatter.render(cache[i]) for i in indices]
     trace = build_trace_json(
         prompts,
         max_tokens=int(parsed["max_tokens"]),
@@ -326,6 +496,7 @@ def generate_trace(
         "row_indices": list(indices),
         "sampled_trace_sha256": sha,
     }
+    receipt.update(formatter.receipt)
     if parsed.get("ignore_eos", False):
         receipt["ignore_eos"] = True
     return SampledTrace(
@@ -346,6 +517,7 @@ def sample_workload(
     block_hash: str,
     campaign_id: str,
     row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    prompt_formatter: PromptFormatter | None = None,
 ) -> SampledTrace:
     """Generate one round trace from a future-block seed."""
     if commit_block is None:
@@ -361,6 +533,7 @@ def sample_workload(
         rule=parsed,
         seed_hex=seed_hex,
         row_fetcher=fetcher,
+        prompt_formatter=prompt_formatter,
         sample_seed_block=seed_block,
         sample_seed_block_hash=str(block_hash).strip().lower(),
     )
