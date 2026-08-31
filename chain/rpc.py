@@ -35,19 +35,14 @@ def fetch_block_datetime(subtensor: Any, block_number: int) -> datetime | None:
     raw = getattr(info, "timestamp", None)
     if raw is None and isinstance(info, dict):
         raw = info.get("timestamp")
-    if raw is None:
-        return None
-    if isinstance(raw, datetime):
-        if raw.tzinfo is None:
-            return raw.replace(tzinfo=timezone.utc)
-        return raw.astimezone(timezone.utc)
-    try:
-        return datetime.fromtimestamp(float(raw), tz=timezone.utc)
-    except (TypeError, ValueError, OverflowError):
+    if not isinstance(raw, datetime):
         logger.warning(
-            "block_info(%d) returned invalid timestamp %r", block_number, raw
+            "block_info(%d) returned unsupported timestamp %r", block_number, raw
         )
         return None
+    if raw.tzinfo is None:
+        return raw.replace(tzinfo=timezone.utc)
+    return raw.astimezone(timezone.utc)
 
 
 def _retry(
