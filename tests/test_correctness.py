@@ -881,6 +881,52 @@ def test_baseline_relative_bounds_cover_all_measured_repetitions():
     )
 
 
+def test_empty_baseline_builds_a_zero_length_degeneracy_reference():
+    references = build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", "", tokens=1)],
+        {
+            "r1": NaturalStopReference(
+                request_id="r1",
+                completion_tokens=1,
+                finish_reason="stop",
+                text="",
+            )
+        },
+        {"r1": ("",)},
+    )
+    assert references["r1"] == BaselineDegeneracyReference(
+        natural_stop_tokens=0,
+        full_distinct_ngram_ratio=1.0,
+        full_repeated_span_ratio=0.0,
+    )
+
+
+def test_empty_baseline_reference_does_not_exempt_a_repeat_loop(tmp_path: Path):
+    references = build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", "", tokens=1)],
+        {
+            "r1": NaturalStopReference(
+                request_id="r1",
+                completion_tokens=1,
+                finish_reason="stop",
+                text="",
+            )
+        },
+        {"r1": ("",)},
+    )
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            [_captured("r1", "Hello world", LOOP_TEXT, tokens=200)],
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
+            baseline_outputs={"r1": ""},
+            baseline_degeneracy=references,
+        )
+    assert report.verdict == "fail_correctness"
+    assert "degenerate output" in (report.reason or "")
+
+
 def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
     """The candidate cannot move the inspected boundary by claiming an early stop."""
     baseline_forced = PROSE_TEXT + LOOP_TEXT

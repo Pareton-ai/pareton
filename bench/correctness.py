@@ -636,9 +636,9 @@ def build_baseline_degeneracy_references(
                 "baseline natural-stop reference missing correctness request "
                 f"{captured.request_id!r}"
             )
-        if stop.completion_tokens < 1 or not stop.text:
+        if stop.text and stop.completion_tokens < 1:
             raise EngineError(
-                "baseline natural-stop reference is empty for correctness request "
+                "baseline natural-stop reference has text but no completion tokens "
                 f"{captured.request_id!r}"
             )
         natural_reason = degeneracy_reason(stop.text)
@@ -658,7 +658,10 @@ def build_baseline_degeneracy_references(
                 f"{captured.request_id!r}"
             )
         references[captured.request_id] = BaselineDegeneracyReference(
-            natural_stop_tokens=stop.completion_tokens,
+            # An empty decoded baseline output is a valid zero-length boundary.
+            # Its full-output metrics still provide strict relative bounds for
+            # any non-empty candidate output on this request.
+            natural_stop_tokens=(stop.completion_tokens if stop.text else 0),
             full_distinct_ngram_ratio=min(
                 distinct_ngram_ratio(text) for text in samples
             ),
