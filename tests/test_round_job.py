@@ -16,6 +16,7 @@ pytestmark = pytest.mark.unit
 from bench.validate import sha256_bytes
 from campaign.engine import preset
 from campaign.models import SLA
+from gpu.errors import NoCapacityError
 from gpu.orchestrate import EXIT_DESTROY_FAILED
 from round.store import (
     VOID_LEADER_IMAGE_MISSING,
@@ -25,11 +26,11 @@ from round.store import (
     VOID_TRACE_UNAVAILABLE,
     infra_failed_follow_up_states,
 )
+from worker import round_job
 from worker.round_job import (
     RoundInfraError,
     bind_report_to_round,
     build_round_request,
-    capacity_retry_delay_s,
     classify_round_failure,
     entry_results_from_report,
     materialize_round_trace,
@@ -670,10 +671,53 @@ def test_remaining_budget_voids_when_the_clock_has_run_out():
     assert leftover > 0
 
 
-def test_capacity_retry_delay_doubles_then_saturates(monkeypatch):
-    monkeypatch.setattr(config, "PROVISION_RETRY_BASE_S", 300)
-    monkeypatch.setattr(config, "PROVISION_RETRY_MAX_S", 3600)
-    assert [capacity_retry_delay_s(n) for n in (0, 1, 2, 3)] == [300, 600, 1200, 2400]
-    # Saturates rather than growing without bound during a long outage.
-    assert capacity_retry_delay_s(4) == 3600
-    assert capacity_retry_delay_s(10_000) == 3600
+def test_process_round_defers_on_empty_market(tmp_path, monkeypatch):
+    """NoCapacityError must reclaim the round, not void it, at a flat delay."""
+    from pathlib import Path
+
+    monkeypatch.setattr(config, "PROVISION_RETRY_S", 1800)
+    campaign = _campaign()
+    seen: list[float] = []
+    voided: list[str] = []
+
+    monkeypatch.setattr(round_job, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(round_job, "list_round_entries", lambda _rid: _entries())
+    monkeypatch.setattr(round_job, "remaining_round_budget_s", lambda *a, **k: 100.0)
+    monkeypatch.setattr(round_job, "set_round_phase", lambda **k: True)
+    monkeypatch.setattr(round_job, "touch_round_heartbeat", lambda **k: True)
+
+    def fake_materialize(_row, _campaign, dest_dir, **_k):
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        trace = dest / "trace.json"
+        _write_trace(trace)
+        return trace
+
+    def fake_build(_row, _campaign, _entries, *, task_id, trace_path):
+        return {"task_id": task_id}
+
+    def capture(_round_id, *, delay_s):
+        seen.append(delay_s)
+        return True
+
+    monkeypatch.setattr(round_job, "materialize_round_trace", fake_materialize)
+    monkeypatch.setattr(round_job, "build_round_request", fake_build)
+    monkeypatch.setattr(round_job, "defer_round_for_capacity", capture)
+    monkeypatch.setattr(
+        round_job, "void_round", lambda *_a, **_k: voided.append("void")
+    )
+
+    def empty_market(*_a, **_k):
+        raise NoCapacityError("no 1x H200")
+
+    outcome = round_job.process_round(
+        _round_row(),
+        mock_bench=False,
+        work_root=tmp_path / "work",
+        run_pod_fn=empty_market,
+        resolve_image_fn=lambda _ref: True,
+    )
+
+    assert outcome == "deferred"
+    assert seen == [1800]
+    assert voided == []
