@@ -392,6 +392,7 @@ def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeyp
                 "model_revision": HF_REV,
                 "sha256": "sha256:" + "d" * 64,
                 "add_generation_prompt": True,
+                "enable_thinking": False,
             },
         },
     )
@@ -434,6 +435,63 @@ def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeyp
         "model_revision": HF_REV,
         "expected_template_sha256": "sha256:" + "d" * 64,
     }
+
+
+def test_materialize_round_trace_requires_the_thinking_mode_contract(
+    tmp_path, monkeypatch
+):
+    rule = {
+        "type": "hf_rows",
+        "dataset": "d",
+        "revision": "r",
+        "n_rows": 2,
+        "n_prompts": 1,
+        "max_tokens": 8,
+        "algo_version": 1,
+    }
+    formatter = PromptFormatter(
+        render=lambda prompt: f"<user>{prompt}</user><assistant>",
+        receipt={
+            "chat_template": {
+                "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+                "model_revision": HF_REV,
+                "sha256": "sha256:" + "d" * 64,
+                "add_generation_prompt": True,
+                "enable_thinking": False,
+            },
+        },
+    )
+
+    def row_fetcher(idx):
+        return {"trajectory": [{"role": "user", "content": f"issue-{idx}"}]}
+
+    sampled = generate_trace(
+        rule=rule,
+        seed_hex="ab" * 32,
+        row_fetcher=row_fetcher,
+        prompt_formatter=formatter,
+    )
+    receipt = dict(sampled.receipt)
+    receipt["chat_template"] = dict(receipt["chat_template"])
+    receipt["chat_template"].pop("enable_thinking")
+    row = _round_row(
+        sampled_trace_sha256=sampled.sha256,
+        sampling_receipt=receipt,
+        seed_hex="ab" * 32,
+    )
+    monkeypatch.setattr(
+        "worker.round_job.build_prompt_formatter",
+        lambda *_args, **_kwargs: formatter,
+    )
+
+    with pytest.raises(RoundInfraError, match="missing its rendering contract") as exc:
+        materialize_round_trace(
+            row,
+            _campaign(),
+            tmp_path / "out",
+            row_fetcher=row_fetcher,
+        )
+    assert exc.value.reason == VOID_TRACE_UNAVAILABLE
 
 
 def test_materialize_round_trace_keeps_legacy_v1_raw_prompts(tmp_path):

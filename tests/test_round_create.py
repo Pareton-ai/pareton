@@ -189,6 +189,7 @@ def test_round_creation_hashes_chat_formatted_prompts(monkeypatch):
                 "model_revision": "a" * 40,
                 "sha256": "sha256:" + "b" * 64,
                 "add_generation_prompt": True,
+                "enable_thinking": False,
             },
         },
     )
@@ -220,6 +221,7 @@ def test_round_creation_hashes_chat_formatted_prompts(monkeypatch):
     assert out == {"round_id": "r1", "ordinal": 1}
     (kw,) = calls
     assert kw["sampling_receipt"]["chat_template"]["add_generation_prompt"] is True
+    assert kw["sampling_receipt"]["chat_template"]["enable_thinking"] is False
     assert formatter_calls[0][1] == {
         "model_repo": "org/model",
         "model_revision": "a" * 40,

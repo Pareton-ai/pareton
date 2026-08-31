@@ -23,6 +23,7 @@ MAX_PROMPT_CHARS = 8000
 DEFAULT_N_PROMPTS = 32
 DEFAULT_MAX_TOKENS = 128
 DEFAULT_SEED_BLOCK_OFFSET = 1
+CHAT_TEMPLATE_ENABLE_THINKING = False
 
 # process-local cache: one Arrow split per pinned (dataset, revision, config, split)
 _HF_SPLIT_CACHE: dict[tuple[str, str, str, str], Any] = {}
@@ -228,6 +229,7 @@ def build_prompt_formatter(
                 tools=None,
                 documents=None,
                 add_generation_prompt=True,
+                enable_thinking=CHAT_TEMPLATE_ENABLE_THINKING,
                 **special_tokens,
             )
         except Exception as exc:
@@ -249,6 +251,7 @@ def build_prompt_formatter(
                 "model_revision": revision,
                 "sha256": template_sha256,
                 "add_generation_prompt": True,
+                "enable_thinking": CHAT_TEMPLATE_ENABLE_THINKING,
             },
         },
     )

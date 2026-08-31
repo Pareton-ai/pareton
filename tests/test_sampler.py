@@ -126,6 +126,8 @@ def _fake_tokenizer_config() -> dict:
         "chat_template": (
             "<user>{{ messages[0]['content'] }}</user>"
             "{% if add_generation_prompt %}<assistant>{% endif %}"
+            "{% if enable_thinking is undefined or enable_thinking is true %}"
+            "<think>{% else %}<no-think>{% endif %}"
         ),
         "eos_token": "<eos>",
     }
@@ -142,10 +144,13 @@ def _chat_formatter() -> PromptFormatter:
 
 def test_hf_chat_formatter_renders_and_records_the_template_pin():
     formatter = _chat_formatter()
-    assert formatter.render("issue text") == "<user>issue text</user><assistant>"
+    assert formatter.render("issue text") == (
+        "<user>issue text</user><assistant><no-think>"
+    )
     assert formatter.receipt["chat_template"]["model_repo"] == "org/model"
     assert formatter.receipt["chat_template"]["model_revision"] == "a" * 40
     assert formatter.receipt["chat_template"]["sha256"].startswith("sha256:")
+    assert formatter.receipt["chat_template"]["enable_thinking"] is False
 
 
 def test_hf_chat_formatter_rejects_a_changed_template():
@@ -169,7 +174,7 @@ def test_chat_formatted_trace_hashes_the_rendered_prompt():
     )
     trace = json.loads(sampled.body)
     assert trace["requests"][0]["prompt"].startswith("<user>")
-    assert trace["requests"][0]["prompt"].endswith("</user><assistant>")
+    assert trace["requests"][0]["prompt"].endswith("</user><assistant><no-think>")
     assert "chat_template" in sampled.receipt
 
 
