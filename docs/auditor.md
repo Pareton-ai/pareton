@@ -1,86 +1,87 @@
 # Run the auditor weight setter
 
-The production `pareton-weights` service computes the dense UID-indexed weight
-vector, stores it in Postgres, publishes it at `GET /v1/weights`, and submits it
-to Bittensor. `scripts/auditor.py` performs only the last step. It fetches the
-published vector and its `version_key`, verifies the validator hotkey on SN10,
-and submits the vector with `bt.SetWeights`.
+`scripts/auditor.py` mirrors Pareton's published weight vector onto Bittensor.
+It fetches `GET https://api.pareton.ai/v1/weights`, checks that the signing
+hotkey may set weights on the netuid, and submits the vector unchanged with
+`bt.SetWeights`.
+
+The script decides nothing. Pareton's `pareton-weights` service computes the
+vector, stores it, and publishes it; this process only signs and relays what
+the endpoint returns.
 
 After a successful submission it waits 360 chain blocks. After a failed
-submission or fetch it waits 36 chain blocks. It polls the Finney chain every
-12 seconds to measure those intervals. It logs each API fetch, metagraph read,
-submission, error, and block wait. The chain has commit-reveal enabled, so a
-successful Finney submission means the commitment was accepted. The vector
-becomes live after the chain reveals it.
+submission or fetch it waits 36 blocks. It polls the chain every 12 seconds to
+measure those intervals, and logs every fetch, metagraph read, submission,
+error, and wait. SN10 has commit-reveal enabled, so a successful submission
+means the commitment was accepted; the vector goes live after the reveal.
 
-## Setup
+## Install
 
-Run from a Pareton checkout on the VM. Install the repository dependencies and
-confirm that the validator wallet and hotkey already exist locally:
+The script is standalone. Copy the single file anywhere; it imports nothing
+else from this repository.
 
 ```bash
-cd /opt/pareton
-python -m pip install -r requirements.txt
-python scripts/auditor.py --help
+curl -O https://raw.githubusercontent.com/Pareton-ai/pareton/main/scripts/auditor.py
+python -m pip install 'requests>=2.31' 'bittensor==11.0.2'
+python auditor.py --help
 ```
 
-`--coldkey` is the local Bittensor wallet name. `--hotkey` is the local hotkey
-name inside that wallet. The hotkey must be registered on netuid 10 and allowed
-to set weights. The script never accepts or prints seed material.
+Nothing else from `requirements.txt` is needed.
 
-Test one foreground start before moving it to the background:
+## Configure
+
+The network, netuid and API URL are fixed constants at the top of the file:
+Finney, netuid 10, `https://api.pareton.ai/v1/weights`. Only the wallet is
+configurable.
+
+| Variable | Flag | Meaning |
+| --- | --- | --- |
+| `PARETON_WALLET_NAME` | `--coldkey` | Local Bittensor wallet name |
+| `PARETON_WALLET_HOTKEY` | `--hotkey` | Local hotkey name inside that wallet |
+
+A command-line flag overrides the environment variable. Both are required.
+
+These are local wallet names, not addresses and not seed material. The script
+never reads or prints seed material. The hotkey must be registered on netuid 10
+and hold a validator permit; the script checks this and exits before signing
+anything if it does not.
+
+## Run
+
+Test one foreground start first:
 
 ```bash
-cd /opt/pareton
-python scripts/auditor.py --coldkey pareton-validator-ckey --hotkey pareton-validator-hkey
+export PARETON_WALLET_NAME=my-validator-coldkey
+export PARETON_WALLET_HOTKEY=my-validator-hotkey
+
+python auditor.py --once   # one attempt, exit 0 on acceptance, 1 on failure
+python auditor.py          # run forever
 ```
 
-Stop it with `Ctrl-C` after the first successful log line.
+Stop the foreground process with `Ctrl-C`.
 
-Use `--network` and `--netuid` to target another subnet. `--once` performs one
-submission attempt and returns exit code 0 on acceptance or 1 on failure:
+## Run in the background
 
-```bash
-python scripts/auditor.py \
-  --coldkey dev_coldkey \
-  --hotkey dev_hotkey \
-  --network test \
-  --netuid 292 \
-  --once
-```
-
-## Run with PM2
-
-Use the Python executable from the environment where the dependencies were
-installed:
+With PM2:
 
 ```bash
-cd /opt/pareton
-pm2 start scripts/auditor.py \
-  --name pareton-auditor \
-  --interpreter "$(command -v python)" \
-  -- --coldkey pareton-validator-ckey --hotkey pareton-validator-hkey
+pm2 start auditor.py --name pareton-auditor --interpreter "$(command -v python)"
 pm2 save
 pm2 logs pareton-auditor
 ```
 
-Use `pm2 startup` once if PM2 is not already configured to start after a VM
-reboot.
+PM2 inherits the environment of the shell that started it. Run `pm2 startup`
+once if PM2 is not already set to start after a reboot.
 
-## Run with nohup
+With nohup:
 
 ```bash
-cd /opt/pareton
-nohup python scripts/auditor.py \
-  --coldkey pareton-validator-ckey \
-  --hotkey pareton-validator-hkey \
-  > pareton-auditor.log 2>&1 &
+nohup python auditor.py > pareton-auditor.log 2>&1 &
 echo $! > pareton-auditor.pid
 tail -f pareton-auditor.log
+
+kill "$(cat pareton-auditor.pid)"
 ```
 
-Stop the nohup process with:
-
-```bash
-kill "$(cat /opt/pareton/pareton-auditor.pid)"
-```
+Run it under systemd, supervisor, or a container if you prefer. The script is
+plain Python with no runtime assumptions beyond the two packages above.

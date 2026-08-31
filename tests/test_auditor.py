@@ -69,17 +69,13 @@ def test_fetch_weights_rejects_an_unsafe_response(overrides):
         auditor.fetch_weights(Client(body(**overrides)))
 
 
-def test_submit_latest_uses_dense_uids_and_one_chain_attempt(monkeypatch):
+def test_submit_latest_uses_dense_uids(monkeypatch):
     seen = {}
     wallet = SimpleNamespace()
     subtensor = SimpleNamespace()
     meta = SimpleNamespace()
 
-    monkeypatch.setattr(
-        auditor,
-        "fetch_metagraph",
-        lambda *args, **kwargs: (meta, 8_965_604, "0xabc"),
-    )
+    monkeypatch.setattr(auditor, "fetch_metagraph", lambda *args, **kwargs: meta)
 
     def fake_set_weights(got_subtensor, got_wallet, got_meta, **kwargs):
         seen.update(kwargs)
@@ -92,35 +88,53 @@ def test_submit_latest_uses_dense_uids_and_one_chain_attempt(monkeypatch):
     assert list(seen["uids"]) == [0, 1]
     assert seen["weights"] == [0.1, 0.9]
     assert seen["version_key"] == 2032
-    assert seen["burn_uid"] == 201
-    assert seen["attempts"] == 1
 
 
-def test_submit_latest_uses_selected_network_and_netuid(monkeypatch):
+def test_set_weights_refuses_a_hotkey_without_a_permit():
+    meta = SimpleNamespace(
+        by_hotkey=lambda _hk: SimpleNamespace(uid=16, validator_permit=False)
+    )
+    wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address="5Test"))
+
+    with pytest.raises(auditor.ValidatorPermitError):
+        auditor.set_weights(
+            SimpleNamespace(),
+            wallet,
+            meta,
+            uids=[0, 1],
+            weights=[0.1, 0.9],
+            version_key=2032,
+        )
+
+
+def test_main_reads_settings_from_the_environment(monkeypatch):
     seen = {}
+    monkeypatch.setenv("PARETON_WALLET_NAME", "env-coldkey")
+    monkeypatch.setenv("PARETON_WALLET_HOTKEY", "env-hotkey")
+    monkeypatch.setattr(auditor, "run", lambda **kwargs: seen.update(kwargs) or True)
 
-    def fake_metagraph(subtensor, netuid, **kwargs):
-        seen["metagraph"] = (subtensor, netuid, kwargs)
-        return SimpleNamespace(), 100, "0xabc"
+    assert auditor.main([]) == 0
+    assert seen == {
+        "coldkey": "env-coldkey",
+        "hotkey": "env-hotkey",
+        "once": False,
+    }
 
-    monkeypatch.setattr(auditor, "fetch_metagraph", fake_metagraph)
-    monkeypatch.setattr(
-        auditor,
-        "set_weights",
-        lambda subtensor, wallet, meta, **kwargs: seen.update(set=kwargs),
-    )
 
-    auditor.submit_latest(
-        "subtensor",
-        "wallet",
-        network="test",
-        netuid=292,
-        client=Client(body()),
-    )
+def test_command_line_flags_win_over_the_environment(monkeypatch):
+    seen = {}
+    monkeypatch.setenv("PARETON_WALLET_NAME", "env-coldkey")
+    monkeypatch.setenv("PARETON_WALLET_HOTKEY", "env-hotkey")
+    monkeypatch.setattr(auditor, "run", lambda **kwargs: seen.update(kwargs) or True)
 
-    assert seen["metagraph"] == (
-        "subtensor",
-        292,
-        {"network": "test", "attempts": 1},
-    )
-    assert seen["set"]["netuid"] == 292
+    assert auditor.main(["--coldkey", "flag-ck"]) == 0
+    assert seen["coldkey"] == "flag-ck"
+    assert seen["hotkey"] == "env-hotkey"
+
+
+def test_main_requires_the_wallet_settings(monkeypatch):
+    monkeypatch.delenv("PARETON_WALLET_NAME", raising=False)
+    monkeypatch.delenv("PARETON_WALLET_HOTKEY", raising=False)
+
+    with pytest.raises(SystemExit):
+        auditor.main([])
