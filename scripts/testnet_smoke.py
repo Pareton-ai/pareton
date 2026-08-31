@@ -157,6 +157,7 @@ def ensure_campaign() -> str:
         denied_paths=["tests/**", ".github/**", "**/Dockerfile*"],
         priority_metric="throughput",
         success_threshold="mock build reaches built",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
         status="open",
         customer_signoff=None,
         bench=None,

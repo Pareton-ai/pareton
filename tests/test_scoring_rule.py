@@ -193,6 +193,7 @@ def _campaign_row(status: str) -> dict[str, Any]:
         "workload_pool": None,
         "sampling_rule": None,
         "scoring_rule": {"name": "median_e2e_speedup"},
+        "submission_fee": {"amount_tao": "0.0005", "recipient": "5Recipient"},
         "created_at": None,
     }
 

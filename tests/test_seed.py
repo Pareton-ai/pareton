@@ -351,6 +351,17 @@ def test_seed_pins_the_emission_rule_from_config(monkeypatch: pytest.MonkeyPatch
     assert m.to_public_dict()["emission_rule"] == m.emission_rule
 
 
+def test_seed_pins_submission_fee_terms(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(allow_placeholders=True)
+    fee = captured["manifest"].submission_fee
+    assert fee == {
+        "amount_tao": str(config.SUBMISSION_FEE_TAO),
+        "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
+    }
+    assert captured["manifest"].to_public_dict()["submission_fee"] == fee
+
+
 def test_seed_rejects_an_emission_rule_that_over_commits_the_subnet(
     monkeypatch: pytest.MonkeyPatch,
 ):

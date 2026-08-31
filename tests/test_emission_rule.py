@@ -41,6 +41,7 @@ def _fields_kwargs(**overrides):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
     )
     kwargs.update(overrides)
     return kwargs

@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import config  # noqa: E402
+from campaign.fees import submission_fee_rao, validate_submission_fee  # noqa: E402
 from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
 from storage.s3 import patch_url_hotkey  # noqa: E402
 
@@ -135,7 +135,7 @@ def _say(msg: str, *, file=None) -> None:
     out.flush()
 
 
-def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int, int]:
+def _pay_fee(subtensor, wallet, *, fee_tao: str, recipient: str) -> tuple[int, int]:
     """Send the fee from the coldkey and return the proof reference."""
     import bittensor as bt
 
@@ -149,7 +149,7 @@ def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int,
         "After it, the transfer runs silently (this can take a minute)."
     )
     result = subtensor.execute(
-        bt.Transfer(dest_ss58=recipient, amount_tao=str(fee_tao)), wallet
+        bt.Transfer(dest_ss58=recipient, amount_tao=fee_tao), wallet
     )
     if not getattr(result, "success", False):
         message = getattr(result, "message", None) or getattr(result, "error", result)
@@ -214,6 +214,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Print commitment payload without submitting on-chain",
     )
     p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the API-declared submission fee without an interactive prompt",
+    )
+    p.add_argument(
         "--payment-block",
         type=int,
         default=None,
@@ -264,6 +269,49 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: failed to fetch campaign: {exc}", file=sys.stderr)
         return 1
     baseline_commit = campaign["baseline_commit"]
+    try:
+        fee = validate_submission_fee(campaign["submission_fee"])
+    except KeyError:
+        print(
+            "error: campaign API returned no submission_fee; refusing to guess",
+            file=sys.stderr,
+        )
+        return 1
+    except ValueError as exc:
+        print(f"error: invalid campaign submission_fee: {exc}", file=sys.stderr)
+        return 1
+    fee_tao = fee["amount_tao"]
+    fee_amount_rao = submission_fee_rao(fee)
+    recipient = fee["recipient"]
+
+    if args.payment_block is not None and fee_amount_rao <= 0:
+        print(
+            "error: --payment-block/--payment-tx require a positive campaign fee",
+            file=sys.stderr,
+        )
+        return 1
+
+    _say(f"Campaign submission fee: {fee_tao} TAO")
+    _say(f"Payment recipient: {recipient}")
+    if (
+        fee_amount_rao > 0
+        and args.payment_block is None
+        and not args.dry_run
+        and not args.yes
+    ):
+        if not sys.stdin.isatty():
+            print(
+                "error: fee confirmation requires an interactive terminal or --yes",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            confirmed = input("Pay this fee and submit the patch? [y/N] ")
+        except EOFError:
+            confirmed = ""
+        if confirmed.strip().lower() not in {"y", "yes"}:
+            _say("Submission cancelled before upload or payment.")
+            return 1
 
     if args.retrieval_url:
         retrieval_url = args.retrieval_url
@@ -297,19 +345,11 @@ def main(argv: list[str] | None = None) -> int:
         "patch_hash": patch_hash,
         "retrieval_url": retrieval_url,
     }
-    fee_tao = config.SUBMISSION_FEE_TAO
-    recipient = config.PAYMENT_RECIPIENT_ADDRESS
-    if args.payment_block is not None and fee_tao <= 0:
-        print(
-            "error: --payment-block/--payment-tx require PARETON_SUBMISSION_FEE_TAO > 0",
-            file=sys.stderr,
-        )
-        return 1
     try:
         payload = encode_patch_commitment(**payload_args)
         # Size the payload against a worst-case proof before any money moves.
         probe = payload
-        if fee_tao > 0:
+        if fee_amount_rao > 0:
             probe = encode_patch_commitment(
                 **payload_args,
                 payment_block=_PREFLIGHT_BLOCK,
@@ -321,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
-        if fee_tao > 0 and args.payment_block is not None:
+        if fee_amount_rao > 0 and args.payment_block is not None:
             payload = encode_patch_commitment(
                 **payload_args,
                 payment_block=args.payment_block,
@@ -329,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         _say(f"Commitment payload ({len(payload.encode())} bytes):")
         print(payload)
-        if fee_tao > 0:
+        if fee_amount_rao > 0:
             if args.payment_block is not None:
                 _say(
                     f"Dry run: would reuse payment "
@@ -353,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
     # cannot commit, and the fee would be spent for nothing. Reuse flags let
     # a miner retry the commitment after a transfer that already landed.
     payment_block = payment_tx = None
-    if fee_tao > 0:
+    if fee_amount_rao > 0:
         if args.payment_block is not None:
             payment_block, payment_tx = args.payment_block, args.payment_tx
             _say(f"Reusing payment {payment_block}-{payment_tx}.")

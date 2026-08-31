@@ -43,6 +43,20 @@ def test_campaigns_cache_control(client: TestClient):
     )
 
 
+def test_campaign_routes_expose_pinned_submission_fee(monkeypatch, client):
+    from api import server
+
+    fee = {"amount_tao": "0.0005", "recipient": "5Recipient"}
+    campaign = SimpleNamespace(
+        to_public_dict=lambda: {"campaign_id": "c1", "submission_fee": fee},
+    )
+    monkeypatch.setattr(server, "list_campaigns", lambda status=None: [campaign])
+    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
+
+    assert client.get("/v1/campaigns").json()["campaigns"][0]["submission_fee"] == fee
+    assert client.get("/v1/campaigns/c1").json()["submission_fee"] == fee
+
+
 def test_campaign_detail_db_unavailable_is_503(monkeypatch, client: TestClient):
     from api import server
     from db.exceptions import DatabaseUnavailable
