@@ -117,14 +117,14 @@ def assert_validator_permit(meta: Any, hotkey: str) -> int:
 
 
 def _outcome(result: Any) -> tuple[bool, str]:
-    """Normalize the SDK's success and message shapes into `(ok, reason)`."""
-    if isinstance(result, tuple) and len(result) == 2:
-        return bool(result[0]), str(result[1] or "")
-    ok = getattr(result, "success", None)
-    if ok is None:
-        ok = bool(result)
-    reason = getattr(result, "message", None) or getattr(result, "error", "")
-    return bool(ok), str(reason or "")
+    """`(ok, reason)` out of the SDK's ExtrinsicResult.
+
+    A result missing ``success`` reads as a failure, so an SDK that changes
+    this shape raises loudly rather than reporting a silent win.
+    """
+    ok = bool(getattr(result, "success", False))
+    reason = getattr(result, "message", None) or getattr(result, "error", None)
+    return ok, str(reason) if reason else ""
 
 
 def set_weights(

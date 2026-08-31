@@ -138,3 +138,22 @@ def test_main_requires_the_wallet_settings(monkeypatch):
 
     with pytest.raises(SystemExit):
         auditor.main([])
+
+
+def test_set_weights_treats_an_unknown_result_shape_as_a_failure():
+    """An SDK result without `success` must raise, never log a silent win."""
+    meta = SimpleNamespace(
+        by_hotkey=lambda _hk: SimpleNamespace(uid=16, validator_permit=True)
+    )
+    wallet = SimpleNamespace(hotkey=SimpleNamespace(ss58_address="5Test"))
+    subtensor = SimpleNamespace(execute=lambda *a, **k: SimpleNamespace())
+
+    with pytest.raises(auditor.WeightSetError):
+        auditor.set_weights(
+            subtensor,
+            wallet,
+            meta,
+            uids=[0, 1],
+            weights=[0.1, 0.9],
+            version_key=2032,
+        )
