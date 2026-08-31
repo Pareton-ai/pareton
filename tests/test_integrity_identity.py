@@ -165,9 +165,8 @@ def test_integrity_accepts_matching_hotkey(monkeypatch):
     assert res.ok
 
 
-def test_patch_fingerprint_strips_comment_styles_and_blank_lines():
-    commented = b"alpha\n# one\n// two\n/*\nblock\n*/\n\n\nomega\n"
-    assert patch_fingerprint_bytes(commented) == patch_fingerprint_bytes(
+def test_patch_fingerprint_strips_blank_lines_without_git_diff():
+    assert patch_fingerprint_bytes(b"alpha\n\n\nomega\n") == patch_fingerprint_bytes(
         b"alpha\nomega\n"
     )
 
@@ -182,10 +181,9 @@ def test_patch_fingerprint_strips_comments_from_git_hunk_content():
     first = b"""diff --git a/vllm/x.py b/vllm/x.py
 --- a/vllm/x.py
 +++ b/vllm/x.py
-@@ -1,2 +1,2 @@
--# old note
-+# first note
- x = 1
+@@ -1 +1 @@
+-x = 1  # old note
++x = 1  # first note
 """
     second = first.replace(b"first note", b"changed note")
     assert hash_patch_bytes(first) != hash_patch_bytes(second)
@@ -208,39 +206,63 @@ index 1111111..3333333 100644
 @@ -1 +1,3 @@ def run():
  x = 1
 +# changed note
-+// another note
++# another note
 """
     assert hash_patch_bytes(first) != hash_patch_bytes(second)
     assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
 
 
 def test_patch_fingerprint_tracks_block_comments_across_hunk_sides():
-    first = b"""diff --git a/vllm/x.py b/vllm/x.py
---- a/vllm/x.py
-+++ b/vllm/x.py
-@@ -1,4 +1,4 @@
+    first = b"""diff --git a/vllm/x.cpp b/vllm/x.cpp
+--- a/vllm/x.cpp
++++ b/vllm/x.cpp
+@@ -1,5 +1,5 @@
  /*
 -old note
 +first note
  */
- x = 1
+-x = 1; // old note
++x = 1; // first note
 """
     second = first.replace(b"first note", b"changed note")
     assert hash_patch_bytes(first) != hash_patch_bytes(second)
     assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
 
 
-@pytest.mark.parametrize(
-    ("first", "second"),
-    [
-        (b"+x = 1  # first\n", b"+x = 1  # changed\n"),
-        (b"+x = 1; // first\n", b"+x = 1; // changed\n"),
-        (b"+x = /* first */ 1;\n", b"+x = /* changed */ 1;\n"),
-    ],
-)
-def test_patch_fingerprint_strips_inline_comments(first, second):
-    assert hash_patch_bytes(first) != hash_patch_bytes(second)
-    assert patch_fingerprint_bytes(first) == patch_fingerprint_bytes(second)
+def test_patch_fingerprint_keeps_python_floor_division():
+    half = b"""diff --git a/vllm/x.py b/vllm/x.py
+--- a/vllm/x.py
++++ b/vllm/x.py
+@@ -1 +1 @@
+-result = n // 1
++result = n // 2
+"""
+    quarter = half.replace(b"n // 2", b"n // 4")
+    assert patch_fingerprint_bytes(half) != patch_fingerprint_bytes(quarter)
+
+
+def test_patch_fingerprint_keeps_c_preprocessor_directives():
+    small = b"""diff --git a/vllm/kernel.cu b/vllm/kernel.cu
+--- a/vllm/kernel.cu
++++ b/vllm/kernel.cu
+@@ -1 +1 @@
+-#define BLOCK_SIZE 64
++#define BLOCK_SIZE 128
+"""
+    large = small.replace(b"BLOCK_SIZE 128", b"BLOCK_SIZE 256")
+    assert patch_fingerprint_bytes(small) != patch_fingerprint_bytes(large)
+
+
+def test_patch_fingerprint_preserves_comments_outside_vllm_root():
+    first = b"""diff --git a/tests/x.py b/tests/x.py
+--- a/tests/x.py
++++ b/tests/x.py
+@@ -1 +1 @@
+-# old note
++# first note
+"""
+    second = first.replace(b"first note", b"changed note")
+    assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
 
 
 @pytest.mark.parametrize(
@@ -268,9 +290,7 @@ def test_patch_fingerprint_keeps_code_after_block_comment():
     assert patch_fingerprint_bytes(first) != patch_fingerprint_bytes(second)
 
 
-def test_patch_fingerprint_documents_python_docstring_edge_case():
-    with_hash_line = b'"""\n# this is docstring content\n"""\n'
-    without_hash_line = b'"""\n"""\n'
-    assert patch_fingerprint_bytes(with_hash_line) == patch_fingerprint_bytes(
-        without_hash_line
+def test_patch_fingerprint_preserves_comments_without_git_diff():
+    assert patch_fingerprint_bytes(b"# first\n") != patch_fingerprint_bytes(
+        b"# changed\n"
     )
