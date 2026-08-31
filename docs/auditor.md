@@ -1,54 +1,39 @@
-# Run the auditor weight setter
+# Run the weight setter
 
-`scripts/auditor.py` mirrors Pareton's published weight vector onto Bittensor.
-It fetches `GET https://api.pareton.ai/v1/weights`, checks that the signing
-hotkey may set weights on the netuid, and submits the vector unchanged with
-`bt.SetWeights`.
+`scripts/auditor.py` fetches `GET https://api.pareton.ai/v1/weights` and
+submits that weight vector on mainnet (Finney) Subnet 10. It does not change the vector.
 
-The script decides nothing. Pareton's `pareton-weights` service computes the
-vector, stores it, and publishes it; this process only signs and relays what
-the endpoint returns.
-
-After a successful submission it waits 360 chain blocks. After a failed
-submission or fetch it waits 36 blocks. It polls the chain every 12 seconds to
-measure those intervals, and logs every fetch, metagraph read, submission,
-error, and wait. SN10 has commit-reveal enabled, so a successful submission
-means the commitment was accepted; the vector goes live after the reveal.
+After a successful submission it waits 360 blocks. After a failure it waits
+36 blocks. SN10 uses commit-reveal, so a successful call means the commitment
+was accepted; the vector goes live after reveal.
 
 ## Install
 
-The script is standalone. Copy the single file anywhere; it imports nothing
-else from this repository.
-
 ```bash
+# Download the standalone script
 curl -O https://raw.githubusercontent.com/Pareton-ai/pareton/main/scripts/auditor.py
+# Install the two dependencies
 python -m pip install 'requests>=2.31' 'bittensor==11.0.2'
+# Confirm the CLI loads
 python auditor.py --help
 ```
 
-Nothing else from `requirements.txt` is needed.
-
 ## Configure
 
-The network, netuid and API URL are fixed constants at the top of the file:
-Finney, netuid 10, `https://api.pareton.ai/v1/weights`. Only the wallet is
-configurable.
+Only the wallet is configurable. Network, netuid, and the API URL are fixed
+in the script.
 
-| Variable | Flag | Meaning |
-| --- | --- | --- |
-| `PARETON_WALLET_NAME` | `--coldkey` | Local Bittensor wallet name |
-| `PARETON_WALLET_HOTKEY` | `--hotkey` | Local hotkey name inside that wallet |
+| Variable                | Flag        | Meaning                              |
+| ----------------------- | ----------- | ------------------------------------ |
+| `PARETON_WALLET_NAME`   | `--coldkey` | Local Bittensor wallet name          |
+| `PARETON_WALLET_HOTKEY` | `--hotkey`  | Local hotkey name inside that wallet |
 
-A command-line flag overrides the environment variable. Both are required.
-
-These are local wallet names, not addresses and not seed material. The script
-never reads or prints seed material. The hotkey must be registered on netuid 10
-and hold a validator permit; the script checks this and exits before signing
-anything if it does not.
+A flag overrides the environment variable. Both are required. These are local
+wallet names, not addresses or seeds. The hotkey must be registered on netuid
+10 with a validator permit; the script checks that and exits before signing
+if it is not.
 
 ## Run
-
-Test one foreground start first:
 
 ```bash
 export PARETON_WALLET_NAME=my-validator-coldkey
@@ -71,7 +56,7 @@ pm2 logs pareton-auditor
 ```
 
 PM2 inherits the environment of the shell that started it. Run `pm2 startup`
-once if PM2 is not already set to start after a reboot.
+once if it should start after a reboot.
 
 With nohup:
 
@@ -82,6 +67,3 @@ tail -f pareton-auditor.log
 
 kill "$(cat pareton-auditor.pid)"
 ```
-
-Run it under systemd, supervisor, or a container if you prefer. The script is
-plain Python with no runtime assumptions beyond the two packages above.
