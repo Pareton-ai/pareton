@@ -8,8 +8,11 @@ import json
 import pytest
 
 from bench.sampler import (
+    ALGO_VERSION,
     MAX_PROMPT_CHARS,
+    PromptFormatter,
     SamplerError,
+    build_prompt_formatter,
     compute_sample_seed,
     extract_prompt,
     fetch_hf_row,
@@ -71,6 +74,11 @@ def test_parse_sampling_rule_requires_hf_rows():
     parsed = parse_sampling_rule(_rule())
     assert parsed["type"] == "hf_rows"
     assert parsed["n_prompts"] == 3
+    assert parsed["algo_version"] == 1
+    current = _rule()
+    del current["algo_version"]
+    assert parse_sampling_rule(current)["algo_version"] == ALGO_VERSION == 2
+    assert "prompt_format" not in parsed
     assert "ignore_eos" not in parsed
     assert parse_sampling_rule(_rule(ignore_eos=True))["ignore_eos"] is True
     omitted = _rule()
@@ -105,6 +113,113 @@ def test_ignore_eos_is_pinned_only_when_enabled():
         request["sampling"]["ignore_eos"] is True for request in forced_doc["requests"]
     )
     assert forced.sha256 != ordinary.sha256
+
+
+def test_sampler_accepts_legacy_and_current_algorithm_versions():
+    assert parse_sampling_rule(_rule(algo_version=1))["algo_version"] == 1
+    assert parse_sampling_rule(_rule(algo_version=2))["algo_version"] == 2
+
+
+def test_sampler_rejects_an_unreleased_algorithm_version():
+    with pytest.raises(SamplerError, match="unsupported algo_version"):
+        parse_sampling_rule(_rule(algo_version=3))
+
+
+def _chat_rule() -> dict:
+    return _rule(algo_version=ALGO_VERSION)
+
+
+def _fake_tokenizer_config() -> dict:
+    return {
+        "chat_template": (
+            "<user>{{ messages[0]['content'] }}</user>"
+            "{% if add_generation_prompt %}<assistant>{% endif %}"
+            "{% if enable_thinking is undefined or enable_thinking is true %}"
+            "<think>{% else %}<no-think>{% endif %}"
+        ),
+        "eos_token": "<eos>",
+    }
+
+
+def _chat_formatter() -> PromptFormatter:
+    return build_prompt_formatter(
+        _chat_rule(),
+        model_repo="org/model",
+        model_revision="a" * 40,
+        config_loader=lambda **_kwargs: _fake_tokenizer_config(),
+    )
+
+
+def test_hf_chat_formatter_renders_and_records_the_template_pin():
+    formatter = _chat_formatter()
+    assert formatter.render("issue text") == (
+        "<user>issue text</user><assistant><no-think>"
+    )
+    assert formatter.receipt["chat_template"]["model_repo"] == "org/model"
+    assert formatter.receipt["chat_template"]["model_revision"] == "a" * 40
+    assert formatter.receipt["chat_template"]["sha256"].startswith("sha256:")
+    assert formatter.receipt["chat_template"]["enable_thinking"] is False
+
+
+def test_hf_chat_formatter_honors_an_explicit_thinking_mode():
+    formatter = build_prompt_formatter(
+        _chat_rule(),
+        model_repo="org/model",
+        model_revision="a" * 40,
+        enable_thinking=True,
+        config_loader=lambda **_kwargs: _fake_tokenizer_config(),
+    )
+    assert formatter.render("issue text") == (
+        "<user>issue text</user><assistant><think>"
+    )
+    assert formatter.receipt["chat_template"]["enable_thinking"] is True
+
+
+def test_hf_chat_formatter_rejects_a_changed_template():
+    with pytest.raises(SamplerError, match="chat template sha256 mismatch"):
+        build_prompt_formatter(
+            _chat_rule(),
+            model_repo="org/model",
+            model_revision="a" * 40,
+            expected_template_sha256="sha256:" + "0" * 64,
+            config_loader=lambda **_kwargs: _fake_tokenizer_config(),
+        )
+
+
+def test_chat_formatted_trace_hashes_the_rendered_prompt():
+    rows = [_user_row(f"prompt-{i}") for i in range(8)]
+    sampled = generate_trace(
+        rule=_chat_rule(),
+        seed_hex="aa" * 32,
+        row_fetcher=_fetcher(rows),
+        prompt_formatter=_chat_formatter(),
+    )
+    trace = json.loads(sampled.body)
+    assert trace["requests"][0]["prompt"].startswith("<user>")
+    assert trace["requests"][0]["prompt"].endswith("</user><assistant><no-think>")
+    assert "chat_template" in sampled.receipt
+
+
+def test_trace_without_a_formatter_keeps_raw_prompt_compatibility():
+    rows = [_user_row(f"prompt-{i}") for i in range(8)]
+    sampled = generate_trace(
+        rule=_rule(algo_version=1),
+        seed_hex="aa" * 32,
+        row_fetcher=_fetcher(rows),
+    )
+    trace = json.loads(sampled.body)
+    assert trace["requests"][0]["prompt"].startswith("prompt-")
+    assert "chat_template" not in sampled.receipt
+
+
+def test_chat_algorithm_requires_a_formatter():
+    rows = [_user_row(f"prompt-{i}") for i in range(8)]
+    with pytest.raises(SamplerError, match="requires a chat prompt formatter"):
+        generate_trace(
+            rule=_chat_rule(),
+            seed_hex="aa" * 32,
+            row_fetcher=_fetcher(rows),
+        )
 
 
 def test_fixed_seed_identical_trace_sha256_twice():

@@ -54,6 +54,8 @@ def test_default_seed_pins_hf_rows_and_stores_no_trace(
     assert m.sampling_rule is not None
     assert m.sampling_rule["type"] == "hf_rows"
     assert m.sampling_rule["dataset"] == "nebius/SWE-agent-trajectories"
+    assert m.sampling_rule["algo_version"] == 2
+    assert "prompt_format" not in m.sampling_rule
     public = m.to_public_dict()
     assert "workload_trace_url" not in public
     assert public["sampling_rule"]["type"] == "hf_rows"
