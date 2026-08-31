@@ -184,10 +184,13 @@ def build_prompt_formatter(
     model_repo: str | None = None,
     model_revision: str | None = None,
     expected_template_sha256: str | None = None,
+    enable_thinking: bool = CHAT_TEMPLATE_ENABLE_THINKING,
     config_loader: Callable[..., dict[str, Any]] | None = None,
 ) -> PromptFormatter:
     """Build a formatter from the campaign's pinned tokenizer config."""
     parse_sampling_rule(rule)
+    if not isinstance(enable_thinking, bool):
+        raise SamplerError("enable_thinking must be a boolean")
 
     repo = str(model_repo or "").strip()
     revision = str(model_revision or "").strip()
@@ -229,7 +232,7 @@ def build_prompt_formatter(
                 tools=None,
                 documents=None,
                 add_generation_prompt=True,
-                enable_thinking=CHAT_TEMPLATE_ENABLE_THINKING,
+                enable_thinking=enable_thinking,
                 **special_tokens,
             )
         except Exception as exc:
@@ -251,7 +254,7 @@ def build_prompt_formatter(
                 "model_revision": revision,
                 "sha256": template_sha256,
                 "add_generation_prompt": True,
-                "enable_thinking": CHAT_TEMPLATE_ENABLE_THINKING,
+                "enable_thinking": enable_thinking,
             },
         },
     )

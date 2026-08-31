@@ -15,7 +15,6 @@ from uuid import uuid4
 import config
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
-    CHAT_TEMPLATE_ENABLE_THINKING,
     PromptFormatter,
     SamplerError,
     build_prompt_formatter,
@@ -194,13 +193,11 @@ def materialize_round_trace(
                     model_repo = str(model.get("hf_repo") or "")
                     model_revision = str(model.get("hf_revision") or "")
                     template_sha256 = str(template.get("sha256") or "")
+                    receipt_thinking = template.get("enable_thinking")
                     if (
                         not template_sha256
                         or (template.get("add_generation_prompt") is not True)
-                        or (
-                            template.get("enable_thinking")
-                            is not CHAT_TEMPLATE_ENABLE_THINKING
-                        )
+                        or not isinstance(receipt_thinking, bool)
                     ):
                         raise SamplerError(
                             "chat template receipt is missing its rendering contract"
@@ -216,6 +213,7 @@ def materialize_round_trace(
                         model_repo=model_repo,
                         model_revision=model_revision,
                         expected_template_sha256=template_sha256,
+                        enable_thinking=receipt_thinking,
                     )
                 else:
                     # Receipts created before template rendering was introduced

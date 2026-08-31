@@ -153,6 +153,20 @@ def test_hf_chat_formatter_renders_and_records_the_template_pin():
     assert formatter.receipt["chat_template"]["enable_thinking"] is False
 
 
+def test_hf_chat_formatter_honors_an_explicit_thinking_mode():
+    formatter = build_prompt_formatter(
+        _chat_rule(),
+        model_repo="org/model",
+        model_revision="a" * 40,
+        enable_thinking=True,
+        config_loader=lambda **_kwargs: _fake_tokenizer_config(),
+    )
+    assert formatter.render("issue text") == (
+        "<user>issue text</user><assistant><think>"
+    )
+    assert formatter.receipt["chat_template"]["enable_thinking"] is True
+
+
 def test_hf_chat_formatter_rejects_a_changed_template():
     with pytest.raises(SamplerError, match="chat template sha256 mismatch"):
         build_prompt_formatter(

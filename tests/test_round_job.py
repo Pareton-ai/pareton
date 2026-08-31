@@ -372,7 +372,10 @@ def test_materialize_round_trace_sha_mismatch(tmp_path):
     assert sha256_bytes(raw) != row["sampled_trace_sha256"]
 
 
-def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("enable_thinking", [False, True])
+def test_materialize_round_trace_rebuilds_chat_formatted_bytes(
+    tmp_path, monkeypatch, enable_thinking
+):
     rule = {
         "type": "hf_rows",
         "dataset": "d",
@@ -392,7 +395,7 @@ def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeyp
                 "model_revision": HF_REV,
                 "sha256": "sha256:" + "d" * 64,
                 "add_generation_prompt": True,
-                "enable_thinking": False,
+                "enable_thinking": enable_thinking,
             },
         },
     )
@@ -434,6 +437,7 @@ def test_materialize_round_trace_rebuilds_chat_formatted_bytes(tmp_path, monkeyp
         "model_repo": "Qwen/Qwen2.5-7B-Instruct",
         "model_revision": HF_REV,
         "expected_template_sha256": "sha256:" + "d" * 64,
+        "enable_thinking": enable_thinking,
     }
 
 
