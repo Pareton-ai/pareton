@@ -1,4 +1,4 @@
-"""Permanently disqualify one hotkey from one campaign.
+"""Disqualify one hotkey from one campaign.
 
 Usage:
     PARETON_DATABASE_URL=... python -m campaign.disqualify \
@@ -50,7 +50,7 @@ def _resolve_uid(uid: int, *, network: str, netuid: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Permanently disqualify a hotkey from one campaign"
+        description="Disqualify a hotkey from one campaign"
     )
     parser.add_argument("--campaign-id", required=True)
     identity = parser.add_mutually_exclusive_group(required=True)

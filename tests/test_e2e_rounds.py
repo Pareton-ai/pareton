@@ -35,6 +35,7 @@ from round.store import (
     touch_round_heartbeat,
     vacate_leader_if_idle,
     void_round,
+    waive_campaign_hotkey,
 )
 
 pytestmark = pytest.mark.e2e
@@ -1044,6 +1045,66 @@ def test_campaign_hotkey_disqualification_vacates_and_blocks_reentry():
         )
         is None
     )
+
+
+def test_campaign_hotkey_waiver_allows_only_future_submissions():
+    campaign_id = _campaign()
+    hotkey = "5WaivedHotkeyForE2ETesting00000000000000000000"
+    old_sid = _submission(
+        campaign_id,
+        image_ref=IMAGE_C,
+        block=1,
+        hotkey=hotkey,
+    )
+    disqualify_campaign_hotkey(
+        campaign_id,
+        hotkey,
+        reason="temporary test",
+        evidence_ref="PAR-123",
+        disqualified_by="test-operator",
+        epsilon=0.01,
+    )
+
+    waiver = waive_campaign_hotkey(
+        campaign_id,
+        hotkey,
+        reason="temporary test ended",
+        evidence_ref="PAR-124",
+        waived_by="test-operator",
+    )
+    assert waiver.created is True
+    assert _latest_state(old_sid)[0] == "disqualified"
+
+    new_sid = insert_submission(
+        campaign_id=campaign_id,
+        patch_hash="sha256:" + "8" * 64,
+        hotkey=hotkey,
+        baseline_commit="deadbeef",
+        retrieval_url="https://cdn.test/waived-reentry.diff",
+        commit_block=2,
+    )
+    assert new_sid is not None
+    assert _latest_state(str(new_sid))[0] == "committed"
+
+    duplicate = waive_campaign_hotkey(
+        campaign_id,
+        hotkey,
+        reason="duplicate operator request",
+        evidence_ref="PAR-124",
+        waived_by="test-operator",
+    )
+    assert duplicate.created is False
+
+    reapplied = disqualify_campaign_hotkey(
+        campaign_id,
+        hotkey,
+        reason="new policy violation",
+        evidence_ref="PAR-125",
+        disqualified_by="test-operator",
+        epsilon=0.01,
+    )
+    assert reapplied.created is True
+    assert _latest_state(str(new_sid))[0] == "disqualified"
 
 
 def test_campaign_hotkey_disqualification_seats_best_eligible_runner_up():
