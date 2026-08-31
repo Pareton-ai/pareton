@@ -15,6 +15,7 @@ from uuid import uuid4
 import config
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
+    CHAT_TEMPLATE_ALGO_VERSION,
     PromptFormatter,
     SamplerError,
     build_prompt_formatter,
@@ -176,8 +177,10 @@ def materialize_round_trace(
                     "seed_block_offset": receipt.get("seed_block_offset"),
                 }
             )
-            formatter = prompt_formatter
-            if formatter is None:
+            formatter = None
+            if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+                formatter = prompt_formatter
+            if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION and formatter is None:
                 template = receipt.get("chat_template")
                 if isinstance(template, dict):
                     bench = (
@@ -216,9 +219,9 @@ def materialize_round_trace(
                         enable_thinking=receipt_thinking,
                     )
                 else:
-                    # Receipts created before template rendering was introduced
-                    # contain no chat_template metadata and remain byte-compatible.
-                    formatter = None
+                    raise SamplerError(
+                        "algo_version 2 receipt requires chat template metadata"
+                    )
             sampled = generate_trace(
                 rule=rule,
                 seed_hex=str(

@@ -15,6 +15,7 @@ from typing import Any
 
 import config
 from bench.sampler import (
+    CHAT_TEMPLATE_ALGO_VERSION,
     PromptFormatter,
     build_prompt_formatter,
     compute_sample_seed,
@@ -122,16 +123,20 @@ def try_create_round(
     # The default row fetcher indexes config/split directly; parsing fills
     # the defaults a minimal rule omits.
     rule = parse_sampling_rule(campaign.sampling_rule)
-    formatter = prompt_formatter
-    if formatter is None:
-        model = bench.get("model")
-        if not isinstance(model, dict):
-            raise ValueError("chat template sampling requires campaigns.bench.model")
-        formatter = build_prompt_formatter(
-            rule,
-            model_repo=str(model.get("hf_repo") or ""),
-            model_revision=str(model.get("hf_revision") or ""),
-        )
+    formatter = None
+    if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+        formatter = prompt_formatter
+        if formatter is None:
+            model = bench.get("model")
+            if not isinstance(model, dict):
+                raise ValueError(
+                    "chat template sampling requires campaigns.bench.model"
+                )
+            formatter = build_prompt_formatter(
+                rule,
+                model_repo=str(model.get("hf_repo") or ""),
+                model_revision=str(model.get("hf_revision") or ""),
+            )
     sampled = generate_trace(
         rule=rule,
         seed_hex=seed_hex,

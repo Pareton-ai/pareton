@@ -74,7 +74,10 @@ def test_parse_sampling_rule_requires_hf_rows():
     parsed = parse_sampling_rule(_rule())
     assert parsed["type"] == "hf_rows"
     assert parsed["n_prompts"] == 3
-    assert parsed["algo_version"] == ALGO_VERSION == 1
+    assert parsed["algo_version"] == 1
+    current = _rule()
+    del current["algo_version"]
+    assert parse_sampling_rule(current)["algo_version"] == ALGO_VERSION == 2
     assert "prompt_format" not in parsed
     assert "ignore_eos" not in parsed
     assert parse_sampling_rule(_rule(ignore_eos=True))["ignore_eos"] is True
@@ -112,13 +115,18 @@ def test_ignore_eos_is_pinned_only_when_enabled():
     assert forced.sha256 != ordinary.sha256
 
 
+def test_sampler_accepts_legacy_and_current_algorithm_versions():
+    assert parse_sampling_rule(_rule(algo_version=1))["algo_version"] == 1
+    assert parse_sampling_rule(_rule(algo_version=2))["algo_version"] == 2
+
+
 def test_sampler_rejects_an_unreleased_algorithm_version():
     with pytest.raises(SamplerError, match="unsupported algo_version"):
-        parse_sampling_rule(_rule(algo_version=2))
+        parse_sampling_rule(_rule(algo_version=3))
 
 
 def _chat_rule() -> dict:
-    return _rule()
+    return _rule(algo_version=ALGO_VERSION)
 
 
 def _fake_tokenizer_config() -> dict:
@@ -195,13 +203,23 @@ def test_chat_formatted_trace_hashes_the_rendered_prompt():
 def test_trace_without_a_formatter_keeps_raw_prompt_compatibility():
     rows = [_user_row(f"prompt-{i}") for i in range(8)]
     sampled = generate_trace(
-        rule=_chat_rule(),
+        rule=_rule(algo_version=1),
         seed_hex="aa" * 32,
         row_fetcher=_fetcher(rows),
     )
     trace = json.loads(sampled.body)
     assert trace["requests"][0]["prompt"].startswith("prompt-")
     assert "chat_template" not in sampled.receipt
+
+
+def test_chat_algorithm_requires_a_formatter():
+    rows = [_user_row(f"prompt-{i}") for i in range(8)]
+    with pytest.raises(SamplerError, match="requires a chat prompt formatter"):
+        generate_trace(
+            rule=_chat_rule(),
+            seed_hex="aa" * 32,
+            row_fetcher=_fetcher(rows),
+        )
 
 
 def test_fixed_seed_identical_trace_sha256_twice():

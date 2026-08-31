@@ -179,7 +179,7 @@ def test_round_creation_hashes_chat_formatted_prompts(monkeypatch):
         "revision": "r",
         "n_rows": 2,
         "n_prompts": 1,
-        "algo_version": 1,
+        "algo_version": 2,
     }
     formatter = PromptFormatter(
         render=lambda prompt: f"<chat>{prompt}</chat><assistant>",
@@ -226,3 +226,34 @@ def test_round_creation_hashes_chat_formatted_prompts(monkeypatch):
         "model_repo": "org/model",
         "model_revision": "a" * 40,
     }
+
+
+def test_round_creation_keeps_v1_prompts_raw(monkeypatch):
+    calls = _capture(monkeypatch)
+    monkeypatch.setattr(config, "ROUND_SIZE", 1)
+    rule = {
+        "type": "hf_rows",
+        "dataset": "d",
+        "revision": "r",
+        "n_rows": 2,
+        "n_prompts": 1,
+        "algo_version": 1,
+    }
+
+    def unexpected_formatter(*_args, **_kwargs):
+        raise AssertionError("v1 must not build a chat formatter")
+
+    monkeypatch.setattr("round.create.build_prompt_formatter", unexpected_formatter)
+
+    out = try_create_round(
+        _campaign(sampling_rule=rule),
+        {"queued": 5, "oldest_queued_at": NOW},
+        seed_block=1000,
+        seed_block_hash="ab" * 32,
+        row_fetcher=lambda _idx: {"trajectory": [{"role": "user", "content": "raw"}]},
+    )
+
+    assert out == {"round_id": "r1", "ordinal": 1}
+    (kw,) = calls
+    assert kw["sampling_receipt"]["algo_version"] == 1
+    assert "chat_template" not in kw["sampling_receipt"]

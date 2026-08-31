@@ -385,7 +385,7 @@ def test_materialize_round_trace_rebuilds_chat_formatted_bytes(
         "n_rows": 2,
         "n_prompts": 1,
         "max_tokens": 8,
-        "algo_version": 1,
+        "algo_version": 2,
     }
     formatter = PromptFormatter(
         render=lambda prompt: f"<user>{prompt}</user><assistant>",
@@ -451,7 +451,7 @@ def test_materialize_round_trace_requires_the_thinking_mode_contract(
         "n_rows": 2,
         "n_prompts": 1,
         "max_tokens": 8,
-        "algo_version": 1,
+        "algo_version": 2,
     }
     formatter = PromptFormatter(
         render=lambda prompt: f"<user>{prompt}</user><assistant>",

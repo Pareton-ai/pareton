@@ -18,7 +18,9 @@ from typing import Any
 _SHA256_HEX_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
-ALGO_VERSION = 1
+ALGO_VERSION = 2
+SUPPORTED_ALGO_VERSIONS = frozenset({1, 2})
+CHAT_TEMPLATE_ALGO_VERSION = 2
 MAX_PROMPT_CHARS = 8000
 DEFAULT_N_PROMPTS = 32
 DEFAULT_MAX_TOKENS = 128
@@ -81,7 +83,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         ignore_eos = False
     if not isinstance(ignore_eos, bool):
         raise SamplerError("ignore_eos must be a boolean")
-    algo_version = int(rule.get("algo_version") or ALGO_VERSION)
+    algo_version = int(rule.get("algo_version", ALGO_VERSION))
     if n_rows < 1:
         raise SamplerError("n_rows must be >= 1")
     if n_prompts < 1:
@@ -90,7 +92,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         raise SamplerError("n_prompts must be <= n_rows")
     if max_tokens < 1:
         raise SamplerError("max_tokens must be >= 1")
-    if algo_version != ALGO_VERSION:
+    if algo_version not in SUPPORTED_ALGO_VERSIONS:
         raise SamplerError(f"unsupported algo_version: {algo_version}")
     parsed = {
         "type": "hf_rows",
@@ -462,10 +464,12 @@ def generate_trace(
         n_prompts=int(parsed["n_prompts"]),
         row_ok=row_ok,
     )
-    formatter = prompt_formatter or PromptFormatter(
-        render=lambda prompt: prompt,
-        receipt={},
-    )
+    if parsed["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+        if prompt_formatter is None:
+            raise SamplerError("algo_version 2 requires a chat prompt formatter")
+        formatter = prompt_formatter
+    else:
+        formatter = PromptFormatter(render=lambda prompt: prompt, receipt={})
     prompts = [formatter.render(cache[i]) for i in indices]
     trace = build_trace_json(
         prompts,
