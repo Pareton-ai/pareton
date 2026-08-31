@@ -128,17 +128,13 @@ def dockerfile_for_patch(
     Parallelism uses ARG (build-time) so job count is not a permanent image ENV
     fingerprint; ARG values are visible to RUN. NVCC_THREADS stays 1 (ENV).
 
-    ``engine`` is the campaign's engine profile (PAR-55). It supplies the only
-    two engine-specific pieces of this file — ``install_cmd`` and ``entrypoint``
-    — and ``None`` resolves to the vLLM default, so a campaign pinned before
-    engine profiles existed emits a byte-identical Dockerfile.
+    ``engine`` is the campaign's engine profile (``install_cmd``, ``entrypoint``).
+    ``None`` is the vLLM default, so pre-profile campaigns emit the same Dockerfile.
     """
     jobs = int(config.BUILD_MAX_JOBS if max_jobs is None else max_jobs)
     if jobs < 1:
         raise ValueError(f"BUILD_MAX_JOBS must be >= 1, got {jobs}")
-    # Raises on an unknown engine name or a token carrying newlines/control
-    # characters, so a malformed profile fails here rather than injecting extra
-    # directives into the generated Dockerfile.
+    # Rejects unknown engines and control chars in install/entrypoint tokens.
     profile = resolve_engine(engine)
     arch = "" if torch_cuda_arch_list is None else str(torch_cuda_arch_list).strip()
 
@@ -153,10 +149,7 @@ def dockerfile_for_patch(
         f"ARG CMAKE_BUILD_PARALLEL_LEVEL={jobs}",
         "ENV NVCC_THREADS=1",
         "ENV CCACHE_DIR=/root/.ccache",
-        # PEP 660 editable builds compile in a random /tmp/tmp*.build-temp
-        # directory, and ccache's default hash_dir=true mixes that cwd into
-        # every cache key, so cross-build hits were impossible. Source paths
-        # are absolute and stable (/src); drop the cwd from the key.
+        # PEP 660 builds in a random /tmp cwd; omit it from the ccache key.
         "ENV CCACHE_NOHASHDIR=1",
     ]
     if arch:
@@ -176,11 +169,7 @@ def dockerfile_for_patch(
         "CMAKE_CUDA_COMPILER_LAUNCHER=ccache; "
         'else echo "pareton-builder: ccache missing; continuing without"; fi'
     )
-    # Drop compile debris so export does not unpack multi-GB rust/CUDA
-    # intermediates (VPS ENOSPC on unpack after a successful wheel build).
-    # Engine-neutral by inspection, not by luck: PAR-54 found SGLang also has a
-    # rust/ cargo workspace (sglang-grpc, sglang-mm, sglang-server), and `rm -rf`
-    # is a no-op on paths an engine does not have. No engine field needed.
+    # Drop rust/CUDA intermediates so image export does not unpack multi-GB debris.
     cleanup = "rm -rf /src/.git /src/rust/target /tmp/pip-* /root/.cache/pip"
     install = profile["install_cmd"]
     if skip_apply:
@@ -196,23 +185,17 @@ def dockerfile_for_patch(
     if skip_apply:
         # Trusted baseline build: warms the cache for miner builds.
         mount_opts = f"id={cache_id},target=/root/.ccache,sharing=locked"
+        run_parts.insert(0, "export CCACHE_MAXSIZE=20G")
     else:
-        # Miner-patched Python runs during the build (setup.py executes
-        # vllm/envs.py), so a writable shared cache would let one submission
-        # poison objects served to later submissions. Read-only mount; the
-        # gate already restricts patches to vllm/**, so every compiled object
-        # is baseline content and a warm build never needs to write.
+        # Miner setup.py runs in-build; a writable shared cache could poison later jobs.
         mount_opts = f"id={cache_id},target=/root/.ccache,readonly"
-        # A read-only cache dir makes ccache's default temp dir
-        # (<cache_dir>/tmp) unwritable; a miss would fail temp creation and
-        # abort instead of compiling (ccache 4.5.1 manual, read_only note).
+        # Read-only cache makes ccache's default tmp unwritable; miss would abort.
         run_parts.insert(1, "export CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp/ccache-tmp")
-    # No # syntax= line — BuildKit builtin frontend supports RUN --mount.
+    # No # syntax= line: BuildKit builtin frontend supports RUN --mount.
     lines.append(
         f"RUN --mount=type=cache,{mount_opts} " + " \\\n    && ".join(run_parts)
     )
-    # json.dumps renders exec-form ENTRYPOINT with ", " separators, which is
-    # byte-identical to the vLLM literal this replaced.
+    # json.dumps exec-form matches the old vLLM ENTRYPOINT literal.
     lines.append(f"ENTRYPOINT {json.dumps(profile['entrypoint'])}")
     lines.append("")
     return "\n".join(lines)
@@ -282,8 +265,7 @@ def _run_logged(
 ) -> int:
     """Run cmd, tee stdout/stderr to log_path, enforce timeout.
 
-    Output goes to the file only: journald gets _progress milestones, not
-    raw build logs (PAR-36). Drill-down: tail -f the build log.
+    Output goes to the file only; journald gets _progress milestones.
     """
     with log_path.open("a", encoding="utf-8") as logf:
         logf.write(f"+ {' '.join(cmd)}\n")
@@ -417,8 +399,6 @@ def build_engine_image(
     _progress(
         f"build_max_jobs={config.BUILD_MAX_JOBS} torch_cuda_arch_list={arch_note}"
     )
-    # Which recipe ran is the first thing to check when an image starts the
-    # wrong server, so surface it next to the other build knobs.
     _progress(f"engine={profile['name']}")
 
     try:
@@ -464,8 +444,7 @@ def build_engine_image(
                 stderr=checkout.stderr[-2000:],
             )
 
-        # Miner builds stay --network=none. A2b empty-patch needs network so
-        # cmake FetchContent can populate /src/.deps (vLLM pin ee0da84).
+        # Miner builds stay --network=none. Empty-patch (a2b baseline) needs network for cmake.
         build_cmd = [
             "docker",
             "build",
@@ -552,8 +531,7 @@ def build_engine_image(
             "build_error", error=str(exc), **_sanitized_tail(log_path)
         )
     finally:
-        # docker-context holds the full baseline clone (GBs); only build.log
-        # (in log_dir, outside work_root) survives.
+        # Context holds the baseline clone; only build.log in log_dir survives.
         shutil.rmtree(root, ignore_errors=True)
 
 

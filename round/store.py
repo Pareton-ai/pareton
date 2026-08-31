@@ -16,6 +16,11 @@ from uuid import UUID
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 
+from campaign.exclusion import (
+    ACTION_DISQUALIFIED,
+    ACTION_WAIVED,
+    latest_campaign_hotkey_action,
+)
 from db.connection import db_connection
 from gate.types import SubmissionState
 from round.rank import (
@@ -51,6 +56,15 @@ class CampaignHotkeyDisqualification:
     leader_vacated: bool
     replacement_submission_id: str | None = None
     replacement_hotkey: str | None = None
+
+
+@dataclass(frozen=True)
+class CampaignHotkeyWaiver:
+    """Audit summary returned by ``waive_campaign_hotkey``."""
+
+    campaign_id: str
+    hotkey: str
+    created: bool
 
 
 def campaigns_with_queue() -> list[dict[str, Any]]:
@@ -942,7 +956,7 @@ def disqualify_campaign_hotkey(
     disqualified_by: str,
     epsilon: float,
 ) -> CampaignHotkeyDisqualification:
-    """Permanently exclude one hotkey from one campaign.
+    """Exclude one hotkey from one campaign until an operator waives it.
 
     The campaign lock serializes this operation with round creation and
     submission ingestion. A live round or gate job makes the operation fail
@@ -966,6 +980,7 @@ def disqualify_campaign_hotkey(
     detail = {
         "source": "manual",
         "scope": "campaign",
+        "action": ACTION_DISQUALIFIED,
         "reason": reason,
         "operator": disqualified_by,
     }
@@ -1022,20 +1037,8 @@ def disqualify_campaign_hotkey(
                     "hotkey has a running gate job; retry when it is idle"
                 )
 
-            cur.execute(
-                """
-                SELECT 1
-                FROM submissions s
-                JOIN submission_events e ON e.submission_id = s.id
-                WHERE s.campaign_id = %s AND s.hotkey = %s
-                  AND e.state = 'disqualified'
-                  AND e.detail ->> 'source' = 'manual'
-                  AND e.detail ->> 'scope' = 'campaign'
-                LIMIT 1
-                """,
-                (cid, hotkey),
-            )
-            created = cur.fetchone() is None
+            latest_action = latest_campaign_hotkey_action(cur, cid, hotkey)
+            created = latest_action is None or latest_action == ACTION_WAIVED
 
             cur.execute(
                 """
@@ -1058,25 +1061,21 @@ def disqualify_campaign_hotkey(
 
             # submission_events is append-only. Historical round entries stay
             # unchanged; this later event is the administrative verdict.
-            cur.execute(
-                """
-                INSERT INTO submission_events (
-                  submission_id, state, evidence_ref, detail
+            if created:
+                cur.execute(
+                    """
+                    INSERT INTO submission_events (
+                      submission_id, state, evidence_ref, detail
+                    )
+                    SELECT s.id, 'disqualified', %s, %s
+                    FROM submissions s
+                    WHERE s.campaign_id = %s AND s.hotkey = %s
+                    """,
+                    (evidence_ref, Json(detail), cid, hotkey),
                 )
-                SELECT s.id, 'disqualified', %s, %s
-                FROM submissions s
-                WHERE s.campaign_id = %s AND s.hotkey = %s
-                  AND NOT EXISTS (
-                    SELECT 1 FROM submission_events e
-                    WHERE e.submission_id = s.id
-                      AND e.state = 'disqualified'
-                      AND e.detail ->> 'source' = 'manual'
-                      AND e.detail ->> 'scope' = 'campaign'
-                  )
-                """,
-                (evidence_ref, Json(detail), cid, hotkey),
-            )
-            submissions_disqualified = cur.rowcount
+                submissions_disqualified = cur.rowcount
+            else:
+                submissions_disqualified = 0
 
             cur.execute(
                 """
@@ -1117,8 +1116,12 @@ def disqualify_campaign_hotkey(
                       AND e.status = 'scored'
                       AND e.score > 0
                       AND latest.state = 'scored'
-                      AND NOT EXISTS (
-                        SELECT 1
+                      AND COALESCE((
+                        SELECT
+                          COALESCE(
+                            blocked_event.detail ->> 'action',
+                            'disqualified'
+                          ) = 'waived'
                         FROM submissions blocked
                         JOIN submission_events blocked_event
                           ON blocked_event.submission_id = blocked.id
@@ -1127,7 +1130,10 @@ def disqualify_campaign_hotkey(
                           AND blocked_event.state = 'disqualified'
                           AND blocked_event.detail ->> 'source' = 'manual'
                           AND blocked_event.detail ->> 'scope' = 'campaign'
-                      )
+                        ORDER BY blocked_event.created_at DESC,
+                                 blocked_event.id DESC
+                        LIMIT 1
+                      ), TRUE)
                     ORDER BY e.score DESC, s.commit_block ASC, s.id ASC
                     LIMIT 1
                     """,
@@ -1223,6 +1229,81 @@ def disqualify_campaign_hotkey(
         ),
         replacement_hotkey=(replacement["hotkey"] if replacement is not None else None),
     )
+
+
+def waive_campaign_hotkey(
+    campaign_id: UUID | str,
+    hotkey: str,
+    *,
+    reason: str,
+    evidence_ref: str,
+    waived_by: str,
+) -> CampaignHotkeyWaiver:
+    """Restore a hotkey's eligibility for future campaign submissions.
+
+    The waiver is an append-only administrative action. Existing submissions
+    and round entries retain their historical disqualification verdicts.
+    """
+    reason = reason.strip()
+    evidence_ref = evidence_ref.strip()
+    waived_by = waived_by.strip()
+    hotkey = hotkey.strip()
+    if not hotkey:
+        raise ValueError("hotkey is required")
+    if not reason:
+        raise ValueError("reason is required")
+    if not evidence_ref:
+        raise ValueError("evidence_ref is required")
+    if not waived_by:
+        raise ValueError("waived_by is required")
+
+    cid = str(campaign_id)
+    detail = {
+        "source": "manual",
+        "scope": "campaign",
+        "action": ACTION_WAIVED,
+        "reason": reason,
+        "operator": waived_by,
+    }
+    with db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                (cid,),
+            )
+            if cur.fetchone() is None:
+                raise ValueError(f"unknown campaign: {cid}")
+
+            cur.execute(
+                """
+                SELECT s.id
+                FROM submissions s
+                WHERE s.campaign_id = %s AND s.hotkey = %s
+                ORDER BY s.created_at DESC, s.id DESC
+                LIMIT 1
+                FOR UPDATE
+                """,
+                (cid, hotkey),
+            )
+            submission = cur.fetchone()
+            if submission is None:
+                raise ValueError("hotkey has no submissions in this campaign")
+
+            latest_action = latest_campaign_hotkey_action(cur, cid, hotkey)
+            if latest_action is None:
+                raise ValueError("hotkey is not disqualified from this campaign")
+            created = latest_action != ACTION_WAIVED
+            if created:
+                cur.execute(
+                    """
+                    INSERT INTO submission_events (
+                      submission_id, state, evidence_ref, detail
+                    ) VALUES (%s, 'disqualified', %s, %s)
+                    """,
+                    (str(submission["id"]), evidence_ref, Json(detail)),
+                )
+
+    return CampaignHotkeyWaiver(campaign_id=cid, hotkey=hotkey, created=created)
 
 
 def list_open_campaign_emissions() -> list[dict[str, Any]]:

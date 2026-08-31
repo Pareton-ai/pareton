@@ -9,10 +9,15 @@ would shadow the builtin.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
+import config
 from bench.sampler import (
+    CHAT_TEMPLATE_ALGO_VERSION,
+    PromptFormatter,
+    build_prompt_formatter,
     compute_sample_seed,
     fetch_hf_row,
     generate_trace,
@@ -20,7 +25,6 @@ from bench.sampler import (
 )
 from builder.registry import baseline_engine_image_ref, normalize_digest
 from campaign.store import get_campaign
-import config
 from chain.rpc import fetch_finalized_block_hash
 from round.store import campaigns_with_queue, create_round
 
@@ -89,6 +93,7 @@ def try_create_round(
     seed_block: int,
     seed_block_hash: str,
     row_fetcher: Callable[[int], dict[str, Any]] | None = None,
+    prompt_formatter: PromptFormatter | None = None,
 ) -> dict[str, Any] | None:
     """Create one round for one campaign, or return None if it is not due."""
     campaign_id = str(campaign.campaign_id)
@@ -118,10 +123,25 @@ def try_create_round(
     # The default row fetcher indexes config/split directly; parsing fills
     # the defaults a minimal rule omits.
     rule = parse_sampling_rule(campaign.sampling_rule)
+    formatter = None
+    if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+        formatter = prompt_formatter
+        if formatter is None:
+            model = bench.get("model")
+            if not isinstance(model, dict):
+                raise ValueError(
+                    "chat template sampling requires campaigns.bench.model"
+                )
+            formatter = build_prompt_formatter(
+                rule,
+                model_repo=str(model.get("hf_repo") or ""),
+                model_revision=str(model.get("hf_revision") or ""),
+            )
     sampled = generate_trace(
         rule=rule,
         seed_hex=seed_hex,
         row_fetcher=row_fetcher or (lambda idx: fetch_hf_row(rule, idx)),
+        prompt_formatter=formatter,
         sample_seed_block=seed_block,
         sample_seed_block_hash=seed_block_hash,
     )
