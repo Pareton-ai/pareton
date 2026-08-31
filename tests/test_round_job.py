@@ -25,11 +25,12 @@ from round.store import (
     VOID_TRACE_UNAVAILABLE,
     infra_failed_follow_up_states,
 )
+from worker import round_job
 from worker.round_job import (
+    RoundDeferred,
     RoundInfraError,
     bind_report_to_round,
     build_round_request,
-    capacity_retry_delay_s,
     classify_round_failure,
     entry_results_from_report,
     materialize_round_trace,
@@ -670,10 +671,18 @@ def test_remaining_budget_voids_when_the_clock_has_run_out():
     assert leftover > 0
 
 
-def test_capacity_retry_delay_doubles_then_saturates(monkeypatch):
-    monkeypatch.setattr(config, "PROVISION_RETRY_BASE_S", 300)
-    monkeypatch.setattr(config, "PROVISION_RETRY_MAX_S", 3600)
-    assert [capacity_retry_delay_s(n) for n in (0, 1, 2, 3)] == [300, 600, 1200, 2400]
-    # Saturates rather than growing without bound during a long outage.
-    assert capacity_retry_delay_s(4) == 3600
-    assert capacity_retry_delay_s(10_000) == 3600
+def test_defer_waits_a_flat_interval_regardless_of_attempts(monkeypatch):
+    monkeypatch.setattr(config, "PROVISION_RETRY_S", 1800)
+    seen: list[float] = []
+
+    def capture(round_id, *, delay_s):
+        seen.append(delay_s)
+        return True
+
+    monkeypatch.setattr(round_job, "defer_round_for_capacity", capture)
+    for attempts in (0, 1, 50):
+        round_job._defer(
+            {"id": uuid4(), "provision_attempts": attempts}, RoundDeferred("empty")
+        )
+    # A tenth empty market waits exactly as long as the first.
+    assert seen == [1800, 1800, 1800]

@@ -369,7 +369,6 @@ def claim_pending_round() -> dict[str, Any] | None:
                           sampled_trace_sha256, sampling_receipt, scoring_rule,
                           status, incumbent_submission_id, winner_submission_id,
                           leader_changed, baseline_drift, phase, progress,
-                          provision_attempts,
                           created_at, started_at, heartbeat_at, completed_at
                 """
             )

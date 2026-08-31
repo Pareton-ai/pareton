@@ -221,9 +221,8 @@ CREATE TABLE IF NOT EXISTS rounds (
   heartbeat_at TIMESTAMPTZ,
   progress JSONB,
   current_entry_id BIGINT,
-  -- Capacity backoff: with no stock anywhere a round returns to 'pending'
-  -- instead of voiding, keeping its ordinal and cohort. `retry_after` gates
-  -- the next claim, `provision_attempts` doubles the wait.
+  -- No stock: the round returns to 'pending' keeping its ordinal and cohort.
+  -- `retry_after` gates the next claim; `provision_attempts` only counts.
   provision_attempts INTEGER NOT NULL DEFAULT 0,
   retry_after TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

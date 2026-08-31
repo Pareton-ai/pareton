@@ -62,22 +62,6 @@ logger = logging.getLogger(__name__)
 class RoundDeferred(Exception):
     """The GPU market was empty. Wait and re-claim; the round is not spent."""
 
-    def __init__(self, delay_s: float, detail: str) -> None:
-        super().__init__(detail)
-        self.delay_s = delay_s
-        self.detail = detail
-
-
-def capacity_retry_delay_s(attempts: int) -> float:
-    """Backoff before re-claiming a round no provider could fill.
-
-    Doubles per prior attempt and saturates at PROVISION_RETRY_MAX_S. The
-    exponent is clamped so a long outage cannot build an absurd shift value.
-    """
-    base = float(config.PROVISION_RETRY_BASE_S)
-    cap = float(config.PROVISION_RETRY_MAX_S)
-    return min(base * float(2 ** min(max(attempts, 0), 20)), cap)
-
 
 class RoundInfraError(Exception):
     """Infrastructure failure: void the round, do not settle a leader."""
@@ -594,15 +578,15 @@ def _void(round_row: dict[str, Any], reason: str) -> None:
 
 def _defer(round_row: dict[str, Any], exc: RoundDeferred) -> None:
     round_id = str(round_row["id"])
-    if not defer_round_for_capacity(round_id, delay_s=exc.delay_s):
+    if not defer_round_for_capacity(round_id, delay_s=config.PROVISION_RETRY_S):
         logger.info("round %s already settled; skipped defer", round_id)
         return
     logger.warning(
-        "deferred round %s (campaign %s) for %.0fs: %s",
+        "deferred round %s (campaign %s) for %ds: %s",
         round_row.get("ordinal"),
         round_row.get("campaign_id"),
-        exc.delay_s,
-        exc.detail,
+        config.PROVISION_RETRY_S,
+        exc,
     )
 
 
@@ -761,12 +745,7 @@ def _process_round(
                 # Nothing was rented, so the cohort and seed stay valid. Voiding
                 # here is what let an out-of-stock market burn a round every
                 # poll interval; keep the round and wait the market out.
-                raise RoundDeferred(
-                    capacity_retry_delay_s(
-                        int(round_row.get("provision_attempts") or 0)
-                    ),
-                    str(exc),
-                ) from exc
+                raise RoundDeferred(str(exc)) from exc
             except ProvisionError as exc:
                 provision_error = True
                 raise RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc)) from exc
