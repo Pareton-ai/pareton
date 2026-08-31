@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from datetime import datetime
 from functools import partial
-from typing import Any, Callable
+from typing import Any
 
 import config
 from campaign.store import (
@@ -25,7 +27,7 @@ from chain.payment import (
     fetch_block_payment_view,
     verify_payment,
 )
-from chain.rpc import fetch_chain_view
+from chain.rpc import fetch_block_datetime, fetch_chain_view
 from gate.integrity import (
     PATCH_HASH_MISMATCH,
     check_integrity,
@@ -37,6 +39,7 @@ from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_ho
 logger = logging.getLogger(__name__)
 
 BlockFetcher = Callable[[int], BlockPaymentView | None]
+BlockDatetimeFetcher = Callable[[int], datetime | None]
 PatchFetcher = Callable[[str], bytes]
 FailedHashCheck = tuple[str, str, str]
 
@@ -80,6 +83,7 @@ def ingest_commitment(
     com: PatchCommitment,
     *,
     fetch_block: BlockFetcher | None = None,
+    fetch_commit_datetime: BlockDatetimeFetcher | None = None,
     fetcher: PatchFetcher | None = None,
 ) -> str | None:
     """Insert a submission from a commitment. Returns submission id or None if dupe/invalid."""
@@ -100,6 +104,46 @@ def ingest_commitment(
         return None
     if get_submission_for_campaign(com.campaign_id, com.patch_hash) is not None:
         return None
+    competition_start = config.COMPETITION_START_DATETIME
+    if competition_start is not None:
+        if fetch_commit_datetime is None:
+            logger.warning(
+                "skip commitment: block timestamp unavailable "
+                "campaign=%s commit_block=%d",
+                com.campaign_id,
+                com.commit_block,
+            )
+            return None
+        try:
+            committed_at = fetch_commit_datetime(com.commit_block)
+        # Injected RPC adapters may raise transport-specific exception types.
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "skip commitment: block timestamp lookup failed "
+                "campaign=%s commit_block=%d error=%s",
+                com.campaign_id,
+                com.commit_block,
+                type(exc).__name__,
+            )
+            return None
+        if committed_at is None:
+            logger.warning(
+                "skip commitment: block timestamp unavailable "
+                "campaign=%s commit_block=%d",
+                com.campaign_id,
+                com.commit_block,
+            )
+            return None
+        if committed_at < competition_start:
+            logger.info(
+                "skip commitment before competition start: "
+                "campaign=%s commit_block=%d committed_at=%s start_at=%s",
+                com.campaign_id,
+                com.commit_block,
+                committed_at.isoformat(),
+                competition_start.isoformat(),
+            )
+            return None
     hash_check_key = _hash_check_key(com)
     if hash_check_key in _failed_hash_checks:
         logger.info(
@@ -217,6 +261,7 @@ def scan_chain(
         ingest = partial(
             ingest_commitment,
             fetch_block=partial(fetch_block_payment_view, subtensor),
+            fetch_commit_datetime=partial(fetch_block_datetime, subtensor),
         )
     meta, revealed, block, _block_hash = fetch_chain_view(
         subtensor, netuid, network=network

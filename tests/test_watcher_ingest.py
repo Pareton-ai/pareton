@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -39,11 +40,59 @@ def _com(**overrides) -> PatchCommitment:
 def _cdn(monkeypatch):
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", None)
     monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url, **_kwargs: PATCH)
     monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: None)
     watcher._failed_hash_checks.clear()
     yield
     watcher._failed_hash_checks.clear()
+
+
+START = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def test_ingest_rejects_commitment_before_competition_start(monkeypatch, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
+
+    sid = watcher.ingest_commitment(
+        _com(),
+        fetch_commit_datetime=lambda _block: START - timedelta(seconds=12),
+    )
+
+    assert sid is None
+    assert inserted == {}
+
+
+@pytest.mark.parametrize("offset_s", [0, 12])
+def test_ingest_accepts_commitment_at_or_after_competition_start(
+    monkeypatch, inserted, offset_s
+):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
+
+    sid = watcher.ingest_commitment(
+        _com(),
+        fetch_commit_datetime=lambda _block: START + timedelta(seconds=offset_s),
+    )
+
+    assert sid == "sid"
+
+
+@pytest.mark.parametrize(
+    "fetch_commit_datetime",
+    [None, lambda _block: None],
+)
+def test_ingest_fails_closed_when_competition_block_time_is_unavailable(
+    monkeypatch, inserted, fetch_commit_datetime
+):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
+
+    sid = watcher.ingest_commitment(_com(), fetch_commit_datetime=fetch_commit_datetime)
+
+    assert sid is None
+    assert inserted == {}
 
 
 def test_ingest_skips_hotkey_mismatch(monkeypatch):
