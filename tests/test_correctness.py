@@ -11,6 +11,7 @@ from bench.correctness import (
     BASELINE_INDEX,
     BaselineDegeneracyReference,
     CapturedOutput,
+    MAX_BASELINE_PROMPT_DROPS,
     PendingCorrectness,
     PromptCase,
     build_baseline_degeneracy_references,
@@ -825,6 +826,109 @@ def test_baseline_relative_bounds_cover_all_measured_repetitions():
         longest_repeated_substring_ratio(first),
         longest_repeated_substring_ratio(second),
     )
+
+
+def test_degenerate_baseline_prompt_is_dropped_for_every_engine(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    baseline_outputs = [
+        _captured("bad", "Bad prompt", LOOP_TEXT),
+        _captured("good", "Hello world", PROSE_TEXT),
+    ]
+    natural_stops = {
+        "bad": NaturalStopReference(
+            request_id="bad",
+            completion_tokens=len(mock_tokenize(LOOP_TEXT)),
+            finish_reason="stop",
+            text=LOOP_TEXT,
+        ),
+        "good": NaturalStopReference(
+            request_id="good",
+            completion_tokens=len(mock_tokenize(PROSE_TEXT)),
+            finish_reason="stop",
+            text=PROSE_TEXT,
+        ),
+    }
+    references = build_baseline_degeneracy_references(
+        baseline_outputs,
+        natural_stops,
+        {"bad": (LOOP_TEXT,), "good": (PROSE_TEXT,)},
+    )
+    assert set(references) == {"good"}
+    assert "distinct 16-gram ratio" in references.dropped["bad"]
+    assert "over 1200 chars" in references.dropped["bad"]
+    assert "dropping correctness prompt 'bad'" in caplog.text
+
+    pending = [
+        PendingCorrectness(candidate_index=BASELINE_INDEX, outputs=baseline_outputs),
+        PendingCorrectness(
+            candidate_index=0,
+            outputs=[
+                _captured("bad", "Bad prompt", GARBAGE_TEXT),
+                _captured("good", "Hello world", PROSE_TEXT),
+            ],
+        ),
+    ]
+    evidence = tmp_path / "correctness"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            pending,
+            cfg=_cfg(num_prompts=2, max_drop=0.1),
+            evidence_dir=evidence,
+            baseline_degeneracy=references,
+        )
+
+    assert reports[BASELINE_INDEX].verdict == "pass"
+    assert reports[0].verdict == "pass"
+    assert reports[BASELINE_INDEX].num_prompts == 1
+    assert reports[0].num_prompts == 1
+    for name in ("baseline.jsonl", "candidate_0.jsonl"):
+        rows = [
+            json.loads(line)
+            for line in (evidence / name).read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[0]["request_id"] == "bad"
+        assert rows[0]["dropped"] is True
+        assert "distinct 16-gram ratio" in rows[0]["drop_reason"]
+        assert "over 1200 chars" in rows[0]["drop_reason"]
+        assert rows[1]["request_id"] == "good"
+
+
+def test_too_many_degenerate_baseline_prompts_fail_the_round():
+    outputs = [
+        _captured(f"r{i}", f"Prompt {i}", LOOP_TEXT)
+        for i in range(MAX_BASELINE_PROMPT_DROPS + 1)
+    ]
+    natural_stops = {
+        output.request_id: NaturalStopReference(
+            request_id=output.request_id,
+            completion_tokens=len(mock_tokenize(LOOP_TEXT)),
+            finish_reason="stop",
+            text=LOOP_TEXT,
+        )
+        for output in outputs
+    }
+
+    with pytest.raises(
+        EngineError,
+        match=rf"{MAX_BASELINE_PROMPT_DROPS + 1}.*limit of "
+        rf"{MAX_BASELINE_PROMPT_DROPS}",
+    ):
+        build_baseline_degeneracy_references(outputs, natural_stops)
+
+
+def test_unexplained_missing_baseline_reference_is_an_engine_error(tmp_path: Path):
+    evidence = tmp_path / "correctness" / "candidate_0.jsonl"
+    with pytest.raises(EngineError, match="missing correctness request 'mystery'"):
+        grade_candidate(
+            "http://unused",
+            [_captured("mystery", "Hello world", PROSE_TEXT)],
+            cfg=_cfg(num_prompts=1),
+            evidence_path=evidence,
+            baseline_degeneracy={},
+        )
+    assert not evidence.exists()
 
 
 def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
