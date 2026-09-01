@@ -87,6 +87,9 @@ DEGENERACY_NGRAM = 16
 DEGENERACY_MIN_CHARS = 64
 DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
 DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
+# A larger exclusion set no longer provides a representative correctness
+# sample. This is a harness invariant rather than campaign policy.
+MAX_BASELINE_PROMPT_DROPS = 4
 
 
 @dataclass(frozen=True)
@@ -576,6 +579,19 @@ class BaselineDegeneracyReference:
     full_repeated_span_ratio: float
 
 
+class BaselineDegeneracyReferences(dict[str, BaselineDegeneracyReference]):
+    """Usable references plus audited reasons for intentional omissions."""
+
+    def __init__(
+        self,
+        references: Mapping[str, BaselineDegeneracyReference],
+        *,
+        dropped: Mapping[str, str],
+    ) -> None:
+        super().__init__(references)
+        self.dropped = dict(dropped)
+
+
 @dataclass
 class PendingCorrectness:
     """An engine's outputs waiting on the shared scorer.
@@ -627,9 +643,10 @@ def build_baseline_degeneracy_references(
     outputs: list[CapturedOutput],
     natural_stops: Mapping[str, NaturalStopReference],
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
-) -> dict[str, BaselineDegeneracyReference]:
+) -> BaselineDegeneracyReferences:
     """Build bounds for prompts with a usable baseline natural-stop output."""
     references: dict[str, BaselineDegeneracyReference] = {}
+    dropped: dict[str, str] = {}
     for captured in outputs:
         stop = natural_stops.get(captured.request_id)
         if stop is None:
@@ -644,11 +661,19 @@ def build_baseline_degeneracy_references(
             )
         natural_reason = degeneracy_reason(stop.text)
         if natural_reason is not None:
+            drop_reason = f"baseline natural output is degenerate: {natural_reason}"
+            dropped[captured.request_id] = drop_reason
+            if len(dropped) > MAX_BASELINE_PROMPT_DROPS:
+                raise EngineError(
+                    f"baseline natural output is degenerate for {len(dropped)} "
+                    "correctness prompts, above the harness limit of "
+                    f"{MAX_BASELINE_PROMPT_DROPS} (latest "
+                    f"{captured.request_id!r}: {natural_reason})"
+                )
             logger.warning(
-                "dropping correctness prompt %r because the baseline natural "
-                "output is degenerate: %s",
+                "dropping correctness prompt %r: %s",
                 captured.request_id,
-                natural_reason,
+                drop_reason,
             )
             continue
         samples = (
@@ -670,7 +695,28 @@ def build_baseline_degeneracy_references(
                 longest_repeated_substring_ratio(text) for text in samples
             ),
         )
-    return references
+    return BaselineDegeneracyReferences(references, dropped=dropped)
+
+
+def _baseline_drop_reason(
+    references: Mapping[str, BaselineDegeneracyReference], request_id: str
+) -> str | None:
+    if not isinstance(references, BaselineDegeneracyReferences):
+        return None
+    return references.dropped.get(request_id)
+
+
+def _retained_prompt_count(
+    outputs: list[CapturedOutput],
+    references: Mapping[str, BaselineDegeneracyReference] | None,
+) -> int:
+    if references is None:
+        return len(outputs)
+    return sum(
+        1
+        for output in outputs
+        if _baseline_drop_reason(references, output.request_id) is None
+    )
 
 
 def score_captured_output(
@@ -751,14 +797,20 @@ def grade_candidate(
                 else baseline_degeneracy.get(captured.request_id)
             )
             if baseline_degeneracy is not None and reference is None:
-                # The builder raises for missing or empty baseline inputs and
-                # omits only prompts whose natural output is degenerate.
+                drop_reason = _baseline_drop_reason(
+                    baseline_degeneracy, captured.request_id
+                )
+                if drop_reason is None:
+                    raise EngineError(
+                        "baseline degeneracy reference missing correctness request "
+                        f"{captured.request_id!r}"
+                    )
                 ef.write(
                     json.dumps(
                         {
                             "request_id": captured.request_id,
                             "dropped": True,
-                            "drop_reason": "baseline natural output is degenerate",
+                            "drop_reason": drop_reason,
                         },
                         sort_keys=True,
                     )
@@ -994,12 +1046,7 @@ def grade_all(
             logger.warning("scoring %s failed: %s", item.evidence_name, exc)
             report = CorrectnessReport(
                 verdict="infra_failed",
-                num_prompts=sum(
-                    1
-                    for output in item.outputs
-                    if baseline_degeneracy is None
-                    or output.request_id in baseline_degeneracy
-                ),
+                num_prompts=_retained_prompt_count(item.outputs, baseline_degeneracy),
                 num_positions_scored=0,
                 mean_logprob=0.0,
                 min_logprob=0.0,
