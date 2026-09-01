@@ -9,6 +9,7 @@ import pytest
 
 from bench.correctness import (
     BASELINE_INDEX,
+    MAX_DEGENERATE_BASELINE_PROMPTS,
     BaselineDegeneracyReference,
     CapturedOutput,
     PendingCorrectness,
@@ -24,6 +25,7 @@ from bench.correctness import (
     probe_logprob_capability,
     quantile_low,
     resolve_trace_path,
+    retain_gradable,
     select_correctness_prompts,
 )
 from bench.lifecycle import EngineError
@@ -940,3 +942,64 @@ def test_grade_all_grades_the_baseline_first_and_keys_it_separately(tmp_path: Pa
     assert reports[0].verdict == "pass"
     assert (evidence / "baseline.jsonl").is_file()
     assert (evidence / "candidate_0.jsonl").is_file()
+
+
+def _stop(request_id: str, text: str) -> NaturalStopReference:
+    return NaturalStopReference(
+        request_id=request_id,
+        completion_tokens=len(mock_tokenize(text)),
+        finish_reason="stop",
+        text=text,
+    )
+
+
+def test_degenerate_baseline_prompt_is_dropped_not_fatal(tmp_path: Path):
+    """A prompt the baseline loops on leaves the graded set; the round lives."""
+    outputs = [
+        _captured("good", "Hello world", PROSE_TEXT),
+        _captured("bad", "Hello world", PROSE_TEXT),
+    ]
+    references = build_baseline_degeneracy_references(
+        outputs,
+        {"good": _stop("good", PROSE_TEXT), "bad": _stop("bad", LOOP_TEXT)},
+        evidence_dir=tmp_path,
+    )
+    assert set(references) == {"good"}
+    dropped = json.loads(
+        (tmp_path / "dropped_baseline_prompts.json").read_text(encoding="utf-8")
+    )
+    assert "16-gram" in dropped["bad"]
+
+
+def test_dropped_prompt_is_removed_for_baseline_and_candidates(tmp_path: Path):
+    """Every entry is graded on exactly the surviving prompts."""
+    outputs = [
+        _captured("good", "Hello world", PROSE_TEXT),
+        _captured("bad", "Hello world", PROSE_TEXT),
+    ]
+    references = build_baseline_degeneracy_references(
+        outputs,
+        {"good": _stop("good", PROSE_TEXT), "bad": _stop("bad", LOOP_TEXT)},
+        evidence_dir=tmp_path,
+    )
+    assert [c.request_id for c in retain_gradable(outputs, references)] == ["good"]
+    # A candidate answering the dropped prompt is filtered the same way, so
+    # grade_all never looks up a missing reference.
+    candidate = [
+        _captured("good", "Hello world", PROSE_TEXT),
+        _captured("bad", "Hello world", LOOP_TEXT),
+    ]
+    assert [c.request_id for c in retain_gradable(candidate, references)] == ["good"]
+    assert retain_gradable(candidate, None) == candidate
+
+
+def test_too_many_degenerate_baseline_prompts_still_voids(tmp_path: Path):
+    """Past the drop ceiling the surviving set is too small to rank on."""
+    count = MAX_DEGENERATE_BASELINE_PROMPTS + 1
+    outputs = [_captured(f"r{i}", "Hello world", PROSE_TEXT) for i in range(count)]
+    stops = {f"r{i}": _stop(f"r{i}", LOOP_TEXT) for i in range(count)}
+    with pytest.raises(EngineError) as excinfo:
+        build_baseline_degeneracy_references(outputs, stops, evidence_dir=tmp_path)
+    assert f"{count} of {count} baseline outputs are degenerate" in str(excinfo.value)
+    # The evidence is still written, so a voided round says which prompts.
+    assert (tmp_path / "dropped_baseline_prompts.json").is_file()

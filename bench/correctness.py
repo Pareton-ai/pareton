@@ -86,6 +86,13 @@ DEGENERACY_MIN_CHARS = 64
 DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
 DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
 
+# A prompt the baseline itself answers degenerately is a bad prompt, not a
+# cheating candidate: it carries no usable bound, so it is dropped from the
+# graded set instead of voiding the round. Past this many drops the surviving
+# set is too small to rank on, so the round voids after all.
+MAX_DEGENERATE_BASELINE_PROMPTS = 4
+DROPPED_PROMPTS_EVIDENCE_FILENAME = "dropped_baseline_prompts.json"
+
 
 @dataclass(frozen=True)
 class PromptCase:
@@ -625,9 +632,16 @@ def build_baseline_degeneracy_references(
     outputs: list[CapturedOutput],
     natural_stops: Mapping[str, NaturalStopReference],
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
+    evidence_dir: Path | None = None,
 ) -> dict[str, BaselineDegeneracyReference]:
-    """Build prompt-specific bounds from every measured baseline repetition."""
+    """Build prompt-specific bounds from every measured baseline repetition.
+
+    A prompt whose own baseline output is degenerate carries no usable bound
+    and is left out of the returned mapping; callers drop it from the graded
+    set via ``retain_gradable``. Too many such drops voids the round.
+    """
     references: dict[str, BaselineDegeneracyReference] = {}
+    dropped: dict[str, str] = {}
     for captured in outputs:
         stop = natural_stops.get(captured.request_id)
         if stop is None:
@@ -642,10 +656,16 @@ def build_baseline_degeneracy_references(
             )
         natural_reason = degeneracy_reason(stop.text)
         if natural_reason is not None:
-            raise EngineError(
-                f"baseline natural output {captured.request_id!r} is degenerate: "
-                f"{natural_reason}"
+            # No trustworthy bound can come from a baseline that repeats, so
+            # this prompt is dropped rather than failing every candidate.
+            logger.warning(
+                "dropping correctness request %r: baseline natural output is "
+                "degenerate: %s",
+                captured.request_id,
+                natural_reason,
             )
+            dropped[captured.request_id] = natural_reason
+            continue
         samples = (
             (captured.output_text,)
             if output_samples is None
@@ -665,7 +685,49 @@ def build_baseline_degeneracy_references(
                 longest_repeated_substring_ratio(text) for text in samples
             ),
         )
+    if dropped:
+        if evidence_dir is not None:
+            write_dropped_baseline_prompts(evidence_dir, dropped)
+        if len(dropped) > MAX_DEGENERATE_BASELINE_PROMPTS:
+            raise EngineError(
+                f"{len(dropped)} of {len(outputs)} baseline outputs are "
+                f"degenerate, above the {MAX_DEGENERATE_BASELINE_PROMPTS} the "
+                "harness tolerates: "
+                + ", ".join(f"{rid!r}: {why}" for rid, why in sorted(dropped.items()))
+            )
+        if not references:
+            raise EngineError(
+                "every baseline output is degenerate; no correctness request "
+                "can be graded"
+            )
     return references
+
+
+def retain_gradable(
+    outputs: list[CapturedOutput],
+    references: Mapping[str, BaselineDegeneracyReference] | None,
+) -> list[CapturedOutput]:
+    """Keep only the outputs the baseline produced a usable bound for.
+
+    Applied to the baseline and to every candidate alike, so each entry is
+    graded on exactly the same surviving prompts.
+    """
+    if references is None:
+        return outputs
+    return [captured for captured in outputs if captured.request_id in references]
+
+
+def write_dropped_baseline_prompts(
+    evidence_dir: Path, dropped: Mapping[str, str]
+) -> Path:
+    """Record which prompts left the graded set, and why."""
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    path = evidence_dir / DROPPED_PROMPTS_EVIDENCE_FILENAME
+    path.write_text(
+        json.dumps(dict(sorted(dropped.items())), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def score_captured_output(

@@ -45,6 +45,7 @@ from bench.correctness import (
     grade_all,
     load_correctness_prompts,
     resolve_trace_path,
+    retain_gradable,
 )
 from bench.env import (
     collect_env_raw_dumps,
@@ -540,6 +541,13 @@ def run_round(
                             baseline_outputs,
                             natural_stops,
                             replay.output_samples,
+                            evidence_dir=layout.correctness_dir,
+                        )
+                        # Prompts the baseline itself answered degenerately
+                        # carry no bound, so every entry is graded without
+                        # them.
+                        baseline_outputs = retain_gradable(
+                            baseline_outputs, baseline_degeneracy
                         )
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
@@ -593,8 +601,13 @@ def run_round(
             pending.append(
                 PendingCorrectness(
                     candidate_index=index,
-                    outputs=capture_outputs(
-                        prompts, timings=replay.result.timings, outputs=replay.outputs
+                    outputs=retain_gradable(
+                        capture_outputs(
+                            prompts,
+                            timings=replay.result.timings,
+                            outputs=replay.outputs,
+                        ),
+                        baseline_degeneracy,
                     ),
                 )
             )
