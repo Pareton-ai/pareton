@@ -827,6 +827,72 @@ def test_baseline_relative_bounds_cover_all_measured_repetitions():
     )
 
 
+def test_degenerate_baseline_prompt_is_dropped_for_every_engine(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    baseline_outputs = [
+        _captured("bad", "Bad prompt", LOOP_TEXT),
+        _captured("good", "Hello world", PROSE_TEXT),
+    ]
+    natural_stops = {
+        "bad": NaturalStopReference(
+            request_id="bad",
+            completion_tokens=len(mock_tokenize(LOOP_TEXT)),
+            finish_reason="stop",
+            text=LOOP_TEXT,
+        ),
+        "good": NaturalStopReference(
+            request_id="good",
+            completion_tokens=len(mock_tokenize(PROSE_TEXT)),
+            finish_reason="stop",
+            text=PROSE_TEXT,
+        ),
+    }
+    references = build_baseline_degeneracy_references(
+        baseline_outputs,
+        natural_stops,
+        {"bad": (LOOP_TEXT,), "good": (PROSE_TEXT,)},
+    )
+    assert set(references) == {"good"}
+    assert "dropping correctness prompt 'bad'" in caplog.text
+
+    pending = [
+        PendingCorrectness(candidate_index=BASELINE_INDEX, outputs=baseline_outputs),
+        PendingCorrectness(
+            candidate_index=0,
+            outputs=[
+                _captured("bad", "Bad prompt", GARBAGE_TEXT),
+                _captured("good", "Hello world", PROSE_TEXT),
+            ],
+        ),
+    ]
+    evidence = tmp_path / "correctness"
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            pending,
+            cfg=_cfg(num_prompts=2, max_drop=0.1),
+            evidence_dir=evidence,
+            baseline_degeneracy=references,
+        )
+
+    assert reports[BASELINE_INDEX].verdict == "pass"
+    assert reports[0].verdict == "pass"
+    assert reports[BASELINE_INDEX].num_prompts == 1
+    assert reports[0].num_prompts == 1
+    for name in ("baseline.jsonl", "candidate_0.jsonl"):
+        rows = [
+            json.loads(line)
+            for line in (evidence / name).read_text(encoding="utf-8").splitlines()
+        ]
+        assert rows[0] == {
+            "request_id": "bad",
+            "dropped": True,
+            "drop_reason": "baseline natural output is degenerate",
+        }
+        assert rows[1]["request_id"] == "good"
+
+
 def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
     """The candidate cannot move the inspected boundary by claiming an early stop."""
     baseline_forced = PROSE_TEXT + LOOP_TEXT

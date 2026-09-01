@@ -34,8 +34,10 @@ that degrades the model and still clears the absolute floor.
 
 When the relative bar is enabled, the baseline is queued under
 ``BASELINE_INDEX`` and graded first so that reference exists. A baseline that
-cannot be graded fails the round, never a candidate. Campaigns without that
-bar retain the pre-PAR-108 grading path.
+cannot be graded fails the round, never a candidate. A prompt whose baseline
+natural-stop output is itself degenerate is excluded for every engine instead
+of failing the round. Campaigns without that bar retain the pre-PAR-108
+grading path.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -626,7 +628,7 @@ def build_baseline_degeneracy_references(
     natural_stops: Mapping[str, NaturalStopReference],
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, BaselineDegeneracyReference]:
-    """Build prompt-specific bounds from every measured baseline repetition."""
+    """Build bounds for prompts with a usable baseline natural-stop output."""
     references: dict[str, BaselineDegeneracyReference] = {}
     for captured in outputs:
         stop = natural_stops.get(captured.request_id)
@@ -642,10 +644,13 @@ def build_baseline_degeneracy_references(
             )
         natural_reason = degeneracy_reason(stop.text)
         if natural_reason is not None:
-            raise EngineError(
-                f"baseline natural output {captured.request_id!r} is degenerate: "
-                f"{natural_reason}"
+            logger.warning(
+                "dropping correctness prompt %r because the baseline natural "
+                "output is degenerate: %s",
+                captured.request_id,
+                natural_reason,
             )
+            continue
         samples = (
             (captured.output_text,)
             if output_samples is None
@@ -732,6 +737,7 @@ def grade_candidate(
     thr = cfg.thresholds
     logprobs: list[float] = []
     span_positions = 0
+    num_prompts = 0
     empty: list[str] = []
     degenerate: str | None = None
 
@@ -739,6 +745,27 @@ def grade_candidate(
     partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
     with partial.open("w", encoding="utf-8") as ef:
         for captured in outputs:
+            reference = (
+                None
+                if baseline_degeneracy is None
+                else baseline_degeneracy.get(captured.request_id)
+            )
+            if baseline_degeneracy is not None and reference is None:
+                # The builder raises for missing or empty baseline inputs and
+                # omits only prompts whose natural output is degenerate.
+                ef.write(
+                    json.dumps(
+                        {
+                            "request_id": captured.request_id,
+                            "dropped": True,
+                            "drop_reason": "baseline natural output is degenerate",
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                continue
+            num_prompts += 1
             if not captured.output_text:
                 empty.append(captured.request_id)
                 continue
@@ -750,16 +777,6 @@ def grade_candidate(
             span_positions += span
             distinct_ratio = distinct_ngram_ratio(captured.output_text)
             repeated_span_ratio = longest_repeated_substring_ratio(captured.output_text)
-            reference = (
-                None
-                if baseline_degeneracy is None
-                else baseline_degeneracy.get(captured.request_id)
-            )
-            if baseline_degeneracy is not None and reference is None:
-                raise EngineError(
-                    "baseline degeneracy reference missing correctness request "
-                    f"{captured.request_id!r}"
-                )
             if reference is None:
                 prefix_text = captured.output_text
                 prefix_distinct_ratio = distinct_ratio
@@ -837,7 +854,7 @@ def grade_candidate(
     if empty:
         return CorrectnessReport(
             verdict="fail_correctness",
-            num_prompts=len(outputs),
+            num_prompts=num_prompts,
             num_positions_scored=len(logprobs),
             mean_logprob=0.0,
             min_logprob=0.0,
@@ -850,7 +867,7 @@ def grade_candidate(
     if not logprobs:
         return CorrectnessReport(
             verdict="infra_failed",
-            num_prompts=len(outputs),
+            num_prompts=num_prompts,
             num_positions_scored=0,
             mean_logprob=0.0,
             min_logprob=0.0,
@@ -918,7 +935,7 @@ def grade_candidate(
     )
     return CorrectnessReport(
         verdict=verdict,
-        num_prompts=len(outputs),
+        num_prompts=num_prompts,
         num_positions_scored=len(logprobs),
         mean_logprob=mean_lp,
         min_logprob=min_lp,
@@ -977,7 +994,12 @@ def grade_all(
             logger.warning("scoring %s failed: %s", item.evidence_name, exc)
             report = CorrectnessReport(
                 verdict="infra_failed",
-                num_prompts=len(item.outputs),
+                num_prompts=sum(
+                    1
+                    for output in item.outputs
+                    if baseline_degeneracy is None
+                    or output.request_id in baseline_degeneracy
+                ),
                 num_positions_scored=0,
                 mean_logprob=0.0,
                 min_logprob=0.0,
