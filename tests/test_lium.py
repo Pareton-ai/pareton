@@ -207,8 +207,24 @@ def test_search_filters(provider: LiumProvider, client: FakeClient):
     offers = provider.search(
         PodSpec(gpu_count=1, gpu_type="H200", max_hourly_cents=500)
     )
-    assert [o.instance_id for o in offers] == ["e1"]
+    # e5 is oversized but usable; it sorts behind the exact-size e1.
+    assert [o.instance_id for o in offers] == ["e1", "e5"]
     assert offers[0].hourly_price_cents == 150
+
+
+def test_search_falls_back_to_oversized_node(
+    provider: LiumProvider, client: FakeClient
+):
+    """No 1x on the market, so the run takes a bigger node and uses one GPU."""
+    client.executors = [
+        FakeExecutor("e1", "eight", "H200", 8, 25.6, True),
+        FakeExecutor("e2", "a100", "A100", 8, 2.0, True),
+    ]
+    offers = provider.search(
+        PodSpec(gpu_count=1, gpu_type="H200", max_hourly_cents=7500)
+    )
+    assert [o.instance_id for o in offers] == ["e1"]
+    assert offers[0].gpu_count == 8
 
 
 def test_search_prefers_fastest_download(provider: LiumProvider, client: FakeClient):
