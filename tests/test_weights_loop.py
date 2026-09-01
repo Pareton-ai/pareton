@@ -242,7 +242,9 @@ def test_store_only_tick_skips_permit_and_chain(wallet, wired):
     assert process.last_chain_set_block == 1000
 
 
-def test_identical_vector_skips_insert(monkeypatch, wallet, meta, wired):
+def test_identical_vector_store_only_tick_skips_insert(
+    monkeypatch, wallet, meta, wired
+):
     monkeypatch.setattr(
         loop,
         "get_latest_weight_set",
@@ -273,7 +275,41 @@ def test_identical_vector_skips_insert(monkeypatch, wallet, meta, wired):
     assert wired["insert"] == []
 
 
-def test_store_only_abort_keeps_round_retryable(monkeypatch, wallet, meta, wired):
+def test_identical_vector_chain_tick_still_inserts_and_marks(
+    monkeypatch, wallet, meta, wired
+):
+    monkeypatch.setattr(
+        loop,
+        "get_latest_weight_set",
+        lambda: {
+            "computed_at_block": 1000,
+            "version_key": 2032,
+            "burn_uid": BURN,
+            "weights": [0.0, 0.0, 0.0, 1.0],
+            "breakdown": [],
+        },
+    )
+    process = loop.WeightsProcess(
+        last_stored_round="round-1",
+        last_chain_set_block=1000,
+        cadence=360,
+    )
+    assert (
+        _tick(
+            process,
+            head=1360,
+            wallet=wallet,
+            meta=meta,
+            round_marker="round-1",
+            sign=True,
+        )
+        == "computed"
+    )
+    assert wired["insert"]
+    assert wired["mark"] == [{"row_id": 7, "ok": True, "error": None}]
+
+
+def test_store_only_abort_advances_round_marker(monkeypatch, wallet, meta, wired):
     monkeypatch.setattr(
         loop,
         "build_weight_vector",
@@ -295,5 +331,5 @@ def test_store_only_abort_keeps_round_retryable(monkeypatch, wallet, meta, wired
         )
         == "aborted"
     )
-    assert process.last_stored_round == "round-1"
+    assert process.last_stored_round == "round-2"
     assert process.last_chain_set_block == 1000

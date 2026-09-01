@@ -155,7 +155,7 @@ def run_cycle(
         return None
 
     values = list(vector.weights)
-    stored = not _same_vector(get_latest_weight_set(), values)
+    stored = sign or not _same_vector(get_latest_weight_set(), values)
     row_id = None
     if stored:
         row_id = insert_weight_set(
@@ -174,6 +174,9 @@ def run_cycle(
             current_block,
         )
         return current_block
+
+    # Chain ticks always append an audit row, even when the vector is unchanged.
+    assert row_id is not None
 
     if not enabled:
         logger.info(
@@ -202,8 +205,7 @@ def run_cycle(
             burn_uid=config.BURN_UID,
         )
     except WeightSetError as exc:
-        if row_id is not None:
-            mark_weight_set_result(row_id, ok=False, error=str(exc))
+        mark_weight_set_result(row_id, ok=False, error=str(exc))
         logger.warning("set_weights failed: %s", exc)
         obs.weights_computed(
             computed_at_block=current_block,
@@ -214,8 +216,7 @@ def run_cycle(
         )
         return current_block
 
-    if row_id is not None:
-        mark_weight_set_result(row_id, ok=True, error=None)
+    mark_weight_set_result(row_id, ok=True, error=None)
     obs.weights_computed(
         computed_at_block=current_block,
         version_key=config.VERSION_KEY,
@@ -261,6 +262,6 @@ class WeightsProcess:
         )
         if sign:
             self.last_chain_set_block = head
-        if completed is not None:
-            self.last_stored_round = round_marker
+        # Expected aborts advance the marker so they retry at cadence, not poll rate.
+        self.last_stored_round = round_marker
         return "computed" if completed is not None else "aborted"
