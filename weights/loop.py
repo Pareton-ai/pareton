@@ -37,6 +37,11 @@ def cycle_due(last_block: int | None, head: int, cadence: int) -> bool:
     return head >= last_block + cadence
 
 
+def new_round_due(last_round: str | None, latest_round: str | None) -> bool:
+    """True when a scored round exists that this process has not stored."""
+    return latest_round is not None and latest_round != last_round
+
+
 def _hotkey_uids(meta: Any) -> tuple[dict[str, int], int]:
     """Live ``hotkey -> uid`` map from ``by_hotkey().uid``. UIDs are never stored.
 
@@ -99,6 +104,16 @@ def reconcile_deregistrations(hotkey_uids: dict[str, int]) -> list[str]:
     return vacated
 
 
+def _same_vector(row: dict[str, Any] | None, values: list[float]) -> bool:
+    if row is None:
+        return False
+    return (
+        int(row["version_key"]) == config.VERSION_KEY
+        and int(row["burn_uid"]) == config.BURN_UID
+        and [float(value) for value in row["weights"]] == values
+    )
+
+
 def run_cycle(
     subtensor: Any,
     wallet: Any,
@@ -106,15 +121,10 @@ def run_cycle(
     *,
     current_block: int,
     enabled: bool,
+    sign: bool = True,
 ) -> int | None:
-    """One compute cycle. Returns the block if a row was stored, else None.
-
-    A builder guard abort leaves no ``weight_sets`` row. A chain rejection
-    stores the row with ``set_ok=false`` and the loop keeps running. The
-    caller advances ``last_block`` either way so a persistent abort retries
-    at cadence, not every poll.
-    """
-    if enabled:
+    """Compute once, store only when changed, and optionally sign."""
+    if sign and enabled:
         try:
             uid = assert_validator_permit(
                 meta, wallet.hotkey.ss58_address, config.NETUID
@@ -144,21 +154,31 @@ def run_cycle(
         logger.exception("weight vector failed structural guards; not stored")
         return None
 
-    row_id = insert_weight_set(
-        computed_at_block=current_block,
-        version_key=config.VERSION_KEY,
-        burn_uid=config.BURN_UID,
-        weights=list(vector.weights),
-        breakdown=list(vector.breakdown),
-    )
     values = list(vector.weights)
-    uids = list(range(len(values)))
+    stored = not _same_vector(get_latest_weight_set(), values)
+    row_id = None
+    if stored:
+        row_id = insert_weight_set(
+            computed_at_block=current_block,
+            version_key=config.VERSION_KEY,
+            burn_uid=config.BURN_UID,
+            weights=values,
+            breakdown=list(vector.breakdown),
+        )
     burn_share = float(values[config.BURN_UID])
+
+    if not sign:
+        logger.info(
+            "weights API refresh stored=%s at block %d",
+            stored,
+            current_block,
+        )
+        return current_block
 
     if not enabled:
         logger.info(
-            "weights kill switch on: stored row %d at block %d, did not sign",
-            row_id,
+            "weights kill switch on: stored=%s at block %d, did not sign",
+            stored,
             current_block,
         )
         obs.weights_computed(
@@ -176,14 +196,15 @@ def run_cycle(
             wallet,
             meta,
             netuid=config.NETUID,
-            uids=uids,
+            uids=list(range(len(values))),
             weights=values,
             version_key=config.VERSION_KEY,
             burn_uid=config.BURN_UID,
         )
     except WeightSetError as exc:
-        mark_weight_set_result(row_id, ok=False, error=str(exc))
-        logger.warning("set_weights failed; stored set_ok=false: %s", exc)
+        if row_id is not None:
+            mark_weight_set_result(row_id, ok=False, error=str(exc))
+        logger.warning("set_weights failed: %s", exc)
         obs.weights_computed(
             computed_at_block=current_block,
             version_key=config.VERSION_KEY,
@@ -193,7 +214,8 @@ def run_cycle(
         )
         return current_block
 
-    mark_weight_set_result(row_id, ok=True, error=None)
+    if row_id is not None:
+        mark_weight_set_result(row_id, ok=True, error=None)
     obs.weights_computed(
         computed_at_block=current_block,
         version_key=config.VERSION_KEY,
@@ -205,10 +227,17 @@ def run_cycle(
 
 
 class WeightsProcess:
-    """Cadence state. The loop is one thread; overlap cannot occur."""
+    """Track API publication and chain-set cadence independently."""
 
-    def __init__(self, *, last_block: int | None, cadence: int):
-        self.last_block = last_block
+    def __init__(
+        self,
+        *,
+        last_stored_round: str | None = None,
+        last_chain_set_block: int | None = None,
+        cadence: int,
+    ):
+        self.last_stored_round = last_stored_round
+        self.last_chain_set_block = last_chain_set_block
         self.cadence = cadence
 
     def tick(
@@ -219,22 +248,19 @@ class WeightsProcess:
         wallet: Any,
         meta: Any,
         enabled: bool,
+        round_marker: str | None = None,
+        sign: bool = True,
     ) -> str:
-        stored = run_cycle(
+        completed = run_cycle(
             subtensor,
             wallet,
             meta,
             current_block=head,
             enabled=enabled,
+            sign=sign,
         )
-        # Permit skip and builder abort both return None. Advance either way
-        # so a persistent failure retries at cadence, not every poll.
-        self.last_block = head
-        return "computed" if stored is not None else "aborted"
-
-
-def last_computed_block() -> int | None:
-    row = get_latest_weight_set()
-    if row is None:
-        return None
-    return int(row["computed_at_block"])
+        if sign:
+            self.last_chain_set_block = head
+        if completed is not None:
+            self.last_stored_round = round_marker
+        return "computed" if completed is not None else "aborted"

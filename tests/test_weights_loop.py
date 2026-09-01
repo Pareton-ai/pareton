@@ -1,4 +1,4 @@
-"""Unit tests for the pareton-weights cadence (PAR-105).
+"""Unit tests for the pareton-weights cadence (PAR-105, PAR-117).
 
 No database, no chain, no network. Store and SDK calls are fakes.
 """
@@ -63,6 +63,7 @@ def wired(monkeypatch, calls):
     monkeypatch.setattr(loop.config, "OVERTAKE_EPSILON", 0.01)
     monkeypatch.setattr(loop, "list_idle_seated_leaders", lambda: [])
     monkeypatch.setattr(loop, "list_open_campaign_emissions", lambda: [])
+    monkeypatch.setattr(loop, "get_latest_weight_set", lambda: None)
     monkeypatch.setattr(loop, "obs", SimpleNamespace(weights_computed=lambda **k: None))
 
     def _insert(**kwargs):
@@ -86,13 +87,14 @@ def wired(monkeypatch, calls):
     return calls
 
 
-def _tick(process, *, head, wallet, meta, enabled=True):
+def _tick(process, *, head, wallet, meta, enabled=True, **kwargs):
     return process.tick(
         head=head,
         subtensor=SimpleNamespace(),
         wallet=wallet,
         meta=meta,
         enabled=enabled,
+        **kwargs,
     )
 
 
@@ -141,11 +143,11 @@ def test_missing_permit_does_not_vacate(monkeypatch, wallet, wired):
         "list_idle_seated_leaders",
         lambda: [{"campaign_id": "c1", "hotkey": LEADER}],
     )
-    process = loop.WeightsProcess(last_block=None, cadence=360)
+    process = loop.WeightsProcess(last_chain_set_block=None, cadence=360)
     assert _tick(process, head=50, wallet=wallet, meta=meta) == "aborted"
     assert wired["vacate"] == []
     assert wired["insert"] == []
-    assert process.last_block == 50
+    assert process.last_chain_set_block == 50
 
 
 def test_set_weights_failure_records_set_ok_false_and_survives(
@@ -155,18 +157,18 @@ def test_set_weights_failure_records_set_ok_false_and_survives(
         raise WeightSetError("chain rejected the weight vector")
 
     monkeypatch.setattr(loop, "set_weights", boom)
-    process = loop.WeightsProcess(last_block=None, cadence=360)
+    process = loop.WeightsProcess(last_chain_set_block=None, cadence=360)
     assert _tick(process, head=50, wallet=wallet, meta=meta) == "computed"
     assert wired["insert"]
     assert wired["mark"] == [
         {"row_id": 7, "ok": False, "error": "chain rejected the weight vector"}
     ]
-    assert process.last_block == 50
-    assert loop.cycle_due(process.last_block, 51, 360) is False
+    assert process.last_chain_set_block == 50
+    assert loop.cycle_due(process.last_chain_set_block, 51, 360) is False
 
 
 def test_kill_switch_stores_and_never_calls_chain(wallet, meta, wired):
-    process = loop.WeightsProcess(last_block=None, cadence=360)
+    process = loop.WeightsProcess(last_chain_set_block=None, cadence=360)
     assert (
         _tick(process, head=10, wallet=wallet, meta=meta, enabled=False) == "computed"
     )
@@ -175,29 +177,29 @@ def test_kill_switch_stores_and_never_calls_chain(wallet, meta, wired):
     assert wired["mark"] == []
 
 
-def test_guard_violation_stores_nothing_and_advances_last_block(
+def test_guard_violation_stores_nothing_and_advances_chain_marker(
     monkeypatch, wallet, meta, wired
 ):
     def bad(*args, **kwargs):
         raise WeightVectorError("burn is negative")
 
     monkeypatch.setattr(loop, "build_weight_vector", bad)
-    process = loop.WeightsProcess(last_block=None, cadence=360)
+    process = loop.WeightsProcess(last_chain_set_block=None, cadence=360)
     assert _tick(process, head=10, wallet=wallet, meta=meta) == "aborted"
     assert wired["insert"] == []
     assert wired["set"] == []
     assert wired["mark"] == []
-    assert process.last_block == 10
+    assert process.last_chain_set_block == 10
 
 
 def test_uid_map_mismatch_aborts_and_advances(wallet, wired):
     missing = FakeMeta([SIGNER, "5Ghost"])
     missing.by_hotkey = lambda hk: None
-    process = loop.WeightsProcess(last_block=None, cadence=360)
+    process = loop.WeightsProcess(last_chain_set_block=None, cadence=360)
     assert _tick(process, head=10, wallet=wallet, meta=missing) == "aborted"
     assert wired["insert"] == []
     assert wired["vacate"] == []
-    assert process.last_block == 10
+    assert process.last_chain_set_block == 10
 
 
 def test_tick_does_not_catch_unexpected_errors(monkeypatch, wallet, meta, wired):
@@ -205,6 +207,93 @@ def test_tick_does_not_catch_unexpected_errors(monkeypatch, wallet, meta, wired)
         raise RuntimeError("metagraph shape changed")
 
     monkeypatch.setattr(loop, "run_cycle", boom)
-    process = loop.WeightsProcess(last_block=None, cadence=360)
+    process = loop.WeightsProcess(last_chain_set_block=None, cadence=360)
     with pytest.raises(RuntimeError, match="metagraph shape changed"):
         _tick(process, head=10, wallet=wallet, meta=meta)
+
+
+def test_new_round_is_due_independently_of_chain_cadence():
+    assert loop.new_round_due("round-1", "round-2") is True
+    assert loop.new_round_due("round-2", "round-2") is False
+    assert loop.new_round_due(None, None) is False
+
+
+def test_store_only_tick_skips_permit_and_chain(wallet, wired):
+    meta = FakeMeta([SIGNER, "5Other", "5Third", "5Burn"], permit=False)
+    process = loop.WeightsProcess(
+        last_stored_round="round-1",
+        last_chain_set_block=1000,
+        cadence=360,
+    )
+    assert (
+        _tick(
+            process,
+            head=1010,
+            wallet=wallet,
+            meta=meta,
+            round_marker="round-2",
+            sign=False,
+        )
+        == "computed"
+    )
+    assert wired["insert"]
+    assert wired["set"] == []
+    assert process.last_stored_round == "round-2"
+    assert process.last_chain_set_block == 1000
+
+
+def test_identical_vector_skips_insert(monkeypatch, wallet, meta, wired):
+    monkeypatch.setattr(
+        loop,
+        "get_latest_weight_set",
+        lambda: {
+            "computed_at_block": 1000,
+            "version_key": 2032,
+            "burn_uid": BURN,
+            "weights": [0.0, 0.0, 0.0, 1.0],
+            "breakdown": [],
+        },
+    )
+    process = loop.WeightsProcess(
+        last_stored_round="round-1",
+        last_chain_set_block=1000,
+        cadence=360,
+    )
+    assert (
+        _tick(
+            process,
+            head=1010,
+            wallet=wallet,
+            meta=meta,
+            round_marker="round-2",
+            sign=False,
+        )
+        == "computed"
+    )
+    assert wired["insert"] == []
+
+
+def test_store_only_abort_keeps_round_retryable(monkeypatch, wallet, meta, wired):
+    monkeypatch.setattr(
+        loop,
+        "build_weight_vector",
+        lambda *args, **kwargs: (_ for _ in ()).throw(WeightVectorError("bad")),
+    )
+    process = loop.WeightsProcess(
+        last_stored_round="round-1",
+        last_chain_set_block=1000,
+        cadence=360,
+    )
+    assert (
+        _tick(
+            process,
+            head=1010,
+            wallet=wallet,
+            meta=meta,
+            round_marker="round-2",
+            sign=False,
+        )
+        == "aborted"
+    )
+    assert process.last_stored_round == "round-1"
+    assert process.last_chain_set_block == 1000
