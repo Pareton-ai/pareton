@@ -847,6 +847,63 @@ def get_latest_weight_set() -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
+def get_latest_completed_round_marker() -> str | None:
+    """Id of the most recently completed scored round, or None."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM rounds
+                WHERE status = 'complete' AND completed_at IS NOT NULL
+                ORDER BY completed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def get_latest_stored_round_marker() -> str | None:
+    """Newest scored round already covered by the latest weight snapshot."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id
+                FROM rounds r
+                WHERE r.status = 'complete'
+                  AND r.completed_at <= (
+                    SELECT created_at
+                    FROM weight_sets
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                  )
+                ORDER BY r.completed_at DESC, r.id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def get_latest_chain_set_block() -> int | None:
+    """Block of the newest weight row with a terminal chain result."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT computed_at_block
+                FROM weight_sets
+                WHERE set_ok IS NOT NULL
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row is not None else None
+
+
 def list_idle_seated_leaders() -> list[dict[str, Any]]:
     """Seated leaders on campaigns with no pending or running round.
 

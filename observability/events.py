@@ -330,7 +330,7 @@ def weights_computed(
     set_ok: bool | None = None,
     enabled: bool = True,
 ) -> dict[str, Any]:
-    """A ``weight_sets`` row was written. Absence of this event is the stall alert."""
+    """A chain-cadence compute completed. Absence is the stall alert."""
     return _emit(
         "weights_computed",
         computed_at_block=computed_at_block,
