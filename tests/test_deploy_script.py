@@ -148,7 +148,7 @@ esac
         venv_bin / "python",
         """#!/usr/bin/env bash
 printf 'python %s\n' "$*" >> "$CALL_LOG"
-exit "${PROBE_RC:-1}"
+exit "${PROBE_RC:-10}"
 """,
     )
     _write_executable(
@@ -168,7 +168,7 @@ fi
         "HEAD_FILE": str(head),
         "WORKER_STATE_FILE": str(worker_state),
         "REMOTE_COMMIT": "new",
-        "PROBE_RC": "1",
+        "PROBE_RC": "10",
     }
     return DeployHarness(repo, script, log, head, worker_state, env)
 
@@ -243,6 +243,19 @@ def test_running_database_work_defers_before_worker_stop(
     assert not any(call.startswith("git pull") for call in calls)
     assert deploy_harness.worker_state.read_text(encoding="utf-8") == "running\n"
     assert deploy_harness.head.read_text(encoding="utf-8") == "old\n"
+
+
+def test_probe_import_failure_exit_one_fails_closed(
+    deploy_harness: DeployHarness,
+):
+    result = deploy_harness.run(PROBE_RC="1")
+
+    assert result.returncode == 0
+    assert "worker probe failed (rc=1); update deferred" in result.stdout
+    calls = deploy_harness.calls()
+    assert not any(call.startswith("systemctl stop") for call in calls)
+    assert not any(call.startswith("git pull") for call in calls)
+    assert deploy_harness.worker_state.read_text(encoding="utf-8") == "running\n"
 
 
 def test_worker_stop_failure_prevents_first_mutation(

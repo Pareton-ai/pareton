@@ -7,6 +7,12 @@ from dataclasses import dataclass
 
 from db.connection import db_connection
 
+EXIT_BUSY = 0
+EXIT_ERROR = 2
+# Python itself commonly uses 1 for import, syntax, and interpreter failures.
+# A successful idle probe needs a value those pre-main failures cannot mimic.
+EXIT_IDLE = 10
+
 
 @dataclass(frozen=True)
 class ActiveWork:
@@ -45,16 +51,16 @@ def probe_active_work() -> ActiveWork:
 
 
 def main() -> int:
-    """Exit 0 when busy, 1 when idle, and 2 when the probe cannot decide."""
+    """Return the deploy probe protocol code; only EXIT_IDLE permits deploy."""
     try:
         active = probe_active_work()
     except Exception:  # noqa: BLE001 - uncertainty must defer the deploy
         print("deploy: database activity probe failed", file=sys.stderr)
-        return 2
+        return EXIT_ERROR
     if active.busy:
         print(f"deploy: active work: {active.labels()}")
-        return 0
-    return 1
+        return EXIT_BUSY
+    return EXIT_IDLE
 
 
 if __name__ == "__main__":

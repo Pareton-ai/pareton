@@ -62,7 +62,7 @@ def test_probe_is_idle_only_when_both_work_types_are_idle(monkeypatch):
     monkeypatch.setattr(probe, "db_connection", _connection((False, False)))
 
     assert probe.probe_active_work().busy is False
-    assert probe.main() == 1
+    assert probe.main() == probe.EXIT_IDLE
 
 
 def test_probe_failure_is_fail_closed(monkeypatch, capsys):
@@ -73,5 +73,5 @@ def test_probe_failure_is_fail_closed(monkeypatch, capsys):
 
     monkeypatch.setattr(probe, "db_connection", broken_connection)
 
-    assert probe.main() == 2
+    assert probe.main() == probe.EXIT_ERROR
     assert capsys.readouterr().err == "deploy: database activity probe failed\n"

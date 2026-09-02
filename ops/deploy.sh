@@ -64,14 +64,14 @@ if [ -f "$PENDING_FLAG" ]; then
     # again; stop is idempotent and preserves the crash barrier.
     systemctl stop pareton-worker
 else
-    # Exit 0 = busy, 1 = idle, 2 = probe error. Treat errors as busy. This
-    # catches stale/orphaned state before the first mutation. The exclusive
-    # lock closes the gap between this query and stopping the worker.
+    # Exit 0 = busy and 10 = confirmed idle. Every other code fails closed,
+    # including Python's usual exit 1 for an import or syntax failure. The
+    # exclusive lock closes the gap between this query and stopping the worker.
     "$REPO/.venv/bin/python" -m ops.deploy_probe && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "deploy: update deferred"
         exit 0
-    elif [ "$rc" -ne 1 ]; then
+    elif [ "$rc" -ne 10 ]; then
         echo "deploy: worker probe failed (rc=$rc); update deferred"
         exit 0
     fi
