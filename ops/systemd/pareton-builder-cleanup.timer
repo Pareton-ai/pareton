@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Pareton Docker builder cleanup hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=5min
+RandomizedDelaySec=5min
+Unit=pareton-builder-cleanup.service
+
+[Install]
+WantedBy=timers.target

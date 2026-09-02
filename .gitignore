@@ -165,6 +165,7 @@ cython_debug/
 
 testing/
 
+.pareton-work/
 .dependencies_installed
 
 # Editors / local agent tooling

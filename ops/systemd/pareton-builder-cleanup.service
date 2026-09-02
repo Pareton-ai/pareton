@@ -1,0 +1,17 @@
+[Unit]
+Description=Pareton persistent Docker builder cleanup
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/pareton
+EnvironmentFile=/opt/pareton/.env
+ExecStart=/opt/pareton/.venv/bin/python -m builder.cleanup
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

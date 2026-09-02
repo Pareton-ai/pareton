@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import hashlib
 import os
 import re
 import shutil
@@ -21,6 +21,7 @@ from builder.digest import (
     mock_digest_from_patch_hash,
     resolve_image_repo_digest,
 )
+from builder.lock import serialized_build_storage
 from builder.registry import engine_image_ref
 from campaign.engine import resolve_engine
 from gate.types import GateResult, SubmissionState
@@ -302,6 +303,7 @@ def _run_logged(
             reader.join(timeout=30)
 
 
+@serialized_build_storage
 def build_engine_image(
     *,
     baseline_repo: str,
@@ -408,6 +410,7 @@ def build_engine_image(
             capture_output=True,
             text=True,
             timeout=600,
+            check=False,
         )
         if clone.returncode != 0:
             return GateResult.reject(
@@ -421,6 +424,7 @@ def build_engine_image(
             capture_output=True,
             text=True,
             timeout=120,
+            check=False,
         )
         if checkout.returncode != 0:
             subprocess.run(
@@ -437,6 +441,7 @@ def build_engine_image(
                 capture_output=True,
                 text=True,
                 timeout=120,
+                check=False,
             )
         if checkout.returncode != 0:
             return GateResult.reject(
@@ -525,7 +530,7 @@ def build_engine_image(
         return GateResult.reject(
             "build_timeout", error=str(exc), **_sanitized_tail(log_path)
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - build failures become gate evidence.
         _progress(f"FAIL build_error: {type(exc).__name__}")
         return GateResult.reject(
             "build_error", error=str(exc), **_sanitized_tail(log_path)

@@ -14,6 +14,8 @@ re-install it on the box, so the two never drift.
 | `systemd/pareton-weights.service` | `/etc/systemd/system/`          | Weight cadence, `python -m weights`. Holds the validator wallet. |
 | `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer                                    |
 | `systemd/pareton-deploy.timer`    | `/etc/systemd/system/`          | **Fires every 60s**                                              |
+| `systemd/pareton-builder-cleanup.service` | `/etc/systemd/system/` | Docker image and BuildKit cleanup oneshot                         |
+| `systemd/pareton-builder-cleanup.timer` | `/etc/systemd/system/` | Runs builder cleanup hourly                                      |
 | `deploy.sh`                       | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself                                    |
 | `gpu/pareton-gpu-reap.service`    | `/etc/systemd/system/`          | Oneshot GPU TTL reap                                             |
 | `gpu/pareton-gpu-reap.timer`      | `/etc/systemd/system/`          | Fires every 10 min                                               |
@@ -80,4 +82,44 @@ because each one changes production behavior:
 scp ops/systemd/pareton-deploy.timer root@<host>:/etc/systemd/system/
 ssh root@<host> systemctl daemon-reload
 ssh root@<host> systemctl restart pareton-deploy.timer
+```
+
+## Builder disk cleanup
+
+The persistent build host keeps local retention tags for the build-base and
+baseline engine images of every draft or open campaign. Published candidate
+tags are removed after their digest-pinned reference is stored in Postgres.
+The hourly fallback sweep removes leftover candidate tags and prunes ordinary
+BuildKit records after Docker storage crosses 75% usage.
+BuildKit `exec.cachemount` records are excluded because they hold the warmed
+baseline ccache used by later miner builds.
+
+Docker Engine's own background BuildKit GC is separate from this timer. Its
+default first policy includes `exec.cachemount` records older than 48 hours.
+Configure `/etc/docker/daemon.json` with custom GC policies that exclude
+`type=exec.cachemount`, while preserving any existing storage-driver and
+feature settings on the host. Validate the merged file with `dockerd
+--validate --config-file=/etc/docker/daemon.json` before restarting Docker.
+
+The cleanup fails without deleting anything when Postgres is unavailable, and
+skips a run when a build holds the shared storage lock. Preview it before
+installing the timer:
+
+```sh
+cd /opt/pareton
+set -a
+. ./.env
+set +a
+.venv/bin/python -m builder.cleanup --dry-run --force
+```
+
+Install both units, then inspect the first run:
+
+```sh
+cp ops/systemd/pareton-builder-cleanup.service /etc/systemd/system/
+cp ops/systemd/pareton-builder-cleanup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now pareton-builder-cleanup.timer
+systemctl start pareton-builder-cleanup.service
+journalctl -u pareton-builder-cleanup.service -n 100 --no-pager
 ```
