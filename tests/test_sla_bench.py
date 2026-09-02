@@ -353,8 +353,12 @@ def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
     )
     assert references["forced"].completion_tokens == 417
     assert references["forced"].text == "natural answer"
-    evidence = tmp_path / "baseline_natural_stops.jsonl"
-    assert json.loads(evidence.read_text(encoding="utf-8"))["request_id"] == ("forced")
+    assert references["forced"].finish_reason == "stop"
+    evidence = json.loads(
+        (tmp_path / "baseline_natural_stops.jsonl").read_text(encoding="utf-8")
+    )
+    assert evidence["request_id"] == "forced"
+    assert evidence["finish_reason"] == "stop"
 
 
 def test_median_rep_row_keeps_the_clean_mid_latency_on_a_one_in_three_loop():
@@ -426,8 +430,12 @@ def test_natural_stop_is_byte_equal_to_the_median_output_without_ignore_eos(
     assert references["hf-003"].text == median
     assert references["hf-003"].text == replay.outputs["hf-003"]
     assert references["hf-003"].completion_tokens == 78
+    # Matches the round-10 VM row: finish_reason is JSON null, so this
+    # was the copy path. An ignore_eos probe would have written "stop".
+    assert references["hf-003"].finish_reason is None
     evidence = json.loads(
         (tmp_path / "baseline_natural_stops.jsonl").read_text(encoding="utf-8")
     )
     assert evidence["text"] == median
     assert evidence["completion_tokens"] == 78
+    assert evidence["finish_reason"] is None

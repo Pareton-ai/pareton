@@ -331,6 +331,11 @@ def capture_baseline_natural_stops(
         references[req.id] = NaturalStopReference(
             request_id=req.id,
             completion_tokens=timing.completion_tokens,
+            # None is the copy-path fingerprint in evidence. A real
+            # ignore_eos probe writes the probe row's finish_reason
+            # (typically "stop"). Round 10 hf-003 has null here: the
+            # 78-token text is the latency-median SLA output, not a
+            # separate forced-length replay.
             finish_reason=None,
             text=text,
         )

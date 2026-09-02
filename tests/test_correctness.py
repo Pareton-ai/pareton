@@ -918,11 +918,13 @@ def test_too_many_degenerate_baseline_prompts_fail_the_round():
         build_baseline_degeneracy_references(outputs, natural_stops)
 
 
-def _stop(request_id: str, text: str) -> NaturalStopReference:
+def _stop(
+    request_id: str, text: str, *, finish_reason: str | None = "stop"
+) -> NaturalStopReference:
     return NaturalStopReference(
         request_id=request_id,
         completion_tokens=len(mock_tokenize(text)),
-        finish_reason="stop",
+        finish_reason=finish_reason,
         text=text,
     )
 
@@ -932,18 +934,22 @@ def test_a_looping_baseline_sibling_rep_drops_the_prompt(
 ):
     """PAR-121: the median-rep natural stop is clean; a sibling SLA rep loops.
 
-    That is round 10 hf-003: the drop used to read only stop.text, keep the
-    prompt, and then grade each candidate's own median rep against the
-    prefix bar. A 2-in-3 candidate loop became a terminal DQ while the
-    pinned image itself had already looped.
+    That is round 10 hf-003. The VM row is finish_reason=null / 78 tok /
+    clean tool-call text — the copy path, not an ignore_eos probe. The
+    drop used to read only that median, keep the prompt, and then grade
+    each candidate's own median against the prefix bar. A 2-in-3
+    candidate loop became a terminal DQ while the pinned image itself
+    had already looped. Correctness rows recorded
+    baseline_longest_repeated_substring_ratio ≈ 0.989 from the sibling
+    and dropped=null on every candidate.
     """
     baseline_outputs = [
         _captured("hf-003", "Explore the repo", PROSE_TEXT),
         _captured("hf-010", "List files", PROSE_TEXT),
     ]
     natural_stops = {
-        "hf-003": _stop("hf-003", PROSE_TEXT),
-        "hf-010": _stop("hf-010", PROSE_TEXT),
+        "hf-003": _stop("hf-003", PROSE_TEXT, finish_reason=None),
+        "hf-010": _stop("hf-010", PROSE_TEXT, finish_reason=None),
     }
     references = build_baseline_degeneracy_references(
         baseline_outputs,
