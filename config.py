@@ -111,9 +111,7 @@ BUILD_LOG_DIR: Path = Path(
 # Docker build and cleanup share this lock. Keeping it under WORK_DIR avoids a
 # second host path and works for both the production root user and local dev.
 BUILDER_LOCK_PATH: Path = Path(
-    os.environ.get(
-        "PARETON_BUILDER_LOCK_PATH", str(WORK_DIR / "builder-storage.lock")
-    )
+    os.environ.get("PARETON_BUILDER_LOCK_PATH", str(WORK_DIR / "builder-storage.lock"))
 ).resolve()
 # Persistent builder disk policy. Candidate images are durable in GHCR, while
 # active campaign baselines and their BuildKit ccache mounts stay local.
