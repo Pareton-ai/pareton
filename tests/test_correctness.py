@@ -814,6 +814,7 @@ def test_baseline_relative_bounds_cover_all_measured_repetitions():
                 completion_tokens=len(mock_tokenize(PROSE_TEXT)),
                 finish_reason="stop",
                 text=PROSE_TEXT,
+                probed=True,
             )
         },
         {"r1": (first, second)},
@@ -919,13 +920,18 @@ def test_too_many_degenerate_baseline_prompts_fail_the_round():
 
 
 def _stop(
-    request_id: str, text: str, *, finish_reason: str | None = "stop"
+    request_id: str,
+    text: str,
+    *,
+    finish_reason: str | None = "stop",
+    probed: bool = False,
 ) -> NaturalStopReference:
     return NaturalStopReference(
         request_id=request_id,
         completion_tokens=len(mock_tokenize(text)),
         finish_reason=finish_reason,
         text=text,
+        probed=probed,
     )
 
 
@@ -1018,7 +1024,7 @@ def test_forced_ignore_eos_samples_do_not_drop_a_clean_natural_stop():
     forced = PROSE_TEXT + LOOP_TEXT
     references = build_baseline_degeneracy_references(
         [_captured("r1", "Hello world", forced)],
-        {"r1": _stop("r1", PROSE_TEXT)},
+        {"r1": _stop("r1", PROSE_TEXT, probed=True)},
         {"r1": (forced, forced, forced)},
     )
     assert set(references) == {"r1"}
@@ -1026,6 +1032,44 @@ def test_forced_ignore_eos_samples_do_not_drop_a_clean_natural_stop():
     assert references["r1"].full_repeated_span_ratio == max(
         longest_repeated_substring_ratio(text) for text in (forced,)
     )
+
+
+def test_a_probe_matching_the_median_still_ignores_forced_siblings():
+    """A probe can coincidentally equal the forced median. Siblings may not.
+
+    Byte-equality is not a path signal. Five such false drops would void
+    the round (MAX_BASELINE_PROMPT_DROPS = 4).
+    """
+    median = PROSE_TEXT
+    looping_sibling = PROSE_TEXT + LOOP_TEXT
+    references = build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", median)],
+        {"r1": _stop("r1", median, probed=True)},
+        {"r1": (median, looping_sibling, looping_sibling)},
+    )
+    assert set(references) == {"r1"}
+    assert references.dropped == {}
+    assert references["r1"].full_repeated_span_ratio == max(
+        longest_repeated_substring_ratio(text)
+        for text in (median, looping_sibling, looping_sibling)
+    )
+
+
+def test_coincidental_probe_matches_do_not_void_the_round():
+    """Five ignore_eos prompts with looping forced siblings stay under the cap."""
+    looping_sibling = PROSE_TEXT + LOOP_TEXT
+    outputs = [_captured(f"r{i}", f"Prompt {i}", PROSE_TEXT) for i in range(5)]
+    natural_stops = {
+        output.request_id: _stop(output.request_id, PROSE_TEXT, probed=True)
+        for output in outputs
+    }
+    samples = {
+        output.request_id: (PROSE_TEXT, looping_sibling, looping_sibling)
+        for output in outputs
+    }
+    references = build_baseline_degeneracy_references(outputs, natural_stops, samples)
+    assert set(references) == {output.request_id for output in outputs}
+    assert references.dropped == {}
 
 
 def test_a_zero_for_three_baseline_still_disqualifies_a_looping_candidate(

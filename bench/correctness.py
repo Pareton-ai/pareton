@@ -671,9 +671,10 @@ def build_baseline_degeneracy_references(
     itself looped is the signal that separates those coin-flips from a
     patch-attributable 2/3-or-3/3 against a 0/3 baseline.
 
-    When ``stop.text`` is a separate ``ignore_eos`` probe it is not the
-    same artifact as the SLA samples. Those forced tails are allowed to
-    loop after the trusted stop, and only ``stop.text`` decides the drop.
+    When the natural stop came from the ``ignore_eos`` probe
+    (``NaturalStopReference.probed``), SLA samples are forced-length
+    and may loop after EOS. Only ``stop.text`` decides the drop; byte
+    equality with the median SLA output is not a path signal.
     """
     references: dict[str, BaselineDegeneracyReference] = {}
     dropped: dict[str, str] = {}
@@ -700,11 +701,11 @@ def build_baseline_degeneracy_references(
                 f"{captured.request_id!r}"
             )
         inspected = [stop.text]
-        # SLA reps are natural completions only when they are the same
-        # artifact the drop already trusted. Byte-equality with the median
-        # captured output is how capture_baseline_natural_stops records
-        # that this trace did not take the ignore_eos probe path.
-        if stop.text == captured.output_text:
+        # probed=True means the extra ignore_eos=false replay. Those
+        # SLA siblings are forced-length; a post-EOS loop is allowed
+        # and must not drop the prompt, even if the probe text happens
+        # to match the median SLA output byte-for-byte.
+        if not stop.probed:
             inspected.extend(samples)
         sample_reason = None
         for text in inspected:
