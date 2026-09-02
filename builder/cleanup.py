@@ -183,7 +183,9 @@ def evict_candidate_image(image_tag: str) -> bool:
     if not sep or name != repository or not _HEX_TAG.fullmatch(tag):
         raise ValueError(f"not a Pareton candidate image tag: {image_tag!r}")
     try:
-        with builder_storage_lock(blocking=True):
+        with builder_storage_lock(blocking=False) as acquired:
+            if not acquired:
+                return False
             proc = _run(["docker", "image", "rm", image_tag])
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"docker image rm timed out for {image_tag}") from exc
@@ -208,15 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        campaigns = _load_campaigns()
-    except Exception as exc:  # noqa: BLE001 - no DB means no safe cleanup.
-        logger.error("cleanup: campaign load failed; no Docker data changed: %s", exc)
-        return 1
-    try:
         with builder_storage_lock(blocking=False) as acquired:
             if not acquired:
                 logger.info("cleanup: build storage lock is busy; skip this run")
                 return 0
+            campaigns = _load_campaigns()
             result = cleanup_once(
                 campaigns, dry_run=bool(args.dry_run), force=bool(args.force)
             )

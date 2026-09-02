@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -124,6 +125,29 @@ def test_dry_run_and_database_failure_do_not_mutate(monkeypatch):
 
 
 @pytest.mark.unit
+def test_main_loads_campaigns_after_acquiring_lock(monkeypatch):
+    events = []
+
+    @contextmanager
+    def lock(**_kwargs):
+        events.append("lock")
+        yield True
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", lock)
+    monkeypatch.setattr(cleanup, "_load_campaigns", lambda: events.append("load") or [])
+    monkeypatch.setattr(
+        cleanup,
+        "cleanup_once",
+        lambda campaigns, **_kwargs: {
+            "usage_after_percent": 0,
+        },
+    )
+
+    assert cleanup.main([]) == 0
+    assert events == ["lock", "load"]
+
+
+@pytest.mark.unit
 def test_evict_rejects_non_candidate_and_removes_exact_candidate(monkeypatch, tmp_path):
     fake = DockerFake()
     monkeypatch.setattr(cleanup.subprocess, "run", fake)
@@ -132,6 +156,21 @@ def test_evict_rejects_non_candidate_and_removes_exact_candidate(monkeypatch, tm
         cleanup.evict_candidate_image("ghcr.io/pareton-ai/pareton-engine:baseline")
     assert cleanup.evict_candidate_image(_CANDIDATE) is True
     assert ["docker", "image", "rm", _CANDIDATE] in fake.calls
+
+
+@pytest.mark.unit
+def test_evict_skips_when_builder_storage_lock_is_busy(monkeypatch):
+    fake = DockerFake()
+
+    @contextmanager
+    def busy_lock(**_kwargs):
+        yield False
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", busy_lock)
+    monkeypatch.setattr(cleanup.subprocess, "run", fake)
+
+    assert cleanup.evict_candidate_image(_CANDIDATE) is False
+    assert fake.calls == []
 
 
 @pytest.mark.unit
