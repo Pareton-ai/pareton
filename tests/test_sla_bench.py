@@ -18,6 +18,7 @@ from bench.schemas import (
     TraceSampling,
     WorkloadTrace,
 )
+from bench.score import PromptTiming
 from bench.sla_bench import (
     _engine_metrics_from_reps,
     _median_rep_row,
@@ -354,3 +355,79 @@ def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
     assert references["forced"].text == "natural answer"
     evidence = tmp_path / "baseline_natural_stops.jsonl"
     assert json.loads(evidence.read_text(encoding="utf-8"))["request_id"] == ("forced")
+
+
+def test_median_rep_row_keeps_the_clean_mid_latency_on_a_one_in_three_loop():
+    """Round 10 hf-003 baseline: the 74s loop is not the graded artifact."""
+    rows = [
+        {
+            "e2e_ms": 74308.0,
+            "text": "loop",
+            "completion_tokens": 5120,
+            "finish_reason": "length",
+        },
+        {
+            "e2e_ms": 4421.8,
+            "text": "short",
+            "completion_tokens": 59,
+            "finish_reason": "stop",
+        },
+        {
+            "e2e_ms": 5643.6,
+            "text": "median",
+            "completion_tokens": 78,
+            "finish_reason": "stop",
+        },
+    ]
+    chosen = _median_rep_row(rows)
+    assert chosen["text"] == "median"
+    assert chosen["completion_tokens"] == 78
+
+
+def test_median_rep_row_keeps_a_short_loop_when_it_lands_mid_pack():
+    """Round 8 hf-026: finish_reason=repetition becomes the graded artifact."""
+    rows = [
+        {"e2e_ms": 1595.9, "text": "loop", "finish_reason": "repetition"},
+        {"e2e_ms": 1646.0, "text": "ok-long", "finish_reason": "stop"},
+        {"e2e_ms": 1586.8, "text": "ok-short", "finish_reason": "stop"},
+    ]
+    assert _median_rep_row(rows)["text"] == "loop"
+
+
+def test_natural_stop_is_byte_equal_to_the_median_output_without_ignore_eos(
+    tmp_path: Path,
+):
+    """This campaign's traces set no ignore_eos, so stop.text IS the median."""
+    median = (
+        "I'll start by exploring the repository structure...\n"
+        "<parameter=command>\nfind /redis-py -type f"
+    )
+    request = TraceRequest(
+        id="hf-003",
+        arrival_offset_ms=0,
+        max_tokens=5120,
+        sampling=TraceSampling(0.0, 1.0),
+        prompt="explore",
+    )
+    replay = SimpleNamespace(
+        result=SimpleNamespace(
+            timings={
+                "hf-003": PromptTiming(ttft_s=0.1, itl_s=[0.01], completion_tokens=78)
+            }
+        ),
+        outputs={"hf-003": median},
+    )
+    references = capture_baseline_natural_stops(
+        "http://unused",
+        requests=[request],
+        replay=replay,
+        evidence_dir=tmp_path,
+    )
+    assert references["hf-003"].text == median
+    assert references["hf-003"].text == replay.outputs["hf-003"]
+    assert references["hf-003"].completion_tokens == 78
+    evidence = json.loads(
+        (tmp_path / "baseline_natural_stops.jsonl").read_text(encoding="utf-8")
+    )
+    assert evidence["text"] == median
+    assert evidence["completion_tokens"] == 78
