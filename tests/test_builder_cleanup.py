@@ -86,6 +86,24 @@ def test_cleanup_retains_baselines_removes_candidates_and_preserves_ccache(
 
 
 @pytest.mark.unit
+def test_cleanup_continues_to_prune_after_candidate_removal_timeout(monkeypatch):
+    fake = DockerFake()
+
+    def run(cmd, **kwargs):
+        if list(cmd) == ["docker", "image", "rm", _CANDIDATE]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+        return fake(cmd, **kwargs)
+
+    monkeypatch.setattr(cleanup, "_run", run)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(80))
+
+    result = cleanup.cleanup_once([_campaign()])
+
+    assert result["pruned"] is True
+    assert any(cmd[:3] == ["docker", "image", "prune"] for cmd in fake.calls)
+
+
+@pytest.mark.unit
 def test_dry_run_and_database_failure_do_not_mutate(monkeypatch):
     fake = DockerFake()
     monkeypatch.setattr(cleanup.subprocess, "run", fake)
@@ -114,3 +132,18 @@ def test_evict_rejects_non_candidate_and_removes_exact_candidate(monkeypatch, tm
         cleanup.evict_candidate_image("ghcr.io/pareton-ai/pareton-engine:baseline")
     assert cleanup.evict_candidate_image(_CANDIDATE) is True
     assert ["docker", "image", "rm", _CANDIDATE] in fake.calls
+
+
+@pytest.mark.unit
+def test_evict_normalizes_docker_timeout(monkeypatch, tmp_path):
+    monkeypatch.setattr(cleanup.config, "BUILDER_LOCK_PATH", tmp_path / "lock")
+    monkeypatch.setattr(
+        cleanup,
+        "_run",
+        lambda cmd: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="docker image rm timed out"):
+        cleanup.evict_candidate_image(_CANDIDATE)

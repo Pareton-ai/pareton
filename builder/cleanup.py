@@ -110,7 +110,11 @@ def _remove_candidates(*, dry_run: bool) -> int:
     for ref in refs:
         logger.info("cleanup: remove local candidate %s", ref)
         if not dry_run:
-            proc = _run(["docker", "image", "rm", ref])
+            try:
+                proc = _run(["docker", "image", "rm", ref])
+            except subprocess.TimeoutExpired:
+                logger.warning("cleanup: candidate removal timed out for %s", ref)
+                continue
             if proc.returncode != 0:
                 logger.warning(
                     "cleanup: candidate removal failed for %s: %s",
@@ -178,8 +182,11 @@ def evict_candidate_image(image_tag: str) -> bool:
     name, sep, tag = str(image_tag).rpartition(":")
     if not sep or name != repository or not _HEX_TAG.fullmatch(tag):
         raise ValueError(f"not a Pareton candidate image tag: {image_tag!r}")
-    with builder_storage_lock(blocking=True):
-        proc = _run(["docker", "image", "rm", image_tag])
+    try:
+        with builder_storage_lock(blocking=True):
+            proc = _run(["docker", "image", "rm", image_tag])
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"docker image rm timed out for {image_tag}") from exc
     if proc.returncode == 0:
         return True
     message = proc.stderr or proc.stdout
