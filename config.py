@@ -38,6 +38,13 @@ WEIGHTS_ENABLED: bool = os.environ.get(
 POLL_INTERVAL_S: int = int(os.environ.get("PARETON_POLL_INTERVAL_S", "30"))
 CHAIN_RETRY_ATTEMPTS: int = int(os.environ.get("PARETON_CHAIN_RETRY_ATTEMPTS", "3"))
 CHAIN_RETRY_DELAY_S: int = int(os.environ.get("PARETON_CHAIN_RETRY_DELAY_S", "30"))
+# Workers hold a shared lock while they own a gates/build/round cycle. The
+# deploy process takes the same lock exclusively before changing the checkout.
+WORKER_ACTIVITY_LOCK_PATH: Path = Path(
+    os.environ.get(
+        "PARETON_WORKER_ACTIVITY_LOCK_PATH", "/run/pareton-worker-activity.lock"
+    )
+).resolve()
 
 
 def _optional_utc_datetime(raw: str) -> datetime | None:

@@ -8,6 +8,10 @@ Type=oneshot
 # Runs the /usr/local/bin copy, not the repo copy, so a git pull cannot
 # rewrite the script while bash is executing it.
 ExecStart=/usr/local/bin/pareton-deploy
+# A requirements install can exceed systemd's host default. If this limit is
+# still reached, deploy.sh has already stopped the worker and the next tick
+# safely retries instead of letting it run on a partial environment.
+TimeoutStartSec=30min
 Nice=10
 
 [Install]

@@ -15,11 +15,13 @@ import logging
 import signal
 import sys
 import threading
+from contextlib import nullcontext
 
 import config
 from campaign.store import claim_next_job, count_pending_jobs
 from observability.events import heartbeat as _heartbeat
 from round.store import claim_pending_round
+from worker.activity import shared_activity_lock
 from worker.pipeline import process_submission
 from worker.round_job import process_round
 
@@ -28,6 +30,11 @@ logger = logging.getLogger(__name__)
 # Heartbeats must continue while a long gates/build/bench job blocks the main
 # loop, otherwise the 15-minute heartbeat-absent monitor pages on healthy work.
 HEARTBEAT_INTERVAL_S = 300.0
+
+
+def _unlocked_activity(_drain: threading.Event):
+    """Test/default guard; production main passes the host activity lock."""
+    return nullcontext(True)
 
 
 def _queue_depth() -> int | None:
@@ -104,10 +111,18 @@ def run_once(
     return True
 
 
-def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:
-    """Run work cycles until drain is set; idle sleep wakes early on drain."""
+def _run_loop(
+    cycle,
+    drain: threading.Event,
+    poll_interval_s: float,
+    activity_lock=_unlocked_activity,
+) -> None:
+    """Run lock-protected work cycles; idle sleep wakes early on drain."""
     while not drain.is_set():
-        did = cycle()
+        with activity_lock(drain) as acquired:
+            if not acquired or drain.is_set():
+                break
+            did = cycle()
         if not did:
             drain.wait(poll_interval_s)
 
@@ -190,10 +205,17 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _request_drain)
 
     if args.once:
-        _cycle()
+        with shared_activity_lock(drain) as acquired:
+            if acquired and not drain.is_set():
+                _cycle()
         return 0
 
-    _run_loop(_cycle, drain, config.POLL_INTERVAL_S)
+    _run_loop(
+        _cycle,
+        drain,
+        config.POLL_INTERVAL_S,
+        activity_lock=shared_activity_lock,
+    )
     logger.info("drain complete; exiting")
     return 0
 
