@@ -566,6 +566,19 @@ def test_round_infra_error_carries_void_reason():
     assert err.reason == VOID_LEADER_IMAGE_MISSING
 
 
+def test_void_log_includes_infrastructure_detail(monkeypatch, caplog):
+    monkeypatch.setattr(round_job, "void_round", lambda *_a, **_k: True)
+    monkeypatch.setattr(round_job.obs, "round_voided", lambda **_k: None)
+
+    round_job._void(
+        _round_row(),
+        "leader_infra_failed",
+        "docker pull failed: registry timeout",
+    )
+
+    assert "leader_infra_failed: docker pull failed: registry timeout" in caplog.text
+
+
 def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monkeypatch):
     """A disqualified incumbent has no in-round score; the history row must
     still carry the score it won with, from leaders.last_score."""

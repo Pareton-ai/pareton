@@ -37,6 +37,7 @@ _DEFAULT_HEALTH_POLL_S = 2.0
 _DEFAULT_ENGINE_PORT = 8000
 _DEFAULT_PULL_TIMEOUT_S = 1800.0
 _DEFAULT_CMD_TIMEOUT_S = 120.0
+_PULL_ATTEMPTS = 3
 
 
 def ensure_listen_args(serve_args: Sequence[str], port: int) -> list[str]:
@@ -304,6 +305,81 @@ def resolve_image_digest(
     return normalize_image_id(id_result.stdout)
 
 
+def pull_image(
+    image: str,
+    *,
+    runner: DockerRunner,
+    pull_timeout_s: float,
+    cmd_timeout_s: float,
+) -> None:
+    """Pull within one total budget, tolerating registry failure when safe."""
+    pinned = extract_digest_from_image_ref(image)
+    last_result: DockerResult | None = None
+    last_error: EngineError | None = None
+    deadline = time.monotonic() + pull_timeout_s
+    for attempt in range(1, _PULL_ATTEMPTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        attempt_timeout = pull_timeout_s if attempt == 1 else remaining
+        try:
+            last_result = runner(["docker", "pull", image], timeout=attempt_timeout)
+            last_error = None
+        except EngineError as exc:
+            last_result = None
+            last_error = exc
+        if last_result is not None and last_result.returncode == 0:
+            return
+
+        detail = (
+            str(last_error)
+            if last_error is not None
+            else (last_result.stderr.strip() or last_result.stdout)
+        )
+        if pinned is not None:
+            try:
+                cached = runner(
+                    ["docker", "image", "inspect", image],
+                    timeout=cmd_timeout_s,
+                )
+                if cached.returncode == 0:
+                    logger.warning(
+                        "docker pull failed for %s; using cached "
+                        "digest-pinned image: %s",
+                        image,
+                        detail,
+                    )
+                    return
+            except EngineError:
+                pass
+
+        remaining = deadline - time.monotonic()
+        if attempt < _PULL_ATTEMPTS and remaining > 0:
+            delay = min(float(2**attempt), remaining)
+            logger.warning(
+                "docker pull failed for %s (attempt %d/%d); retrying in %.0fs: %s",
+                image,
+                attempt,
+                _PULL_ATTEMPTS,
+                delay,
+                detail,
+            )
+            time.sleep(delay)
+
+    if last_error is not None:
+        raise EngineError(
+            f"docker pull failed for {image!r}: {last_error}"
+        ) from last_error
+    if last_result is None:
+        raise EngineError(
+            f"docker pull failed for {image!r}: timed out after {pull_timeout_s}s"
+        )
+    raise_docker_failure(
+        f"docker pull failed for {image!r}",
+        last_result.stderr.strip() or last_result.stdout,
+    )
+
+
 def container_ip_on_network(
     container_id: str,
     network_name: str,
@@ -552,15 +628,12 @@ class EngineContainer:
         assert self.cmd_timeout_s is not None
 
         if self.pull:
-            pull_result = self.runner(
-                ["docker", "pull", self.spec.image],
-                timeout=self.pull_timeout_s,
+            pull_image(
+                self.spec.image,
+                runner=self.runner,
+                pull_timeout_s=self.pull_timeout_s,
+                cmd_timeout_s=self.cmd_timeout_s,
             )
-            if pull_result.returncode != 0:
-                raise_docker_failure(
-                    f"docker pull failed for {self.spec.image!r}",
-                    pull_result.stderr.strip() or pull_result.stdout,
-                )
 
         image_digest = resolve_image_digest(
             self.spec.image,
