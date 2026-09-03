@@ -479,6 +479,74 @@ def test_read_pod_phase_caps_the_bytes_it_reads(tmp_path: Path):
     assert "/opt/pareton/out/phase.json" in commands[0]
 
 
+def test_read_pod_entry_statuses_sanitizes_untrusted_payload(tmp_path: Path):
+    from gpu.orchestrate import read_pod_entry_statuses
+
+    pod = _fake_pod(tmp_path)
+    payloads: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, payloads.pop(0), "")
+
+    payloads.append(
+        json.dumps(
+            {
+                "entries": {
+                    "baseline": {"status": "scored", "reason": None},
+                    "0": {"status": "infra_failed", "reason": "docker pull failed"},
+                    "1": {"status": "running"},
+                    "evil key": {"status": "scored"},
+                    "2": {"status": "owned"},  # not in the status vocabulary
+                    "3": "not a dict",
+                    # The harness never streams a candidate verdict of scored:
+                    # forged, and accepting it would settle the challenger.
+                    "4": {"status": "scored"},
+                }
+            }
+        )
+    )
+    assert read_pod_entry_statuses(pod, remote_out="/o", runner=runner) == {
+        "baseline": {"status": "scored", "reason": None},
+        "0": {"status": "infra_failed", "reason": "docker pull failed"},
+        "1": {"status": "running", "reason": None},
+    }
+
+    payloads.append("not json at all")
+    assert read_pod_entry_statuses(pod, remote_out="/o", runner=runner) is None
+
+    # An older harness writes no beacon: no entries, not an error.
+    payloads.append(json.dumps({"phase": "sla_bench"}))
+    assert read_pod_entry_statuses(pod, remote_out="/o", runner=runner) is None
+
+
+def test_pod_phase_poller_relays_entry_statuses_once_per_change(tmp_path: Path):
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    phases: list[str] = []
+    status_calls: list[dict] = []
+    record = {"entries": {"0": {"status": "infra_failed", "reason": "x"}}}
+
+    def runner(cmd, *, timeout, input_text=None):
+        if "entry_status.json" in cmd[-1]:
+            return SshResult(0, json.dumps(record), "")
+        return SshResult(0, json.dumps({"phase": "sla_bench"}), "")
+
+    poller = _PodPhasePoller(
+        pod,
+        remote_out="/o",
+        on_phase=lambda phase, **kw: phases.append(phase),
+        runner=runner,
+        interval_s=60.0,
+        on_entry_status=status_calls.append,
+    )
+    poller.poll_once()
+    poller.poll_once()
+    assert phases == ["sla_bench", "sla_bench"]
+    # Same payload on the second poll: not relayed again.
+    assert status_calls == [{"0": {"status": "infra_failed", "reason": "x"}}]
+
+
 def test_pod_phase_poller_relays_and_survives_ssh_failure(tmp_path: Path):
     from gpu.errors import GpuError
     from gpu.orchestrate import _PodPhasePoller
@@ -520,6 +588,33 @@ def test_pod_phase_poller_does_not_relay_after_stop(tmp_path: Path):
     poller.__exit__(None, None, None)
     poller.poll_once()
     assert seen == []
+
+
+def test_pod_phase_poller_final_read_relays_entry_statuses_after_stop(tmp_path: Path):
+    """The post-exit read lands a terminal status written between polls."""
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[dict] = []
+    payload = {"entries": {"0": {"status": "running"}}, "at": "t0"}
+
+    def runner(cmd, *, timeout, input_text=None):
+        if "entry_status.json" in cmd[-1]:
+            return SshResult(0, json.dumps(payload), "")
+        return SshResult(0, json.dumps({"phase": "sla_bench"}), "")
+
+    poller = _PodPhasePoller(
+        pod,
+        remote_out="/o",
+        on_phase=lambda *a, **k: None,
+        runner=runner,
+        interval_s=60.0,
+        on_entry_status=seen.append,
+    )
+    poller.__exit__(None, None, None)
+    payload["entries"]["0"]["status"] = "infra_failed"
+    poller.final_read()
+    assert seen[-1]["0"]["status"] == "infra_failed"
 
 
 def test_pod_phase_poller_polls_immediately(tmp_path: Path):

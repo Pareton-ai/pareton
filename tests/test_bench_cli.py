@@ -137,6 +137,219 @@ def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
     assert by_index[2]["score"] > by_index[1]["score"]
 
 
+def test_cli_mock_leader_failure_skips_remaining_candidates(tmp_path: Path):
+    """A leader infra failure voids the round at ranking time, so benching the
+    rest of the cohort would only burn pod hours: the harness skips them."""
+    req = _write_request(tmp_path, candidates=4, leader_candidate_index=1)
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.004",
+            "--mock-candidates",
+            json.dumps(
+                [
+                    {"speed_factor": 1.1},
+                    {"infra_fail": True},
+                    {"speed_factor": 1.2},
+                    {"speed_factor": 1.3},
+                ]
+            ),
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    from bench.validate import validate_report_dict
+
+    validate_report_dict(report)
+    by_index = {e["index"]: e for e in report["entries"]}
+    assert len(by_index) == 4
+    # Ran before the leader leg, so it was benched and graded for real.
+    assert by_index[0]["status"] == "scored"
+    assert by_index[1]["status"] == "infra_failed"
+    assert "failed to start" in by_index[1]["reason"]
+    # Never started: recorded as skipped, not benched.
+    assert by_index[2]["status"] == "infra_failed"
+    assert by_index[2]["reason"] == "skipped: leader candidate infra failed"
+    assert by_index[3]["reason"] == "skipped: leader candidate infra failed"
+    # The closing baseline leg still ran, so the report stays schema-complete.
+    assert report["baseline_drift"] is not None
+    assert report["drift_baseline"]["role"] == "baseline-drift"
+
+    # Leg outcomes were streamed as they happened, not only at the end.
+    streamed = json.loads((out / "entry_status.json").read_text(encoding="utf-8"))
+    entries = streamed["entries"]
+    assert entries["baseline"]["status"] == "scored"
+    assert entries["0"]["status"] == "running"  # SLA ok, correctness pending
+    assert entries["1"]["status"] == "infra_failed"
+    assert entries["2"]["reason"] == "skipped: leader candidate infra failed"
+
+
+def test_cli_mock_leader_first_leg_failure_skips_the_whole_cohort(tmp_path: Path):
+    req = _write_request(tmp_path, candidates=3, leader_candidate_index=0)
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.004",
+            "--mock-candidates",
+            json.dumps(
+                [
+                    {"infra_fail": True},
+                    {"speed_factor": 1.2},
+                    {"crash": True},
+                ]
+            ),
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    by_index = {e["index"]: e for e in report["entries"]}
+    assert by_index[0]["status"] == "infra_failed"
+    assert "failed to start" in by_index[0]["reason"]
+    # The scripted crash never ran: candidate 2 is reported skipped, not
+    # disqualified.
+    assert by_index[1]["reason"] == "skipped: leader candidate infra failed"
+    assert by_index[2]["reason"] == "skipped: leader candidate infra failed"
+
+
+def test_scorer_baseline_abort_streams_no_candidate_verdict(
+    tmp_path: Path, monkeypatch
+):
+    """A scorer that cannot grade the baseline is harness fault: the round
+    voids and nobody is judged. A candidate DQ streamed before that abort
+    would survive the void and keep the challenger off the queue."""
+    import types
+    from contextlib import contextmanager
+
+    import pytest
+
+    import bench.main as bm
+    from bench.output import OutputLayout
+    from bench.validate import validate_bench_request_dict
+
+    req_dict = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req_dict["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_dict["correctness"]["thresholds"]["max_mean_logprob_drop"] = 1.5
+    req = validate_bench_request_dict(req_dict)
+
+    replay = types.SimpleNamespace(
+        result=types.SimpleNamespace(timings={}), outputs={}, output_samples={}
+    )
+    monkeypatch.setattr(bm, "run_sla_engine", lambda *a, **k: replay)
+    monkeypatch.setattr(bm, "capture_baseline_natural_stops", lambda *a, **k: [])
+    monkeypatch.setattr(bm, "capture_outputs", lambda *a, **k: {})
+    monkeypatch.setattr(
+        bm, "build_baseline_degeneracy_references", lambda *a, **k: None
+    )
+
+    def fake_grade_all(*a, **k):
+        return {
+            bm.BASELINE_INDEX: types.SimpleNamespace(
+                verdict="fail_correctness", reason="baseline garbage"
+            ),
+            0: types.SimpleNamespace(
+                verdict="fail_correctness", reason="candidate garbage"
+            ),
+        }
+
+    monkeypatch.setattr(bm, "grade_all", fake_grade_all)
+
+    class _FakeProvider:
+        @contextmanager
+        def start(self, start, *, phase):
+            yield "http://127.0.0.1:1"
+
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    trace = types.SimpleNamespace(requests=[])
+
+    with pytest.raises(bm.EngineError, match="scorer could not grade the baseline"):
+        bm.run_round(
+            req=req,
+            provider=_FakeProvider(),
+            prompts=[],
+            trace=trace,
+            layout=layout,
+        )
+
+    streamed = json.loads(layout.entry_status_path.read_text(encoding="utf-8"))[
+        "entries"
+    ]
+    # The candidate's leg started, but its failing verdict was never streamed:
+    # the harness-fault abort judges nobody.
+    assert streamed["0"]["status"] == "running"
+    assert streamed["baseline"]["status"] == "scored"
+
+
+def test_leader_crash_short_circuits_and_streams_infra_failed(
+    tmp_path: Path, monkeypatch
+):
+    """An incumbent crash is remapped to infra_failed at settlement and voids
+    the round, so the harness skips the rest of the cohort and streams the
+    same infra_failed status the worker would write."""
+    import types
+    from contextlib import contextmanager
+
+    import bench.main as bm
+    from bench.output import OutputLayout
+    from bench.validate import validate_bench_request_dict
+
+    req_dict = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req_dict["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_dict["engines"]["candidates"].append(dict(req_dict["engines"]["candidates"][0]))
+    req_dict["leader_candidate_index"] = 0
+    req = validate_bench_request_dict(req_dict)
+
+    replay = types.SimpleNamespace(
+        result=types.SimpleNamespace(timings={}), outputs={}, output_samples={}
+    )
+
+    def fake_run(url, *, role, requests, cfg, evidence_dir):
+        if role == "candidate-0":
+            raise bm.EngineCrashedError("leader engine died")
+        return replay
+
+    monkeypatch.setattr(bm, "run_sla_engine", fake_run)
+    monkeypatch.setattr(bm, "capture_baseline_natural_stops", lambda *a, **k: [])
+    monkeypatch.setattr(bm, "capture_outputs", lambda *a, **k: {})
+    monkeypatch.setattr(
+        bm, "build_baseline_degeneracy_references", lambda *a, **k: None
+    )
+
+    class _FakeProvider:
+        @contextmanager
+        def start(self, start, *, phase):
+            yield "http://127.0.0.1:1"
+
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    trace = types.SimpleNamespace(requests=[])
+
+    bm.run_round(
+        req=req, provider=_FakeProvider(), prompts=[], trace=trace, layout=layout
+    )
+
+    streamed = json.loads(layout.entry_status_path.read_text(encoding="utf-8"))[
+        "entries"
+    ]
+    # The crashed leader streams infra_failed, matching the settlement remap,
+    # and the remaining candidate is skipped rather than benched.
+    assert streamed["0"]["status"] == "infra_failed"
+    assert streamed["1"]["status"] == "infra_failed"
+    assert "skipped" in streamed["1"]["reason"]
+
+
 def test_cli_mock_candidates_requires_mock_engine(tmp_path: Path):
     req = _write_request(tmp_path)
     out = tmp_path / "out"

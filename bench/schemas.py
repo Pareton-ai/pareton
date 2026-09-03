@@ -291,24 +291,40 @@ class BenchRequest:
     sla_bench: SlaBenchConfig
     scoring_rule: dict[str, Any] = field(default_factory=dict)
     hf_token_env: str = "HF_TOKEN"
+    # Which candidate (index into engines.candidates) holds the crown, if any.
+    # A leader infra failure voids the round at ranking time, so the harness
+    # skips the rest of the cohort once that leg fails. None keeps the old
+    # behavior: every candidate is benched.
+    leader_candidate_index: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
         mode = d.get("mode", "all")
         if mode not in ("all", "sla_bench"):
             raise ValueError(f"mode must be one of all|sla_bench, got {mode!r}")
+        engines = EnginesSpec.from_dict(d["engines"])
+        leader_index_raw = d.get("leader_candidate_index")
+        leader_index: int | None = None
+        if leader_index_raw is not None:
+            leader_index = int(leader_index_raw)
+            if leader_index < 0 or leader_index >= len(engines.candidates):
+                raise ValueError(
+                    f"leader_candidate_index {leader_index} out of range for "
+                    f"{len(engines.candidates)} candidate(s)"
+                )
         return cls(
             schema_version=int(d["schema_version"]),
             task_id=str(d["task_id"]),
             mode=mode,  # type: ignore[arg-type]
             model=ModelSpec.from_dict(d["model"]),
             hardware=HardwareSpec.from_dict(d["hardware"]),
-            engines=EnginesSpec.from_dict(d["engines"]),
+            engines=engines,
             workload_trace=WorkloadTraceRef.from_dict(d["workload_trace"]),
             correctness=CorrectnessConfig.from_dict(d["correctness"]),
             sla_bench=SlaBenchConfig.from_dict(d["sla_bench"]),
             scoring_rule=dict(d.get("scoring_rule") or {}),
             hf_token_env=str(d.get("hf_token_env") or "HF_TOKEN"),
+            leader_candidate_index=leader_index,
         )
 
     def to_dict(self) -> dict[str, Any]:

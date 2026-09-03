@@ -24,6 +24,7 @@ from campaign.exclusion import (
 from db.connection import db_connection
 from gate.types import SubmissionState
 from round.rank import (
+    ENTRY_STATUSES,
     EVENT_OVERTAKEN,
     EVENT_SEATED,
     EVENT_VACATED,
@@ -308,10 +309,19 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
 def _requeue_challengers(cur: Any, round_id: Any, void_reason: str) -> None:
     """Put unsettled challenger entries back on the round queue.
 
-    Terminal entries are already judged; requeueing them would resurrect a
-    disqualified or scored submission. infra_failed is not terminal: it gets
-    its one requeue. SETTLED_STATUSES is the do-not-requeue test.
+    A voided round never reached settlement, so a disqualified entry can only
+    be a live-streamed pod report, not a verdict: reset it first or the
+    requeue would strand the challenger. infra_failed is not terminal: it
+    gets its one requeue. SETTLED_STATUSES is the do-not-requeue test.
     """
+    cur.execute(
+        """
+        UPDATE round_entries
+        SET status = 'pending', disqualify_reason = NULL
+        WHERE round_id = %s AND status = 'disqualified'
+        """,
+        (str(round_id),),
+    )
     cur.execute(
         """
         INSERT INTO submission_events (submission_id, state, detail)
@@ -450,6 +460,62 @@ def touch_round_heartbeat(*, round_id: UUID | str) -> bool:
             return cur.rowcount > 0
 
 
+def _lock_running_round(cur: Any, round_id: UUID | str) -> bool:
+    """Take the rounds row lock if the round is still running.
+
+    Live updates, void, stale reap, and settlement all take this lock
+    first so they never deadlock and a late poll cannot read a stale
+    running snapshot while a void is in flight.
+    """
+    cur.execute(
+        """
+        SELECT id FROM rounds
+        WHERE id = %s AND status = 'running'
+        FOR UPDATE
+        """,
+        (str(round_id),),
+    )
+    return cur.fetchone() is not None
+
+
+def update_round_entry_live_status(
+    *,
+    entry_id: int,
+    status: str,
+    reason: str | None = None,
+) -> bool:
+    """Pod-reported mid-round progress for one entry. Returns whether it landed.
+
+    Forward-only: a pending/running row moves to the reported status, a
+    settled row is left alone. Locks the owning running round first so a
+    concurrent void cannot be missed as a stale snapshot, and so every
+    writer uses the same round-first lock order. Settlement
+    (complete_round) stays the authority and can still overwrite whatever
+    a pod reported.
+    """
+    if status not in ENTRY_STATUSES:
+        raise ValueError(f"unknown entry status {status!r}")
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT round_id FROM round_entries WHERE id = %s",
+                (int(entry_id),),
+            )
+            row = cur.fetchone()
+            if row is None or not _lock_running_round(cur, row[0]):
+                return False
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = %s,
+                    disqualify_reason = COALESCE(%s, disqualify_reason)
+                WHERE id = %s AND status IN ('pending', 'running')
+                """,
+                (status, reason, int(entry_id)),
+            )
+            return cur.rowcount > 0
+
+
 def complete_round(
     *,
     round_id: UUID | str,
@@ -470,6 +536,11 @@ def complete_round(
     """
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Round-first lock, same order as void/reap/live-status. Claiming
+            # here also makes a concurrent void return False before any
+            # entry write, instead of rolling back after the fact.
+            if not _lock_running_round(cur, round_id):
+                return False
             for entry in entries:
                 report = entry.get("report") or {}
                 cur.execute(

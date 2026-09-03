@@ -18,6 +18,7 @@ def _utc_now_iso() -> str:
 
 
 PHASE_FILENAME = "phase.json"
+ENTRY_STATUS_FILENAME = "entry_status.json"
 
 
 class OutputLayout:
@@ -43,6 +44,7 @@ class OutputLayout:
         self.report_path = self.root / "bench_report.json"
         self.log_path = self.root / "harness.log"
         self.phase_path = self.root / PHASE_FILENAME
+        self.entry_status_path = self.root / ENTRY_STATUS_FILENAME
 
     def prepare(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -102,6 +104,21 @@ class OutputLayout:
             )  # atomic: a poll never reads a half-written file
         except OSError as exc:
             logger.warning("failed to write phase marker %s: %s", phase, exc)
+
+    def write_entry_statuses(self, statuses: dict[str, Any]) -> None:
+        """Atomic per-entry progress beacon for the worker to poll.
+
+        Keys are ``"baseline"`` or a decimal candidate index; values carry
+        ``status`` and optionally ``reason``. Failures are logged, never
+        raised: progress must not fail a bench.
+        """
+        record: dict[str, Any] = {"entries": statuses, "at": _utc_now_iso()}
+        try:
+            tmp = self.entry_status_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(record, default=str) + "\n", encoding="utf-8")
+            tmp.replace(self.entry_status_path)
+        except OSError as exc:
+            logger.warning("failed to write entry status marker: %s", exc)
 
 
 class JsonlFileHandler(logging.Handler):

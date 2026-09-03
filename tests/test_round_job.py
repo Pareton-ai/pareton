@@ -142,6 +142,51 @@ def test_build_round_request_maps_candidates_in_entry_order(tmp_path):
     assert "perf_screen" not in req
 
 
+def test_build_round_request_names_the_leader_candidate(tmp_path):
+    """The harness short-circuits a doomed round on this index."""
+    trace = tmp_path / "trace.json"
+    raw = _write_trace(trace)
+    row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    req = build_round_request(
+        row, _campaign(), _entries(), task_id=str(uuid4()), trace_path=str(trace)
+    )
+    # _entries() orders baseline, leader, challenger: the leader is the first
+    # non-baseline entry, so candidate index 0.
+    assert req["leader_candidate_index"] == 0
+
+    no_leader = [e for e in _entries() if e["role"] != "leader"]
+    req = build_round_request(
+        row, _campaign(), no_leader, task_id=str(uuid4()), trace_path=str(trace)
+    )
+    assert req["leader_candidate_index"] is None
+
+
+def test_entry_status_writer_maps_pod_keys_to_entry_ids(monkeypatch):
+    from worker import round_job as rj
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        rj,
+        "update_round_entry_live_status",
+        lambda **kw: calls.append(kw) or True,
+    )
+    write = rj._round_entry_status_writer(_entries())
+    write(
+        {
+            "baseline": {"status": "scored", "reason": None},
+            "0": {"status": "infra_failed", "reason": "docker pull failed"},
+            "1": {"status": "running"},
+            "9": {"status": "scored"},  # no such candidate: dropped
+            "junk": {"status": "scored"},  # not a key the harness sends
+        }
+    )
+    assert calls == [
+        {"entry_id": 1, "status": "scored", "reason": None},
+        {"entry_id": 2, "status": "infra_failed", "reason": "docker pull failed"},
+        {"entry_id": 3, "status": "running", "reason": None},
+    ]
+
+
 def test_build_round_request_forwards_the_relative_quality_bar(tmp_path):
     """A quality bar pinned in the manifest has to reach the pod."""
     trace = tmp_path / "trace.json"
