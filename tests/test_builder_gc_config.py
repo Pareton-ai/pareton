@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import config
@@ -24,8 +26,11 @@ def test_daemon_gc_must_be_disabled():
 
 
 @pytest.mark.unit
-def test_committed_daemon_config_preserves_ccache():
-    validate_daemon_gc_file(config.REPO_ROOT / "ops" / "docker" / "daemon.json")
+def test_committed_daemon_config_preserves_ccache_without_selecting_image_store():
+    path = config.REPO_ROOT / "ops" / "docker" / "daemon.json"
+    validate_daemon_gc_file(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert "containerd-snapshotter" not in data.get("features", {})
 
 
 @pytest.mark.unit
