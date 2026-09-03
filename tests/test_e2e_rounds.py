@@ -373,7 +373,6 @@ def test_stale_round_voids_and_requeues_challengers_only():
             )
             before = cur.fetchone()[0]
     leader_state_before = _latest_state(leader_sid)
-    dq_state_before = _latest_state(dq_sid)
 
     voided = reap_stale_rounds(1800)
 
@@ -391,7 +390,11 @@ def test_stale_round_voids_and_requeues_challengers_only():
     assert state == "bench_queued"
     assert detail["void_reason"] == "heartbeat_stale"
     assert _latest_state(leader_sid) == leader_state_before
-    assert _latest_state(dq_sid) == dq_state_before
+    # A DQ on a still-running round is only a live-streamed pod report, never
+    # a settlement verdict: the void requeues it like any unsettled entry.
+    state, detail = _latest_state(dq_sid)
+    assert state == "bench_queued"
+    assert detail["void_reason"] == "heartbeat_stale"
 
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
@@ -928,6 +931,39 @@ def test_void_leaves_leader_untouched_and_requeues_challengers():
     assert status == "void"
     assert reason == VOID_POD_FAILED
     assert winner is None
+
+
+def test_void_reverts_live_streamed_disqualification():
+    """A live-streamed DQ is provisional: settlement never ran on a voided
+    round, so the entry goes back to pending and the challenger requeues."""
+    campaign_id = _campaign()
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = 'disqualified', disqualify_reason = 'live: crashed'
+                WHERE round_id = %s AND role = 'challenger'
+                """,
+                (rid,),
+            )
+    assert void_round(rid, VOID_POD_FAILED)
+    state, _detail = _latest_state(challenger)
+    assert state == "bench_queued"
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, disqualify_reason FROM round_entries "
+                "WHERE round_id = %s AND role = 'challenger'",
+                (rid,),
+            )
+            row = cur.fetchone()
+    assert row == ("pending", None)
 
 
 def test_complete_seats_first_leader():

@@ -292,6 +292,64 @@ def test_scorer_baseline_abort_streams_no_candidate_verdict(
     assert streamed["baseline"]["status"] == "scored"
 
 
+def test_leader_crash_short_circuits_and_streams_infra_failed(
+    tmp_path: Path, monkeypatch
+):
+    """An incumbent crash is remapped to infra_failed at settlement and voids
+    the round, so the harness skips the rest of the cohort and streams the
+    same infra_failed status the worker would write."""
+    import types
+    from contextlib import contextmanager
+
+    import bench.main as bm
+    from bench.output import OutputLayout
+    from bench.validate import validate_bench_request_dict
+
+    req_dict = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req_dict["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_dict["engines"]["candidates"].append(dict(req_dict["engines"]["candidates"][0]))
+    req_dict["leader_candidate_index"] = 0
+    req = validate_bench_request_dict(req_dict)
+
+    replay = types.SimpleNamespace(
+        result=types.SimpleNamespace(timings={}), outputs={}, output_samples={}
+    )
+
+    def fake_run(url, *, role, requests, cfg, evidence_dir):
+        if role == "candidate-0":
+            raise bm.EngineCrashedError("leader engine died")
+        return replay
+
+    monkeypatch.setattr(bm, "run_sla_engine", fake_run)
+    monkeypatch.setattr(bm, "capture_baseline_natural_stops", lambda *a, **k: [])
+    monkeypatch.setattr(bm, "capture_outputs", lambda *a, **k: {})
+    monkeypatch.setattr(
+        bm, "build_baseline_degeneracy_references", lambda *a, **k: None
+    )
+
+    class _FakeProvider:
+        @contextmanager
+        def start(self, start, *, phase):
+            yield "http://127.0.0.1:1"
+
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    trace = types.SimpleNamespace(requests=[])
+
+    bm.run_round(
+        req=req, provider=_FakeProvider(), prompts=[], trace=trace, layout=layout
+    )
+
+    streamed = json.loads(layout.entry_status_path.read_text(encoding="utf-8"))[
+        "entries"
+    ]
+    # The crashed leader streams infra_failed, matching the settlement remap,
+    # and the remaining candidate is skipped rather than benched.
+    assert streamed["0"]["status"] == "infra_failed"
+    assert streamed["1"]["status"] == "infra_failed"
+    assert "skipped" in streamed["1"]["reason"]
+
+
 def test_cli_mock_candidates_requires_mock_engine(tmp_path: Path):
     req = _write_request(tmp_path)
     out = tmp_path / "out"

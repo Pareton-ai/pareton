@@ -610,13 +610,18 @@ def run_round(
                 runs.append(
                     _CandidateRun(index=index, status="disqualified", reason=str(exc))
                 )
-                note(str(index), "disqualified", str(exc))
                 if leader_index is not None and index == leader_index:
+                    # Settlement remaps an incumbent crash to infra_failed and
+                    # voids the round (entry_results_from_report), so stream
+                    # the same status and skip the legs settlement discards.
+                    note(str(index), "infra_failed", str(exc))
                     leader_failed = True
                     logger.warning(
                         "leader candidate %d failed; skipping remaining candidates",
                         index,
                     )
+                else:
+                    note(str(index), "disqualified", str(exc))
                 continue
             except EngineError as exc:
                 # One candidate failing to run is that entry's problem, not

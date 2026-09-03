@@ -754,6 +754,17 @@ def void_round(round_id: UUID | str, reason: str) -> bool:
             landed = cur.fetchone() is not None
             if not landed:
                 return False
+            # A voided round never reached settlement, so a disqualified entry
+            # can only be a live-streamed pod report, not a verdict. Reset it
+            # or the requeue below would strand the challenger.
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = 'pending', disqualify_reason = NULL
+                WHERE round_id = %s AND status = 'disqualified'
+                """,
+                (str(round_id),),
+            )
             _requeue_challengers(cur, round_id, reason)
     return True
 

@@ -694,6 +694,15 @@ class _PodPhasePoller:
         self._thread.start()
         return self
 
+    def final_read(self) -> None:
+        """One last entry-status read after the harness ssh returns.
+
+        The blocking return can beat the last poll interval; without this a
+        fast terminal failure between intervals never reaches the database.
+        Phase relay stays stop-guarded: the worker owns the phase from here.
+        """
+        self._poll_entry_statuses()
+
     def __exit__(self, *exc: object) -> None:
         with self._lock:
             self._stop.set()
@@ -845,14 +854,15 @@ def run_bench_on_pod(
                 f"--request {REMOTE_REQUEST} --output-dir {remote_out}{mock_flag}"
             )
             # ssh exec does not stream; poll the harness marker while it blocks.
-            with _PodPhasePoller(
+            poller = _PodPhasePoller(
                 pod,
                 remote_out=remote_out,
                 on_phase=phase,
                 runner=runner,
                 state_dir=registry.state_dir,
                 on_entry_status=on_entry_status,
-            ):
+            )
+            with poller:
                 result = ssh_exec(
                     pod,
                     bench_cmd,
@@ -865,6 +875,9 @@ def run_bench_on_pod(
                     state_dir=registry.state_dir,
                     check=False,
                 )
+            # The ssh return can beat the last poll interval; read the entry
+            # beacon one final time so a fast terminal failure still lands.
+            poller.final_read()
             if result.stdout:
                 print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
             if result.stderr:

@@ -587,6 +587,33 @@ def test_pod_phase_poller_does_not_relay_after_stop(tmp_path: Path):
     assert seen == []
 
 
+def test_pod_phase_poller_final_read_relays_entry_statuses_after_stop(tmp_path: Path):
+    """The post-exit read lands a terminal status written between polls."""
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[dict] = []
+    payload = {"entries": {"0": {"status": "running"}}, "at": "t0"}
+
+    def runner(cmd, *, timeout, input_text=None):
+        if "entry_status.json" in cmd[-1]:
+            return SshResult(0, json.dumps(payload), "")
+        return SshResult(0, json.dumps({"phase": "sla_bench"}), "")
+
+    poller = _PodPhasePoller(
+        pod,
+        remote_out="/o",
+        on_phase=lambda *a, **k: None,
+        runner=runner,
+        interval_s=60.0,
+        on_entry_status=seen.append,
+    )
+    poller.__exit__(None, None, None)
+    payload["entries"]["0"]["status"] = "infra_failed"
+    poller.final_read()
+    assert seen[-1]["0"]["status"] == "infra_failed"
+
+
 def test_pod_phase_poller_polls_immediately(tmp_path: Path):
     """First read must not wait a full BENCH_PHASE_POLL_S."""
     import threading
