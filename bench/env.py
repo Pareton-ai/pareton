@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import platform
 import re
 import shutil
@@ -12,7 +13,7 @@ import subprocess
 from typing import Any
 
 from bench import __version__
-from bench.schemas import EnvironmentInfo, GpuInfo
+from bench.schemas import CpuInfo, EnvironmentInfo, GpuInfo
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,105 @@ def _docker_version() -> str:
     return ""
 
 
+def _read_text(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def _cpu_model() -> str:
+    """First "model name" in /proc/cpuinfo, else whatever platform reports."""
+    info = _read_text("/proc/cpuinfo")
+    if info:
+        for line in info.splitlines():
+            key, sep, value = line.partition(":")
+            if sep and key.strip() in ("model name", "Model name", "Processor"):
+                name = value.strip()
+                if name:
+                    return name
+    out = _run(["sysctl", "-n", "machdep.cpu.brand_string"])
+    if out and out.strip():
+        return out.strip()
+    return platform.processor() or ""
+
+
+def _available_cores(logical: int) -> int:
+    """Cores this process may run on. Lower than `logical` under a cpuset."""
+    getaffinity = getattr(os, "sched_getaffinity", None)
+    if getaffinity is None:
+        return logical
+    try:
+        return len(getaffinity(0)) or logical
+    except OSError:
+        return logical
+
+
+def _cgroup_quota_cores() -> float | None:
+    """The cgroup CPU ceiling in whole cores. None means uncapped.
+
+    Checked because "how many cores does the box have" and "how many may the
+    engine use" are different questions, and only the second one bounds a
+    score. cgroup v2 first, then v1.
+    """
+    v2 = _read_text("/sys/fs/cgroup/cpu.max")
+    if v2:
+        parts = v2.split()
+        if len(parts) == 2 and parts[0] != "max":
+            try:
+                quota, period = int(parts[0]), int(parts[1])
+            except ValueError:
+                return None
+            if quota > 0 and period > 0:
+                return quota / period
+        return None
+    raw_quota = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+    raw_period = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+    if not raw_quota or not raw_period:
+        return None
+    try:
+        quota, period = int(raw_quota.strip()), int(raw_period.strip())
+    except ValueError:
+        return None
+    # -1 is the kernel's "no limit"; a zero period would be a divide by zero.
+    if quota <= 0 or period <= 0:
+        return None
+    return quota / period
+
+
+def _memory_total_mb() -> int:
+    info = _read_text("/proc/meminfo")
+    if info:
+        for line in info.splitlines():
+            if line.startswith("MemTotal:"):
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    return int(parts[1]) // 1024
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
+        return 0
+    if pages < 0 or page_size < 0:
+        return 0
+    return (pages * page_size) // (1024 * 1024)
+
+
+def collect_cpu() -> CpuInfo:
+    """Probe the host CPU. Zeroes and empty strings where a probe is unavailable."""
+    logical = os.cpu_count() or 0
+    return CpuInfo(
+        model=_cpu_model(),
+        logical_cores=logical,
+        available_cores=_available_cores(logical),
+        memory_total_mb=_memory_total_mb(),
+        quota_cores=_cgroup_quota_cores(),
+    )
+
+
 def collect_environment(*, harness_version: str | None = None) -> EnvironmentInfo:
-    """Probe GPU/driver/CUDA/Docker. Empty strings / empty gpu list when unavailable."""
+    """Probe GPU/driver/CUDA/Docker/CPU. Empty values when a probe is unavailable."""
     gpus: list[GpuInfo] = []
     gpu_out = _run(
         [
@@ -119,6 +217,7 @@ def collect_environment(*, harness_version: str | None = None) -> EnvironmentInf
         docker_version=_docker_version(),
         harness_version=harness_version or __version__,
         hostname_hash=_hostname_hash(),
+        cpu=collect_cpu(),
     )
 
 
@@ -133,6 +232,9 @@ def collect_env_raw_dumps() -> dict[str, str]:
     docker_info = _run(["docker", "info"], timeout=15.0)
     if docker_info:
         dumps["docker-info.txt"] = docker_info
+    lscpu = _run(["lscpu"], timeout=15.0)
+    if lscpu:
+        dumps["lscpu.txt"] = lscpu
     return dumps
 
 
