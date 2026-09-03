@@ -28,9 +28,31 @@ That is also why it needs re-installing by hand after a change here.
 ## A merge to `main` is a production deploy
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
-separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
-and `pareton-weights` within a minute, and restarts `pareton-worker` on the
-next tick where no `submission_jobs` row is `running`.
+separate promote step. The timer may fetch a merge while work is active, but it
+does not pull, install dependencies, or restart any service until the worker is
+truly idle.
+
+The worker holds `PARETON_WORKER_ACTIVITY_LOCK_PATH` shared from immediately
+before it claims a submission job or round until all processing and cleanup
+finish. The deploy takes the lock exclusively, then verifies that neither a
+`submission_jobs` row nor a `rounds` row is `running`. A held lock, active row,
+or failed database probe defers the entire update to a later timer tick. Pending
+unclaimed work does not block a deploy because it owns no Docker build or GPU
+pod, and the exclusive lock prevents the worker from claiming it mid-deploy.
+
+Once the idle checks pass, the deploy stops `pareton-worker` before pulling or
+installing anything. It starts the worker only after the checkout, dependencies,
+and other service restarts succeed. An interrupted deploy leaves the worker
+stopped and `.deploy-pending` in place; the next timer tick retries from the last
+fully deployed commit. A retry stops the worker idempotently and does not import
+the database probe from the possibly partial checkout. The deploy oneshot allows
+30 minutes for this transaction.
+
+The first rollout of this guard needs a maintenance window because the old
+worker does not hold the activity lock. Stop the deploy timer, verify that both
+work tables are idle, then stop the worker before updating the checkout,
+`/usr/local/bin/pareton-deploy`, and the deploy service unit. Reload systemd,
+then start the worker and timer. Later deploys are coordinated automatically.
 
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.
@@ -77,7 +99,13 @@ because each one changes production behavior:
 ## Reinstalling a unit
 
 ```sh
-scp ops/systemd/pareton-deploy.timer root@<host>:/etc/systemd/system/
+scp ops/systemd/pareton-deploy.service ops/systemd/pareton-deploy.timer root@<host>:/etc/systemd/system/
 ssh root@<host> systemctl daemon-reload
 ssh root@<host> systemctl restart pareton-deploy.timer
+```
+
+After changing `ops/deploy.sh`, also refresh the installed copy:
+
+```sh
+ssh root@<host> install -m 0755 /opt/pareton/ops/deploy.sh /usr/local/bin/pareton-deploy
 ```

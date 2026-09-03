@@ -2,16 +2,16 @@
 # Pull-based deploy for the Pareton VPS, run by pareton-deploy.timer.
 #
 # Behavior:
-#   - git pull --ff-only when origin/main has new commits.
+#   - Fetch origin/main every tick, but pull only while the worker is truly idle.
 #   - pip install only when requirements.txt changed in the pull.
-#   - pareton-api, pareton-watcher, and pareton-weights restart on every new
-#     commit (stateless enough to be always safe). Watcher and weights restart
-#     is skipped if the unit is not installed yet so a first-ship tick cannot
-#     abort the deploy.
-#   - pareton-worker restarts only when no submission_jobs are 'running'.
-#     A running job killed mid-bench is never requeued (claim_next_job only
-#     claims 'pending'), and its GPU pod burns money until the TTL reaper.
-#     When busy, a pending flag defers the restart to a later idle tick.
+#   - A shared/exclusive host lock prevents a worker from claiming work between
+#     the idle check and stop. The database probe also fails closed on any
+#     running submission build or benchmark round, including orphaned state.
+#   - The worker stops before the first checkout mutation and starts only after
+#     every deploy step succeeds. A failed deploy therefore leaves it stopped
+#     and the pending flag makes a later timer tick retry the whole transaction.
+#   - Watcher and weights restarts are skipped if their units are not installed
+#     yet so a first-ship tick cannot abort the deploy.
 #   - pareton-gpu-reap needs no restart: it is a oneshot timer that re-reads
 #     the code from disk on every 10-minute run.
 #
@@ -30,25 +30,6 @@ flock -n 9 || exit 0
 
 cd "$REPO"
 
-worker_busy() {
-    set -a
-    # shellcheck disable=SC1091
-    source "$REPO/.env"
-    set +a
-    # Exit 0 = busy, 1 = idle, 2 = probe error. Callers must treat 2 as busy
-    # (fail closed) so a broken probe never restarts a worker mid-job.
-    "$REPO/.venv/bin/python" -c "
-import sys
-try:
-    from db.connection import db_connection
-    with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(\"SELECT 1 FROM submission_jobs WHERE status = 'running' LIMIT 1\")
-        sys.exit(0 if cur.fetchone() else 1)
-except Exception:
-    sys.exit(2)
-"
-}
-
 git fetch --quiet origin main
 REMOTE=$(git rev-parse origin/main)
 # Commit of the last deploy whose pull, pip and api restart all succeeded.
@@ -58,11 +39,54 @@ REMOTE=$(git rev-parse origin/main)
 # case HEAD is treated as already deployed.
 DEPLOYED=$(cat "$DEPLOYED_FILE" 2>/dev/null || git rev-parse HEAD)
 
+if [ "$DEPLOYED" = "$REMOTE" ] && [ ! -f "$PENDING_FLAG" ]; then
+    exit 0
+fi
+
+set -a
+# shellcheck disable=SC1091
+source "$REPO/.env"
+set +a
+WORKER_ACTIVITY_LOCK=${PARETON_WORKER_ACTIVITY_LOCK_PATH:-/run/pareton-worker-activity.lock}
+
+# Worker cycles hold this lock shared from immediately before claim through
+# final cleanup. Holding it exclusively makes the idle decision atomic with
+# stopping the worker. Do not wait: a later timer tick will retry.
+exec 8>"$WORKER_ACTIVITY_LOCK"
+if ! flock -n 8; then
+    echo "deploy: worker activity lock held; update deferred"
+    exit 0
+fi
+
+if [ -f "$PENDING_FLAG" ]; then
+    # A prior attempt already passed the pre-mutation probe and stopped the
+    # worker. Do not import code from the possibly partial checkout to probe
+    # again; stop is idempotent and preserves the crash barrier.
+    systemctl stop pareton-worker
+else
+    # Exit 0 = busy and 10 = confirmed idle. Every other code fails closed,
+    # including Python's usual exit 1 for an import or syntax failure. The
+    # exclusive lock closes the gap between this query and stopping the worker.
+    "$REPO/.venv/bin/python" -m ops.deploy_probe && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "deploy: update deferred"
+        exit 0
+    elif [ "$rc" -ne 10 ]; then
+        echo "deploy: worker probe failed (rc=$rc); update deferred"
+        exit 0
+    fi
+
+    # Stopping before the first mutation is the crash barrier: if any later
+    # command fails or this oneshot is killed, no old worker can resume on a
+    # partial deploy.
+    systemctl stop pareton-worker
+fi
+
 if [ "$DEPLOYED" != "$REMOTE" ]; then
-    # Mark the worker restart owed before the steps that can fail. If one does,
-    # set -e aborts here and the pending block below never runs, so the worker
-    # is not restarted onto a half-deployed tree.
-    touch "$PENDING_FLAG"
+    # Record the incomplete transaction before its first checkout mutation.
+    if [ ! -f "$PENDING_FLAG" ]; then
+        touch "$PENDING_FLAG"
+    fi
     git pull --ff-only --quiet origin main
     if git diff --name-only "$DEPLOYED" HEAD | grep -qx requirements.txt; then
         "$REPO/.venv/bin/pip" install --quiet -r requirements.txt
@@ -83,14 +107,7 @@ if [ "$DEPLOYED" != "$REMOTE" ]; then
 fi
 
 if [ -f "$PENDING_FLAG" ]; then
-    worker_busy && rc=0 || rc=$?
-    if [ "$rc" -eq 1 ]; then
-        systemctl restart pareton-worker
-        rm -f "$PENDING_FLAG"
-        echo "deploy: pareton-worker restarted"
-    elif [ "$rc" -eq 0 ]; then
-        echo "deploy: worker has a running job; restart deferred"
-    else
-        echo "deploy: worker probe failed (rc=$rc); treating as busy, restart deferred"
-    fi
+    systemctl start pareton-worker
+    rm -f "$PENDING_FLAG"
+    echo "deploy: pareton-worker started"
 fi
