@@ -52,6 +52,7 @@ from round.store import (
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
+    update_round_entry_live_status,
     void_round,
 )
 from worker.phase_reporter import PhaseReporter
@@ -344,6 +345,10 @@ def build_round_request(
         )
 
     scoring_rule = _parse_json_field(round_row.get("scoring_rule")) or {}
+    leader_candidate_index = next(
+        (i for i, row in enumerate(candidates) if row["role"] == "leader"),
+        None,
+    )
     req = {
         "schema_version": 1,
         "task_id": task_id,
@@ -390,6 +395,7 @@ def build_round_request(
         },
         "scoring_rule": dict(scoring_rule),
         "hf_token_env": "HF_TOKEN",
+        "leader_candidate_index": leader_candidate_index,
     }
     try:
         validate_bench_request_dict(req)
@@ -555,6 +561,46 @@ def _round_heartbeat_writer(round_id: str) -> Callable[..., bool]:
         return touch_round_heartbeat(round_id=round_id)
 
     return beat
+
+
+def _round_entry_status_writer(
+    entries: list[dict[str, Any]],
+) -> Callable[[dict[str, Any]], None]:
+    """Map pod-reported per-entry statuses onto round_entries rows.
+
+    The harness numbers candidates in request order, and the request was
+    built from this same entries list, so a decimal key lines up with the
+    non-baseline rows. Best-effort: a bad payload is dropped, never fatal,
+    and the store write itself is forward-only so settlement stays the
+    authority.
+    """
+    baseline_id = next((e["id"] for e in entries if e["role"] == "baseline"), None)
+    candidate_ids = [e["id"] for e in entries if e["role"] != "baseline"]
+
+    def write(statuses: dict[str, Any]) -> None:
+        for key, item in statuses.items():
+            if not isinstance(item, dict):
+                continue
+            if key == "baseline":
+                entry_id = baseline_id
+            else:
+                try:
+                    entry_id = candidate_ids[int(key)]
+                except (ValueError, IndexError):
+                    continue
+            if entry_id is None:
+                continue
+            reason = item.get("reason")
+            try:
+                update_round_entry_live_status(
+                    entry_id=int(entry_id),
+                    status=str(item.get("status")),
+                    reason=None if reason is None else str(reason),
+                )
+            except Exception as exc:  # noqa: BLE001 - progress must not fail a bench
+                logger.warning("entry status write failed (%s): %s", key, exc)
+
+    return write
 
 
 def _void(round_row: dict[str, Any], reason: str, detail: str = "") -> None:
@@ -735,6 +781,11 @@ def _process_round(
             )
             leftover = remaining_round_budget_s(round_row["started_at"], now=now)
             fn = run_pod_fn or run_bench_on_pod
+            # Only the real pod runner polls per-entry progress; injected
+            # fakes keep their narrower signature.
+            extra: dict[str, Any] = {}
+            if run_pod_fn is None:
+                extra["on_entry_status"] = _round_entry_status_writer(entries)
             try:
                 exit_code = fn(
                     spec,
@@ -742,6 +793,7 @@ def _process_round(
                     output_dir=output_dir,
                     on_phase=reporter.set,
                     bench_timeout_s=leftover,
+                    **extra,
                 )
             except NoCapacityError as exc:
                 # Nothing was rented, so the cohort and seed stay valid. Voiding

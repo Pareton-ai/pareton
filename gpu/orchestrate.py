@@ -14,7 +14,7 @@ from typing import Any, Callable, Sequence
 
 import config
 from bench.correctness import resolve_trace_path
-from bench.output import PHASE_FILENAME
+from bench.output import ENTRY_STATUS_FILENAME, PHASE_FILENAME
 from bench.phases import (
     POD_REPORTABLE_PHASES,
     BenchPhase,
@@ -49,6 +49,7 @@ from gpu.registry import (
 from gpu.ssh import REPO_RSYNC_EXCLUDES, SshRunner, exec as ssh_exec, pull, push
 from gpu.types import Pod, PodSpec, SshTarget
 from observability import events as obs
+from round.rank import ENTRY_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ class RegistryAddError(GpuError):
 
 
 PhaseSink = Callable[..., None]
+# Per-entry progress from the pod: {entry_key: {"status": ..., "reason": ...}}
+# where entry_key is "baseline" or a decimal candidate index.
+EntryStatusSink = Callable[[dict[str, dict[str, Any]]], None]
 
 
 def _noop_phase(_phase: str, **_progress: Any) -> None:
@@ -561,6 +565,56 @@ def read_pod_phase(
     return phase, coerce_progress(record.get("progress"))
 
 
+def read_pod_entry_statuses(
+    pod: Pod,
+    *,
+    remote_out: str,
+    runner: SshRunner | None = None,
+    state_dir: Path | None = None,
+    max_bytes: int = 16384,
+) -> dict[str, dict[str, Any]] | None:
+    """Per-entry progress beacon on the pod, or None when absent/malformed.
+
+    Untrusted: byte-capped, keys limited to ``"baseline"`` or decimal
+    candidate indices, statuses vocabulary-checked, reasons truncated.
+    """
+    path = shlex.quote(f"{remote_out}/{ENTRY_STATUS_FILENAME}")
+    result = ssh_exec(
+        pod,
+        f"head -c {int(max_bytes)} {path} 2>/dev/null || true",
+        timeout_s=30.0,
+        runner=runner,
+        state_dir=state_dir,
+        check=False,
+    )
+    if result.exit_code != 0:
+        return None
+    try:
+        record = json.loads((result.stdout or "").strip() or "{}")
+    except json.JSONDecodeError:
+        return None
+    entries = record.get("entries") if isinstance(record, dict) else None
+    if not isinstance(entries, dict):
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for key, item in entries.items():
+        if len(out) >= 64:
+            break
+        if not isinstance(key, str) or not (key == "baseline" or key.isdigit()):
+            continue
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if status not in ENTRY_STATUSES:
+            continue
+        reason = item.get("reason")
+        out[key] = {
+            "status": status,
+            "reason": str(reason)[:256] if reason is not None else None,
+        }
+    return out or None
+
+
 class _PodPhasePoller:
     """Poll remote phase.json while ssh exec blocks. Failures leave the last phase in place."""
 
@@ -573,10 +627,13 @@ class _PodPhasePoller:
         runner: SshRunner | None = None,
         state_dir: Path | None = None,
         interval_s: float | None = None,
+        on_entry_status: EntryStatusSink | None = None,
     ) -> None:
         self._pod = pod
         self._remote_out = remote_out
         self._on_phase = on_phase
+        self._on_entry_status = on_entry_status
+        self._last_entry_statuses: dict[str, dict[str, Any]] | None = None
         self._runner = runner
         self._state_dir = state_dir
         self._interval_s = (
@@ -596,15 +653,34 @@ class _PodPhasePoller:
             )
         except Exception as exc:  # noqa: BLE001 - progress must not fail a bench
             logger.debug("pod phase poll failed: %s", exc)
+            phase = None
+            progress = None
+        if phase is not None:
+            with self._lock:
+                # Join can time out while SSH is still in flight; never
+                # overwrite a later worker-owned phase such as teardown.
+                if self._stop.is_set():
+                    return
+                self._on_phase(phase, **(progress or {}))
+        self._poll_entry_statuses()
+
+    def _poll_entry_statuses(self) -> None:
+        if self._on_entry_status is None:
             return
-        if phase is None:
+        try:
+            statuses = read_pod_entry_statuses(
+                self._pod,
+                remote_out=self._remote_out,
+                runner=self._runner,
+                state_dir=self._state_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - progress must not fail a bench
+            logger.debug("pod entry-status poll failed: %s", exc)
             return
-        with self._lock:
-            # Join can time out while SSH is still in flight; never overwrite
-            # a later worker-owned phase such as teardown.
-            if self._stop.is_set():
-                return
-            self._on_phase(phase, **(progress or {}))
+        if statuses is None or statuses == self._last_entry_statuses:
+            return
+        self._last_entry_statuses = statuses
+        self._on_entry_status(statuses)
 
     def _loop(self) -> None:
         self.poll_once()
@@ -643,6 +719,7 @@ def run_bench_on_pod(
     repo_root: Path | None = None,
     on_phase: PhaseSink | None = None,
     bench_timeout_s: float | None = None,
+    on_entry_status: EntryStatusSink | None = None,
 ) -> int:
     """Run bench request(s) on a GPU pod.
 
@@ -653,6 +730,8 @@ def run_bench_on_pod(
     ``--repetitions`` still replays one request N times (not a sample pool).
 
     ``on_phase`` is called as the run moves through provisioning, bootstrap, pull, harness, teardown.
+    ``on_entry_status`` is called when the harness reports per-entry leg
+    outcomes mid-run (round requests only); None disables that poll.
 
     ``bench_timeout_s`` bounds the remote harness ssh exec. None uses
     ``config.BENCH_TIMEOUT_S``, so the GPU CLI path is unchanged.
@@ -772,6 +851,7 @@ def run_bench_on_pod(
                 on_phase=phase,
                 runner=runner,
                 state_dir=registry.state_dir,
+                on_entry_status=on_entry_status,
             ):
                 result = ssh_exec(
                     pod,

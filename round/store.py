@@ -24,6 +24,7 @@ from campaign.exclusion import (
 from db.connection import db_connection
 from gate.types import SubmissionState
 from round.rank import (
+    ENTRY_STATUSES,
     EVENT_OVERTAKEN,
     EVENT_SEATED,
     EVENT_VACATED,
@@ -446,6 +447,34 @@ def touch_round_heartbeat(*, round_id: UUID | str) -> bool:
                 WHERE id = %s AND status = 'running'
                 """,
                 (str(round_id),),
+            )
+            return cur.rowcount > 0
+
+
+def update_round_entry_live_status(
+    *,
+    entry_id: int,
+    status: str,
+    reason: str | None = None,
+) -> bool:
+    """Pod-reported mid-round progress for one entry. Returns whether it landed.
+
+    Forward-only: a pending/running row moves to the reported status, a
+    settled row is left alone. Settlement (complete_round) stays the
+    authority and can still overwrite whatever a pod reported.
+    """
+    if status not in ENTRY_STATUSES:
+        raise ValueError(f"unknown entry status {status!r}")
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = %s,
+                    disqualify_reason = COALESCE(%s, disqualify_reason)
+                WHERE id = %s AND status IN ('pending', 'running')
+                """,
+                (status, reason, int(entry_id)),
             )
             return cur.rowcount > 0
 

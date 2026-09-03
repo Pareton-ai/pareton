@@ -137,6 +137,92 @@ def test_cli_mock_round_scripts_the_whole_matrix(tmp_path: Path):
     assert by_index[2]["score"] > by_index[1]["score"]
 
 
+def test_cli_mock_leader_failure_skips_remaining_candidates(tmp_path: Path):
+    """A leader infra failure voids the round at ranking time, so benching the
+    rest of the cohort would only burn pod hours: the harness skips them."""
+    req = _write_request(tmp_path, candidates=4, leader_candidate_index=1)
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.004",
+            "--mock-candidates",
+            json.dumps(
+                [
+                    {"speed_factor": 1.1},
+                    {"infra_fail": True},
+                    {"speed_factor": 1.2},
+                    {"speed_factor": 1.3},
+                ]
+            ),
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    from bench.validate import validate_report_dict
+
+    validate_report_dict(report)
+    by_index = {e["index"]: e for e in report["entries"]}
+    assert len(by_index) == 4
+    # Ran before the leader leg, so it was benched and graded for real.
+    assert by_index[0]["status"] == "scored"
+    assert by_index[1]["status"] == "infra_failed"
+    assert "failed to start" in by_index[1]["reason"]
+    # Never started: recorded as skipped, not benched.
+    assert by_index[2]["status"] == "infra_failed"
+    assert by_index[2]["reason"] == "skipped: leader candidate infra failed"
+    assert by_index[3]["reason"] == "skipped: leader candidate infra failed"
+    # The closing baseline leg still ran, so the report stays schema-complete.
+    assert report["baseline_drift"] is not None
+    assert report["drift_baseline"]["role"] == "baseline-drift"
+
+    # Leg outcomes were streamed as they happened, not only at the end.
+    streamed = json.loads((out / "entry_status.json").read_text(encoding="utf-8"))
+    entries = streamed["entries"]
+    assert entries["baseline"]["status"] == "scored"
+    assert entries["0"]["status"] == "running"  # SLA ok, correctness pending
+    assert entries["1"]["status"] == "infra_failed"
+    assert entries["2"]["reason"] == "skipped: leader candidate infra failed"
+
+
+def test_cli_mock_leader_first_leg_failure_skips_the_whole_cohort(tmp_path: Path):
+    req = _write_request(tmp_path, candidates=3, leader_candidate_index=0)
+    out = tmp_path / "out"
+    code = main(
+        [
+            "--request",
+            str(req),
+            "--output-dir",
+            str(out),
+            "--mock-engine",
+            "--mock-baseline-token-latency-s",
+            "0.004",
+            "--mock-candidates",
+            json.dumps(
+                [
+                    {"infra_fail": True},
+                    {"speed_factor": 1.2},
+                    {"crash": True},
+                ]
+            ),
+        ]
+    )
+    assert code == EXIT_OK
+    report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
+    by_index = {e["index"]: e for e in report["entries"]}
+    assert by_index[0]["status"] == "infra_failed"
+    assert "failed to start" in by_index[0]["reason"]
+    # The scripted crash never ran: candidate 2 is reported skipped, not
+    # disqualified.
+    assert by_index[1]["reason"] == "skipped: leader candidate infra failed"
+    assert by_index[2]["reason"] == "skipped: leader candidate infra failed"
+
+
 def test_cli_mock_candidates_requires_mock_engine(tmp_path: Path):
     req = _write_request(tmp_path)
     out = tmp_path / "out"

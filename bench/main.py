@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from bench import __version__
 from bench.correctness import (
@@ -512,8 +512,34 @@ def run_round(
     baseline_degeneracy = None
     relative_correctness = req.correctness.thresholds.max_mean_logprob_drop is not None
 
+    leader_index = req.leader_candidate_index
+    leader_failed = False
+    # Live per-entry progress, streamed to the worker through
+    # entry_status.json. Terminal failures are reported as legs finish so a
+    # doomed round is visible long before the final report lands.
+    entry_statuses: dict[str, dict[str, Any]] = {}
+
+    def note(key: str, status: str, reason: str | None = None) -> None:
+        entry_statuses[key] = {"status": status, "reason": reason}
+        layout.write_entry_statuses(entry_statuses)
+
     for start in plan:
+        if leader_failed and start.kind == "candidate":
+            # A leader infra failure voids the round at ranking time, so
+            # benching the rest of the cohort only burns pod hours. Record
+            # the remaining entries without starting their engines.
+            skipped = start.candidate_index
+            assert skipped is not None
+            reason = "skipped: leader candidate infra failed"
+            logger.warning("candidate %d %s", skipped, reason)
+            runs.append(
+                _CandidateRun(index=skipped, status="infra_failed", reason=reason)
+            )
+            note(str(skipped), "infra_failed", reason)
+            continue
         if start.kind in ("baseline", "drift"):
+            if start.kind == "baseline":
+                note("baseline", "running")
             phase = BenchPhase.SLA_BENCH
             try:
                 with provider.start(start, phase=phase) as url:
@@ -544,9 +570,12 @@ def run_round(
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
                 # scored against, so the round cannot continue without it.
+                if start.kind == "baseline":
+                    note("baseline", "infra_failed", str(exc))
                 raise EngineError(str(exc), error_role="baseline") from exc
             if start.kind == "baseline":
                 baseline = replay
+                note("baseline", "scored")
                 # The relative correctness bar needs the baseline's own
                 # outputs through the same scorer (PAR-108). An older campaign
                 # without that bar keeps its original candidate-only path.
@@ -563,6 +592,7 @@ def run_round(
         elif start.kind == "candidate":
             index = start.candidate_index
             assert index is not None
+            note(str(index), "running")
             try:
                 with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
                     replay = run_sla_engine(
@@ -580,6 +610,13 @@ def run_round(
                 runs.append(
                     _CandidateRun(index=index, status="disqualified", reason=str(exc))
                 )
+                note(str(index), "disqualified", str(exc))
+                if leader_index is not None and index == leader_index:
+                    leader_failed = True
+                    logger.warning(
+                        "leader candidate %d failed; skipping remaining candidates",
+                        index,
+                    )
                 continue
             except EngineError as exc:
                 # One candidate failing to run is that entry's problem, not
@@ -588,6 +625,13 @@ def run_round(
                 runs.append(
                     _CandidateRun(index=index, status="infra_failed", reason=str(exc))
                 )
+                note(str(index), "infra_failed", str(exc))
+                if leader_index is not None and index == leader_index:
+                    leader_failed = True
+                    logger.warning(
+                        "leader candidate %d failed; skipping remaining candidates",
+                        index,
+                    )
                 continue
             runs.append(_CandidateRun(index=index, status="scored", replay=replay))
             pending.append(
@@ -617,6 +661,18 @@ def run_round(
                 # Correctness is a hard gate, so an unusable scorer means no
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
+            for ci, creport in correctness.items():
+                if ci == BASELINE_INDEX or creport.verdict == "pass":
+                    continue
+                note(
+                    str(ci),
+                    (
+                        "infra_failed"
+                        if creport.verdict == "infra_failed"
+                        else "disqualified"
+                    ),
+                    creport.reason,
+                )
             baseline_report = correctness.pop(BASELINE_INDEX, None)
             if relative_correctness and (
                 baseline_report is None or baseline_report.verdict != "pass"
