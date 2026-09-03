@@ -34,10 +34,12 @@ that degrades the model and still clears the absolute floor.
 
 When the relative bar is enabled, the baseline is queued under
 ``BASELINE_INDEX`` and graded first so that reference exists. A baseline that
-cannot be graded fails the round, never a candidate. A prompt whose baseline
-natural-stop output is itself degenerate is excluded for every engine instead
-of failing the round. Campaigns without that bar retain the pre-PAR-108
-grading path.
+cannot be graded fails the round, never a candidate. A prompt is excluded for
+every engine when *any* measured baseline completion on that prompt is
+degenerate, not only the latency-median natural-stop text. The median-only
+check misses the case where the pinned image loops on a sibling repetition
+and the prompt stays in the set as a coin-flip disqualifier (PAR-121).
+Campaigns without the relative bar retain the pre-PAR-108 grading path.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -639,12 +641,41 @@ def capture_outputs(
     return captured
 
 
+def _record_baseline_prompt_drop(
+    dropped: dict[str, str], request_id: str, reason: str
+) -> None:
+    drop_reason = f"baseline natural output is degenerate: {reason}"
+    dropped[request_id] = drop_reason
+    if len(dropped) > MAX_BASELINE_PROMPT_DROPS:
+        raise EngineError(
+            f"baseline natural output is degenerate for {len(dropped)} "
+            "correctness prompts, above the harness limit of "
+            f"{MAX_BASELINE_PROMPT_DROPS} (latest {request_id!r}: {reason})"
+        )
+    logger.warning("dropping correctness prompt %r: %s", request_id, drop_reason)
+
+
 def build_baseline_degeneracy_references(
     outputs: list[CapturedOutput],
     natural_stops: Mapping[str, NaturalStopReference],
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
 ) -> BaselineDegeneracyReferences:
-    """Build bounds for prompts with a usable baseline natural-stop output."""
+    """Build bounds for prompts with a usable baseline natural-stop output.
+
+    The drop reads every measured baseline completion, not only
+    ``stop.text``. On a trace without ``ignore_eos``, ``stop.text`` is the
+    latency-median SLA rep; a looping sibling rep then loosens the relative
+    bar (max span / min distinct) while the prompt stays live. Candidates
+    are graded on their own median rep, so a 2-in-3 loop on an unstable
+    prompt is a terminal DQ. Dropping the prompt when the pinned image
+    itself looped is the signal that separates those coin-flips from a
+    patch-attributable 2/3-or-3/3 against a 0/3 baseline.
+
+    When the natural stop came from the ``ignore_eos`` probe
+    (``NaturalStopReference.probed``), SLA samples are forced-length
+    and may loop after EOS. Only ``stop.text`` decides the drop; byte
+    equality with the median SLA output is not a path signal.
+    """
     references: dict[str, BaselineDegeneracyReference] = {}
     dropped: dict[str, str] = {}
     for captured in outputs:
@@ -659,23 +690,6 @@ def build_baseline_degeneracy_references(
                 "baseline natural-stop reference is empty for correctness request "
                 f"{captured.request_id!r}"
             )
-        natural_reason = degeneracy_reason(stop.text)
-        if natural_reason is not None:
-            drop_reason = f"baseline natural output is degenerate: {natural_reason}"
-            dropped[captured.request_id] = drop_reason
-            if len(dropped) > MAX_BASELINE_PROMPT_DROPS:
-                raise EngineError(
-                    f"baseline natural output is degenerate for {len(dropped)} "
-                    "correctness prompts, above the harness limit of "
-                    f"{MAX_BASELINE_PROMPT_DROPS} (latest "
-                    f"{captured.request_id!r}: {natural_reason})"
-                )
-            logger.warning(
-                "dropping correctness prompt %r: %s",
-                captured.request_id,
-                drop_reason,
-            )
-            continue
         samples = (
             (captured.output_text,)
             if output_samples is None
@@ -686,6 +700,21 @@ def build_baseline_degeneracy_references(
                 "baseline output samples missing correctness request "
                 f"{captured.request_id!r}"
             )
+        inspected = [stop.text]
+        # probed=True means the extra ignore_eos=false replay. Those
+        # SLA siblings are forced-length; a post-EOS loop is allowed
+        # and must not drop the prompt, even if the probe text happens
+        # to match the median SLA output byte-for-byte.
+        if not stop.probed:
+            inspected.extend(samples)
+        sample_reason = None
+        for text in inspected:
+            sample_reason = degeneracy_reason(text)
+            if sample_reason is not None:
+                break
+        if sample_reason is not None:
+            _record_baseline_prompt_drop(dropped, captured.request_id, sample_reason)
+            continue
         references[captured.request_id] = BaselineDegeneracyReference(
             natural_stop_tokens=stop.completion_tokens,
             full_distinct_ngram_ratio=min(

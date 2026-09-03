@@ -292,12 +292,19 @@ class EngineReplay:
 
 @dataclass(frozen=True)
 class NaturalStopReference:
-    """Where the pinned baseline stopped when EOS handling was enabled."""
+    """Where the pinned baseline stopped when EOS handling was enabled.
+
+    ``probed`` is True only for the extra ignore_eos=false replay. That
+    path's SLA siblings are forced-length and may loop after EOS; they
+    must not decide the drop. Byte-equality of ``text`` with the median
+    SLA output is not a substitute: a probe can coincidentally match.
+    """
 
     request_id: str
     completion_tokens: int
     finish_reason: str | None
     text: str
+    probed: bool = False
 
 
 def capture_baseline_natural_stops(
@@ -331,8 +338,14 @@ def capture_baseline_natural_stops(
         references[req.id] = NaturalStopReference(
             request_id=req.id,
             completion_tokens=timing.completion_tokens,
+            # None is the copy-path fingerprint in evidence. A real
+            # ignore_eos probe writes the probe row's finish_reason
+            # (typically "stop"). Round 10 hf-003 has null here: the
+            # 78-token text is the latency-median SLA output, not a
+            # separate forced-length replay.
             finish_reason=None,
             text=text,
+            probed=False,
         )
 
     if forced:
@@ -360,6 +373,7 @@ def capture_baseline_natural_stops(
                     else str(row["finish_reason"])
                 ),
                 text=str(row.get("text") or ""),
+                probed=True,
             )
 
     missing = [req.id for req in requests if req.id not in references]
@@ -381,6 +395,7 @@ def capture_baseline_natural_stops(
                         "request_id": ref.request_id,
                         "completion_tokens": ref.completion_tokens,
                         "finish_reason": ref.finish_reason,
+                        "probed": ref.probed,
                         "text": ref.text,
                     },
                     sort_keys=True,
@@ -448,6 +463,12 @@ def _median_rep_row(rows: list[dict]) -> dict:
     Picking one real repetition keeps ``(ttft, itl, tokens, text)`` a
     self-consistent set. Averaging would blend ITL vectors of different lengths
     and pair timings with text that never occurred together.
+
+    The selected text is the entire graded artifact
+    (``capture_outputs`` and, when ``ignore_eos`` is off,
+    ``capture_baseline_natural_stops``). A looping sibling rep is
+    invisible here; ``build_baseline_degeneracy_references`` has to
+    look at ``output_samples`` to see it.
     """
     ordered = sorted(rows, key=lambda r: float(r["e2e_ms"]))
     return ordered[(len(ordered) - 1) // 2]
