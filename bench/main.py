@@ -661,18 +661,6 @@ def run_round(
                 # Correctness is a hard gate, so an unusable scorer means no
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
-            for ci, creport in correctness.items():
-                if ci == BASELINE_INDEX or creport.verdict == "pass":
-                    continue
-                note(
-                    str(ci),
-                    (
-                        "infra_failed"
-                        if creport.verdict == "infra_failed"
-                        else "disqualified"
-                    ),
-                    creport.reason,
-                )
             baseline_report = correctness.pop(BASELINE_INDEX, None)
             if relative_correctness and (
                 baseline_report is None or baseline_report.verdict != "pass"
@@ -688,6 +676,22 @@ def run_round(
                 raise EngineError(
                     f"scorer could not grade the baseline: {detail}",
                     error_role="scorer",
+                )
+            # Stream candidate verdicts only after the harness has vouched for
+            # its own reference. The abort above voids the round as our fault,
+            # and a disqualification streamed before it would survive the void
+            # and keep the challenger off the queue.
+            for ci, creport in correctness.items():
+                if creport.verdict == "pass":
+                    continue
+                note(
+                    str(ci),
+                    (
+                        "infra_failed"
+                        if creport.verdict == "infra_failed"
+                        else "disqualified"
+                    ),
+                    creport.reason,
                 )
 
     if baseline is None or drift is None:

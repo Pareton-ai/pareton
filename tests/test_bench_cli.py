@@ -223,6 +223,75 @@ def test_cli_mock_leader_first_leg_failure_skips_the_whole_cohort(tmp_path: Path
     assert by_index[2]["reason"] == "skipped: leader candidate infra failed"
 
 
+def test_scorer_baseline_abort_streams_no_candidate_verdict(
+    tmp_path: Path, monkeypatch
+):
+    """A scorer that cannot grade the baseline is harness fault: the round
+    voids and nobody is judged. A candidate DQ streamed before that abort
+    would survive the void and keep the challenger off the queue."""
+    import types
+    from contextlib import contextmanager
+
+    import pytest
+
+    import bench.main as bm
+    from bench.output import OutputLayout
+    from bench.validate import validate_bench_request_dict
+
+    req_dict = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req_dict["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    req_dict["correctness"]["thresholds"]["max_mean_logprob_drop"] = 1.5
+    req = validate_bench_request_dict(req_dict)
+
+    replay = types.SimpleNamespace(
+        result=types.SimpleNamespace(timings={}), outputs={}, output_samples={}
+    )
+    monkeypatch.setattr(bm, "run_sla_engine", lambda *a, **k: replay)
+    monkeypatch.setattr(bm, "capture_baseline_natural_stops", lambda *a, **k: [])
+    monkeypatch.setattr(bm, "capture_outputs", lambda *a, **k: {})
+    monkeypatch.setattr(
+        bm, "build_baseline_degeneracy_references", lambda *a, **k: None
+    )
+
+    def fake_grade_all(*a, **k):
+        return {
+            bm.BASELINE_INDEX: types.SimpleNamespace(
+                verdict="fail_correctness", reason="baseline garbage"
+            ),
+            0: types.SimpleNamespace(
+                verdict="fail_correctness", reason="candidate garbage"
+            ),
+        }
+
+    monkeypatch.setattr(bm, "grade_all", fake_grade_all)
+
+    class _FakeProvider:
+        @contextmanager
+        def start(self, start, *, phase):
+            yield "http://127.0.0.1:1"
+
+    layout = OutputLayout(tmp_path / "out")
+    layout.prepare()
+    trace = types.SimpleNamespace(requests=[])
+
+    with pytest.raises(bm.EngineError, match="scorer could not grade the baseline"):
+        bm.run_round(
+            req=req,
+            provider=_FakeProvider(),
+            prompts=[],
+            trace=trace,
+            layout=layout,
+        )
+
+    streamed = json.loads(layout.entry_status_path.read_text(encoding="utf-8"))[
+        "entries"
+    ]
+    # The candidate's leg started, but its failing verdict was never streamed:
+    # the harness-fault abort judges nobody.
+    assert streamed["0"]["status"] == "running"
+    assert streamed["baseline"]["status"] == "scored"
+
+
 def test_cli_mock_candidates_requires_mock_engine(tmp_path: Path):
     req = _write_request(tmp_path)
     out = tmp_path / "out"
