@@ -16,7 +16,7 @@ re-install it on the box, so the two never drift.
 | `systemd/pareton-deploy.timer`    | `/etc/systemd/system/`          | **Fires every 60s**                                              |
 | `systemd/pareton-builder-cleanup.service` | `/etc/systemd/system/` | Docker image and BuildKit cleanup oneshot                         |
 | `systemd/pareton-builder-cleanup.timer` | `/etc/systemd/system/` | Runs builder cleanup hourly                                      |
-| `docker/daemon.json`                  | `/etc/docker/daemon.json`      | Disables Docker's competing BuildKit GC                          |
+| `docker/daemon.json`                  | Merge into `/etc/docker/daemon.json` | Disables Docker's competing BuildKit GC without selecting an image store |
 | `deploy.sh`                       | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself                                    |
 | `gpu/pareton-gpu-reap.service`    | `/etc/systemd/system/`          | Oneshot GPU TTL reap                                             |
 | `gpu/pareton-gpu-reap.timer`      | `/etc/systemd/system/`          | Fires every 10 min                                               |
@@ -122,16 +122,28 @@ set +a
 ```
 
 Install the Docker policy and both units during a maintenance window. The
-committed daemon file preserves the production host's classic image-store
-setting. If the host has gained other Docker settings, merge them into the
-committed file before installation.
+committed file is a merge fragment, not a replacement daemon configuration.
+It deliberately omits `features.containerd-snapshotter`. Merge it into the
+host's current configuration so Docker keeps its active classic or containerd
+image store and every unrelated daemon setting. Record the active storage
+driver before the restart and require the same value afterward.
 
 ```sh
 systemctl stop pareton-deploy.timer
 systemctl stop pareton-worker
-install -D -m 0644 ops/docker/daemon.json /etc/docker/daemon.json
-dockerd --validate --config-file=/etc/docker/daemon.json
+command -v jq
+test -f /etc/docker/daemon.json
+image_store_before=$(docker info --format '{{json .DriverStatus}}')
+cp -a /etc/docker/daemon.json /etc/docker/daemon.json.pre-pareton-gc
+daemon_merged=$(mktemp)
+jq -s '.[0] * .[1]' \
+  /etc/docker/daemon.json ops/docker/daemon.json > "$daemon_merged"
+dockerd --validate --config-file="$daemon_merged"
+install -m 0644 "$daemon_merged" /etc/docker/daemon.json
+rm -f "$daemon_merged"
 systemctl restart docker
+image_store_after=$(docker info --format '{{json .DriverStatus}}')
+test "$image_store_after" = "$image_store_before"
 .venv/bin/python -m builder.gc_config
 cp ops/systemd/pareton-worker.service /etc/systemd/system/
 cp ops/systemd/pareton-builder-cleanup.service /etc/systemd/system/

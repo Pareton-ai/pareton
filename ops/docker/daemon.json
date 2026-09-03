@@ -3,8 +3,5 @@
     "gc": {
       "enabled": false
     }
-  },
-  "features": {
-    "containerd-snapshotter": false
   }
 }
