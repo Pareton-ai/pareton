@@ -29,7 +29,9 @@ def validate_daemon_gc_file(path: Path) -> None:
     except FileNotFoundError as exc:
         raise ValueError(f"Docker daemon config does not exist: {path}") from exc
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Docker daemon config is invalid JSON: {path}: {exc}") from exc
+        raise ValueError(
+            f"Docker daemon config is invalid JSON: {path}: {exc}"
+        ) from exc
     validate_daemon_gc_config(data)
 
 
