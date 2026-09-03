@@ -113,6 +113,10 @@ BUILD_LOG_DIR: Path = Path(
 BUILDER_LOCK_PATH: Path = Path(
     os.environ.get("PARETON_BUILDER_LOCK_PATH", str(WORK_DIR / "builder-storage.lock"))
 ).resolve()
+BUILDER_NAME: str = os.environ.get("PARETON_BUILDER_NAME", "default").strip()
+DOCKER_DAEMON_CONFIG_PATH: Path = Path(
+    os.environ.get("PARETON_DOCKER_DAEMON_CONFIG_PATH", "/etc/docker/daemon.json")
+).resolve()
 # Persistent builder disk policy. Candidate images are durable in GHCR, while
 # active campaign baselines and their BuildKit ccache mounts stay local.
 BUILDER_DOCKER_ROOT: Path = Path(

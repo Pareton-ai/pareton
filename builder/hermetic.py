@@ -452,7 +452,11 @@ def build_engine_image(
         # Miner builds stay --network=none. Empty-patch (a2b baseline) needs network for cmake.
         build_cmd = [
             "docker",
+            "buildx",
             "build",
+            "--builder",
+            config.BUILDER_NAME,
+            "--load",
             "--progress=plain",
             *([] if allow_empty_patch else ["--network=none"]),
             "--build-arg",

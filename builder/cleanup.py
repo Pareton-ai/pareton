@@ -143,27 +143,24 @@ def cleanup_once(
     pruned = force or _used_percent(before) >= high
     if pruned:
         min_free = max(1, int(before.total * (1 - high / 100)))
-        commands = [
-            ["docker", "image", "prune", "--force"],
-            [
-                "docker",
-                "buildx",
-                "prune",
-                "--force",
-                "--filter",
-                "type!=exec.cachemount",
-                "--min-free-space",
-                f"{min_free}b",
-            ],
+        cmd = [
+            "docker",
+            "buildx",
+            "prune",
+            "--builder",
+            config.BUILDER_NAME,
+            "--force",
+            "--filter",
+            "type!=exec.cachemount",
+            "--min-free-space",
+            f"{min_free}b",
         ]
-        for cmd in commands:
-            logger.info("cleanup: %s", " ".join(cmd))
-            if dry_run:
-                continue
+        logger.info("cleanup: %s", " ".join(cmd))
+        if not dry_run:
             proc = _run(cmd, timeout=1800)
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"{' '.join(cmd[:3])} failed: {proc.stderr.strip()[:500]}"
+                    f"docker buildx prune failed: {proc.stderr.strip()[:500]}"
                 )
 
     after = shutil.disk_usage(config.BUILDER_DOCKER_ROOT)

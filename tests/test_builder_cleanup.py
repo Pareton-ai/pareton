@@ -75,6 +75,7 @@ def test_cleanup_retains_baselines_removes_candidates_and_preserves_ccache(
     fake = DockerFake()
     monkeypatch.setattr(cleanup.subprocess, "run", fake)
     monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(80))
+    monkeypatch.setattr(cleanup.config, "BUILDER_NAME", "pareton-builder")
 
     result = cleanup.cleanup_once([_campaign()])
 
@@ -82,8 +83,10 @@ def test_cleanup_retains_baselines_removes_candidates_and_preserves_ccache(
     assert ["docker", "image", "rm", _CANDIDATE] in fake.calls
     assert any(cmd[:2] == ["docker", "tag"] for cmd in fake.calls)
     buildx = next(cmd for cmd in fake.calls if cmd[:3] == ["docker", "buildx", "prune"])
+    assert buildx[3:5] == ["--builder", "pareton-builder"]
     assert "type!=exec.cachemount" in buildx
     assert not any(cmd[:3] == ["docker", "system", "prune"] for cmd in fake.calls)
+    assert not any(cmd[:3] == ["docker", "image", "prune"] for cmd in fake.calls)
 
 
 @pytest.mark.unit
@@ -101,7 +104,7 @@ def test_cleanup_continues_to_prune_after_candidate_removal_timeout(monkeypatch)
     result = cleanup.cleanup_once([_campaign()])
 
     assert result["pruned"] is True
-    assert any(cmd[:3] == ["docker", "image", "prune"] for cmd in fake.calls)
+    assert any(cmd[:3] == ["docker", "buildx", "prune"] for cmd in fake.calls)
 
 
 @pytest.mark.unit
@@ -112,7 +115,12 @@ def test_dry_run_and_database_failure_do_not_mutate(monkeypatch):
     cleanup.cleanup_once([_campaign()], dry_run=True)
     assert not any(cmd[:2] == ["docker", "tag"] for cmd in fake.calls)
     assert not any(
-        cmd[:3] in (["docker", "image", "rm"], ["docker", "image", "prune"])
+        cmd[:3]
+        in (
+            ["docker", "image", "rm"],
+            ["docker", "image", "prune"],
+            ["docker", "buildx", "prune"],
+        )
         for cmd in fake.calls
     )
 

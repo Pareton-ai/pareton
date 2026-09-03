@@ -16,6 +16,7 @@ re-install it on the box, so the two never drift.
 | `systemd/pareton-deploy.timer`    | `/etc/systemd/system/`          | **Fires every 60s**                                              |
 | `systemd/pareton-builder-cleanup.service` | `/etc/systemd/system/` | Docker image and BuildKit cleanup oneshot                         |
 | `systemd/pareton-builder-cleanup.timer` | `/etc/systemd/system/` | Runs builder cleanup hourly                                      |
+| `docker/daemon.json`                  | `/etc/docker/daemon.json`      | Disables Docker's competing BuildKit GC                          |
 | `deploy.sh`                       | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself                                    |
 | `gpu/pareton-gpu-reap.service`    | `/etc/systemd/system/`          | Oneshot GPU TTL reap                                             |
 | `gpu/pareton-gpu-reap.timer`      | `/etc/systemd/system/`          | Fires every 10 min                                               |
@@ -90,16 +91,23 @@ The persistent build host keeps local retention tags for the build-base and
 baseline engine images of every draft or open campaign. Published candidate
 tags are removed after their digest-pinned reference is stored in Postgres.
 The hourly fallback sweep removes leftover candidate tags and prunes ordinary
-BuildKit records after Docker storage crosses 75% usage.
+BuildKit records after Docker storage crosses 75% usage. It targets the same
+explicit Buildx builder as miner builds and does not run daemon-wide image or
+system prune commands.
 BuildKit `exec.cachemount` records are excluded because they hold the warmed
 baseline ccache used by later miner builds.
 
-Docker Engine's own background BuildKit GC is separate from this timer. Its
-default first policy includes `exec.cachemount` records older than 48 hours.
-Configure `/etc/docker/daemon.json` with custom GC policies that exclude
-`type=exec.cachemount`, while preserving any existing storage-driver and
-feature settings on the host. Validate the merged file with `dockerd
---validate --config-file=/etc/docker/daemon.json` before restarting Docker.
+Docker Engine's background BuildKit GC is disabled on the dedicated builder
+host. Pareton's filtered cleanup is the only BuildKit GC authority, so Docker
+cannot independently reclaim `exec.cachemount`. Both the worker and cleanup
+units fail their startup check unless `/etc/docker/daemon.json` has
+`builder.gc.enabled=false`.
+
+Baseline build and serving images for every draft or open campaign have local
+retention tags. Candidate and leader images are durable in GHCR by digest.
+Rounds read those digest-pinned references from Postgres and pull them on the
+GPU host, so removing a builder-host candidate tag never causes a rebuild.
+This cleanup never deletes registry artifacts.
 
 The cleanup fails without deleting anything when Postgres is unavailable, and
 skips a run when a build holds the shared storage lock. Preview it before
@@ -113,13 +121,25 @@ set +a
 .venv/bin/python -m builder.cleanup --dry-run --force
 ```
 
-Install both units, then inspect the first run:
+Install the Docker policy and both units during a maintenance window. The
+committed daemon file preserves the production host's classic image-store
+setting. If the host has gained other Docker settings, merge them into the
+committed file before installation.
 
 ```sh
+systemctl stop pareton-deploy.timer
+systemctl stop pareton-worker
+install -D -m 0644 ops/docker/daemon.json /etc/docker/daemon.json
+dockerd --validate --config-file=/etc/docker/daemon.json
+systemctl restart docker
+.venv/bin/python -m builder.gc_config
+cp ops/systemd/pareton-worker.service /etc/systemd/system/
 cp ops/systemd/pareton-builder-cleanup.service /etc/systemd/system/
 cp ops/systemd/pareton-builder-cleanup.timer /etc/systemd/system/
 systemctl daemon-reload
+systemctl start pareton-worker
 systemctl enable --now pareton-builder-cleanup.timer
 systemctl start pareton-builder-cleanup.service
+systemctl start pareton-deploy.timer
 journalctl -u pareton-builder-cleanup.service -n 100 --no-pager
 ```

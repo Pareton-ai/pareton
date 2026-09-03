@@ -574,6 +574,43 @@ def test_build_vllm_inherits_arch(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.unit
+def test_build_uses_explicit_builder(tmp_path, monkeypatch):
+    from builder import hermetic
+
+    commands: list[list[str]] = []
+    monkeypatch.setattr(hermetic, "_base_image_torch_arch", lambda *_a, **_k: "9.0")
+    monkeypatch.setattr(hermetic.subprocess, "run", _ok_run)
+    monkeypatch.setattr(hermetic.config, "BUILDER_NAME", "pareton-builder")
+
+    def capture(cmd, **_kwargs):
+        commands.append(list(cmd))
+        return 0
+
+    monkeypatch.setattr(hermetic, "_run_logged", capture)
+    result = build_engine_image(
+        baseline_repo="https://example.invalid/repo.git",
+        baseline_commit=COMMIT,
+        base_image=_BASE,
+        patch_bytes=b"diff --git a/x b/x\n",
+        patch_hash="sha256:" + ("c" * 64),
+        work_root=tmp_path / "work",
+        log_dir=tmp_path / "logs",
+        push=False,
+    )
+
+    assert result.ok
+    build = commands[0]
+    assert build[:5] == [
+        "docker",
+        "buildx",
+        "build",
+        "--builder",
+        "pareton-builder",
+    ]
+    assert "--load" in build
+
+
+@pytest.mark.unit
 def test_build_vllm_rejects_base_arch_unset(tmp_path, monkeypatch):
     import builder.hermetic as hermetic
 
