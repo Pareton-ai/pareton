@@ -309,10 +309,19 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
 def _requeue_challengers(cur: Any, round_id: Any, void_reason: str) -> None:
     """Put unsettled challenger entries back on the round queue.
 
-    Terminal entries are already judged; requeueing them would resurrect a
-    disqualified or scored submission. infra_failed is not terminal: it gets
-    its one requeue. SETTLED_STATUSES is the do-not-requeue test.
+    A voided round never reached settlement, so a disqualified entry can only
+    be a live-streamed pod report, not a verdict: reset it first or the
+    requeue would strand the challenger. infra_failed is not terminal: it
+    gets its one requeue. SETTLED_STATUSES is the do-not-requeue test.
     """
+    cur.execute(
+        """
+        UPDATE round_entries
+        SET status = 'pending', disqualify_reason = NULL
+        WHERE round_id = %s AND status = 'disqualified'
+        """,
+        (str(round_id),),
+    )
     cur.execute(
         """
         INSERT INTO submission_events (submission_id, state, detail)
@@ -460,8 +469,10 @@ def update_round_entry_live_status(
     """Pod-reported mid-round progress for one entry. Returns whether it landed.
 
     Forward-only: a pending/running row moves to the reported status, a
-    settled row is left alone. Settlement (complete_round) stays the
-    authority and can still overwrite whatever a pod reported.
+    settled row is left alone. Scoped to a still-running round: a poll thread
+    can outlive its join and report after a void, and a voided round's rows
+    are final. Settlement (complete_round) stays the authority and can still
+    overwrite whatever a pod reported.
     """
     if status not in ENTRY_STATUSES:
         raise ValueError(f"unknown entry status {status!r}")
@@ -469,10 +480,14 @@ def update_round_entry_live_status(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE round_entries
+                UPDATE round_entries re
                 SET status = %s,
                     disqualify_reason = COALESCE(%s, disqualify_reason)
-                WHERE id = %s AND status IN ('pending', 'running')
+                WHERE re.id = %s AND re.status IN ('pending', 'running')
+                  AND EXISTS (
+                    SELECT 1 FROM rounds r
+                    WHERE r.id = re.round_id AND r.status = 'running'
+                  )
                 """,
                 (status, reason, int(entry_id)),
             )
@@ -754,17 +769,6 @@ def void_round(round_id: UUID | str, reason: str) -> bool:
             landed = cur.fetchone() is not None
             if not landed:
                 return False
-            # A voided round never reached settlement, so a disqualified entry
-            # can only be a live-streamed pod report, not a verdict. Reset it
-            # or the requeue below would strand the challenger.
-            cur.execute(
-                """
-                UPDATE round_entries
-                SET status = 'pending', disqualify_reason = NULL
-                WHERE round_id = %s AND status = 'disqualified'
-                """,
-                (str(round_id),),
-            )
             _requeue_challengers(cur, round_id, reason)
     return True
 

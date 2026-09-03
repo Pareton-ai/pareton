@@ -607,6 +607,10 @@ def read_pod_entry_statuses(
         status = item.get("status")
         if status not in ENTRY_STATUSES:
             continue
+        # Only the baseline leg ever reports scored; a candidate scored beacon
+        # is forged or corrupt, and accepting it would settle the challenger.
+        if status == "scored" and key != "baseline":
+            continue
         reason = item.get("reason")
         out[key] = {
             "status": status,

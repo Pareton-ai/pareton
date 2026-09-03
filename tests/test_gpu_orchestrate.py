@@ -498,6 +498,9 @@ def test_read_pod_entry_statuses_sanitizes_untrusted_payload(tmp_path: Path):
                     "evil key": {"status": "scored"},
                     "2": {"status": "owned"},  # not in the status vocabulary
                     "3": "not a dict",
+                    # The harness never streams a candidate verdict of scored:
+                    # forged, and accepting it would settle the challenger.
+                    "4": {"status": "scored"},
                 }
             }
         )

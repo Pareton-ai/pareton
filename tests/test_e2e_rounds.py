@@ -33,6 +33,7 @@ from round.store import (
     reap_stale_rounds,
     set_round_phase,
     touch_round_heartbeat,
+    update_round_entry_live_status,
     vacate_leader_if_idle,
     void_round,
     waive_campaign_hotkey,
@@ -949,9 +950,11 @@ def test_void_reverts_live_streamed_disqualification():
                 UPDATE round_entries
                 SET status = 'disqualified', disqualify_reason = 'live: crashed'
                 WHERE round_id = %s AND role = 'challenger'
+                RETURNING id
                 """,
                 (rid,),
             )
+            (entry_id,) = cur.fetchone()
     assert void_round(rid, VOID_POD_FAILED)
     state, _detail = _latest_state(challenger)
     assert state == "bench_queued"
@@ -964,6 +967,15 @@ def test_void_reverts_live_streamed_disqualification():
             )
             row = cur.fetchone()
     assert row == ("pending", None)
+    # A poll thread can outlive its join: a late beacon for a voided round
+    # must not land.
+    assert not update_round_entry_live_status(
+        entry_id=entry_id, status="disqualified", reason="late"
+    )
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM round_entries WHERE id = %s", (entry_id,))
+            assert cur.fetchone()[0] == "pending"
 
 
 def test_complete_seats_first_leader():
