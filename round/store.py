@@ -460,6 +460,24 @@ def touch_round_heartbeat(*, round_id: UUID | str) -> bool:
             return cur.rowcount > 0
 
 
+def _lock_running_round(cur: Any, round_id: UUID | str) -> bool:
+    """Take the rounds row lock if the round is still running.
+
+    Live updates, void, stale reap, and settlement all take this lock
+    first so they never deadlock and a late poll cannot read a stale
+    running snapshot while a void is in flight.
+    """
+    cur.execute(
+        """
+        SELECT id FROM rounds
+        WHERE id = %s AND status = 'running'
+        FOR UPDATE
+        """,
+        (str(round_id),),
+    )
+    return cur.fetchone() is not None
+
+
 def update_round_entry_live_status(
     *,
     entry_id: int,
@@ -469,25 +487,29 @@ def update_round_entry_live_status(
     """Pod-reported mid-round progress for one entry. Returns whether it landed.
 
     Forward-only: a pending/running row moves to the reported status, a
-    settled row is left alone. Scoped to a still-running round: a poll thread
-    can outlive its join and report after a void, and a voided round's rows
-    are final. Settlement (complete_round) stays the authority and can still
-    overwrite whatever a pod reported.
+    settled row is left alone. Locks the owning running round first so a
+    concurrent void cannot be missed as a stale snapshot, and so every
+    writer uses the same round-first lock order. Settlement
+    (complete_round) stays the authority and can still overwrite whatever
+    a pod reported.
     """
     if status not in ENTRY_STATUSES:
         raise ValueError(f"unknown entry status {status!r}")
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT round_id FROM round_entries WHERE id = %s",
+                (int(entry_id),),
+            )
+            row = cur.fetchone()
+            if row is None or not _lock_running_round(cur, row[0]):
+                return False
+            cur.execute(
                 """
-                UPDATE round_entries re
+                UPDATE round_entries
                 SET status = %s,
                     disqualify_reason = COALESCE(%s, disqualify_reason)
-                WHERE re.id = %s AND re.status IN ('pending', 'running')
-                  AND EXISTS (
-                    SELECT 1 FROM rounds r
-                    WHERE r.id = re.round_id AND r.status = 'running'
-                  )
+                WHERE id = %s AND status IN ('pending', 'running')
                 """,
                 (status, reason, int(entry_id)),
             )
@@ -514,6 +536,11 @@ def complete_round(
     """
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Round-first lock, same order as void/reap/live-status. Claiming
+            # here also makes a concurrent void return False before any
+            # entry write, instead of rolling back after the fact.
+            if not _lock_running_round(cur, round_id):
+                return False
             for entry in entries:
                 report = entry.get("report") or {}
                 cur.execute(
