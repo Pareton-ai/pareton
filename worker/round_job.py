@@ -39,7 +39,7 @@ from gpu.errors import GpuError, NoCapacityError, ProvisionError
 from gpu.orchestrate import EXIT_DESTROY_FAILED, run_bench_on_pod
 from gpu.types import PodSpec
 from observability import events as obs
-from round.rank import Entry, rank_round
+from round.rank import VOID_LEADER_INFRA_FAILED, Entry, rank_round
 from round.store import (
     VOID_LEADER_IMAGE_MISSING,
     VOID_POD_FAILED,
@@ -557,17 +557,19 @@ def _round_heartbeat_writer(round_id: str) -> Callable[..., bool]:
     return beat
 
 
-def _void(round_row: dict[str, Any], reason: str) -> None:
+def _void(round_row: dict[str, Any], reason: str, detail: str = "") -> None:
     round_id = str(round_row["id"])
     landed = void_round(round_id, reason)
     if not landed:
         logger.info("round %s already settled; skipped void %s", round_id, reason)
         return
+    log_detail = detail.replace("\r", " ").replace("\n", " ")[:1000]
     logger.warning(
-        "voided round %s (campaign %s): %s",
+        "voided round %s (campaign %s): %s%s",
         round_row.get("ordinal"),
         round_row.get("campaign_id"),
         reason,
+        f": {log_detail}" if log_detail else "",
     )
     obs.round_voided(
         round_id=round_id,
@@ -627,7 +629,7 @@ def process_round(
         _defer(round_row, exc)
         return "deferred"
     except RoundInfraError as exc:
-        _void(round_row, exc.reason)
+        _void(round_row, exc.reason, exc.detail)
         return exc.reason
 
 
@@ -825,7 +827,13 @@ def _process_round(
         leader_score=incumbent_score,
     )
     if decision.void:
-        raise RoundInfraError(str(decision.void_reason))
+        reason = str(decision.void_reason)
+        detail = ""
+        if reason == VOID_LEADER_INFRA_FAILED:
+            leader_result = next((r for r in results if r["role"] == "leader"), None)
+            if leader_result is not None:
+                detail = str(leader_result.get("disqualify_reason") or "")
+        raise RoundInfraError(reason, detail)
 
     evidence_url = None
     if not mock_bench:

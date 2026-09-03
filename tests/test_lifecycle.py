@@ -26,6 +26,7 @@ from bench.lifecycle import (
     extract_digest_from_image_ref,
     normalize_image_id,
     published_host_port,
+    pull_image,
     raise_docker_failure,
     resolve_image_digest,
     wait_until_healthy,
@@ -669,6 +670,97 @@ def test_pull_timeout_budget_is_generous():
     assert any(t >= 1800 for t in pull_timeouts)
     # tracking_runner sees the same timeouts as FakeDocker.__call__
     assert any(t >= 1800 for t in timeouts)
+
+
+def test_pull_failure_uses_cached_digest_pinned_image(caplog):
+    fake = FakeDocker()
+    fake.pull_ok = False
+    image = "ghcr.io/x/y@sha256:" + ("7" * 64)
+    fake.add_handler(
+        lambda argv: argv[:3] == ["docker", "image", "inspect"],
+        lambda _argv: DockerResult(0, "[]\n", ""),
+    )
+
+    pull_image(image, runner=fake, pull_timeout_s=60, cmd_timeout_s=30)
+
+    pulls = [c for c, _ in fake.calls if c[:2] == ["docker", "pull"]]
+    assert len(pulls) == 1
+    assert "using cached digest-pinned image" in caplog.text
+
+
+def test_pull_command_timeout_uses_cached_digest_pinned_image(caplog):
+    fake = FakeDocker()
+    image = "ghcr.io/x/y@sha256:" + ("a" * 64)
+
+    def timed_out(_argv):
+        raise EngineError("docker command timed out after 60s")
+
+    fake.add_handler(
+        lambda argv: argv[:2] == ["docker", "pull"],
+        timed_out,
+    )
+    fake.add_handler(
+        lambda argv: argv[:3] == ["docker", "image", "inspect"],
+        lambda _argv: DockerResult(0, "[]\n", ""),
+    )
+
+    pull_image(image, runner=fake, pull_timeout_s=60, cmd_timeout_s=30)
+
+    pulls = [c for c, _ in fake.calls if c[:2] == ["docker", "pull"]]
+    assert len(pulls) == 1
+    assert "using cached digest-pinned image" in caplog.text
+
+
+def test_pull_retries_when_digest_is_not_cached(monkeypatch):
+    fake = FakeDocker()
+    image = "ghcr.io/x/y@sha256:" + ("8" * 64)
+    attempts = 0
+    sleeps: list[float] = []
+
+    def pull_result(_argv):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return DockerResult(1, "", "registry timeout")
+        return DockerResult(0, "pulled\n", "")
+
+    fake.add_handler(
+        lambda argv: argv[:2] == ["docker", "pull"],
+        pull_result,
+    )
+    fake.add_handler(
+        lambda argv: argv[:3] == ["docker", "image", "inspect"],
+        lambda _argv: DockerResult(1, "", "not found"),
+    )
+    monkeypatch.setattr("bench.lifecycle.time.sleep", sleeps.append)
+
+    pull_image(image, runner=fake, pull_timeout_s=60, cmd_timeout_s=30)
+
+    assert attempts == 3
+    assert sleeps == [2, 4]
+
+
+def test_pull_failure_does_not_use_cached_mutable_tag(monkeypatch):
+    fake = FakeDocker()
+    fake.pull_ok = False
+    sleeps: list[float] = []
+    monkeypatch.setattr("bench.lifecycle.time.sleep", sleeps.append)
+
+    with pytest.raises(EngineError, match="docker pull failed"):
+        pull_image(
+            "ghcr.io/x/y:latest",
+            runner=fake,
+            pull_timeout_s=60,
+            cmd_timeout_s=30,
+        )
+
+    pulls = [c for c, _ in fake.calls if c[:2] == ["docker", "pull"]]
+    cached_checks = [
+        c for c, _ in fake.calls if c[:3] == ["docker", "image", "inspect"]
+    ]
+    assert len(pulls) == 3
+    assert cached_checks == []
+    assert sleeps == [2, 4]
 
 
 # ---------------------------------------------------------------------------
