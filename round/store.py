@@ -1494,11 +1494,50 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
             )
 
 
+def get_round_entry_report(
+    round_id: UUID | str, entry_id: int
+) -> dict[str, Any] | None:
+    """One entry's stored ``report``, addressed within its round.
+
+    Served on its own endpoint rather than folded into the round detail: a
+    round holds a report per entry and each carries every prompt's timings, so
+    inlining them would bloat the response the live dashboard polls hardest.
+
+    ``round_status`` comes along because the caller sets cache headers from it,
+    and an entry of a running round is still moving. ``evidence_s3_url`` stays
+    unselected: the tarball keeps its own gate, and the report is the part a
+    miner needs to re-derive the score.
+
+    None when the entry does not exist, or exists under a different round.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.id, e.round_id, e.submission_id, e.role,
+                       e.engine_image_ref, e.status, e.score,
+                       e.disqualify_reason, e.report,
+                       e.started_at, e.completed_at,
+                       s.patch_hash, s.hotkey,
+                       r.status AS round_status, r.ordinal AS round_ordinal,
+                       r.scoring_rule
+                FROM round_entries e
+                JOIN rounds r ON r.id = e.round_id
+                LEFT JOIN submissions s ON s.id = e.submission_id
+                WHERE e.round_id = %s AND e.id = %s
+                """,
+                (str(round_id), int(entry_id)),
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
     """Every entry of one round, in run order.
 
     ``evidence_s3_url`` and ``report`` are deliberately not selected: evidence
-    stays behind its current gate.
+    stays behind its current gate, and the report is large enough to want its
+    own endpoint (``get_round_entry_report``).
     """
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:

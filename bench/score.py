@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +20,14 @@ from typing import Any
 # before it earns speed credit on that prompt. Overridable per campaign with
 # a "tolerance" key on scoring_rule.
 DEFAULT_SPEED_TOLERANCE: float = 0.9
+
+# Why a prompt was forced to 0.0. Named because they are read back out of a
+# stored report and counted: matching these strings at the call site would
+# break silently the first time one is reworded.
+REASON_NO_CANDIDATE_TIMING = "no candidate timing"
+REASON_BASELINE_NO_TOKENS = "baseline emitted no tokens"
+REASON_BELOW_TOLERANCE = "candidate output below tolerance"
+REASON_INSUFFICIENT_TIMING = "insufficient timing"
 
 
 @dataclass(frozen=True)
@@ -112,15 +120,13 @@ def prompt_speedup(
     never clears the crown bar on its own.
     """
     if candidate is None:
-        return PromptScore(request_id, 0.0, 0, reason="no candidate timing")
+        return PromptScore(request_id, 0.0, 0, reason=REASON_NO_CANDIDATE_TIMING)
     if baseline.completion_tokens < 1:
-        return PromptScore(request_id, 0.0, 0, reason="baseline emitted no tokens")
+        return PromptScore(request_id, 0.0, 0, reason=REASON_BASELINE_NO_TOKENS)
 
     aligned_k = min(baseline.completion_tokens, candidate.completion_tokens)
     if aligned_k < _min_aligned_tokens(baseline.completion_tokens, tolerance):
-        return PromptScore(
-            request_id, 0.0, aligned_k, reason="candidate output below tolerance"
-        )
+        return PromptScore(request_id, 0.0, aligned_k, reason=REASON_BELOW_TOLERANCE)
 
     base_e2e = aligned_e2e_s(baseline, aligned_k)
     cand_e2e = aligned_e2e_s(candidate, aligned_k)
@@ -131,7 +137,7 @@ def prompt_speedup(
             aligned_k,
             baseline_e2e_s=base_e2e,
             candidate_e2e_s=cand_e2e,
-            reason="insufficient timing",
+            reason=REASON_INSUFFICIENT_TIMING,
         )
 
     return PromptScore(
@@ -141,6 +147,41 @@ def prompt_speedup(
         baseline_e2e_s=base_e2e,
         candidate_e2e_s=cand_e2e,
     )
+
+
+def summarize_prompt_scores(
+    prompts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Counts behind one entry's score: how many prompts paid, and what did not.
+
+    Reads the ``prompts`` array of a stored ``round_entries.report``, so it
+    works on any past round without rerunning the bench.
+
+    A prompt is "zeroed" when it carries a ``reason``, never when its speedup
+    happens to be 0.0: a candidate exactly as fast as the baseline earns a
+    real 0.0 and must not be counted as a failure. ``zeroed_by_reason`` keeps
+    the reasons apart because they mean different things to a miner: the
+    tolerance gate is the patch answering less, while a timing gap is the
+    harness having nothing to compare.
+    """
+    total = 0
+    zeroed_by_reason: dict[str, int] = {}
+    for p in prompts:
+        if not isinstance(p, Mapping):
+            continue
+        total += 1
+        reason = p.get("reason")
+        if reason:
+            key = str(reason)
+            zeroed_by_reason[key] = zeroed_by_reason.get(key, 0) + 1
+    zeroed = sum(zeroed_by_reason.values())
+    return {
+        "total": total,
+        "scored": total - zeroed,
+        "zeroed": zeroed,
+        "below_tolerance": zeroed_by_reason.get(REASON_BELOW_TOLERANCE, 0),
+        "zeroed_by_reason": zeroed_by_reason,
+    }
 
 
 def _median_e2e_speedup(

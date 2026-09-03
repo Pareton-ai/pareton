@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
 from bench.phases import BenchPhase, coerce_phase, coerce_progress
+from bench.score import summarize_prompt_scores
 from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
     campaign_hotkey_is_disqualified,
@@ -33,6 +34,7 @@ from round.store import (
     get_latest_weight_set,
     get_leader,
     get_round,
+    get_round_entry_report,
     list_round_entries,
     list_rounds,
     list_score_progress,
@@ -300,6 +302,63 @@ class RoundDetailModel(BaseModel):
     entries: list[RoundEntryModel]
 
 
+class PromptScoreModel(BaseModel):
+    """One prompt's contribution to an entry's score.
+
+    `speedup` is the fraction faster than baseline at the same output token
+    count: 0.35 is 35 percent faster, and a negative value is slower. A
+    non-null `reason` means the prompt was forced to 0.0 and did not measure
+    anything; a 0.0 with no reason is a real result meaning baseline speed.
+    """
+
+    request_id: str
+    speedup: float
+    aligned_tokens: int
+    baseline_e2e_s: float | None = None
+    candidate_e2e_s: float | None = None
+    reason: str | None = None
+
+
+class PromptSummaryModel(BaseModel):
+    """Counts over `prompts`, so the headline number needs no client math."""
+
+    total: int
+    scored: int
+    zeroed: int
+    below_tolerance: int
+    zeroed_by_reason: dict[str, int]
+
+
+class RoundEntryReportModel(BaseModel):
+    """`GET /v1/rounds/{round_id}/entries/{entry_id}/report`.
+
+    The arithmetic behind one entry's score. `prompts` is empty for an entry
+    that never reached scoring, which is every disqualified and infra-failed
+    entry: read `status` and `reason` for why.
+    """
+
+    round_id: str
+    round_ordinal: int
+    entry_id: int
+    submission_id: str | None = None
+    patch_hash: str | None = None
+    hotkey: str | None = None
+    role: str
+    status: str
+    engine_image_ref: str
+    image_digest: str | None = None
+    score: float | None = None
+    reason: str | None = None
+    engine_crashed: bool = False
+    scoring_rule: dict[str, Any]
+    prompt_summary: PromptSummaryModel
+    prompts: list[PromptScoreModel]
+    sla: dict[str, Any] | None = None
+    correctness: dict[str, Any] | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
 class ScorePointEntryModel(BaseModel):
     """One scatter dot. List response, so the hotkey is truncated."""
 
@@ -480,6 +539,67 @@ def round_detail(round_id: UUID, response: Response):
         "phase": coerce_phase(row.get("phase")),
         "progress": coerce_progress(row.get("progress")),
         "entries": list_round_entries(round_id),
+    }
+
+
+@app.get(
+    "/v1/rounds/{round_id}/entries/{entry_id}/report",
+    responses={200: {"model": RoundEntryReportModel}},
+)
+def round_entry_report(round_id: UUID, entry_id: int, response: Response):
+    """The arithmetic behind one entry's score, prompt by prompt.
+
+    The round score is the named rule applied to `prompts`, so a miner can
+    re-derive it and see which prompts paid and which were gated. Absolute
+    seconds are served alongside the ratios: a speedup on its own cannot be
+    checked against a local run.
+
+    The baseline entry stores its SLA replay rather than a comparison, so it
+    comes back with `sla` populated and `prompts` empty. It is the reference
+    the rest are measured against, not a competitor with a score of its own.
+    """
+    row = get_round_entry_report(round_id, entry_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="round entry not found")
+    _set_live_round_cache_control(response, [row["round_status"]])
+
+    raw = row.get("report") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    score_report = raw.get("score_report")
+    score_report = score_report if isinstance(score_report, dict) else {}
+    prompts = score_report.get("prompts")
+    prompts = prompts if isinstance(prompts, list) else []
+    sla = raw.get("sla")
+    if sla is None and "metrics" in raw:
+        # The baseline row stores the SLA replay itself, not an entry report.
+        sla = raw
+
+    return {
+        "round_id": str(row["round_id"]),
+        "round_ordinal": row["round_ordinal"],
+        "entry_id": row["id"],
+        "submission_id": (
+            None if row["submission_id"] is None else str(row["submission_id"])
+        ),
+        "patch_hash": row["patch_hash"],
+        "hotkey": row["hotkey"],
+        "role": row["role"],
+        "status": row["status"],
+        "engine_image_ref": row["engine_image_ref"],
+        "image_digest": raw.get("image_digest"),
+        "score": row["score"],
+        # disqualify_reason is the column the worker writes the harness reason
+        # into for every non-scored status, infra_failed included.
+        "reason": row["disqualify_reason"] or raw.get("reason"),
+        "engine_crashed": bool(raw.get("engine_crashed", False)),
+        "scoring_rule": row["scoring_rule"] or {},
+        "prompt_summary": summarize_prompt_scores(prompts),
+        "prompts": prompts,
+        "sla": sla,
+        "correctness": raw.get("correctness"),
+        "started_at": _iso_or_none(row.get("started_at")),
+        "completed_at": _iso_or_none(row.get("completed_at")),
     }
 
 
