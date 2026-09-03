@@ -12,6 +12,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
+ExecStartPre=/opt/pareton/.venv/bin/python -m builder.gc_config
 ExecStart=/opt/pareton/.venv/bin/python -m worker.main
 Restart=on-failure
 RestartSec=10

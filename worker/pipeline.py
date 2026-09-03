@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
+import config
+from builder.cleanup import evict_candidate_image
 from builder.hermetic import build_engine_image, build_engine_image_local_mock
 from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
-import config
 from campaign.store import (
     append_event,
     complete_gates_job,
@@ -265,6 +267,17 @@ def process_submission(
         job_id=int(job_id) if job_id is not None else None,
         enqueue_round=enqueue_round,
     )
+    if build_res.evidence.get("pushed") and image_tag:
+        try:
+            evict_candidate_image(str(image_tag))
+        except (RuntimeError, ValueError) as exc:
+            # GHCR and the digest-pinned DB ref are already durable. A local
+            # cleanup failure must not reject a successfully built submission.
+            logger.warning(
+                "candidate image cleanup failed for submission %s: %s",
+                submission_id,
+                exc,
+            )
     if enqueue_round:
         logger.info("queued submission %s for the next round", submission_id)
     return build_res
