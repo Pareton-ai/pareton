@@ -236,6 +236,7 @@ class RoundSummaryModel(BaseModel):
     ordinal: int
     status: str
     void_reason: str | None = None
+    void_detail: str | None = None
     gpu_sku: str
     seed_block: int
     seed_block_hash: str
@@ -282,6 +283,7 @@ class RoundDetailModel(BaseModel):
     ordinal: int
     status: str
     void_reason: str | None = None
+    void_detail: str | None = None
     gpu_sku: str
     seed_block: int
     seed_block_hash: str

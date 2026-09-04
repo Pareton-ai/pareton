@@ -670,6 +670,7 @@ def _round_summary(ordinal: int, status: str, **over) -> dict:
         "ordinal": ordinal,
         "status": status,
         "void_reason": None,
+        "void_detail": None,
         "gpu_sku": "H200",
         "seed_block": 1000 + ordinal,
         "seed_block_hash": "0x" + f"{ordinal:064x}",
@@ -719,7 +720,12 @@ def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
     _open_campaign(monkeypatch)
     rows = [
         _round_summary(3, "complete", leader_changed=True),
-        _round_summary(2, "void", void_reason="baseline_drift"),
+        _round_summary(
+            2,
+            "void",
+            void_reason="baseline_drift",
+            void_detail="leader image vanished from ghcr",
+        ),
         _round_summary(1, "complete"),
     ]
     monkeypatch.setattr(
@@ -730,6 +736,9 @@ def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
     body = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds").json()
     assert [r["ordinal"] for r in body["rounds"]] == [3, 2, 1]
     assert body["rounds"][1]["void_reason"] == "baseline_drift"
+    # The list carries the detail too: a miner scanning rounds should not have
+    # to open each void to learn it was the same infra fault every time.
+    assert body["rounds"][1]["void_detail"] == "leader image vanished from ghcr"
 
 
 def test_rounds_list_campaign_404(monkeypatch, client: TestClient):
@@ -739,6 +748,36 @@ def test_rounds_list_campaign_404(monkeypatch, client: TestClient):
     resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "campaign not found"
+
+
+def test_round_detail_explains_why_it_voided(monkeypatch, client: TestClient):
+    """void_reason is a bare code; void_detail is the sentence behind it."""
+    from api import server
+
+    monkeypatch.setattr(
+        server,
+        "get_round",
+        lambda _rid: _round_row(
+            status="void",
+            phase=None,
+            void_reason="pod_failed",
+            void_detail="provider returned 503 after 3 retries",
+        ),
+    )
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    server.RoundDetailModel.model_validate(body)
+    assert body["void_reason"] == "pod_failed"
+    assert body["void_detail"] == "provider returned 503 after 3 retries"
+
+
+def test_a_round_that_did_not_void_carries_no_detail(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "get_round", lambda _rid: _round_row())
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    assert body["void_detail"] is None
 
 
 ROUND_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
@@ -751,6 +790,7 @@ def _round_row(**over) -> dict:
         "ordinal": 4,
         "status": "running",
         "void_reason": None,
+        "void_detail": None,
         "gpu_sku": "H200",
         "seed_block": 1004,
         "seed_block_hash": "0x" + "a" * 64,

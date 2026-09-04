@@ -31,6 +31,7 @@ from round.rank import (
     SETTLED_STATUSES,
     RankDecision,
 )
+from round.void_detail import sanitize_void_detail
 
 # rounds.void_reason written by the watcher. The runner owns the rest.
 VOID_HEARTBEAT_STALE = "heartbeat_stale"
@@ -292,13 +293,19 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
                 UPDATE rounds
                 SET status = 'void',
                     void_reason = %s,
+                    void_detail = %s,
                     completed_at = now()
                 WHERE status = 'running'
                   AND COALESCE(heartbeat_at, started_at)
                       < now() - make_interval(secs => %s)
                 RETURNING id, campaign_id, ordinal
                 """,
-                (VOID_HEARTBEAT_STALE, int(stale_s)),
+                (
+                    VOID_HEARTBEAT_STALE,
+                    f"no heartbeat for over {int(stale_s)}s; the pod stopped "
+                    "reporting and the round was reaped",
+                    int(stale_s),
+                ),
             )
             voided = [dict(r) for r in cur.fetchall()]
             for row in voided:
@@ -774,12 +781,18 @@ def complete_round(
     return True
 
 
-def void_round(round_id: UUID | str, reason: str) -> bool:
+def void_round(round_id: UUID | str, reason: str, detail: str = "") -> bool:
     """Abandon a running round. Returns False when it was already settled.
 
     Never touches leaders or leader_history. Requeues challengers that have
     not reached a settled status.
+
+    ``detail`` is the free text behind ``reason``. It is scrubbed here rather
+    than at the API, so a credential in a provider error or a presigned URL
+    never reaches the column: this is a public field. NULL when empty, so a
+    reader can tell "no detail" from "".
     """
+    scrubbed = sanitize_void_detail(detail)
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -787,11 +800,12 @@ def void_round(round_id: UUID | str, reason: str) -> bool:
                 UPDATE rounds
                 SET status = 'void',
                     void_reason = %s,
+                    void_detail = %s,
                     completed_at = now()
                 WHERE id = %s AND status = 'running'
                 RETURNING id
                 """,
-                (reason, str(round_id)),
+                (reason, scrubbed or None, str(round_id)),
             )
             landed = cur.fetchone() is not None
             if not landed:
@@ -854,7 +868,7 @@ def list_rounds(
             total = int(meta["n"])
             cur.execute(
                 """
-                SELECT r.id, r.ordinal, r.status, r.void_reason, r.gpu_sku,
+                SELECT r.id, r.ordinal, r.status, r.void_reason, r.void_detail, r.gpu_sku,
                        r.seed_block, r.seed_block_hash, r.leader_changed,
                        r.created_at, r.completed_at,
                        (SELECT COUNT(*) FROM round_entries e
@@ -876,7 +890,7 @@ def get_round(round_id: UUID | str) -> dict[str, Any] | None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, campaign_id, ordinal, status, void_reason, gpu_sku,
+                SELECT id, campaign_id, ordinal, status, void_reason, void_detail, gpu_sku,
                        seed_block, seed_block_hash, seed_hex,
                        sampled_trace_sha256, scoring_rule,
                        incumbent_submission_id, winner_submission_id,
