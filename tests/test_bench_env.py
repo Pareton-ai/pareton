@@ -92,6 +92,69 @@ def test_no_cgroup_files_means_uncapped(monkeypatch):
     assert env._cgroup_quota_cores() is None
 
 
+MOUNTINFO_V2 = (
+    "36 1 0:31 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:10 "
+    "- cgroup2 cgroup2 rw,nsdelegate\n"
+)
+CGROUP_NESTED = "0::/user.slice/bench.scope\n"
+
+
+def test_nested_cgroup_v2_quota_follows_membership(monkeypatch):
+    """A pod quota lives on the leaf cgroup, not the mount root."""
+    monkeypatch.setattr(
+        env,
+        "_read_text",
+        _fake_reads(
+            {
+                "/proc/self/cgroup": CGROUP_NESTED,
+                "/proc/self/mountinfo": MOUNTINFO_V2,
+                "/sys/fs/cgroup/cpu.max": "max 100000\n",
+                "/sys/fs/cgroup/user.slice/cpu.max": "max 100000\n",
+                "/sys/fs/cgroup/user.slice/bench.scope/cpu.max": "200000 100000\n",
+            }
+        ),
+    )
+    assert env._cgroup_quota_cores() == 2.0
+
+
+def test_nested_cgroup_v2_quota_uses_the_tightest_ancestor(monkeypatch):
+    monkeypatch.setattr(
+        env,
+        "_read_text",
+        _fake_reads(
+            {
+                "/proc/self/cgroup": CGROUP_NESTED,
+                "/proc/self/mountinfo": MOUNTINFO_V2,
+                "/sys/fs/cgroup/cpu.max": "max 100000\n",
+                "/sys/fs/cgroup/user.slice/cpu.max": "200000 100000\n",
+                "/sys/fs/cgroup/user.slice/bench.scope/cpu.max": "max 100000\n",
+            }
+        ),
+    )
+    assert env._cgroup_quota_cores() == 2.0
+
+
+def test_cgroup_v2_quota_uses_the_mounted_hierarchy(monkeypatch):
+    monkeypatch.setattr(
+        env,
+        "_read_text",
+        _fake_reads(
+            {
+                "/proc/self/cgroup": CGROUP_NESTED,
+                "/proc/self/mountinfo": (
+                    "36 1 0:31 / /sys/fs/cgroup/unified rw,relatime "
+                    "- cgroup2 cgroup2 rw\n"
+                ),
+                "/sys/fs/cgroup/cpu.max": "max 100000\n",
+                "/sys/fs/cgroup/unified/user.slice/bench.scope/cpu.max": (
+                    "200000 100000\n"
+                ),
+            }
+        ),
+    )
+    assert env._cgroup_quota_cores() == 2.0
+
+
 def test_collect_cpu_reports_cores_and_quota(monkeypatch):
     monkeypatch.setattr(
         env,

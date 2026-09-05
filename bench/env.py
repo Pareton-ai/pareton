@@ -135,36 +135,131 @@ def _available_cores(logical: int) -> int:
         return logical
 
 
-def _cgroup_quota_cores() -> float | None:
-    """The cgroup CPU ceiling in whole cores. None means uncapped.
+def _parse_cgroup_membership(text: str) -> tuple[str | None, str | None]:
+    """Relative paths of this process in the v2 and v1-cpu hierarchies.
 
-    Checked because "how many cores does the box have" and "how many may the
-    engine use" are different questions, and only the second one bounds a
-    score. cgroup v2 first, then v1.
+    `/proc/self/cgroup` records membership, not the files under `/sys/fs/cgroup`
+    itself. A nested slice such as `/user.slice/bench.scope` is a different
+    cgroup from the mount root, and that is where a pod quota usually lives.
     """
-    v2 = _read_text("/sys/fs/cgroup/cpu.max")
-    if v2:
-        parts = v2.split()
-        if len(parts) == 2 and parts[0] != "max":
-            try:
-                quota, period = int(parts[0]), int(parts[1])
-            except ValueError:
-                return None
-            if quota > 0 and period > 0:
-                return quota / period
-        return None
-    raw_quota = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-    raw_period = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
-    if not raw_quota or not raw_period:
+    v2_rel: str | None = None
+    v1_rel: str | None = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # v2: `0::/user.slice/bench.scope`
+        if line.startswith("0::"):
+            v2_rel = line[3:] or "/"
+            continue
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        controllers = parts[1].split(",")
+        if "cpu" in controllers:
+            v1_rel = parts[2] or "/"
+    return v2_rel, v1_rel
+
+
+def _parse_cgroup_mounts(text: str) -> tuple[str | None, str | None]:
+    """cgroup2 and v1-cpu mount points from `/proc/self/mountinfo`."""
+    v2_mount: str | None = None
+    v1_mount: str | None = None
+    for line in text.splitlines():
+        if " - " not in line:
+            continue
+        left, right = line.split(" - ", 1)
+        left_fields = left.split()
+        right_fields = right.split()
+        # mountinfo fields 1-5 are stable; optional fields sit after them.
+        if len(left_fields) < 5 or not right_fields:
+            continue
+        mount_point = left_fields[4]
+        fstype = right_fields[0]
+        super_opts = right_fields[2].split(",") if len(right_fields) > 2 else []
+        if fstype == "cgroup2" and v2_mount is None:
+            v2_mount = mount_point
+        elif fstype == "cgroup" and "cpu" in super_opts and v1_mount is None:
+            v1_mount = mount_point
+    return v2_mount, v1_mount
+
+
+def _cgroup_dirs(mount: str, relpath: str) -> list[str]:
+    """Directories from the leaf cgroup up to the mount root, inclusive."""
+    parts = [p for p in relpath.strip("/").split("/") if p]
+    dirs = [os.path.join(mount, *parts[:i]) for i in range(len(parts), 0, -1)]
+    dirs.append(mount)
+    return dirs
+
+
+def _parse_v2_cpu_max(text: str) -> float | None:
+    parts = text.split()
+    if len(parts) != 2 or parts[0] == "max":
         return None
     try:
-        quota, period = int(raw_quota.strip()), int(raw_period.strip())
+        quota, period = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if quota > 0 and period > 0:
+        return quota / period
+    return None
+
+
+def _parse_v1_cpu_quota(quota_text: str, period_text: str) -> float | None:
+    try:
+        quota, period = int(quota_text.strip()), int(period_text.strip())
     except ValueError:
         return None
     # -1 is the kernel's "no limit"; a zero period would be a divide by zero.
     if quota <= 0 or period <= 0:
         return None
     return quota / period
+
+
+def _tightest_quota(quotas: list[float | None]) -> float | None:
+    finite = [q for q in quotas if q is not None]
+    return min(finite) if finite else None
+
+
+def _v2_quota_along(mount: str, relpath: str) -> tuple[bool, float | None]:
+    """Walk `cpu.max` from leaf to root. `found` is True if any file existed."""
+    found = False
+    quotas: list[float | None] = []
+    for directory in _cgroup_dirs(mount, relpath):
+        raw = _read_text(os.path.join(directory, "cpu.max"))
+        if raw is None:
+            continue
+        found = True
+        quotas.append(_parse_v2_cpu_max(raw))
+    return found, _tightest_quota(quotas)
+
+
+def _v1_quota_along(mount: str, relpath: str) -> float | None:
+    quotas: list[float | None] = []
+    for directory in _cgroup_dirs(mount, relpath):
+        raw_quota = _read_text(os.path.join(directory, "cpu.cfs_quota_us"))
+        raw_period = _read_text(os.path.join(directory, "cpu.cfs_period_us"))
+        if not raw_quota or not raw_period:
+            continue
+        quotas.append(_parse_v1_cpu_quota(raw_quota, raw_period))
+    return _tightest_quota(quotas)
+
+
+def _cgroup_quota_cores() -> float | None:
+    """The cgroup CPU ceiling in whole cores. None means uncapped.
+
+    Checked because "how many cores does the box have" and "how many may the
+    engine use" are different questions, and only the second one bounds a
+    score. Membership and the mounted hierarchy come from `/proc`; a nested
+    cgroup's quota is the tightest `cpu.max` (v2) or CFS quota (v1) on the
+    walk from that cgroup to the root. cgroup v2 first, then v1.
+    """
+    v2_rel, v1_rel = _parse_cgroup_membership(_read_text("/proc/self/cgroup") or "")
+    v2_mount, v1_mount = _parse_cgroup_mounts(_read_text("/proc/self/mountinfo") or "")
+    found_v2, v2_quota = _v2_quota_along(v2_mount or "/sys/fs/cgroup", v2_rel or "/")
+    if found_v2:
+        return v2_quota
+    return _v1_quota_along(v1_mount or "/sys/fs/cgroup/cpu", v1_rel or "/")
 
 
 def _memory_total_mb() -> int:

@@ -29,19 +29,23 @@ _WHITESPACE = re.compile(r"\s+")
 # to leak the credential this is here to protect.
 _URL_QUERY = re.compile(r"(https?://[^\s?]*)\?[^\s]*", re.IGNORECASE)
 
-# Bare `key=value` outside a URL, for the same secrets arriving loose in an
-# exception string. Bounded to the value's own token so surrounding prose
-# survives.
+# Credential pairs outside a URL. Provider adapters dump JSON and Python-dict
+# bodies into ProvisionError, so the name may be quoted (`"api_key": "secret"`,
+# `{'Authorization': 'Bearer secret'}`). Quotes around the name are optional; a
+# quoted value is consumed whole so a space inside `"Bearer secret"` cannot
+# leave the token behind. An unquoted value still stops at the next gap, so
+# surrounding prose survives.
 #
 # The name is wrapped in `[\w.-]*` rather than `\b` because an underscore is a
 # word character: `\bACCESS_KEY` never matches inside `AWS_ACCESS_KEY`, which
 # is exactly the spelling a provider error uses. The optional scheme keeps
 # `Authorization: Bearer <token>` from redacting only the word "Bearer".
 _SENSITIVE_PAIR = re.compile(
-    r"([\w.-]*(?:signature|credential|token|secret|password|passwd|api[_-]?key"
-    r"|access[_-]?key|auth(?:orization)?)[\w.-]*)"
+    r"([\"']?[\w.-]*(?:signature|credential|token|secret|password|passwd"
+    r"|api[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*[\"']?)"
     r"\s*[=:]\s*"
-    r"(?:(?:bearer|basic|token)\s+)?\S+",
+    r"(?:(?:bearer|basic|token)\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|\S+)",
     re.IGNORECASE,
 )
 
@@ -50,7 +54,8 @@ def sanitize_void_detail(detail: str | None, *, limit: int = MAX_VOID_DETAIL) ->
     """Scrub a void detail for public display.
 
     Strips terminal escapes and control characters, flattens the string to one
-    line, redacts URL query strings and loose credential pairs, then truncates.
+    line, redacts URL query strings and credential pairs (quoted or not), then
+    truncates.
     Returns "" for nothing worth showing, so a caller can store NULL.
     """
     if not detail:

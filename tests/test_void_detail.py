@@ -63,6 +63,25 @@ def test_loose_credential_pairs_are_redacted(secret: str):
     assert "while retrying" in out
 
 
+@pytest.mark.parametrize(
+    "blob",
+    [
+        '{"api_key": "secret"}',
+        "{'Authorization': 'Bearer secret'}",
+        '{"api_key":"secret"}',
+        '{"Authorization": "Bearer secret"}',
+    ],
+)
+def test_quoted_json_and_python_dict_credentials_are_redacted(blob: str):
+    """Provider adapters include raw response bodies in ProvisionError."""
+    out = sanitize_void_detail(f"provision failed: {blob} while retrying")
+    assert REDACTED in out
+    assert "secret" not in out
+    assert "Bearer" not in out
+    assert "provision failed" in out
+    assert "while retrying" in out
+
+
 def test_terminal_escapes_and_newlines_are_flattened():
     """Provider output arrives coloured and multi-line; a round row is neither."""
     out = sanitize_void_detail("boom \x1b[31mred\x1b[0m\nsecond line\r\tthird")
