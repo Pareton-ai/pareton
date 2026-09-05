@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -80,6 +82,45 @@ def test_quoted_json_and_python_dict_credentials_are_redacted(blob: str):
     assert "Bearer" not in out
     assert "provision failed" in out
     assert "while retrying" in out
+
+
+def test_escaped_quotes_inside_a_json_value_do_not_leave_the_secret():
+    """`\"` is a character in the value, not the end of the quoted value."""
+    detail = json.dumps({"password": 'prefix"SYNTHETIC_SECRET'})
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+
+
+def test_json_encoded_credential_fields_are_redacted():
+    """A JSON body nested inside another JSON string still carries the key."""
+    detail = json.dumps({"body": json.dumps({"api_key": "SYNTHETIC_SECRET"})})
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+
+
+def test_provider_http_body_is_scrubbed_on_the_void_write_path():
+    """Shadeform/Runpod/Targon put resp.text[:300] into ProvisionError.
+
+    round_job raises RoundInfraError with str(exc); void_round sanitizes
+    that detail before the column (and the public round response) sees it.
+    """
+    from gpu.errors import ProvisionError
+    from round.store import VOID_POD_PROVISION_FAILED
+    from worker.round_job import RoundInfraError
+
+    escaped = json.dumps({"password": 'prefix"SYNTHETIC_SECRET'})
+    encoded = json.dumps({"body": json.dumps({"api_key": "SYNTHETIC_SECRET"})})
+    for body in (escaped, encoded):
+        exc = ProvisionError(
+            f"Shadeform POST /instances/create failed HTTP 403: {body[:300]}"
+        )
+        infra = RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc))
+        published = sanitize_void_detail(infra.detail)
+        assert "SYNTHETIC_SECRET" not in published
+        assert REDACTED in published
+        assert "failed HTTP 403" in published
 
 
 def test_terminal_escapes_and_newlines_are_flattened():

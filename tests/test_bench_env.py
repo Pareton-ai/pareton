@@ -155,6 +155,50 @@ def test_cgroup_v2_quota_uses_the_mounted_hierarchy(monkeypatch):
     assert env._cgroup_quota_cores() == 2.0
 
 
+def test_cgroup_v2_subtree_mount_strips_the_mount_root(monkeypatch):
+    """Field 4 is the root inside the filesystem; membership is relative to it."""
+    monkeypatch.setattr(
+        env,
+        "_read_text",
+        _fake_reads(
+            {
+                "/proc/self/cgroup": "0::/tenant/bench\n",
+                "/proc/self/mountinfo": (
+                    "36 1 0:31 /tenant /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
+                ),
+                "/sys/fs/cgroup/cpu.max": "max 100000\n",
+                "/sys/fs/cgroup/bench/cpu.max": "200000 100000\n",
+                # Wrong join of mount point + full membership; must not win.
+                "/sys/fs/cgroup/tenant/bench/cpu.max": "999000 100000\n",
+            }
+        ),
+    )
+    assert env._cgroup_quota_cores() == 2.0
+
+
+def test_cgroup_v1_subtree_mount_strips_the_mount_root(monkeypatch):
+    monkeypatch.setattr(
+        env,
+        "_read_text",
+        _fake_reads(
+            {
+                "/proc/self/cgroup": "2:cpu,cpuacct:/tenant/bench\n",
+                "/proc/self/mountinfo": (
+                    "36 1 0:31 /tenant /sys/fs/cgroup/cpu rw "
+                    "- cgroup cgroup rw,cpu,cpuacct\n"
+                ),
+                "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "-1\n",
+                "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n",
+                "/sys/fs/cgroup/cpu/bench/cpu.cfs_quota_us": "200000\n",
+                "/sys/fs/cgroup/cpu/bench/cpu.cfs_period_us": "100000\n",
+                "/sys/fs/cgroup/cpu/tenant/bench/cpu.cfs_quota_us": "999000\n",
+                "/sys/fs/cgroup/cpu/tenant/bench/cpu.cfs_period_us": "100000\n",
+            }
+        ),
+    )
+    assert env._cgroup_quota_cores() == 2.0
+
+
 def test_collect_cpu_reports_cores_and_quota(monkeypatch):
     monkeypatch.setattr(
         env,

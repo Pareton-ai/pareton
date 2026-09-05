@@ -31,21 +31,33 @@ _URL_QUERY = re.compile(r"(https?://[^\s?]*)\?[^\s]*", re.IGNORECASE)
 
 # Credential pairs outside a URL. Provider adapters dump JSON and Python-dict
 # bodies into ProvisionError, so the name may be quoted (`"api_key": "secret"`,
-# `{'Authorization': 'Bearer secret'}`). Quotes around the name are optional; a
-# quoted value is consumed whole so a space inside `"Bearer secret"` cannot
-# leave the token behind. An unquoted value still stops at the next gap, so
-# surrounding prose survives.
+# `{'Authorization': 'Bearer secret'}`). Quotes around the name are optional
+# and may themselves be JSON-encoded (`\"api_key\"` inside a nested dump).
+#
+# A quoted value is consumed whole, including escaped quotes inside it
+# (`"prefix\"secret"`), so a delimiter cannot leave the token behind. Encoded
+# delimiters (`\"...\"`) are a separate alternative so they do not steal the
+# closing quote of a surrounding JSON string. An unquoted value still stops at
+# the next gap, so surrounding prose survives.
 #
 # The name is wrapped in `[\w.-]*` rather than `\b` because an underscore is a
 # word character: `\bACCESS_KEY` never matches inside `AWS_ACCESS_KEY`, which
 # is exactly the spelling a provider error uses. The optional scheme keeps
 # `Authorization: Bearer <token>` from redacting only the word "Bearer".
 _SENSITIVE_PAIR = re.compile(
-    r"([\"']?[\w.-]*(?:signature|credential|token|secret|password|passwd"
-    r"|api[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*[\"']?)"
+    r"((?:\\[\"']|[\"'])?"
+    r"[\w.-]*(?:signature|credential|token|secret|password|passwd"
+    r"|api[_-]?key|access[_-]?key|auth(?:orization)?)[\w.-]*"
+    r"(?:\\[\"']|[\"'])?)"
     r"\s*[=:]\s*"
     r"(?:(?:bearer|basic|token)\s+)?"
-    r"(?:\"[^\"]*\"|'[^']*'|\S+)",
+    r"(?:"
+    r"\"(?:\\.|[^\"\\])*\""
+    r"|\\\"(?:\\.|[^\"\\])*\\\""
+    r"|'(?:\\.|[^'\\])*'"
+    r"|\\'(?:\\.|[^'\\])*\\'"
+    r"|\S+"
+    r")",
     re.IGNORECASE,
 )
 

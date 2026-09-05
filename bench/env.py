@@ -161,10 +161,17 @@ def _parse_cgroup_membership(text: str) -> tuple[str | None, str | None]:
     return v2_rel, v1_rel
 
 
-def _parse_cgroup_mounts(text: str) -> tuple[str | None, str | None]:
-    """cgroup2 and v1-cpu mount points from `/proc/self/mountinfo`."""
-    v2_mount: str | None = None
-    v1_mount: str | None = None
+def _parse_cgroup_mounts(
+    text: str,
+) -> tuple[tuple[str, str] | None, tuple[str, str] | None]:
+    """cgroup2 and v1-cpu mounts from `/proc/self/mountinfo`.
+
+    Field 4 is the root within the filesystem; field 5 is the mount point.
+    A subtree mount has a root other than `/`, so membership cannot be
+    appended to the mount point until that prefix is stripped.
+    """
+    v2_mount: tuple[str, str] | None = None
+    v1_mount: tuple[str, str] | None = None
     for line in text.splitlines():
         if " - " not in line:
             continue
@@ -174,18 +181,39 @@ def _parse_cgroup_mounts(text: str) -> tuple[str | None, str | None]:
         # mountinfo fields 1-5 are stable; optional fields sit after them.
         if len(left_fields) < 5 or not right_fields:
             continue
+        mount_root = left_fields[3]
         mount_point = left_fields[4]
         fstype = right_fields[0]
         super_opts = right_fields[2].split(",") if len(right_fields) > 2 else []
         if fstype == "cgroup2" and v2_mount is None:
-            v2_mount = mount_point
+            v2_mount = (mount_root, mount_point)
         elif fstype == "cgroup" and "cpu" in super_opts and v1_mount is None:
-            v1_mount = mount_point
+            v1_mount = (mount_root, mount_point)
     return v2_mount, v1_mount
 
 
+def _normalize_cgroup_path(path: str) -> str:
+    if not path or path == "/":
+        return "/"
+    return "/" + "/".join(p for p in path.split("/") if p)
+
+
+def _relpath_in_mount(membership: str, mount_root: str) -> str | None:
+    """Membership relative to the mount root, or None if it is outside."""
+    mem = _normalize_cgroup_path(membership)
+    root = _normalize_cgroup_path(mount_root)
+    if root == "/":
+        return mem
+    if mem == root:
+        return "/"
+    prefix = root + "/"
+    if mem.startswith(prefix):
+        return mem[len(root) :]
+    return None
+
+
 def _cgroup_dirs(mount: str, relpath: str) -> list[str]:
-    """Directories from the leaf cgroup up to the mount root, inclusive."""
+    """Directories from the leaf cgroup up to the mount point, inclusive."""
     parts = [p for p in relpath.strip("/").split("/") if p]
     dirs = [os.path.join(mount, *parts[:i]) for i in range(len(parts), 0, -1)]
     dirs.append(mount)
@@ -252,14 +280,23 @@ def _cgroup_quota_cores() -> float | None:
     engine use" are different questions, and only the second one bounds a
     score. Membership and the mounted hierarchy come from `/proc`; a nested
     cgroup's quota is the tightest `cpu.max` (v2) or CFS quota (v1) on the
-    walk from that cgroup to the root. cgroup v2 first, then v1.
+    walk from that cgroup to the mount point. Membership is resolved relative
+    to the mount root (mountinfo field 4), not appended onto the mount point.
+    cgroup v2 first, then v1.
     """
     v2_rel, v1_rel = _parse_cgroup_membership(_read_text("/proc/self/cgroup") or "")
     v2_mount, v1_mount = _parse_cgroup_mounts(_read_text("/proc/self/mountinfo") or "")
-    found_v2, v2_quota = _v2_quota_along(v2_mount or "/sys/fs/cgroup", v2_rel or "/")
-    if found_v2:
-        return v2_quota
-    return _v1_quota_along(v1_mount or "/sys/fs/cgroup/cpu", v1_rel or "/")
+    v2_root, v2_point = v2_mount or ("/", "/sys/fs/cgroup")
+    v2_inside = _relpath_in_mount(v2_rel or "/", v2_root)
+    if v2_inside is not None:
+        found_v2, v2_quota = _v2_quota_along(v2_point, v2_inside)
+        if found_v2:
+            return v2_quota
+    v1_root, v1_point = v1_mount or ("/", "/sys/fs/cgroup/cpu")
+    v1_inside = _relpath_in_mount(v1_rel or "/", v1_root)
+    if v1_inside is not None:
+        return _v1_quota_along(v1_point, v1_inside)
+    return None
 
 
 def _memory_total_mb() -> int:
