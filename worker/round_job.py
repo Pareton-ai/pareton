@@ -605,7 +605,8 @@ def _round_entry_status_writer(
 
 def _void(round_row: dict[str, Any], reason: str, detail: str = "") -> None:
     round_id = str(round_row["id"])
-    landed = void_round(round_id, reason)
+    # The store scrubs and truncates; the log below keeps the raw string.
+    landed = void_round(round_id, reason, detail)
     if not landed:
         logger.info("round %s already settled; skipped void %s", round_id, reason)
         return

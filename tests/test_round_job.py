@@ -779,3 +779,56 @@ def test_process_round_defers_on_empty_market(tmp_path, monkeypatch):
     assert outcome == "deferred"
     assert seen == [1800]
     assert voided == []
+
+
+def test_void_carries_the_detail_into_the_store(monkeypatch):
+    """The reason alone is a bare code; the detail is what answers "why".
+
+    Miners asked what an infra_fail actually was, and the detail existed only
+    in a worker log line until it was persisted.
+    """
+    from worker import round_job
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        round_job,
+        "void_round",
+        lambda rid, reason, detail="": (calls.append((rid, reason, detail)), True)[1],
+    )
+    monkeypatch.setattr(round_job.obs, "round_voided", lambda **_kw: None)
+
+    round_job._void(
+        {"id": "r1", "campaign_id": "c1", "ordinal": 7},
+        "pod_failed",
+        "provider returned 503 after 3 retries",
+    )
+    assert calls == [("r1", "pod_failed", "provider returned 503 after 3 retries")]
+
+
+def test_void_without_a_detail_still_records_the_reason(monkeypatch):
+    from worker import round_job
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        round_job,
+        "void_round",
+        lambda rid, reason, detail="": (calls.append((rid, reason, detail)), True)[1],
+    )
+    monkeypatch.setattr(round_job.obs, "round_voided", lambda **_kw: None)
+
+    round_job._void({"id": "r1", "campaign_id": "c1", "ordinal": 7}, "round_timeout")
+    assert calls == [("r1", "round_timeout", "")]
+
+
+def test_an_already_settled_round_is_not_voided_again(monkeypatch):
+    """void_round returning False means another writer settled it first."""
+    from worker import round_job
+
+    seen: list[str] = []
+    monkeypatch.setattr(round_job, "void_round", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        round_job.obs, "round_voided", lambda **_kw: seen.append("emitted")
+    )
+
+    round_job._void({"id": "r1", "campaign_id": "c1", "ordinal": 7}, "pod_failed", "x")
+    assert seen == []

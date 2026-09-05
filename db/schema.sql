@@ -210,6 +210,8 @@ CREATE TABLE IF NOT EXISTS rounds (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'running', 'complete', 'void')),
   void_reason TEXT,
+  -- Scrubbed free text behind void_reason (round/void_detail.py). Public.
+  void_detail TEXT,
   incumbent_submission_id UUID REFERENCES submissions(id),
   winner_submission_id UUID REFERENCES submissions(id),
   leader_changed BOOLEAN,

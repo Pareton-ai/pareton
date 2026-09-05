@@ -670,6 +670,7 @@ def _round_summary(ordinal: int, status: str, **over) -> dict:
         "ordinal": ordinal,
         "status": status,
         "void_reason": None,
+        "void_detail": None,
         "gpu_sku": "H200",
         "seed_block": 1000 + ordinal,
         "seed_block_hash": "0x" + f"{ordinal:064x}",
@@ -719,7 +720,12 @@ def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
     _open_campaign(monkeypatch)
     rows = [
         _round_summary(3, "complete", leader_changed=True),
-        _round_summary(2, "void", void_reason="baseline_drift"),
+        _round_summary(
+            2,
+            "void",
+            void_reason="baseline_drift",
+            void_detail="leader image vanished from ghcr",
+        ),
         _round_summary(1, "complete"),
     ]
     monkeypatch.setattr(
@@ -730,6 +736,9 @@ def test_rounds_list_keeps_void_ordinals(monkeypatch, client: TestClient):
     body = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds").json()
     assert [r["ordinal"] for r in body["rounds"]] == [3, 2, 1]
     assert body["rounds"][1]["void_reason"] == "baseline_drift"
+    # The list carries the detail too: a miner scanning rounds should not have
+    # to open each void to learn it was the same infra fault every time.
+    assert body["rounds"][1]["void_detail"] == "leader image vanished from ghcr"
 
 
 def test_rounds_list_campaign_404(monkeypatch, client: TestClient):
@@ -739,6 +748,36 @@ def test_rounds_list_campaign_404(monkeypatch, client: TestClient):
     resp = client.get(f"/v1/campaigns/{CAMPAIGN_ID}/rounds")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "campaign not found"
+
+
+def test_round_detail_explains_why_it_voided(monkeypatch, client: TestClient):
+    """void_reason is a bare code; void_detail is the sentence behind it."""
+    from api import server
+
+    monkeypatch.setattr(
+        server,
+        "get_round",
+        lambda _rid: _round_row(
+            status="void",
+            phase=None,
+            void_reason="pod_failed",
+            void_detail="provider returned 503 after 3 retries",
+        ),
+    )
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    server.RoundDetailModel.model_validate(body)
+    assert body["void_reason"] == "pod_failed"
+    assert body["void_detail"] == "provider returned 503 after 3 retries"
+
+
+def test_a_round_that_did_not_void_carries_no_detail(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "get_round", lambda _rid: _round_row())
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    assert body["void_detail"] is None
 
 
 ROUND_ID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
@@ -751,6 +790,7 @@ def _round_row(**over) -> dict:
         "ordinal": 4,
         "status": "running",
         "void_reason": None,
+        "void_detail": None,
         "gpu_sku": "H200",
         "seed_block": 1004,
         "seed_block_hash": "0x" + "a" * 64,
@@ -865,6 +905,203 @@ def test_round_detail_of_a_terminal_round_is_cacheable(monkeypatch, client: Test
     monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
     resp = client.get(f"/v1/rounds/{ROUND_ID}")
     assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+
+
+# --- GET /v1/rounds/{id}/entries/{id}/report -------------------------------
+
+
+def _score_report_row(**over) -> dict:
+    """One scored challenger, as get_round_entry_report returns it."""
+    row = {
+        "id": 2,
+        "round_id": ROUND_ID,
+        "submission_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+        "role": "challenger",
+        "engine_image_ref": "ghcr.io/x/e@sha256:" + "1" * 64,
+        "status": "scored",
+        "score": 0.7194,
+        "disqualify_reason": None,
+        "started_at": None,
+        "completed_at": None,
+        "patch_hash": "sha256:win",
+        "hotkey": HOTKEY,
+        "round_status": "complete",
+        "round_ordinal": 12,
+        "scoring_rule": {"name": "median_e2e_speedup", "tolerance": 0.9},
+        "report": {
+            "index": 0,
+            "image_digest": "sha256:" + "1" * 64,
+            "status": "scored",
+            "score": 0.7194,
+            "reason": None,
+            "score_report": {
+                "rule": "median_e2e_speedup",
+                "score": 0.7194,
+                "prompts": [
+                    {
+                        "request_id": "req-0",
+                        "speedup": 0.7194,
+                        "aligned_tokens": 44,
+                        "baseline_e2e_s": 1.811,
+                        "candidate_e2e_s": 0.508,
+                        "reason": None,
+                    },
+                    {
+                        "request_id": "req-1",
+                        "speedup": 0.0,
+                        "aligned_tokens": 38,
+                        "baseline_e2e_s": None,
+                        "candidate_e2e_s": None,
+                        "reason": "candidate output below tolerance",
+                    },
+                ],
+            },
+            "sla": {"role": "candidate", "metrics": {"output_tokens_per_s": 91.2}},
+            "correctness": {"verdict": "pass", "mean_logprob": -0.21},
+        },
+    }
+    row.update(over)
+    return row
+
+
+def test_entry_report_serves_the_per_prompt_breakdown(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(
+        server, "get_round_entry_report", lambda _rid, _eid: _score_report_row()
+    )
+    resp = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert resp.status_code == 200
+    body = resp.json()
+    server.RoundEntryReportModel.model_validate(body)
+
+    assert body["round_ordinal"] == 12
+    assert body["entry_id"] == 2
+    assert body["hotkey"] == HOTKEY
+    assert body["scoring_rule"] == {"name": "median_e2e_speedup", "tolerance": 0.9}
+    # Absolute seconds travel with the ratio: a speedup alone cannot be
+    # checked against a local run.
+    assert body["prompts"][0]["baseline_e2e_s"] == 1.811
+    assert body["prompts"][0]["candidate_e2e_s"] == 0.508
+    # The count that was asked for by name: prompts the tolerance gate zeroed.
+    assert body["prompt_summary"]["total"] == 2
+    assert body["prompt_summary"]["scored"] == 1
+    assert body["prompt_summary"]["below_tolerance"] == 1
+    assert body["correctness"]["verdict"] == "pass"
+    assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
+    # Evidence keeps its own gate; the report does not carry it out.
+    assert "evidence_s3_url" not in body
+
+
+def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(
+        server,
+        "get_round_entry_report",
+        lambda _rid, _eid: _score_report_row(round_status="running"),
+    )
+    resp = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert resp.headers.get("Cache-Control") == "no-store"
+
+    monkeypatch.setattr(
+        server, "get_round_entry_report", lambda _rid, _eid: _score_report_row()
+    )
+    resp = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+
+
+def test_entry_report_carries_the_reason_for_a_non_scored_entry(
+    monkeypatch, client: TestClient
+):
+    """A disqualified entry never reached scoring, so it has no prompts."""
+    from api import server
+
+    row = _score_report_row(
+        status="disqualified",
+        score=None,
+        disqualify_reason="mean_logprob -3.9 below -2.0",
+        report={
+            "index": 0,
+            "image_digest": "sha256:" + "2" * 64,
+            "status": "disqualified",
+            "score": None,
+            "reason": "mean_logprob -3.9 below -2.0",
+            "correctness": {"verdict": "fail_correctness", "mean_logprob": -3.9},
+        },
+    )
+    monkeypatch.setattr(server, "get_round_entry_report", lambda _rid, _eid: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["score"] is None
+    assert body["reason"] == "mean_logprob -3.9 below -2.0"
+    assert body["prompts"] == []
+    assert body["prompt_summary"]["total"] == 0
+    assert body["correctness"]["verdict"] == "fail_correctness"
+
+
+def test_entry_report_reads_the_baseline_row_as_an_sla_replay(
+    monkeypatch, client: TestClient
+):
+    """The baseline entry stores its replay, not a comparison against itself."""
+    from api import server
+
+    row = _score_report_row(
+        id=1,
+        role="baseline",
+        submission_id=None,
+        patch_hash=None,
+        hotkey=None,
+        score=0.0,
+        report={
+            "role": "baseline",
+            "metrics": {"output_tokens_per_s": 24.1},
+            "cross_rep_variance": {"p99_e2e_ms_rel_range": 0.018},
+            "timings": {
+                "req-0": {"ttft_s": 0.09, "itl_s": [], "completion_tokens": 44}
+            },
+            "evidence": "sla_bench/",
+        },
+    )
+    monkeypatch.setattr(server, "get_round_entry_report", lambda _rid, _eid: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/1/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["role"] == "baseline"
+    assert body["score"] == 0.0
+    assert body["prompts"] == []
+    # The stored replay is the SLA block, reachable under the same key as a
+    # candidate's, so one client path reads either shape.
+    assert body["sla"]["metrics"]["output_tokens_per_s"] == 24.1
+    assert body["sla"]["cross_rep_variance"]["p99_e2e_ms_rel_range"] == 0.018
+
+
+def test_entry_report_survives_an_empty_or_legacy_report_blob(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    row = _score_report_row(status="infra_failed", score=None, report={})
+    monkeypatch.setattr(server, "get_round_entry_report", lambda _rid, _eid: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["prompts"] == []
+    assert body["sla"] is None
+    assert body["correctness"] is None
+    assert body["engine_crashed"] is False
+
+
+def test_entry_report_404_and_bad_ids(monkeypatch, client: TestClient):
+    from api import server
+
+    monkeypatch.setattr(server, "get_round_entry_report", lambda _rid, _eid: None)
+    assert client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").status_code == 404
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("store must not be reached")
+
+    monkeypatch.setattr(server, "get_round_entry_report", _boom)
+    assert client.get("/v1/rounds/not-a-uuid/entries/2/report").status_code == 422
+    assert client.get(f"/v1/rounds/{ROUND_ID}/entries/nope/report").status_code == 422
 
 
 def test_score_progress_keeps_void_ordinals_and_null_scores(

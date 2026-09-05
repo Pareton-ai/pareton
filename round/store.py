@@ -31,6 +31,7 @@ from round.rank import (
     SETTLED_STATUSES,
     RankDecision,
 )
+from round.void_detail import sanitize_void_detail
 
 # rounds.void_reason written by the watcher. The runner owns the rest.
 VOID_HEARTBEAT_STALE = "heartbeat_stale"
@@ -292,13 +293,19 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
                 UPDATE rounds
                 SET status = 'void',
                     void_reason = %s,
+                    void_detail = %s,
                     completed_at = now()
                 WHERE status = 'running'
                   AND COALESCE(heartbeat_at, started_at)
                       < now() - make_interval(secs => %s)
                 RETURNING id, campaign_id, ordinal
                 """,
-                (VOID_HEARTBEAT_STALE, int(stale_s)),
+                (
+                    VOID_HEARTBEAT_STALE,
+                    f"no heartbeat for over {int(stale_s)}s; the pod stopped "
+                    "reporting and the round was reaped",
+                    int(stale_s),
+                ),
             )
             voided = [dict(r) for r in cur.fetchall()]
             for row in voided:
@@ -774,12 +781,18 @@ def complete_round(
     return True
 
 
-def void_round(round_id: UUID | str, reason: str) -> bool:
+def void_round(round_id: UUID | str, reason: str, detail: str = "") -> bool:
     """Abandon a running round. Returns False when it was already settled.
 
     Never touches leaders or leader_history. Requeues challengers that have
     not reached a settled status.
+
+    ``detail`` is the free text behind ``reason``. It is scrubbed here rather
+    than at the API, so a credential in a provider error or a presigned URL
+    never reaches the column: this is a public field. NULL when empty, so a
+    reader can tell "no detail" from "".
     """
+    scrubbed = sanitize_void_detail(detail)
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -787,11 +800,12 @@ def void_round(round_id: UUID | str, reason: str) -> bool:
                 UPDATE rounds
                 SET status = 'void',
                     void_reason = %s,
+                    void_detail = %s,
                     completed_at = now()
                 WHERE id = %s AND status = 'running'
                 RETURNING id
                 """,
-                (reason, str(round_id)),
+                (reason, scrubbed or None, str(round_id)),
             )
             landed = cur.fetchone() is not None
             if not landed:
@@ -854,7 +868,7 @@ def list_rounds(
             total = int(meta["n"])
             cur.execute(
                 """
-                SELECT r.id, r.ordinal, r.status, r.void_reason, r.gpu_sku,
+                SELECT r.id, r.ordinal, r.status, r.void_reason, r.void_detail, r.gpu_sku,
                        r.seed_block, r.seed_block_hash, r.leader_changed,
                        r.created_at, r.completed_at,
                        (SELECT COUNT(*) FROM round_entries e
@@ -876,7 +890,7 @@ def get_round(round_id: UUID | str) -> dict[str, Any] | None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, campaign_id, ordinal, status, void_reason, gpu_sku,
+                SELECT id, campaign_id, ordinal, status, void_reason, void_detail, gpu_sku,
                        seed_block, seed_block_hash, seed_hex,
                        sampled_trace_sha256, scoring_rule,
                        incumbent_submission_id, winner_submission_id,
@@ -1494,11 +1508,50 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
             )
 
 
+def get_round_entry_report(
+    round_id: UUID | str, entry_id: int
+) -> dict[str, Any] | None:
+    """One entry's stored ``report``, addressed within its round.
+
+    Served on its own endpoint rather than folded into the round detail: a
+    round holds a report per entry and each carries every prompt's timings, so
+    inlining them would bloat the response the live dashboard polls hardest.
+
+    ``round_status`` comes along because the caller sets cache headers from it,
+    and an entry of a running round is still moving. ``evidence_s3_url`` stays
+    unselected: the tarball keeps its own gate, and the report is the part a
+    miner needs to re-derive the score.
+
+    None when the entry does not exist, or exists under a different round.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.id, e.round_id, e.submission_id, e.role,
+                       e.engine_image_ref, e.status, e.score,
+                       e.disqualify_reason, e.report,
+                       e.started_at, e.completed_at,
+                       s.patch_hash, s.hotkey,
+                       r.status AS round_status, r.ordinal AS round_ordinal,
+                       r.scoring_rule
+                FROM round_entries e
+                JOIN rounds r ON r.id = e.round_id
+                LEFT JOIN submissions s ON s.id = e.submission_id
+                WHERE e.round_id = %s AND e.id = %s
+                """,
+                (str(round_id), int(entry_id)),
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
     """Every entry of one round, in run order.
 
     ``evidence_s3_url`` and ``report`` are deliberately not selected: evidence
-    stays behind its current gate.
+    stays behind its current gate, and the report is large enough to want its
+    own endpoint (``get_round_entry_report``).
     """
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
