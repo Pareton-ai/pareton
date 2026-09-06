@@ -10,6 +10,50 @@ Python 3.8+, curl, tar, sha256sum, and `nvidia-smi` available.
 
 ## Use the container you already launched
 
+Reference launch commands for `pareton-vllm` are below. Skip this block if the
+container is already running with these settings. The first command removes a
+stopped or failed container; Docker refuses to remove a running container without
+`-f`. If the name does not exist yet, proceed with volume creation.
+
+```bash
+sudo docker rm pareton-vllm
+sudo docker volume create pareton-hf-cache
+
+IMAGE='ghcr.io/pareton-ai/pareton-engine@sha256:3891dd3de2d04ecbe197af3f8cf93668e54ab4ab8e284a6f02ecf1969ffd7c09'
+
+sudo docker run -d \
+  --name pareton-vllm \
+  --gpus all \
+  --ipc=host \
+  -p 127.0.0.1:8000:8000 \
+  --mount type=volume,source=pareton-hf-cache,target=/hf-cache \
+  -e HF_HOME=/hf-cache \
+  "$IMAGE" \
+  --model Qwen/Qwen3.8-27B-FP8 \
+  --revision 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a \
+  --served-model-name Qwen/Qwen3.8-27B-FP8 \
+  --dtype auto \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 8192 \
+  --tensor-parallel-size 1 \
+  --gpu-memory-utilization 0.80 \
+  --enable-prefix-caching \
+  --enable-chunked-prefill \
+  --max-num-seqs 32 \
+  --max-num-batched-tokens 8192 \
+  --gdn-prefill-backend triton
+
+sudo docker logs -f pareton-vllm
+```
+
+Wait for server startup, then press Ctrl+C to leave log streaming. The detached
+container keeps running. Confirm readiness before starting the benchmark:
+
+```bash
+curl -fsS http://127.0.0.1:8000/health
+```
+
 Upload `pareton-localmaxxing.tar.gz` to `/workspace`, then:
 
 ```bash
