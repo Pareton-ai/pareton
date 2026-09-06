@@ -1,12 +1,20 @@
 # Custom vLLM LocalMaxxing run
 
-This directory is a standalone bundle. No separate repository checkout or host
-vLLM installation is needed. It includes the measurement helpers and prompt;
+Run these scripts from a cloned Pareton repository. No separate benchmark
+repository or host vLLM installation is needed. The helpers and prompt are included;
 bootstrap downloads the checksum-verified LocalMaxxing v0.1.39 Linux x86_64 CLI.
 The existing image supplies vLLM and its CUDA userspace toolchain.
 
 Run as root on a Linux x86_64 GPU host with Docker, NVIDIA Container Toolkit,
-Python 3.8+, curl, tar, sha256sum, and `nvidia-smi` available.
+Python 3.8+, git, curl, tar, sha256sum, and `nvidia-smi` available.
+
+Clone the repo, or enter your existing checkout. All commands below run from the
+repo root:
+
+```bash
+git clone https://github.com/Pareton-ai/pareton.git
+cd pareton
+```
 
 ## Use the container you already launched
 
@@ -54,12 +62,10 @@ container keeps running. Confirm readiness before starting the benchmark:
 curl -fsS http://127.0.0.1:8000/health
 ```
 
-Upload `pareton-localmaxxing.tar.gz` to `/workspace`, then:
+Start the benchmark from the repo root:
 
 ```bash
-mkdir -p /workspace/pareton-localmaxxing
-tar -xzf /workspace/pareton-localmaxxing.tar.gz -C /workspace/pareton-localmaxxing
-bash /workspace/pareton-localmaxxing/reproduce-pareton.sh \
+bash scripts/localmaxxing/reproduce-pareton.sh \
   --existing-container pareton-vllm
 ```
 
@@ -73,7 +79,7 @@ The actual entrypoint, arguments, import path, and version come from the contain
 For a detached run:
 
 ```bash
-nohup bash /workspace/pareton-localmaxxing/reproduce-pareton.sh \
+nohup bash scripts/localmaxxing/reproduce-pareton.sh \
   --existing-container pareton-vllm \
   > /workspace/pareton-localmaxxing.log 2>&1 < /dev/null &
 tail -f /workspace/pareton-localmaxxing.log
@@ -84,7 +90,7 @@ tail -f /workspace/pareton-localmaxxing.log
 If port 8000 and GPU 0 are free, omit the flag:
 
 ```bash
-bash /workspace/pareton-localmaxxing/reproduce-pareton.sh
+bash scripts/localmaxxing/reproduce-pareton.sh
 ```
 
 This pulls the pinned image, uses the `pareton-hf-cache` named volume, launches
@@ -94,7 +100,7 @@ The optional `HF_TOKEN` is passed by variable name to Docker. Do not enable shel
 tracing. The server remains running afterwards. Remove the managed container with:
 
 ```bash
-bash /workspace/pareton-localmaxxing/reproduce-pareton.sh stop
+bash scripts/localmaxxing/reproduce-pareton.sh stop
 ```
 
 `stop` and `serve` reject `--existing-container` to protect the manually launched
@@ -105,21 +111,26 @@ For these instances, a detected `NVIDIA H200` is assumed to be SXM. Both bootstr
 and `run` automatically normalize that exact name to LocalMaxxing's canonical
 `NVIDIA H200 SXM` before hardware validation. Other GPU names and measured hardware
 fields are preserved. Existing metadata from a failed attempt is corrected too;
-no manual JSON edit is needed. After installing the updated bundle, resume with:
+no manual JSON edit is needed. With the updated scripts in your checkout, resume with:
 
 ```bash
-bash /workspace/pareton-localmaxxing/reproduce-pareton.sh run \
+bash scripts/localmaxxing/reproduce-pareton.sh run \
   --existing-container pareton-vllm
 ```
 
 ## Settings and results
 
-Edit `qwen38-27b-fp8-pareton.recipe` for the model and benchmark settings. It
+Edit `scripts/localmaxxing/qwen38-27b-fp8-pareton.recipe` for the model and benchmark settings. It
 preserves the supplied model revision and serving flags. The workload remains
 reasoning-v1 with cache-busting nonces, greedy generation, 512 maximum output
-tokens, two warmups, three timed iterations, and concurrency 256. The server
-schedules at most 32 sequences; excess requests queue. Set `CONCURRENCY=32`
-in the recipe for a lower-concurrency measurement.
+tokens, two warmups, three timed iterations, and concurrency 32. The recipe sets
+`MAX_NUM_SEQS=32` and derives both client `CONCURRENCY` and server `--max-num-seqs`
+from it. This sends 32 concurrent requests, each with one prompt; it does not put
+32 prompts in a single API request. Default run names include `c32`.
+
+Earlier `c256` results used 256 client requests against the same server limit of
+32 active sequences. Those measurements represent a different offered load and
+must not be relabeled as `c32` results. Rerun to measure concurrency 32.
 
 New runs use unique names beneath `/workspace/runs/`. Use `--run-name my-run`
 for an explicit name; existing result directories are never overwritten.
@@ -141,4 +152,5 @@ also propagates benchmark and metadata failures. There is no runtime dependency
 on that repository.
 
 Local checks cover shell syntax and simulated lifecycle and artifact flows.
-Actual GPU performance remains to be verified on the provisioned instance.
+The previous concurrency-256 run completed on the provisioned H200 SXM instance.
+The updated concurrency-32 configuration requires a new GPU run.

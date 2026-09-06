@@ -121,7 +121,7 @@ run() {
   curl -fsS --max-time 5 http://127.0.0.1:8000/health >/dev/null
   validate_hardware
   version=$("${DOCKER[@]}" exec "$CONTAINER" python -c 'import vllm; print(vllm.__version__)')
-  notes="Custom Pareton image $IMAGE; model revision $REVISION. LocalMaxxing reasoning-v1, concurrency $CONCURRENCY, max-num-seqs 32, 2 warmups, $ITERATIONS timed iterations, max_tokens $MAX_TOKENS."
+  notes="Custom Pareton image $IMAGE; model revision $REVISION. LocalMaxxing reasoning-v1, concurrency $CONCURRENCY, max-num-seqs $MAX_NUM_SEQS, 2 warmups, $ITERATIONS timed iterations, max_tokens $MAX_TOKENS."
   # Prevent an old successful run from masking a failed benchmark.
   mkdir "$RUNS/$RUN_NAME"
   printf '%s\n' "$IMAGE" > "$RUNS/$RUN_NAME/image-ref.txt"
