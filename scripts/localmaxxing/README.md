@@ -101,6 +101,17 @@ bash /workspace/pareton-localmaxxing/reproduce-pareton.sh stop
 server. Separate `bootstrap`, `serve`, and `run` steps are available. After the
 first bootstrap, `run --existing-container pareton-vllm` skips CLI installation.
 
+For these instances, a detected `NVIDIA H200` is assumed to be SXM. Both bootstrap
+and `run` automatically normalize that exact name to LocalMaxxing's canonical
+`NVIDIA H200 SXM` before hardware validation. Other GPU names and measured hardware
+fields are preserved. Existing metadata from a failed attempt is corrected too;
+no manual JSON edit is needed. After installing the updated bundle, resume with:
+
+```bash
+bash /workspace/pareton-localmaxxing/reproduce-pareton.sh run \
+  --existing-container pareton-vllm
+```
+
 ## Settings and results
 
 Edit `qwen38-27b-fp8-pareton.recipe` for the model and benchmark settings. It

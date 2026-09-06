@@ -45,6 +45,20 @@ stage_helpers() {
   cp "$HERE/helpers/prompt_reasoning-v1.txt" "$L/prompt_reasoning-v1.txt"
 }
 
+validate_hardware() {
+  # These instances use H200 SXM; nvidia-smi may report only NVIDIA H200.
+  python3 - "$L/hardware.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+hardware = json.loads(path.read_text())
+if hardware.get('gpuName') == 'NVIDIA H200':
+    hardware['gpuName'] = 'NVIDIA H200 SXM'
+    path.write_text(json.dumps(hardware, indent=2) + '\n')
+    print('Hardware name: NVIDIA H200 -> NVIDIA H200 SXM (assumed SXM)')
+PY
+  lmx hardware validate "$L/hardware.json"
+}
+
 bootstrap() {
   stage_helpers
   # Install only the benchmark client. The image supplies vLLM and its toolchain.
@@ -62,7 +76,7 @@ bootstrap() {
     "${DOCKER[@]}" volume create "$VOLUME" >/dev/null
   fi
   lmx hardware --out "$L/hardware.json"
-  lmx hardware validate "$L/hardware.json"
+  validate_hardware
 }
 
 serve() {
@@ -105,7 +119,7 @@ run() {
   "${DOCKER[@]}" inspect -f '{{json .NetworkSettings.Ports}}' "$CONTAINER" | python3 -c \
     'import json,sys; ports=json.load(sys.stdin) or {}; bindings=ports.get("8000/tcp") or []; sys.exit(0 if any(p["HostPort"] == "8000" and p["HostIp"] in ("127.0.0.1", "0.0.0.0") for p in bindings) else "Container must publish port 8000 on host localhost:8000")'
   curl -fsS --max-time 5 http://127.0.0.1:8000/health >/dev/null
-  lmx hardware validate "$L/hardware.json"
+  validate_hardware
   version=$("${DOCKER[@]}" exec "$CONTAINER" python -c 'import vllm; print(vllm.__version__)')
   notes="Custom Pareton image $IMAGE; model revision $REVISION. LocalMaxxing reasoning-v1, concurrency $CONCURRENCY, max-num-seqs 32, 2 warmups, $ITERATIONS timed iterations, max_tokens $MAX_TOKENS."
   # Prevent an old successful run from masking a failed benchmark.
