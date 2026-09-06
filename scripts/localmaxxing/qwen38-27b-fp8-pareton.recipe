@@ -3,7 +3,7 @@ IMAGE='ghcr.io/pareton-ai/pareton-engine@sha256:3891dd3de2d04ecbe197af3f8cf93668
 HF_ID=Qwen/Qwen3.8-27B-FP8
 REVISION=017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
 # Match client concurrency to the server's active sequence limit.
-MAX_NUM_SEQS=32
+MAX_NUM_SEQS=128
 CONCURRENCY=$MAX_NUM_SEQS
 ITERATIONS=3
 MAX_TOKENS=512
