@@ -1,0 +1,24 @@
+# Sourced by reproduce-pareton.sh. No credentials belong in this file.
+IMAGE='ghcr.io/pareton-ai/pareton-engine@sha256:3891dd3de2d04ecbe197af3f8cf93668e54ab4ab8e284a6f02ecf1969ffd7c09'
+HF_ID=Qwen/Qwen3.8-27B-FP8
+REVISION=017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
+CONCURRENCY=256
+ITERATIONS=3
+MAX_TOKENS=512
+RUN_NAME=qwen38-27b-fp8-pareton-c256
+SERVE_ARGS=(
+  --model "$HF_ID"
+  --revision "$REVISION"
+  --served-model-name "$HF_ID"
+  --dtype auto
+  --host 0.0.0.0
+  --port 8000
+  --max-model-len 8192
+  --tensor-parallel-size 1
+  --gpu-memory-utilization 0.80
+  --enable-prefix-caching
+  --enable-chunked-prefill
+  --max-num-seqs 32
+  --max-num-batched-tokens 8192
+  --gdn-prefill-backend triton
+)
