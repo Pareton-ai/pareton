@@ -28,7 +28,7 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 ## Patch visibility
 
 For newly ingested submissions, the API and dashboard withhold the patch download
-link until six hours after the first finalized `scored` or `disqualified`
+link until two days after the first finalized `scored` or `disqualified`
 evaluation. `PARETON_PATCH_REVEAL_DELAY_S` configures that delay. Submissions
 ingested before rollout keep their existing links. Hashes, status, scores, and
 logs remain public.
