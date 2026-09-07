@@ -25,6 +25,7 @@ def client(monkeypatch):
     )
     # No unit test may reach the database. Tests that care override this.
     monkeypatch.setattr(server, "list_submission_round_entries", lambda _ids: {})
+    monkeypatch.setattr(server, "list_patch_evaluation_times", lambda _ids: {})
     return TestClient(server.app)
 
 
@@ -98,10 +99,8 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert row["latest_state"] == "scored"
     assert row["round"]["ordinal"] == 3
     assert row["round"]["score"] == 0.31
-    assert (
-        resp.headers.get("Cache-Control")
-        == "public, max-age=30, stale-while-revalidate=300"
-    )
+    assert row["retrieval_url"] == "https://example/p.diff"
+    assert resp.headers.get("Cache-Control") == "no-store"
 
 
 def test_submissions_offset_past_end(monkeypatch, client: TestClient):
@@ -482,10 +481,10 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     [
         ("building", "no-store"),
         ("bench_queued", "no-store"),
-        ("built", V1_CACHE_CONTROL_EXPECTED),
-        ("scored", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
+        ("built", "no-store"),
+        ("scored", "no-store"),
+        ("rejected", "no-store"),
+        ("rejected_duplicate", "no-store"),
     ],
 )
 def test_submission_detail_cache_control_by_state(

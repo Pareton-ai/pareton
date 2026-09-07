@@ -700,6 +700,93 @@ def _seed_incumbent(campaign_id: UUID, sid: str, image_ref: str) -> str:
     return rid
 
 
+def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
+    from campaign.store import append_event
+    from round.store import list_patch_evaluation_times
+
+    cid = _campaign()
+    scored = _submission(cid, image_ref=IMAGE_A, block=10)
+    disqualified = _submission(cid, image_ref=IMAGE_B, block=11)
+    failed = _submission(cid, image_ref=IMAGE_C, block=12)
+    banned = _submission(cid, image_ref=IMAGE_D, block=13)
+    append_event(banned, "disqualified", detail={"reason": "operator ban"})
+    first = datetime(2026, 9, 7, 8, tzinfo=timezone.utc)
+    cases = [
+        ("void", 6, [(scored, "scored"), (disqualified, "disqualified")]),
+        ("complete", 7, [(scored, "infra_failed"), (failed, "infra_failed")]),
+        ("complete", 8, [(scored, "scored"), (disqualified, "disqualified")]),
+        ("complete", 9, [(scored, "scored")]),
+        ("running", 5, [(failed, "disqualified")]),
+    ]
+    with db_connection() as conn, conn.cursor() as cur:
+        # A pre-rollout row has an ordinary committed event without enrollment.
+        cur.execute(
+            """
+            INSERT INTO submissions (
+                campaign_id, patch_hash, hotkey, baseline_commit, retrieval_url
+            ) VALUES (%s, %s, 'legacy-hotkey', 'deadbeef', 'https://cdn.test/old.diff')
+            RETURNING id
+            """,
+            (str(cid), "sha256:" + "f" * 64),
+        )
+        legacy = str(cur.fetchone()[0])
+        cur.execute(
+            """
+            INSERT INTO submission_events (submission_id, state, detail)
+            VALUES (%s, 'committed', '{"hotkey":"legacy-hotkey"}'::jsonb)
+            """,
+            (legacy,),
+        )
+        for ordinal, (status, hour, entries) in enumerate(cases, 1):
+            cur.execute(
+                """
+                INSERT INTO rounds (
+                    campaign_id, ordinal, gpu_sku, seed_block, seed_block_hash,
+                    seed_hex, sampled_trace_sha256, scoring_rule, status, completed_at
+                ) VALUES (%s, %s, 'H200', 1, '0x00', '00', %s,
+                          '{"name":"median_e2e_speedup"}'::jsonb, %s, %s)
+                RETURNING id
+                """,
+                (
+                    str(cid),
+                    ordinal,
+                    "sha256:" + "e" * 64,
+                    status,
+                    first.replace(hour=hour),
+                ),
+            )
+            rid = str(cur.fetchone()[0])
+            for sid, entry_status in entries:
+                cur.execute(
+                    """
+                    INSERT INTO round_entries (
+                        round_id, submission_id, role, engine_image_ref, status
+                    ) VALUES (%s, %s, 'challenger', %s, %s)
+                    """,
+                    (rid, sid, IMAGE_A, entry_status),
+                )
+    # Re-ingestion does not enroll an existing submission or rewrite its event.
+    assert (
+        insert_submission(
+            campaign_id=cid,
+            patch_hash="sha256:" + "f" * 64,
+            hotkey="legacy-hotkey",
+            baseline_commit="deadbeef",
+            retrieval_url="https://cdn.test/old.diff",
+        )
+        is None
+    )
+    assert list_patch_evaluation_times(
+        [scored, disqualified, failed, banned, legacy]
+    ) == {
+        scored: first,
+        disqualified: first,
+        failed: None,
+        banned: None,
+    }
+    assert list_patch_evaluation_times([]) == {}
+
+
 def _history(campaign_id: UUID) -> list[tuple]:
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:

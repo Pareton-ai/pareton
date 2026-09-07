@@ -317,7 +317,13 @@ def insert_submission(
             if row is None:
                 return None
             submission_id = row[0]
-            detail: dict[str, Any] = {"commit_block": commit_block, "hotkey": hotkey}
+            # Enroll new rows atomically. Older committed events remain untouched
+            # so deployment does not hide URLs that were already published.
+            detail: dict[str, Any] = {
+                "commit_block": commit_block,
+                "hotkey": hotkey,
+                "patch_reveal_delayed": True,
+            }
             if patch_fingerprint is not None:
                 detail["patch_fingerprint"] = patch_fingerprint
             if payment_block is not None:

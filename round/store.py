@@ -10,6 +10,7 @@ existed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 from uuid import UUID
 
@@ -1492,6 +1493,38 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
                 """,
                 (ok, error, int(row_id)),
             )
+
+
+def list_patch_evaluation_times(
+    submission_ids: list[UUID | str],
+) -> dict[str, datetime | None]:
+    """First finalized evaluation for submissions enrolled in delayed disclosure.
+
+    Missing keys are legacy submissions and retain immediate URL visibility.
+    A None value means an enrolled submission has no finalized evaluation yet.
+    Live entries, void rounds, operator bans and infrastructure failures do not
+    start the clock. Re-evaluated leaders keep their first qualifying timestamp.
+    """
+    if not submission_ids:
+        return {}
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.submission_id, MIN(r.completed_at) AS evaluated_at
+                FROM submission_events c
+                LEFT JOIN round_entries e ON e.submission_id = c.submission_id
+                  AND e.status IN ('scored', 'disqualified')
+                LEFT JOIN rounds r ON r.id = e.round_id
+                  AND r.status = 'complete'
+                WHERE c.submission_id = ANY(%s::uuid[])
+                  AND c.state = 'committed'
+                  AND c.detail @> '{"patch_reveal_delayed": true}'::jsonb
+                GROUP BY c.submission_id
+                """,
+                ([str(sid) for sid in submission_ids],),
+            )
+            return {str(r["submission_id"]): r["evaluated_at"] for r in cur.fetchall()}
 
 
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
