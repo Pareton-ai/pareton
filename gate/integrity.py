@@ -6,7 +6,12 @@ import hashlib
 from typing import Callable
 
 from gate.types import GateResult, SubmissionState
-from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_hotkey
+from storage.s3 import (
+    fetch_patch_bytes,
+    is_allowed_retrieval_url,
+    patch_url_hotkey,
+    private_patch_key,
+)
 
 
 def hash_patch_bytes(data: bytes) -> str:
@@ -177,6 +182,7 @@ def check_integrity(
     retrieval_url: str,
     expected_patch_hash: str,
     hotkey: str | None = None,
+    campaign_id: str | None = None,
     fetcher: Callable[[str], bytes] = fetch_patch_bytes,
 ) -> GateResult:
     if not is_allowed_retrieval_url(retrieval_url):
@@ -193,6 +199,13 @@ def check_integrity(
                 hotkey=hotkey,
                 url_hotkey=url_hotkey,
             )
+    key = private_patch_key(retrieval_url)
+    if (
+        key is not None
+        and campaign_id is not None
+        and key.split("/")[-4] != str(campaign_id)
+    ):
+        return GateResult.reject("retrieval_url campaign mismatch")
     try:
         data = fetcher(retrieval_url)
     except Exception as exc:

@@ -9,6 +9,17 @@ from __future__ import annotations
 import pytest
 
 import chain.rpc as rpc
+from storage.s3 import _s3_retrieval_url, object_key_for
+
+
+def _private_cli_url():
+    return _s3_retrieval_url(
+        object_key_for(
+            "11111111-1111-4111-8111-111111111111",
+            "hk",
+            "22222222-2222-4222-8222-222222222222",
+        )
+    )
 
 
 def test_sdk_metagraph_read_surface():
@@ -142,7 +153,7 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
             "--patch",
             str(patch),
             "--retrieval-url",
-            "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+            _private_cli_url(),
             "--wallet-name",
             "w",
         ]
@@ -185,7 +196,7 @@ def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
             "--patch",
             str(patch),
             "--retrieval-url",
-            "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+            _private_cli_url(),
             "--wallet-name",
             "w",
             "--dry-run",
@@ -254,7 +265,7 @@ def _fee_cli_argv(patch) -> list[str]:
         "--patch",
         str(patch),
         "--retrieval-url",
-        "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+        _private_cli_url(),
         "--wallet-name",
         "w",
     ]

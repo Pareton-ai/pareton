@@ -10,6 +10,7 @@ existed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 from uuid import UUID
 
@@ -1494,6 +1495,38 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
             )
 
 
+def list_patch_evaluation_times(
+    submission_ids: list[UUID | str],
+) -> dict[str, datetime | None]:
+    """First finalized evaluation for submissions enrolled in delayed disclosure.
+
+    Missing keys are legacy submissions and retain immediate URL visibility.
+    A None value means an enrolled submission has no finalized evaluation yet.
+    Live entries, void rounds, operator bans and infrastructure failures do not
+    start the clock. Re-evaluated leaders keep their first qualifying timestamp.
+    """
+    if not submission_ids:
+        return {}
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.submission_id, MIN(r.completed_at) AS evaluated_at
+                FROM submission_events c
+                LEFT JOIN round_entries e ON e.submission_id = c.submission_id
+                  AND e.status IN ('scored', 'disqualified')
+                LEFT JOIN rounds r ON r.id = e.round_id
+                  AND r.status = 'complete'
+                WHERE c.submission_id = ANY(%s::uuid[])
+                  AND c.state = 'committed'
+                  AND c.detail @> '{"patch_reveal_delayed": true}'::jsonb
+                GROUP BY c.submission_id
+                """,
+                ([str(sid) for sid in submission_ids],),
+            )
+            return {str(r["submission_id"]): r["evaluated_at"] for r in cur.fetchall()}
+
+
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
     """Every entry of one round, in run order.
 
@@ -1592,6 +1625,10 @@ def list_submission_round_entries(
     it won with, not a fresh ``pending``. A submission whose only entry is live
     still reports that entry, so the live assignment has one source of truth
     rather than being reconstructed from the ``round_assigned`` event.
+
+    ``_patch_evaluated_at`` is internal metadata for URL disclosure. Compute it
+    over the same entries before choosing the displayed round, so callers do
+    not need another database query for a leader's first finalized evaluation.
     """
     if not submission_ids:
         return {}
@@ -1605,7 +1642,11 @@ def list_submission_round_entries(
                 """
                 SELECT DISTINCT ON (e.submission_id)
                        e.submission_id, e.round_id, r.ordinal, e.status,
-                       e.score, e.disqualify_reason
+                       e.score, e.disqualify_reason,
+                       MIN(r.completed_at) FILTER (
+                           WHERE r.status = 'complete'
+                             AND e.status IN ('scored', 'disqualified')
+                       ) OVER (PARTITION BY e.submission_id) AS patch_evaluated_at
                 FROM round_entries e
                 JOIN rounds r ON r.id = e.round_id
                 WHERE e.submission_id = ANY(%s::uuid[]) AND r.status <> 'void'
@@ -1624,6 +1665,7 @@ def list_submission_round_entries(
             "status": r["status"],
             "score": r["score"],
             "disqualify_reason": r["disqualify_reason"],
+            "_patch_evaluated_at": r["patch_evaluated_at"],
         }
         for r in rows
     }
