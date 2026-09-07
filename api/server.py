@@ -45,7 +45,8 @@ from storage.visibility import patch_is_revealed, patch_reveal_at
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # Build logs use no-store until the submission reaches a terminal state.
-# Submission JSON uses no-store because URL visibility depends on time and config.
+# Enrolled submissions use no-store because URL visibility depends on time/config.
+# Exempt submissions retain their existing cache policy.
 # Campaigns and other settled resources keep the shared short TTL above.
 # ``built`` is terminal for no-bench campaigns; bench campaigns continue via
 # ``bench_queued`` (and later) in the same worker turn after enqueue.
@@ -67,7 +68,7 @@ def _is_terminal_submission_state(state: str | None) -> bool:
 def _set_live_submission_cache_control(
     response: Response, latest_state: str | None
 ) -> None:
-    """Build logs stay fresh while the pipeline is still moving."""
+    """Keep live detail and build-log responses fresh."""
     if not _is_terminal_submission_state(latest_state):
         response.headers["Cache-Control"] = _NO_STORE
 
@@ -392,8 +393,13 @@ def campaign_submissions(
     page = list_campaign_submissions(campaign_id, limit=limit, offset=offset)
     if page is None:
         raise HTTPException(status_code=404, detail="campaign not found")
-    response.headers["Cache-Control"] = _NO_STORE
-    evaluation_times = list_patch_evaluation_times([r["id"] for r in page["items"]])
+    evaluation_times = {
+        str(r["id"]): r.get("_patch_evaluated_at")
+        for r in page["items"]
+        if r.get("_patch_reveal_delayed")
+    }
+    if evaluation_times:
+        response.headers["Cache-Control"] = _NO_STORE
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -531,6 +537,8 @@ def _public_submission(row: dict, evaluation_times: dict) -> dict:
     evaluated_at = evaluation_times.get(sid)
     release = patch_reveal_at(evaluated_at)
     public = dict(row)
+    public.pop("_patch_evaluated_at", None)
+    public.pop("_patch_reveal_delayed", None)
     public["retrieval_url"] = ""
     public["patch_reveal_at"] = _iso_or_none(release)
     public["patch_download_url"] = None
@@ -554,11 +562,25 @@ def _withhold_patch_url(value: Any, url: str) -> Any:
     return value
 
 
-def _submission_detail_payload(row: dict) -> dict:
+def _submission_detail_payload(row: dict, response: Response) -> dict:
     events = list_events(row["id"])
     states = list_latest_states([row["id"]])
     jobs = list_submission_jobs(row["id"])
-    evaluation_times = list_patch_evaluation_times([row["id"]])
+    round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
+    round_info = dict(round_info) if round_info is not None else None
+    evaluated_at = (
+        round_info.pop("_patch_evaluated_at", None) if round_info is not None else None
+    )
+    delayed = any(
+        e["state"] == "committed"
+        and (e.get("detail") or {}).get("patch_reveal_delayed") is True
+        for e in events
+    )
+    evaluation_times = {str(row["id"]): evaluated_at} if delayed else {}
+    if delayed:
+        response.headers["Cache-Control"] = _NO_STORE
+    else:
+        _set_live_submission_cache_control(response, states.get(str(row["id"])))
     public = _public_submission(row, evaluation_times)
     payload = {
         "submission": {
@@ -590,7 +612,7 @@ def _submission_detail_payload(row: dict) -> dict:
             }
             for e in events
         ],
-        "round": list_submission_round_entries([row["id"]]).get(str(row["id"])),
+        "round": round_info,
     }
     if not public["retrieval_url"]:
         return _withhold_patch_url(payload, row["retrieval_url"])
@@ -620,9 +642,7 @@ def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Resp
     row = get_submission_for_campaign(campaign_id, patch_hash)
     if row is None:
         raise HTTPException(status_code=404, detail="submission not found")
-    payload = _submission_detail_payload(row)
-    response.headers["Cache-Control"] = _NO_STORE
-    return payload
+    return _submission_detail_payload(row, response)
 
 
 @app.get(
@@ -630,9 +650,9 @@ def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Resp
     responses={200: {"model": SubmissionDetailModel}},
 )
 def submission_detail(patch_hash: str, response: Response):
-    payload = _submission_detail_payload(_resolve_unambiguous_submission(patch_hash))
-    response.headers["Cache-Control"] = _NO_STORE
-    return payload
+    return _submission_detail_payload(
+        _resolve_unambiguous_submission(patch_hash), response
+    )
 
 
 def _patch_download_response(row: dict) -> RedirectResponse:

@@ -100,7 +100,7 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert row["round"]["ordinal"] == 3
     assert row["round"]["score"] == 0.31
     assert row["retrieval_url"] == "https://example/p.diff"
-    assert resp.headers.get("Cache-Control") == "no-store"
+    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
 
 
 def test_submissions_offset_past_end(monkeypatch, client: TestClient):
@@ -117,6 +117,7 @@ def test_submissions_offset_past_end(monkeypatch, client: TestClient):
     body = resp.json()
     assert body["total"] == 3
     assert body["submissions"] == []
+    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
 
 
 @pytest.mark.parametrize(
@@ -481,10 +482,10 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     [
         ("building", "no-store"),
         ("bench_queued", "no-store"),
-        ("built", "no-store"),
-        ("scored", "no-store"),
-        ("rejected", "no-store"),
-        ("rejected_duplicate", "no-store"),
+        ("built", V1_CACHE_CONTROL_EXPECTED),
+        ("scored", V1_CACHE_CONTROL_EXPECTED),
+        ("rejected", V1_CACHE_CONTROL_EXPECTED),
+        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
     ],
 )
 def test_submission_detail_cache_control_by_state(

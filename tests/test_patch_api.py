@@ -57,18 +57,48 @@ def scenario(monkeypatch):
     )
     monkeypatch.setattr(server, "get_submission", lambda h: row if h == HASH else None)
     monkeypatch.setattr(server, "count_submission_campaigns", lambda h: 1)
-    monkeypatch.setattr(server, "list_events", lambda _: events)
+    monkeypatch.setattr(
+        server,
+        "list_events",
+        lambda _: (
+            events
+            + [
+                {
+                    "state": "committed",
+                    "detail": {"patch_reveal_delayed": SID in times},
+                    "created_at": NOW.isoformat(),
+                }
+            ]
+        ),
+    )
     monkeypatch.setattr(server, "list_latest_states", lambda _: {SID: "scored"})
     monkeypatch.setattr(
         server,
         "list_submission_jobs",
         lambda _: [{"status": "done", "last_error": "public diagnostics"}],
     )
-    monkeypatch.setattr(server, "list_submission_round_entries", lambda _: {})
+    monkeypatch.setattr(
+        server,
+        "list_submission_round_entries",
+        lambda _: (
+            {SID: {"_patch_evaluated_at": times[SID]}}
+            if times.get(SID) is not None
+            else {}
+        ),
+    )
     monkeypatch.setattr(
         server,
         "list_campaign_submissions",
-        lambda *a, **k: {"total": 1, "items": [row]},
+        lambda *a, **k: {
+            "total": 1,
+            "items": [
+                {
+                    **row,
+                    "_patch_reveal_delayed": SID in times,
+                    "_patch_evaluated_at": times.get(SID),
+                }
+            ],
+        },
     )
     return TestClient(server.app), times, row, events
 
@@ -141,7 +171,9 @@ def test_existing_submissions_keep_immediate_visibility(scenario, monkeypatch):
     times.clear()
     monkeypatch.setattr(config, "PATCH_REVEAL_DELAY_S", 365 * 86400)
     for path in (BASE, f"/v1/submissions/{HASH}"):
-        submission = client.get(path).json()["submission"]
+        response = client.get(path)
+        assert response.headers["cache-control"] == server.V1_CACHE_CONTROL
+        submission = response.json()["submission"]
         assert submission["retrieval_url"] == RAW_URL
         assert submission["patch_reveal_at"] is None
         assert (
@@ -154,6 +186,10 @@ def test_existing_submissions_keep_immediate_visibility(scenario, monkeypatch):
         ]
         == RAW_URL
     )
+    assert (
+        client.get(f"/v1/campaigns/{CID}/submissions").headers["cache-control"]
+        == server.V1_CACHE_CONTROL
+    )
 
 
 def test_mixed_listing_withholds_only_new_submissions(scenario, monkeypatch):
@@ -162,9 +198,14 @@ def test_mixed_listing_withholds_only_new_submissions(scenario, monkeypatch):
     monkeypatch.setattr(
         server,
         "list_campaign_submissions",
-        lambda *a, **k: {"total": 2, "items": [old, row]},
+        lambda *a, **k: {
+            "total": 2,
+            "items": [old, {**row, "_patch_reveal_delayed": True}],
+        },
     )
-    submissions = client.get(f"/v1/campaigns/{CID}/submissions").json()["submissions"]
+    response = client.get(f"/v1/campaigns/{CID}/submissions")
+    assert response.headers["cache-control"] == "no-store"
+    submissions = response.json()["submissions"]
     assert [s["retrieval_url"] for s in submissions] == [RAW_URL, ""]
 
 
@@ -195,3 +236,23 @@ def test_patch_routes_preserve_missing_and_ambiguous_lookup_behavior(
     assert client.get(BASE.replace(CID, "other") + "/patch").status_code == 404
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _: 2)
     assert client.get(f"/v1/submissions/{HASH}/patch").status_code == 409
+
+
+@pytest.mark.parametrize("age", [None, timedelta(hours=6)])
+def test_json_routes_reuse_loaded_visibility_without_extra_lookup(
+    scenario, monkeypatch, age
+):
+    client, times, _, _ = scenario
+    if age is not None:
+        times[SID] = NOW - age
+
+    def extra_lookup(_):
+        pytest.fail("JSON routes must reuse their existing database reads")
+
+    monkeypatch.setattr(server, "list_patch_evaluation_times", extra_lookup)
+    for path in (BASE, f"/v1/submissions/{HASH}", f"/v1/campaigns/{CID}/submissions"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "_patch_evaluated_at" not in response.text
+        assert "_patch_reveal_delayed" not in response.text
+        assert response.headers["cache-control"] == "no-store"

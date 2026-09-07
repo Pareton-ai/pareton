@@ -701,8 +701,8 @@ def _seed_incumbent(campaign_id: UUID, sid: str, image_ref: str) -> str:
 
 
 def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
-    from campaign.store import append_event
-    from round.store import list_patch_evaluation_times
+    from campaign.store import append_event, list_campaign_submissions
+    from round.store import list_patch_evaluation_times, list_submission_round_entries
 
     cid = _campaign()
     scored = _submission(cid, image_ref=IMAGE_A, block=10)
@@ -785,6 +785,26 @@ def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
         banned: None,
     }
     assert list_patch_evaluation_times([]) == {}
+    # Both JSON paths reuse these existing reads instead of a visibility query.
+    outcomes = list_submission_round_entries([scored, disqualified, failed, banned])
+    assert outcomes[scored]["_patch_evaluated_at"] == first
+    assert outcomes[disqualified]["_patch_evaluated_at"] == first
+    assert outcomes[failed]["_patch_evaluated_at"] is None
+    assert banned not in outcomes
+    page = list_campaign_submissions(cid)
+    rows = {str(r["id"]): r for r in page["items"]}
+    assert rows[scored]["_patch_evaluated_at"] == first
+    assert rows[disqualified]["_patch_evaluated_at"] == first
+    for sid in (failed, banned, legacy):
+        assert rows[sid]["_patch_evaluated_at"] is None
+    assert all(
+        rows[sid]["_patch_reveal_delayed"]
+        for sid in (scored, disqualified, failed, banned)
+    )
+    assert not rows[legacy]["_patch_reveal_delayed"]
+    paged = list_campaign_submissions(cid, limit=2, offset=2)
+    assert paged["total"] == page["total"]
+    assert paged["items"] == page["items"][2:4]
 
 
 def _history(campaign_id: UUID) -> list[tuple]:

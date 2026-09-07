@@ -1625,6 +1625,10 @@ def list_submission_round_entries(
     it won with, not a fresh ``pending``. A submission whose only entry is live
     still reports that entry, so the live assignment has one source of truth
     rather than being reconstructed from the ``round_assigned`` event.
+
+    ``_patch_evaluated_at`` is internal metadata for URL disclosure. Compute it
+    over the same entries before choosing the displayed round, so callers do
+    not need another database query for a leader's first finalized evaluation.
     """
     if not submission_ids:
         return {}
@@ -1638,7 +1642,11 @@ def list_submission_round_entries(
                 """
                 SELECT DISTINCT ON (e.submission_id)
                        e.submission_id, e.round_id, r.ordinal, e.status,
-                       e.score, e.disqualify_reason
+                       e.score, e.disqualify_reason,
+                       MIN(r.completed_at) FILTER (
+                           WHERE r.status = 'complete'
+                             AND e.status IN ('scored', 'disqualified')
+                       ) OVER (PARTITION BY e.submission_id) AS patch_evaluated_at
                 FROM round_entries e
                 JOIN rounds r ON r.id = e.round_id
                 WHERE e.submission_id = ANY(%s::uuid[]) AND r.status <> 'void'
@@ -1657,6 +1665,7 @@ def list_submission_round_entries(
             "status": r["status"],
             "score": r["score"],
             "disqualify_reason": r["disqualify_reason"],
+            "_patch_evaluated_at": r["patch_evaluated_at"],
         }
         for r in rows
     }
