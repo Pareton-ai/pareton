@@ -566,10 +566,24 @@ def _open_campaign(monkeypatch) -> None:
     )
 
 
+def _presign_request():
+    return dict(
+        campaign_id=CAMPAIGN_ID,
+        hotkey=HOTKEY,
+        patch_hash="sha256:" + "a" * 64,
+        upload_id="22222222-2222-4222-8222-222222222222",
+        expires_at=1800000300,
+        network="finney",
+        netuid=10,
+        signature="0" * 128,
+    )
+
+
 def test_presign_rejects_campaign_disqualified_hotkey(monkeypatch, client: TestClient):
     from api import server
 
     _open_campaign(monkeypatch)
+    monkeypatch.setattr(server, "verify_upload_request", lambda *a: 300)
     monkeypatch.setattr(server, "campaign_hotkey_is_disqualified", lambda *_a: True)
     called = {"presign": False}
     monkeypatch.setattr(
@@ -580,7 +594,7 @@ def test_presign_rejects_campaign_disqualified_hotkey(monkeypatch, client: TestC
 
     resp = client.post(
         "/v1/uploads/patch",
-        json={"campaign_id": CAMPAIGN_ID, "hotkey": HOTKEY},
+        json=_presign_request(),
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "hotkey is disqualified from campaign"
@@ -591,6 +605,7 @@ def test_presign_response_is_typed_in_openapi(monkeypatch, client: TestClient):
     from api import server
 
     _open_campaign(monkeypatch)
+    monkeypatch.setattr(server, "verify_upload_request", lambda *a: 300)
     monkeypatch.setattr(server, "campaign_hotkey_is_disqualified", lambda *_a: False)
     monkeypatch.setattr(
         server,
@@ -600,12 +615,14 @@ def test_presign_response_is_typed_in_openapi(monkeypatch, client: TestClient):
             retrieval_url="https://cdn.example/patch",
             object_key="stage0/campaigns/c/patches/h/p.diff",
             expires_in=900,
+            required_headers={"Content-Type": "text/plain"},
+            already_uploaded=False,
         ),
     )
 
     resp = client.post(
         "/v1/uploads/patch",
-        json={"campaign_id": CAMPAIGN_ID, "hotkey": HOTKEY},
+        json=_presign_request(),
     )
     assert resp.status_code == 200
     server.PresignResponse.model_validate(resp.json())

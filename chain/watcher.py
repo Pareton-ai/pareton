@@ -34,7 +34,12 @@ from gate.integrity import (
     patch_fingerprint_bytes,
 )
 from observability import events as obs
-from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_hotkey
+from storage.s3 import (
+    fetch_patch_bytes,
+    is_allowed_retrieval_url,
+    patch_url_hotkey,
+    private_patch_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,7 @@ def ingest_commitment(
     fetch_block: BlockFetcher | None = None,
     fetch_commit_datetime: BlockDatetimeFetcher | None = None,
     fetcher: PatchFetcher | None = None,
+    require_private: bool = True,
 ) -> str | None:
     """Insert a submission from a commitment. Returns submission id or None if dupe/invalid."""
     campaign = get_campaign(com.campaign_id)
@@ -103,6 +109,9 @@ def ingest_commitment(
         )
         return None
     if get_submission_for_campaign(com.campaign_id, com.patch_hash) is not None:
+        return None
+    if require_private and private_patch_key(com.retrieval_url) is None:
+        logger.info("skip commitment: new submissions require a private patch upload")
         return None
     competition_start = config.COMPETITION_START_DATETIME
     if competition_start is not None:
@@ -189,6 +198,7 @@ def ingest_commitment(
         retrieval_url=com.retrieval_url,
         expected_patch_hash=com.patch_hash,
         hotkey=com.hotkey,
+        campaign_id=com.campaign_id,
         # scan_chain runs every poll, so one network attempt per scan is enough.
         # fetch_failed remains retryable without tripling a scan's worst case.
         fetcher=fetcher or partial(fetch_patch_bytes, attempts=1),
@@ -310,4 +320,4 @@ def ingest_mock_commitment(
         retrieval_url=retrieval_url,
         raw="",
     )
-    return ingest_commitment(com)
+    return ingest_commitment(com, require_private=False)

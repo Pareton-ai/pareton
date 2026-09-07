@@ -256,3 +256,129 @@ def test_json_routes_reuse_loaded_visibility_without_extra_lookup(
         assert "_patch_evaluated_at" not in response.text
         assert "_patch_reveal_delayed" not in response.text
         assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        BASE,
+        f"/v1/submissions/{HASH}",
+        f"/v1/campaigns/{CID}/submissions",
+        BASE + "/patch",
+        f"/v1/submissions/{HASH}/patch",
+    ],
+)
+def test_private_patch_is_copied_only_after_reveal_and_returns_permanent_url(
+    scenario, monkeypatch, route
+):
+    from types import SimpleNamespace
+    from storage import s3
+
+    client, times, row, _ = scenario
+    row["retrieval_url"] = RAW_URL.replace("/campaigns/", "/private/campaigns/")
+    monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "")
+    monkeypatch.setattr(config, "S3_ENDPOINT_URL", "")
+    monkeypatch.setattr(config, "S3_BUCKET", "pareton-s3")
+    monkeypatch.setattr(config, "S3_REGION", "us-east-2")
+    monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    copies = []
+
+    def head(**kwargs):
+        from botocore.exceptions import ClientError
+
+        if "/private/" not in kwargs["Key"]:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {
+            "ChecksumSHA256": s3._checksum(HASH),
+            "ContentLength": 5,
+            "ETag": '"etag"',
+        }
+
+    monkeypatch.setattr(
+        s3,
+        "_client",
+        lambda **_: SimpleNamespace(
+            head_object=head,
+            copy_object=lambda **k: copies.append(k),
+        ),
+    )
+    s3.publish_patch.cache_clear()
+    try:
+        response = client.get(route, follow_redirects=False)
+        assert response.status_code == (403 if route.endswith("/patch") else 200)
+        assert copies == []
+        times[SID] = NOW - timedelta(hours=6)
+        response = client.get(route, follow_redirects=False)
+        assert len(copies) == 1
+        if route.endswith("/patch"):
+            assert response.status_code == 307
+            assert response.headers["location"] == RAW_URL
+        else:
+            payload = response.json()
+            result = (
+                payload["submissions"][0]
+                if "submissions" in payload
+                else payload["submission"]
+            )
+            assert result["retrieval_url"] == RAW_URL
+        client.get(route, follow_redirects=False)
+        assert len(copies) == 1
+    finally:
+        s3.publish_patch.cache_clear()
+
+
+def test_private_patch_without_enrollment_fails_closed(scenario, monkeypatch):
+    client, times, row, _ = scenario
+    times.clear()
+    row["retrieval_url"] = RAW_URL.replace("/campaigns/", "/private/campaigns/")
+    monkeypatch.setattr(config, "S3_ENDPOINT_URL", "")
+    monkeypatch.setattr(
+        server, "publish_patch", lambda *a: pytest.fail("unrevealed copy")
+    )
+    evaluated = NOW - timedelta(hours=6)
+    monkeypatch.setattr(
+        server,
+        "list_submission_round_entries",
+        lambda _: {SID: {"_patch_evaluated_at": evaluated}},
+    )
+    monkeypatch.setattr(
+        server,
+        "list_campaign_submissions",
+        lambda *a, **k: {
+            "total": 1,
+            "items": [
+                {
+                    **row,
+                    "_patch_evaluated_at": evaluated,
+                    "_patch_reveal_delayed": False,
+                }
+            ],
+        },
+    )
+    assert client.get(BASE).json()["submission"]["retrieval_url"] == ""
+    assert (
+        client.get(f"/v1/submissions/{HASH}").json()["submission"]["retrieval_url"]
+        == ""
+    )
+    assert (
+        client.get(f"/v1/campaigns/{CID}/submissions").json()["submissions"][0][
+            "retrieval_url"
+        ]
+        == ""
+    )
+    assert client.get(BASE + "/patch", follow_redirects=False).status_code == 403
+
+
+def test_copy_failure_does_not_disclose_a_broken_public_link(scenario, monkeypatch):
+    client, times, _, _ = scenario
+    times[SID] = NOW - timedelta(hours=6)
+
+    def failure(*args):
+        raise RuntimeError("storage failed")
+
+    monkeypatch.setattr(server, "publish_patch", failure)
+    for path in (BASE, BASE + "/patch"):
+        response = client.get(path, follow_redirects=False)
+        assert response.status_code == 503
+        assert response.headers["cache-control"] == "no-store"
+        assert RAW_URL not in response.text

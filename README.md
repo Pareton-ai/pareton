@@ -33,10 +33,13 @@ evaluation. `PARETON_PATCH_REVEAL_DELAY_S` configures that delay. Submissions
 ingested before rollout keep their existing links. Hashes, status, scores, and
 logs remain public.
 
-Patch URLs use independently random UUIDv4 filenames and remain public without
-expiry. The on-chain commitment still exposes the URL immediately, so the delay
-controls discovery through the API and dashboard. See [patch visibility](docs/patch-visibility.md)
-for website/API behavior, configuration, deployment, and a local patch-hash command.
+The miner signs its upload request locally. New patches use private S3 objects
+with independently random UUIDv4 filenames. The on-chain URL identifies the
+private object; it does not grant download access. The watcher and worker read
+it with S3 credentials. After the reveal deadline, the first API request copies
+the diff to public storage and returns a permanent URL without an expiry.
+See [patch visibility](docs/patch-visibility.md) for the upload contract,
+deployment prerequisites, and a local patch-hash command.
 
 ## Layout
 

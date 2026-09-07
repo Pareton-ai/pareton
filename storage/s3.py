@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
+import re
 import tarfile
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -25,9 +29,11 @@ class PresignResult:
     retrieval_url: str
     object_key: str
     expires_in: int
+    required_headers: dict[str, str]
+    already_uploaded: bool = False
 
 
-def _client():
+def _client(*, bounded: bool = False):
     import boto3
     from botocore.config import Config
 
@@ -36,26 +42,45 @@ def _client():
             "PARETON_S3_ACCESS_KEY and PARETON_S3_SECRET_KEY must be set"
         )
 
+    timeouts = (
+        {
+            "connect_timeout": config.PATCH_FETCH_TIMEOUT_S,
+            "read_timeout": config.PATCH_FETCH_TIMEOUT_S,
+            "retries": {"total_max_attempts": 1},
+        }
+        if bounded
+        else {}
+    )
     kwargs: dict = {
         "aws_access_key_id": config.S3_ACCESS_KEY,
         "aws_secret_access_key": config.S3_SECRET_KEY,
         "region_name": config.S3_REGION,
-        "config": Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        "config": Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+            **timeouts,
+        ),
     }
     if config.S3_ENDPOINT_URL:
         kwargs["endpoint_url"] = config.S3_ENDPOINT_URL
     return boto3.client("s3", **kwargs)
 
 
-def object_key_for(campaign_id: str, hotkey: str) -> str:
+def object_key_for(campaign_id: str, hotkey: str, upload_id: str | None = None) -> str:
     prefix = config.S3_PREFIX.strip("/")
-    return f"{prefix}/campaigns/{campaign_id}/patches/{hotkey}/{uuid.uuid4()}.diff"
+    filename = str(uuid.UUID(upload_id)) if upload_id is not None else str(uuid.uuid4())
+    return f"{prefix}/private/campaigns/{campaign_id}/patches/{hotkey}/{filename}.diff"
 
 
 def public_retrieval_url(object_key: str) -> str:
     if config.S3_PUBLIC_BASE_URL:
         base = config.S3_PUBLIC_BASE_URL.rstrip("/")
         return f"{base}/{object_key}"
+    return _s3_retrieval_url(object_key)
+
+
+def _s3_retrieval_url(object_key: str) -> str:
+    """Private locators bypass any public CDN."""
     if config.S3_ENDPOINT_URL:
         endpoint = config.S3_ENDPOINT_URL.rstrip("/")
         return f"{endpoint}/{config.S3_BUCKET}/{object_key}"
@@ -68,61 +93,117 @@ def create_presigned_patch_upload(
     *,
     campaign_id: str,
     hotkey: str,
+    patch_hash: str,
+    upload_id: str,
     expires_in: int | None = None,
+    expires_at: int | None = None,
 ) -> PresignResult:
     expires = expires_in if expires_in is not None else config.PRESIGN_EXPIRES_S
-    key = object_key_for(campaign_id, hotkey)
-    client = _client()
+    key = object_key_for(campaign_id, hotkey, upload_id)
+    client = _client(bounded=True)
+    checksum = _checksum(patch_hash)
+    headers = {
+        "Content-Type": "text/plain",
+        "x-amz-checksum-sha256": checksum,
+        "If-None-Match": "*",
+    }
+    # A retry can finish after a successful PUT whose response was lost.
+    from botocore.exceptions import ClientError
+
+    try:
+        existing = client.head_object(
+            Bucket=config.S3_BUCKET, Key=key, ChecksumMode="ENABLED"
+        )
+    except ClientError as exc:
+        # S3 returns 403 for a missing key when the role cannot ListBucket.
+        if exc.response["Error"]["Code"] not in (
+            "403",
+            "404",
+            "NoSuchKey",
+            "AccessDenied",
+        ):
+            raise
+    else:
+        if existing.get("ChecksumSHA256") != checksum:
+            raise ValueError("upload UUID already belongs to a different patch")
+        return PresignResult("", _s3_retrieval_url(key), key, expires, headers, True)
+    if expires_at is not None:
+        expires = min(expires, expires_at - int(time.time()))
+    if expires <= 0:
+        raise ValueError("upload authorization expired before signing PUT")
     upload_url = client.generate_presigned_url(
         "put_object",
         Params={
             "Bucket": config.S3_BUCKET,
             "Key": key,
             "ContentType": "text/plain",
+            "ChecksumSHA256": checksum,
+            "IfNoneMatch": "*",
         },
         ExpiresIn=expires,
     )
-    retrieval = public_retrieval_url(key)
+    retrieval = _s3_retrieval_url(key)
     return PresignResult(
         upload_url=upload_url,
         retrieval_url=retrieval,
         object_key=key,
         expires_in=expires,
+        required_headers=headers,
     )
+
+
+def _checksum(patch_hash: str) -> str:
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", patch_hash):
+        raise ValueError("invalid patch hash")
+    return base64.b64encode(bytes.fromhex(patch_hash[7:])).decode("ascii")
+
+
+def private_patch_key(url: str) -> str | None:
+    """Accept only a canonical private patch locator in our configured bucket."""
+    base = _s3_retrieval_url("")
+    if not url.startswith(base):
+        return None
+    key = url[len(base) :]
+    prefix = config.S3_PREFIX.strip("/") + "/private/campaigns/"
+    if not key.startswith(prefix):
+        return None
+    parts = key[len(prefix) :].split("/")
+    if len(parts) != 4 or parts[1] != "patches":
+        return None
+    campaign, _, hotkey, filename = parts
+    if not re.fullmatch(r"[a-zA-Z0-9]+", hotkey) or not filename.endswith(".diff"):
+        return None
+    try:
+        if str(uuid.UUID(campaign)) != campaign:
+            return None
+        if str(uuid.UUID(filename[:-5])) + ".diff" != filename:
+            return None
+    except ValueError:
+        return None
+    return key
 
 
 def is_allowed_retrieval_url(url: str) -> bool:
     """Only accept URLs that point at our bucket/prefix (or configured public base)."""
+    if private_patch_key(url) is not None:
+        return True
     try:
         parsed = urlparse(url)
     except Exception:
         return False
-    if parsed.scheme not in ("http", "https"):
+    if parsed.scheme not in ("http", "https") or parsed.query or parsed.fragment:
         return False
     path = parsed.path.lstrip("/")
     prefix = config.S3_PREFIX.strip("/")
-    expected_suffix = f"{prefix}/campaigns/"
-
-    if config.S3_PUBLIC_BASE_URL:
-        base = urlparse(config.S3_PUBLIC_BASE_URL)
-        if parsed.netloc != base.netloc:
-            return False
-        base_path = base.path.lstrip("/")
-        full = path
-        if base_path and full.startswith(base_path + "/"):
-            full = full[len(base_path) + 1 :]
-        return expected_suffix in full or full.startswith(expected_suffix)
-
-    # path-style: /bucket/prefix/campaigns/...
-    if path.startswith(f"{config.S3_BUCKET}/"):
-        rest = path[len(config.S3_BUCKET) + 1 :]
-        return rest.startswith(expected_suffix)
-
-    # virtual-hosted: bucket.s3.../prefix/campaigns/...
-    if parsed.netloc.startswith(f"{config.S3_BUCKET}."):
-        return path.startswith(expected_suffix)
-
-    return False
+    base = public_retrieval_url("")
+    if not url.startswith(base):
+        return False
+    key = url[len(base) :]
+    return (
+        key.startswith(f"{prefix}/campaigns/")
+        and all(part not in ("", ".", "..") for part in key.split("/"))
+        and "%" not in path
+    )
 
 
 def patch_url_hotkey(url: str) -> str | None:
@@ -152,25 +233,97 @@ def fetch_patch_bytes(url: str, *, attempts: int | None = None) -> bytes:
     if attempt_limit < 1:
         raise ValueError("patch fetch attempts must be at least 1")
 
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    key = private_patch_key(url)
     last_err: Exception | None = None
     for attempt in range(1, attempt_limit + 1):
         try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(
-                req, timeout=config.PATCH_FETCH_TIMEOUT_S
-            ) as resp:
-                data = resp.read(config.PATCH_MAX_BYTES + 1)
+            if key is not None:
+                body = _client(bounded=True).get_object(
+                    Bucket=config.S3_BUCKET, Key=key
+                )["Body"]
+                try:
+                    data = body.read(config.PATCH_MAX_BYTES + 1)
+                finally:
+                    body.close()
+            else:
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(
+                    req, timeout=config.PATCH_FETCH_TIMEOUT_S
+                ) as resp:
+                    data = resp.read(config.PATCH_MAX_BYTES + 1)
             if len(data) > config.PATCH_MAX_BYTES:
                 raise ValueError(
                     f"patch exceeds max size {config.PATCH_MAX_BYTES} bytes"
                 )
             return data
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            ValueError,
+            BotoCoreError,
+            ClientError,
+        ) as exc:
             last_err = exc
             logger.warning("patch fetch attempt %d failed: %s", attempt, exc)
     raise RuntimeError(
         f"patch fetch failed after {attempt_limit} attempt(s): {last_err}"
     )
+
+
+@lru_cache(maxsize=1024)
+def publish_patch(url: str, patch_hash: str) -> str:
+    """Copy an immutable patch to public storage. Caller MUST check reveal time.
+
+    Successful copies are cached per process. After restart, verify the public
+    copy first so its availability does not depend on private-source retention.
+    """
+    key = private_patch_key(url)
+    if key is None:
+        return url  # Previously public submissions keep their original URLs.
+    from botocore.exceptions import ClientError
+
+    client = _client(bounded=True)
+    prefix = config.S3_PREFIX.strip("/")
+    public_key = key.replace(f"{prefix}/private/", f"{prefix}/", 1)
+    public_url = public_retrieval_url(public_key)
+    checksum = _checksum(patch_hash)
+    try:
+        published = client.head_object(
+            Bucket=config.S3_BUCKET, Key=public_key, ChecksumMode="ENABLED"
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] not in (
+            "403",
+            "404",
+            "NoSuchKey",
+            "AccessDenied",
+        ):
+            raise
+    else:
+        # A public copy remains usable even if its private source is removed.
+        if published.get("ChecksumSHA256") != checksum:
+            raise ValueError("public patch checksum does not match commitment")
+        return public_url
+    source = client.head_object(
+        Bucket=config.S3_BUCKET, Key=key, ChecksumMode="ENABLED"
+    )
+    if source.get("ChecksumSHA256") != checksum:
+        raise ValueError("private patch checksum does not match commitment")
+    if source["ContentLength"] > config.PATCH_MAX_BYTES:
+        raise ValueError("private patch exceeds size limit")
+    client.copy_object(
+        Bucket=config.S3_BUCKET,
+        Key=public_key,
+        CopySource={"Bucket": config.S3_BUCKET, "Key": key},
+        CopySourceIfMatch=source["ETag"],
+        MetadataDirective="REPLACE",
+        ChecksumAlgorithm="SHA256",
+        ContentType="text/plain",
+        ContentDisposition='attachment; filename="patch.diff"',
+    )
+    return public_url
 
 
 def evidence_object_key(submission_id: str, task_id: str) -> str:

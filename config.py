@@ -73,6 +73,9 @@ S3_PREFIX: str = os.environ.get("PARETON_S3_PREFIX", "stage0")
 S3_REGION: str = os.environ.get("PARETON_S3_REGION", "us-east-2")
 S3_PUBLIC_BASE_URL: str = os.environ.get("PARETON_S3_PUBLIC_BASE_URL", "")
 PRESIGN_EXPIRES_S: int = int(os.environ.get("PARETON_PRESIGN_EXPIRES_S", "3600"))
+UPLOAD_AUTH_TTL_S: int = int(os.environ.get("PARETON_UPLOAD_AUTH_TTL_S", "300"))
+if UPLOAD_AUTH_TTL_S <= 0:
+    raise ValueError("PARETON_UPLOAD_AUTH_TTL_S must be positive")
 PATCH_REVEAL_DELAY_S: int = int(os.environ.get("PARETON_PATCH_REVEAL_DELAY_S", "21600"))
 if PATCH_REVEAL_DELAY_S < 0:
     raise ValueError("PARETON_PATCH_REVEAL_DELAY_S must be nonnegative")

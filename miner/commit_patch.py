@@ -2,8 +2,8 @@
 """Commit a Pareton patch on-chain (Stage 0).
 
 Flow:
-  1. Request Pareton-presigned S3 upload (or reuse --retrieval-url)
-  2. PUT patch bytes
+  1. Sign a private upload request locally (or reuse --retrieval-url)
+  2. PUT patch bytes with the signed checksum and conditional-write headers
   3. Transfer the submission fee from the coldkey (when the fee is on)
   4. Commitments.set_commitment with v2 patch payload (plaintext Raw fields)
 
@@ -22,9 +22,11 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from uuid import UUID, uuid4
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -32,20 +34,13 @@ if str(REPO_ROOT) not in sys.path:
 
 import config  # noqa: E402
 from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
-from storage.s3 import patch_url_hotkey  # noqa: E402
+from storage.s3 import patch_url_hotkey, private_patch_key  # noqa: E402
+from storage.upload_auth import upload_message  # noqa: E402
 
 # Widest fee proof the payload may need to hold (10-digit block, 4-digit index),
 # used to size the payload before any money moves.
 _PREFLIGHT_BLOCK = 2**31 - 1
 _PREFLIGHT_TX = 9999
-
-
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return f"sha256:{h.hexdigest()}"
 
 
 def _http_json(method: str, url: str, body: dict | None = None) -> dict:
@@ -60,15 +55,51 @@ def _http_json(method: str, url: str, body: dict | None = None) -> dict:
         return json.loads(resp.read().decode())
 
 
-def _put_bytes(url: str, data: bytes) -> None:
+def _put_bytes(url: str, data: bytes, headers: dict[str, str]) -> None:
     req = urllib.request.Request(
         url,
         data=data,
         method="PUT",
-        headers={"Content-Type": "text/plain"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         resp.read()
+
+
+def _upload_patch(
+    wallet,
+    *,
+    patch_bytes: bytes,
+    campaign_id: str,
+    network: str,
+    netuid: int,
+    api_base: str,
+) -> str:
+    """Sign locally, then use the API's upload-only S3 authorization."""
+    fields = {
+        "campaign_id": str(UUID(campaign_id)),
+        "hotkey": wallet.hotkey.ss58_address,
+        "patch_hash": "sha256:" + hashlib.sha256(patch_bytes).hexdigest(),
+        "upload_id": str(uuid4()),
+        "expires_at": int(time.time()) + config.UPLOAD_AUTH_TTL_S,
+        "network": network,
+        "netuid": netuid,
+    }
+    request = {**fields, "signature": wallet.hotkey.sign(upload_message(fields)).hex()}
+    endpoint = f"{api_base.rstrip('/')}/v1/uploads/patch"
+    # Reuse the signed UUID after a lost PUT response. The API confirms the
+    # stored checksum before reporting already_uploaded.
+    for attempt in range(2):
+        presign = _http_json("POST", endpoint, request)
+        if presign["already_uploaded"]:
+            return presign["retrieval_url"]
+        try:
+            _put_bytes(presign["upload_url"], patch_bytes, presign["required_headers"])
+            return presign["retrieval_url"]
+        except (urllib.error.URLError, TimeoutError):
+            if attempt:
+                raise
+    raise RuntimeError("patch upload did not complete")
 
 
 def _plaintext_fields(payload: str) -> list[dict]:
@@ -197,7 +228,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--campaign-id", required=True)
     p.add_argument("--patch", required=True, type=Path, help="Unified git diff file")
     p.add_argument("--api-base", default="https://api.pareton.ai")
-    p.add_argument("--retrieval-url", default=None, help="Skip upload; use this URL")
+    p.add_argument(
+        "--retrieval-url",
+        default=None,
+        help="Skip upload; reuse this campaign's private patch locator",
+    )
     p.add_argument("--wallet-name", required=True)
     p.add_argument("--wallet-hotkey", default="default")
     p.add_argument("--network", default="finney")
@@ -248,7 +283,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     patch_bytes = args.patch.read_bytes()
-    patch_hash = _sha256_file(args.patch)
+    patch_hash = "sha256:" + hashlib.sha256(patch_bytes).hexdigest()
+    if not 0 < len(patch_bytes) <= config.PATCH_MAX_BYTES:
+        print("error: patch is empty or exceeds the size limit", file=sys.stderr)
+        return 1
 
     import bittensor as bt
 
@@ -267,6 +305,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.retrieval_url:
         retrieval_url = args.retrieval_url
+        key = private_patch_key(retrieval_url)
+        if key is None or key.split("/")[-4] != str(UUID(args.campaign_id)):
+            print(
+                "error: --retrieval-url must be a private patch for this campaign",
+                file=sys.stderr,
+            )
+            return 1
         if patch_url_hotkey(retrieval_url) != hotkey:
             print(
                 f"error: --retrieval-url path hotkey must match wallet hotkey {hotkey}",
@@ -275,20 +320,18 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         try:
-            presign = _http_json(
-                "POST",
-                f"{args.api_base.rstrip('/')}/v1/uploads/patch",
-                {"campaign_id": args.campaign_id, "hotkey": hotkey},
+            retrieval_url = _upload_patch(
+                wallet,
+                patch_bytes=patch_bytes,
+                campaign_id=args.campaign_id,
+                network=args.network,
+                netuid=args.netuid,
+                api_base=args.api_base,
             )
         except Exception as exc:
-            print(f"error: presign failed: {exc}", file=sys.stderr)
+            # Upload exceptions can contain bearer URLs. Do not print them.
+            print(f"error: patch upload failed ({type(exc).__name__})", file=sys.stderr)
             return 1
-        try:
-            _put_bytes(presign["upload_url"], patch_bytes)
-        except urllib.error.URLError as exc:
-            print(f"error: upload failed: {exc}", file=sys.stderr)
-            return 1
-        retrieval_url = presign["retrieval_url"]
         _say(f"📤 Uploaded the patch to {retrieval_url}.")
 
     payload_args: dict[str, object] = {
