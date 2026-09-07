@@ -25,6 +25,19 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 4. **Hermetic build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
 5. **Rounds** batch queued submissions. One round rents one pod, draws one prompt set, and runs the baseline, the current leader, and every challenger against that set. The best image takes the crown. Scores compare inside one round only. On-chain scoring is still design-only.
 
+## Patch visibility
+
+For newly ingested submissions, the API and dashboard withhold the patch download
+link until six hours after the first finalized `scored` or `disqualified`
+evaluation. `PARETON_PATCH_REVEAL_DELAY_S` configures that delay. Submissions
+ingested before rollout keep their existing links. Hashes, status, scores, and
+logs remain public.
+
+Patch URLs use independently random UUIDv4 filenames and remain public without
+expiry. The on-chain commitment still exposes the URL immediately, so the delay
+controls discovery through the API and dashboard. See [patch visibility](docs/patch-visibility.md)
+for website/API behavior, configuration, deployment, and a local patch-hash command.
+
 ## Layout
 
 | Path                    | Role                                          |
@@ -40,6 +53,7 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 | `worker/`               | Job loop + chain watcher (`python -m worker.watcher`) |
 | `api/`                  | HTTP API (campaigns, submissions, presign)    |
 | `miner/commit_patch.py` | Miner commit CLI                              |
+| `miner/hash_patch.py`   | Compute a patch's commitment hash locally      |
 | `fixtures/`             | Synthetic campaign fixtures                   |
 | `images/baseline/`      | Baseline Dockerfile                           |
 | `ops/`                  | Deploy helpers (Vector, Axiom, GPU scripts)   |
