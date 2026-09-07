@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -769,6 +770,34 @@ def test_round_detail_explains_why_it_voided(monkeypatch, client: TestClient):
     server.RoundDetailModel.model_validate(body)
     assert body["void_reason"] == "pod_failed"
     assert body["void_detail"] == "provider returned 503 after 3 retries"
+
+
+def test_round_detail_does_not_publish_a_truncated_provider_token(
+    monkeypatch, client: TestClient
+):
+    """GET /v1/rounds/{id} returns the column; the column is scrubbed on write."""
+    from api import server
+    from round.void_detail import REDACTED, sanitize_void_detail
+
+    token = "SYNTHETIC_SECRET_" + "A" * 400
+    provider_body = json.dumps({"Authorization": f"Bearer {token}"})
+    detail = f"Shadeform POST /instances/create failed HTTP 403: {provider_body[:300]}"
+    published = sanitize_void_detail(detail)
+    monkeypatch.setattr(
+        server,
+        "get_round",
+        lambda _rid: _round_row(
+            status="void",
+            phase=None,
+            void_reason="pod_provision_failed",
+            void_detail=published,
+        ),
+    )
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: [])
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    assert token not in (body["void_detail"] or "")
+    assert "SYNTHETIC_SECRET_" not in (body["void_detail"] or "")
+    assert REDACTED in body["void_detail"]
 
 
 def test_a_round_that_did_not_void_carries_no_detail(monkeypatch, client: TestClient):

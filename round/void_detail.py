@@ -37,8 +37,11 @@ _URL_QUERY = re.compile(r"(https?://[^\s?]*)\?[^\s]*", re.IGNORECASE)
 # A quoted value is consumed whole, including escaped quotes inside it
 # (`"prefix\"secret"`), so a delimiter cannot leave the token behind. Encoded
 # delimiters (`\"...\"`) are a separate alternative so they do not steal the
-# closing quote of a surrounding JSON string. An unquoted value still stops at
-# the next gap, so surrounding prose survives.
+# closing quote of a surrounding JSON string. Adapters also cut the body at
+# 300 characters before this runs; if that cut lands inside a quoted value,
+# there is no closer, and `\S+` would keep only `Bearer` and leak the token.
+# An unterminated quoted value is therefore consumed through end-of-input.
+# An unquoted value still stops at the next gap, so surrounding prose survives.
 #
 # The name is wrapped in `[\w.-]*` rather than `\b` because an underscore is a
 # word character: `\bACCESS_KEY` never matches inside `AWS_ACCESS_KEY`, which
@@ -56,6 +59,10 @@ _SENSITIVE_PAIR = re.compile(
     r"|\\\"(?:\\.|[^\"\\])*\\\""
     r"|'(?:\\.|[^'\\])*'"
     r"|\\'(?:\\.|[^'\\])*\\'"
+    r"|\"(?:\\.|[^\"\\])*$"
+    r"|\\\"(?:\\.|[^\"\\])*$"
+    r"|'(?:\\.|[^'\\])*$"
+    r"|\\'(?:\\.|[^'\\])*$"
     r"|\S+"
     r")",
     re.IGNORECASE,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -121,6 +122,92 @@ def test_provider_http_body_is_scrubbed_on_the_void_write_path():
         assert "SYNTHETIC_SECRET" not in published
         assert REDACTED in published
         assert "failed HTTP 403" in published
+
+
+# gpu/providers/{shadeform,runpod,targon}._req cuts the HTTP body here,
+# before sanitize_void_detail runs.
+PROVIDER_ERROR_BODY_LIMIT = 300
+
+
+def test_unterminated_quoted_authorization_is_redacted_through_eof():
+    """A cut inside `"Bearer …"` must not leave the token after the space."""
+    out = sanitize_void_detail('{"Authorization": "Bearer SYNTHETIC_SECRET')
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+    out = sanitize_void_detail("{'Authorization': 'Bearer SYNTHETIC_SECRET")
+    assert "SYNTHETIC_SECRET" not in out
+
+
+def test_provider_body_truncation_does_not_leave_an_unterminated_token():
+    token = "SYNTHETIC_SECRET_" + "A" * 400
+    body = json.dumps({"Authorization": f"Bearer {token}"})
+    detail = (
+        "Shadeform POST /instances/create failed HTTP 403: "
+        f"{body[:PROVIDER_ERROR_BODY_LIMIT]}"
+    )
+    assert "SYNTHETIC_SECRET_" in detail
+    out = sanitize_void_detail(detail)
+    assert token not in out
+    assert "SYNTHETIC_SECRET_" not in out
+    assert REDACTED in out
+
+
+def test_truncated_encoded_credential_field_is_redacted_through_eof():
+    inner = json.dumps({"api_key": "SYNTHETIC_SECRET_" + "B" * 400})
+    detail = json.dumps({"body": inner})[:PROVIDER_ERROR_BODY_LIMIT]
+    assert "SYNTHETIC_SECRET_" in detail
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET_" not in out
+    assert REDACTED in out
+
+
+def test_void_round_binds_the_scrubbed_truncated_body(monkeypatch):
+    """The UPDATE params are what the public column (and GET /v1/rounds) see."""
+    import contextlib
+
+    from gpu.errors import ProvisionError
+    from round import store
+    from round.store import VOID_POD_PROVISION_FAILED, void_round
+    from worker.round_job import RoundInfraError
+
+    token = "SYNTHETIC_SECRET_" + "A" * 400
+    body = json.dumps({"Authorization": f"Bearer {token}"})
+    exc = ProvisionError(
+        "Shadeform POST /instances/create failed HTTP 403: "
+        f"{body[:PROVIDER_ERROR_BODY_LIMIT]}"
+    )
+    infra = RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc))
+    bound: list[Any] = []
+
+    class _Cur:
+        def execute(self, _sql: str, args: Any = None) -> None:
+            bound.append(args)
+
+        def fetchone(self) -> tuple[str]:
+            return ("r1",)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    class _Conn:
+        def cursor(self, cursor_factory: Any = None) -> _Cur:
+            return _Cur()
+
+    @contextlib.contextmanager
+    def fake_db(**_kw: object):
+        yield _Conn()
+
+    monkeypatch.setattr(store, "db_connection", fake_db)
+    assert void_round("r1", infra.reason, infra.detail) is True
+    reason, scrubbed, rid = bound[0]
+    assert reason == VOID_POD_PROVISION_FAILED
+    assert rid == "r1"
+    assert token not in (scrubbed or "")
+    assert "SYNTHETIC_SECRET_" not in (scrubbed or "")
+    assert REDACTED in (scrubbed or "")
 
 
 def test_terminal_escapes_and_newlines_are_flattened():
