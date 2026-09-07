@@ -377,8 +377,71 @@ def test_copy_failure_does_not_disclose_a_broken_public_link(scenario, monkeypat
         raise RuntimeError("storage failed")
 
     monkeypatch.setattr(server, "publish_patch", failure)
-    for path in (BASE, BASE + "/patch"):
+    for path in (BASE, f"/v1/submissions/{HASH}"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        submission = response.json()["submission"]
+        assert submission["retrieval_url"] == ""
+        assert submission["patch_download_url"] is None
+        assert submission["patch_reveal_at"] == NOW.isoformat()
+        assert RAW_URL not in response.text
+    for path in (BASE + "/patch", f"/v1/submissions/{HASH}/patch"):
         response = client.get(path, follow_redirects=False)
         assert response.status_code == 503
         assert response.headers["cache-control"] == "no-store"
         assert RAW_URL not in response.text
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [FileNotFoundError("missing private object"), ValueError("checksum mismatch")],
+)
+def test_campaign_list_isolates_patch_publication_failure(
+    scenario, monkeypatch, failure
+):
+    client, _, row, _ = scenario
+    row["retrieval_url"] = RAW_URL.replace("/campaigns/", "/private/campaigns/")
+    healthy = {
+        **row,
+        "id": "33333333-3333-3333-3333-333333333333",
+        "patch_hash": "sha256:" + "b" * 64,
+        "retrieval_url": RAW_URL,
+    }
+    items = [
+        {
+            **item,
+            "latest_state": "scored",
+            "_patch_reveal_delayed": True,
+            "_patch_evaluated_at": NOW - timedelta(hours=6),
+        }
+        for item in (row, healthy)
+    ]
+    monkeypatch.setattr(
+        server,
+        "list_campaign_submissions",
+        lambda *a, **k: {"total": 2, "items": items},
+    )
+
+    def publish(url, patch_hash):
+        if url == row["retrieval_url"]:
+            raise failure
+        return url
+
+    monkeypatch.setattr(server, "publish_patch", publish)
+    response = client.get(f"/v1/campaigns/{CID}/submissions")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["total"] == 2
+    withheld, published = response.json()["submissions"]
+    assert withheld["id"] == SID
+    assert withheld["latest_state"] == "scored"
+    assert withheld["retrieval_url"] == ""
+    assert withheld["patch_download_url"] is None
+    assert withheld["patch_reveal_at"] == NOW.isoformat()
+    assert published["retrieval_url"] == RAW_URL
+    assert published["patch_download_url"] == (
+        f"/v1/campaigns/{CID}/submissions/sha256%3A{'b' * 64}/patch"
+    )
+    assert row["retrieval_url"] not in response.text
+    assert items[0]["retrieval_url"] == row["retrieval_url"]

@@ -21,7 +21,8 @@ def verify_upload_request(fields: dict, signature: str) -> int:
     from bittensor.sp_core import verify
 
     remaining = fields["expires_at"] - int(time.time())
-    if not 0 < remaining <= config.UPLOAD_AUTH_TTL_S:
+    # Allow miners' clocks to lead the API by up to one minute.
+    if not 0 < remaining <= config.UPLOAD_AUTH_TTL_S + 60:
         raise ValueError("upload authorization expired or too far in the future")
     if (
         fields["network"] != config.SUBTENSOR_NETWORK

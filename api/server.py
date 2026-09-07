@@ -561,7 +561,13 @@ def _public_submission(row: dict, evaluation_times: dict) -> dict:
         sid not in evaluation_times and private_patch_key(row["retrieval_url"]) is None
     )
     if legacy or patch_is_revealed(evaluated_at):
-        public["retrieval_url"] = _published_patch_url(row)
+        try:
+            public["retrieval_url"] = _published_patch_url(row)
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+            # Keep this row visible when its patch cannot be published.
+            return public
         public["patch_download_url"] = (
             f"/v1/campaigns/{quote(str(row['campaign_id']), safe='')}/submissions/"
             f"{quote(row['patch_hash'], safe='')}/patch"

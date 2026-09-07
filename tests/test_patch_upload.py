@@ -1,7 +1,10 @@
 """Real hotkey signatures across the miner/API boundary, without chain or S3."""
 
 import hashlib
+import io
+import json
 import time
+import urllib.error
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -81,7 +84,7 @@ def test_presign_rejects_tampered_authorization_before_storage(
     assert calls == []
 
 
-@pytest.mark.parametrize("expires_offset", [-1, 301])
+@pytest.mark.parametrize("expires_offset", [-1, 0, 361])
 def test_presign_rejects_expired_or_unbounded_valid_signature(
     upload_api, expires_offset
 ):
@@ -92,6 +95,18 @@ def test_presign_rejects_expired_or_unbounded_valid_signature(
     fields["signature"] = key.sign(upload_message(fields)).hex()
     assert client.post("/v1/uploads/patch", json=fields).status_code == 403
     assert calls == []
+
+
+@pytest.mark.parametrize("expires_offset", [1, 300, 301, 360])
+def test_presign_accepts_bounded_clock_skew(upload_api, expires_offset):
+    client, key, calls = upload_api
+    fields = signed_request(key)
+    del fields["signature"]
+    fields["expires_at"] = int(time.time()) + expires_offset
+    fields["signature"] = key.sign(upload_message(fields)).hex()
+    assert client.post("/v1/uploads/patch", json=fields).status_code == 200
+    assert calls[0]["expires_in"] == expires_offset
+    assert calls[0]["expires_at"] == fields["expires_at"]
 
 
 def test_unsigned_upload_is_rejected(upload_api):
@@ -169,3 +184,61 @@ def test_miner_retries_same_signed_upload_after_lost_put_response(
     )
     assert bodies[0] == bodies[1]
     assert calls[0]["upload_id"] == calls[1]["upload_id"]
+
+
+@pytest.mark.parametrize(
+    "stage,status,body",
+    [
+        ("GET", 404, '{"detail":"campaign not found"}'),
+        ("POST", 403, '{"detail":"invalid hotkey signature"}'),
+        ("POST", 409, '{"detail":"upload already contains a different patch"}'),
+        ("PUT", 403, "<Error>https://s3.example/put?token=secret</Error>"),
+    ],
+)
+def test_miner_reports_api_errors_without_exposing_put_authorization(
+    upload_api, monkeypatch, tmp_path, capsys, stage, status, body
+):
+    import bittensor as bt
+
+    _, key, _ = upload_api
+    monkeypatch.setattr(bt, "Wallet", lambda **kw: SimpleNamespace(hotkey=key))
+    patch = tmp_path / "p.diff"
+    patch.write_bytes(b"patch")
+    requests = []
+
+    def urlopen(request, **kwargs):
+        method = request.get_method()
+        requests.append(method)
+        if method == stage:
+            raise urllib.error.HTTPError(
+                request.full_url, status, "Forbidden", {}, io.BytesIO(body.encode())
+            )
+        if method == "GET":
+            return io.BytesIO(json.dumps({"baseline_commit": "a" * 40}).encode())
+        if method == "POST":
+            return io.BytesIO(
+                json.dumps(
+                    {
+                        "upload_url": "https://s3.example/put?token=secret",
+                        "already_uploaded": False,
+                        "required_headers": {"If-None-Match": "*"},
+                    }
+                ).encode()
+            )
+        pytest.fail(f"unexpected {method} request")
+
+    monkeypatch.setattr(commit_patch.urllib.request, "urlopen", urlopen)
+    assert (
+        commit_patch.main(
+            ["--campaign-id", CID, "--patch", str(patch), "--wallet-name", "test"]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    if stage == "PUT":
+        assert "patch upload failed (HTTPError)" in output.err
+        assert requests.count("PUT") == 2
+    else:
+        assert f"HTTP {status}: {body}" in output.err
+        assert "PUT" not in requests
+    assert "secret" not in output.out + output.err

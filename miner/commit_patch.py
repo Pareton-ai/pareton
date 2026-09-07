@@ -43,6 +43,10 @@ _PREFLIGHT_BLOCK = 2**31 - 1
 _PREFLIGHT_TX = 9999
 
 
+class APIError(RuntimeError):
+    """An API HTTP error with its status and response body, without the URL."""
+
+
 def _http_json(method: str, url: str, body: dict | None = None) -> dict:
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(
@@ -51,8 +55,13 @@ def _http_json(method: str, url: str, body: dict | None = None) -> dict:
         method=method,
         headers={"Content-Type": "application/json"} if body is not None else {},
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        with exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+        raise APIError(f"HTTP {exc.code}: {detail}") from None
 
 
 def _put_bytes(url: str, data: bytes, headers: dict[str, str]) -> None:
@@ -328,8 +337,11 @@ def main(argv: list[str] | None = None) -> int:
                 netuid=args.netuid,
                 api_base=args.api_base,
             )
+        except APIError as exc:
+            print(f"error: patch upload failed: {exc}", file=sys.stderr)
+            return 1
         except Exception as exc:
-            # Upload exceptions can contain bearer URLs. Do not print them.
+            # S3 PUT exceptions can contain bearer URLs. Do not print them.
             print(f"error: patch upload failed ({type(exc).__name__})", file=sys.stderr)
             return 1
         _say(f"📤 Uploaded the patch to {retrieval_url}.")
