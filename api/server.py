@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import UUID4, BaseModel, ConfigDict, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import config
@@ -22,8 +24,8 @@ from campaign.store import (
     get_public_stats,
     get_submission,
     get_submission_for_campaign,
-    list_campaigns,
     list_campaign_submissions,
+    list_campaigns,
     list_events,
     list_latest_states,
     list_submission_jobs,
@@ -35,16 +37,21 @@ from round.store import (
     get_leader,
     get_round,
     get_round_entry_report,
+    list_patch_evaluation_times,
     list_round_entries,
     list_rounds,
     list_score_progress,
     list_submission_round_entries,
 )
-from storage.s3 import create_presigned_patch_upload
+from storage.s3 import create_presigned_patch_upload, private_patch_key, publish_patch
+from storage.upload_auth import verify_upload_request
+from storage.visibility import patch_is_revealed, patch_reveal_at
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
-# Live pipeline endpoints use no-store until the submission reaches a terminal
-# state (PAR-44). Lists / campaigns keep the shared short TTL above.
+# Build logs use no-store until the submission reaches a terminal state.
+# Enrolled submissions use no-store because URL visibility depends on time/config.
+# Exempt submissions retain their existing cache policy.
+# Campaigns and other settled resources keep the shared short TTL above.
 # ``built`` is terminal for no-bench campaigns; bench campaigns continue via
 # ``bench_queued`` (and later) in the same worker turn after enqueue.
 _TERMINAL_SUBMISSION_STATES = frozenset(
@@ -56,6 +63,7 @@ _NO_STORE = "no-store"
 
 # Identity is the hotkey. Lists carry a prefix; detail pages carry it in full.
 _HOTKEY_PREFIX_LEN = 16
+logger = logging.getLogger(__name__)
 
 
 def _is_terminal_submission_state(state: str | None) -> bool:
@@ -65,7 +73,7 @@ def _is_terminal_submission_state(state: str | None) -> bool:
 def _set_live_submission_cache_control(
     response: Response, latest_state: str | None
 ) -> None:
-    """Detail + build-log stay fresh while the pipeline is still moving."""
+    """Keep live detail and build-log responses fresh."""
     if not _is_terminal_submission_state(latest_state):
         response.headers["Cache-Control"] = _NO_STORE
 
@@ -130,8 +138,16 @@ async def _db_unavailable(_request, exc: DatabaseUnavailable):
 
 
 class PresignRequest(BaseModel):
-    campaign_id: str
+    model_config = ConfigDict(extra="forbid")
+
+    campaign_id: UUID
     hotkey: str = Field(min_length=8, max_length=128)
+    patch_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    upload_id: UUID4
+    expires_at: int = Field(strict=True, gt=0)
+    network: str = Field(min_length=1, max_length=256)
+    netuid: int = Field(strict=True, ge=0, le=65535)
+    signature: str = Field(pattern=r"^[0-9a-fA-F]{128}$")
 
 
 class PresignResponse(BaseModel):
@@ -139,6 +155,8 @@ class PresignResponse(BaseModel):
     retrieval_url: str
     object_key: str
     expires_in: int
+    required_headers: dict[str, str]
+    already_uploaded: bool = False
 
 
 # `str` fallback is deliberate: submission_events.state is unconstrained TEXT,
@@ -178,6 +196,8 @@ class SubmissionSummaryModel(BaseModel):
     engine_image_ref: str | None = None
     latest_state: SubmissionStateName | None = None
     round: SubmissionRoundModel | None = None
+    patch_reveal_at: str | None = None
+    patch_download_url: str | None = None
 
 
 class SubmissionsPageModel(BaseModel):
@@ -440,12 +460,22 @@ def campaign_detail(campaign_id: str):
 )
 def campaign_submissions(
     campaign_id: str,
+    response: Response,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     page = list_campaign_submissions(campaign_id, limit=limit, offset=offset)
     if page is None:
         raise HTTPException(status_code=404, detail="campaign not found")
+    evaluation_times = {
+        str(r["id"]): (
+            r.get("_patch_evaluated_at") if r.get("_patch_reveal_delayed") else None
+        )
+        for r in page["items"]
+        if r.get("_patch_reveal_delayed") or private_patch_key(r["retrieval_url"])
+    }
+    if evaluation_times:
+        response.headers["Cache-Control"] = _NO_STORE
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -455,7 +485,7 @@ def campaign_submissions(
             {
                 **{
                     k: (str(v) if k in ("id", "campaign_id") else v)
-                    for k, v in r.items()
+                    for k, v in _public_submission(r, evaluation_times).items()
                     if k not in ("latest_state", "round")
                 },
                 "latest_state": r.get("latest_state"),
@@ -639,13 +669,86 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _submission_detail_payload(row: dict) -> dict:
+def _public_submission(row: dict, evaluation_times: dict) -> dict:
+    sid = str(row["id"])
+    evaluated_at = evaluation_times.get(sid)
+    release = patch_reveal_at(evaluated_at)
+    public = dict(row)
+    public.pop("_patch_evaluated_at", None)
+    public.pop("_patch_reveal_delayed", None)
+    public["retrieval_url"] = ""
+    public["patch_reveal_at"] = _iso_or_none(release)
+    public["patch_download_url"] = None
+    legacy = (
+        sid not in evaluation_times and private_patch_key(row["retrieval_url"]) is None
+    )
+    if legacy or patch_is_revealed(evaluated_at):
+        try:
+            public["retrieval_url"] = _published_patch_url(row)
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+            # Keep this row visible when its patch cannot be published.
+            return public
+        public["patch_download_url"] = (
+            f"/v1/campaigns/{quote(str(row['campaign_id']), safe='')}/submissions/"
+            f"{quote(row['patch_hash'], safe='')}/patch"
+        )
+    return public
+
+
+def _published_patch_url(row: dict) -> str:
+    try:
+        return publish_patch(row["retrieval_url"], row["patch_hash"])
+    except Exception:
+        logger.exception("patch publication failed submission_id=%s", row["id"])
+        raise HTTPException(
+            status_code=503,
+            detail="patch publication unavailable; retry shortly",
+            headers={"Cache-Control": _NO_STORE},
+        ) from None
+
+
+def _withhold_patch_url(value: Any, url: str) -> Any:
+    """Keep diagnostics public without leaking the URL through error metadata."""
+    if isinstance(value, str):
+        return value.replace(url, "[patch URL withheld]") if url else value
+    if isinstance(value, dict):
+        return {k: _withhold_patch_url(v, url) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_withhold_patch_url(v, url) for v in value]
+    return value
+
+
+def _submission_detail_payload(row: dict, response: Response) -> dict:
     events = list_events(row["id"])
     states = list_latest_states([row["id"]])
     jobs = list_submission_jobs(row["id"])
-    return {
+    round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
+    round_info = dict(round_info) if round_info is not None else None
+    evaluated_at = (
+        round_info.pop("_patch_evaluated_at", None) if round_info is not None else None
+    )
+    enrolled = any(
+        e["state"] == "committed"
+        and (e.get("detail") or {}).get("patch_reveal_delayed") is True
+        for e in events
+    )
+    delayed = enrolled or private_patch_key(row["retrieval_url"]) is not None
+    evaluation_times = (
+        {str(row["id"]): evaluated_at if enrolled else None} if delayed else {}
+    )
+    if delayed:
+        response.headers["Cache-Control"] = _NO_STORE
+    else:
+        _set_live_submission_cache_control(response, states.get(str(row["id"])))
+    public = _public_submission(row, evaluation_times)
+    payload = {
         "submission": {
-            **{k: (str(v) if k in ("id", "campaign_id") else v) for k, v in row.items()}
+            **{
+                k: (str(v) if k in ("id", "campaign_id") else v)
+                for k, v in public.items()
+            }
         },
         "latest_state": states.get(str(row["id"])),
         "jobs": [
@@ -670,8 +773,11 @@ def _submission_detail_payload(row: dict) -> dict:
             }
             for e in events
         ],
-        "round": list_submission_round_entries([row["id"]]).get(str(row["id"])),
+        "round": round_info,
     }
+    if not public["retrieval_url"]:
+        return _withhold_patch_url(payload, row["retrieval_url"])
+    return payload
 
 
 def _resolve_unambiguous_submission(patch_hash: str) -> dict:
@@ -697,9 +803,7 @@ def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Resp
     row = get_submission_for_campaign(campaign_id, patch_hash)
     if row is None:
         raise HTTPException(status_code=404, detail="submission not found")
-    payload = _submission_detail_payload(row)
-    _set_live_submission_cache_control(response, payload.get("latest_state"))
-    return payload
+    return _submission_detail_payload(row, response)
 
 
 @app.get(
@@ -707,9 +811,48 @@ def campaign_submission_detail(campaign_id: str, patch_hash: str, response: Resp
     responses={200: {"model": SubmissionDetailModel}},
 )
 def submission_detail(patch_hash: str, response: Response):
-    payload = _submission_detail_payload(_resolve_unambiguous_submission(patch_hash))
-    _set_live_submission_cache_control(response, payload.get("latest_state"))
-    return payload
+    return _submission_detail_payload(
+        _resolve_unambiguous_submission(patch_hash), response
+    )
+
+
+def _patch_download_response(row: dict) -> RedirectResponse:
+    times = list_patch_evaluation_times([row["id"]])
+    evaluated_at = times.get(str(row["id"]))
+    delayed = (
+        str(row["id"]) in times or private_patch_key(row["retrieval_url"]) is not None
+    )
+    if delayed and not patch_is_revealed(evaluated_at):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": "patch_not_revealed",
+                "patch_reveal_at": _iso_or_none(patch_reveal_at(evaluated_at)),
+            },
+            headers={"Cache-Control": _NO_STORE},
+        )
+    return RedirectResponse(
+        _published_patch_url(row),
+        status_code=307,
+        headers={"Cache-Control": _NO_STORE},
+    )
+
+
+@app.get("/v1/campaigns/{campaign_id}/submissions/{patch_hash}/patch")
+def campaign_submission_patch(campaign_id: str, patch_hash: str):
+    row = get_submission_for_campaign(campaign_id, patch_hash)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="submission not found",
+            headers={"Cache-Control": _NO_STORE},
+        )
+    return _patch_download_response(row)
+
+
+@app.get("/v1/submissions/{patch_hash}/patch")
+def submission_patch(patch_hash: str):
+    return _patch_download_response(_resolve_unambiguous_submission(patch_hash))
 
 
 _BUILD_LOG_MAX_TAIL = 2000
@@ -767,31 +910,51 @@ def submission_build_log(
 @app.post(
     "/v1/uploads/patch",
     response_model=PresignResponse,
-    responses={403: {"description": "Hotkey is disqualified from this campaign"}},
+    responses={
+        403: {"description": "Invalid upload authorization or disqualified hotkey"},
+        409: {"description": "Upload UUID already contains a different patch"},
+    },
 )
-def presign_patch(body: PresignRequest):
-    c = get_campaign(body.campaign_id)
+def presign_patch(body: PresignRequest, response: Response):
+    response.headers["Cache-Control"] = _NO_STORE
+    fields = body.model_dump(mode="json", exclude={"signature"})
+    try:
+        remaining = verify_upload_request(fields, body.signature)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    campaign_id = str(body.campaign_id)
+    c = get_campaign(campaign_id)
     if c is None:
         raise HTTPException(status_code=404, detail="campaign not found")
     if c.status != "open":
         raise HTTPException(status_code=400, detail="campaign is not open")
-    if campaign_hotkey_is_disqualified(body.campaign_id, body.hotkey):
+    if campaign_hotkey_is_disqualified(campaign_id, body.hotkey):
         raise HTTPException(
             status_code=403,
             detail="hotkey is disqualified from campaign",
         )
     try:
         result = create_presigned_patch_upload(
-            campaign_id=body.campaign_id,
+            campaign_id=campaign_id,
             hotkey=body.hotkey,
+            patch_hash=body.patch_hash,
+            upload_id=str(body.upload_id),
+            expires_in=min(remaining, config.PRESIGN_EXPIRES_S),
+            expires_at=body.expires_at,
         )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"presign failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except Exception:
+        raise HTTPException(
+            status_code=503, detail="patch upload unavailable"
+        ) from None
     return {
         "upload_url": result.upload_url,
         "retrieval_url": result.retrieval_url,
         "object_key": result.object_key,
         "expires_in": result.expires_in,
+        "required_headers": result.required_headers,
+        "already_uploaded": result.already_uploaded,
     }
 
 

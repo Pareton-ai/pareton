@@ -29,7 +29,10 @@ def _com(**overrides) -> PatchCommitment:
         campaign_id="11111111-1111-4111-8111-111111111111",
         baseline_commit="a" * 40,
         patch_hash=hash_patch_bytes(PATCH),
-        retrieval_url="https://cdn.example.com/stage0/campaigns/c/patches/hk1/1.diff",
+        retrieval_url=(
+            "https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/private/campaigns/"
+            "11111111-1111-4111-8111-111111111111/patches/hk1/22222222-2222-4222-8222-222222222222.diff"
+        ),
         raw="",
     )
     kwargs.update(overrides)
@@ -40,6 +43,9 @@ def _com(**overrides) -> PatchCommitment:
 def _cdn(monkeypatch):
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(config, "S3_BUCKET", "pareton-s3")
+    monkeypatch.setattr(config, "S3_REGION", "us-east-2")
+    monkeypatch.setattr(config, "S3_ENDPOINT_URL", "")
     monkeypatch.setattr(config, "COMPETITION_START_DATETIME", None)
     monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url, **_kwargs: PATCH)
     monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: None)
@@ -106,9 +112,7 @@ def test_ingest_skips_hotkey_mismatch(monkeypatch):
         lambda **_k: called.__setitem__("insert", True) or "sid",
     )
     sid = watcher.ingest_commitment(
-        _com(
-            retrieval_url="https://cdn.example.com/stage0/campaigns/c/patches/other/1.diff"
-        )
+        _com(retrieval_url=_com().retrieval_url.replace("/hk1/", "/other/"))
     )
     assert sid is None
     assert called["insert"] is False
@@ -230,6 +234,27 @@ def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
     assert inserted["payment_block"] is None
     assert inserted["payment_tx"] is None
     assert inserted["patch_fingerprint"] == patch_fingerprint_bytes(PATCH)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        _com().retrieval_url.replace("/private/", "/"),
+        _com().retrieval_url.replace(
+            "11111111-1111-4111-8111-111111111111",
+            "33333333-3333-4333-8333-333333333333",
+        ),
+    ],
+)
+def test_new_commitments_reject_public_or_cross_campaign_uploads(
+    monkeypatch, inserted, url
+):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "fetch_patch_bytes", lambda *a, **k: pytest.fail("unauthorized read")
+    )
+    assert watcher.ingest_commitment(_com(retrieval_url=url)) is None
+    assert not inserted
 
 
 def test_ingest_rejects_fingerprint_duplicate(monkeypatch, inserted):

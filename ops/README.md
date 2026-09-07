@@ -59,8 +59,9 @@ because each one changes production behavior:
 3. **`aws/pareton-api-iam-policy.json` overstates the live IAM policy.** It
    grants `s3:ListBucket` and `s3:DeleteObject`; the live `pareton-api` user
    has neither. Only `PutObject`/`GetObject` on `stage0/*` actually work.
-   Harmless today — `storage/s3.py` only calls `put_object` — but the file
-   should not be treated as an accurate record of live permissions.
+   Private patch uploads, validator reads, and public copies require only
+   `PutObject`/`GetObject`. The file should not be treated as an accurate record
+   of live permissions.
 
 4. **`vector/vector.toml` does not match the live config.** The committed file
    reads the Axiom token from `${PARETON_AXIOM_TOKEN}`; the live file has a

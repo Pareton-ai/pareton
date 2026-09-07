@@ -317,7 +317,13 @@ def insert_submission(
             if row is None:
                 return None
             submission_id = row[0]
-            detail: dict[str, Any] = {"commit_block": commit_block, "hotkey": hotkey}
+            # Enroll new rows atomically. Older committed events remain untouched
+            # so deployment does not hide URLs that were already published.
+            detail: dict[str, Any] = {
+                "commit_block": commit_block,
+                "hotkey": hotkey,
+                "patch_reveal_delayed": True,
+            }
             if patch_fingerprint is not None:
                 detail["patch_fingerprint"] = patch_fingerprint
             if payment_block is not None:
@@ -714,8 +720,8 @@ def list_campaign_submissions(
     """One-connection page for ``GET /v1/campaigns/{id}/submissions``.
 
     Returns ``None`` when the campaign is missing. Each item already has
-    ``latest_state`` and ``round`` attached, so the handler does not open
-    extra Neon round-trips for those lookups.
+    ``latest_state``, ``round``, and internal patch visibility fields attached,
+    so the handler does not open extra Neon round-trips for those lookups.
     """
     cid = str(campaign_id)
     with db_connection(readonly=True) as conn:
@@ -742,8 +748,19 @@ def list_campaign_submissions(
                        st.state AS latest_state,
                        re.round_id, re.ordinal AS round_ordinal,
                        re.status AS round_entry_status, re.score AS round_score,
-                       re.disqualify_reason AS round_disqualify_reason
-                FROM submissions s
+                       re.disqualify_reason AS round_disqualify_reason,
+                       re.patch_evaluated_at AS _patch_evaluated_at,
+                       EXISTS (
+                           SELECT 1 FROM submission_events c
+                           WHERE c.submission_id = s.id AND c.state = 'committed'
+                             AND c.detail @> '{"patch_reveal_delayed": true}'::jsonb
+                       ) AS _patch_reveal_delayed
+                FROM (
+                    SELECT * FROM submissions
+                    WHERE campaign_id = %s
+                    ORDER BY committed_at DESC, id DESC
+                    LIMIT %s OFFSET %s
+                ) s
                 LEFT JOIN LATERAL (
                     SELECT e.state
                     FROM submission_events e
@@ -753,7 +770,11 @@ def list_campaign_submissions(
                 ) st ON true
                 LEFT JOIN LATERAL (
                     SELECT e.round_id, r.ordinal, e.status, e.score,
-                           e.disqualify_reason
+                           e.disqualify_reason,
+                           MIN(r.completed_at) FILTER (
+                               WHERE r.status = 'complete'
+                                 AND e.status IN ('scored', 'disqualified')
+                           ) OVER () AS patch_evaluated_at
                     FROM round_entries e
                     JOIN rounds r ON r.id = e.round_id
                     WHERE e.submission_id = s.id AND r.status <> 'void'
@@ -763,9 +784,7 @@ def list_campaign_submissions(
                              r.ordinal DESC
                     LIMIT 1
                 ) re ON true
-                WHERE s.campaign_id = %s
                 ORDER BY s.committed_at DESC, s.id DESC
-                LIMIT %s OFFSET %s
                 """,
                 (cid, int(limit), int(offset)),
             )

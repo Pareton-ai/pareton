@@ -102,6 +102,7 @@ def process_submission(
         "retrieval_url": retrieval_url,
         "expected_patch_hash": patch_hash,
         "hotkey": hotkey,
+        "campaign_id": campaign_id,
     }
     if fetcher is not None:
         integrity_kwargs["fetcher"] = fetcher
