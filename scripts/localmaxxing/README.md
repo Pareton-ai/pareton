@@ -48,7 +48,7 @@ sudo docker run -d \
   --gpu-memory-utilization 0.80 \
   --enable-prefix-caching \
   --enable-chunked-prefill \
-  --max-num-seqs 128 \
+  --max-num-seqs 64 \
   --max-num-batched-tokens 8192 \
   --gdn-prefill-backend triton
 
@@ -123,15 +123,15 @@ bash scripts/localmaxxing/reproduce-pareton.sh run \
 Edit `scripts/localmaxxing/qwen38-27b-fp8-pareton.recipe` for the model and benchmark settings. It
 preserves the supplied model revision and serving flags. The workload remains
 reasoning-v1 with cache-busting nonces, greedy generation, 512 maximum output
-tokens, two warmups, three timed iterations, and concurrency 128. The recipe sets
-`MAX_NUM_SEQS=128` and derives both client `CONCURRENCY` and server `--max-num-seqs`
-from it. This sends 128 concurrent requests, each with one prompt; it does not put
-128 prompts in a single API request. Default run names include `c128`.
+tokens, two warmups, three timed iterations, and concurrency 64. The recipe sets
+`MAX_NUM_SEQS=64` and derives both client `CONCURRENCY` and server `--max-num-seqs`
+from it. This sends 64 concurrent requests, each with one prompt; it does not put
+64 prompts in a single API request. Default run names include `c64`.
 
 Earlier `c256` results used 256 client requests against the same server limit of
 32 active sequences. Those measurements represent a different offered load and
-must not be relabeled as `c128` results. Recreate the server with
-`--max-num-seqs 128` and rerun to measure concurrency 128.
+must not be relabeled as `c64` results. Recreate the server with
+`--max-num-seqs 64` and rerun to measure concurrency 64.
 
 New runs use unique names beneath `/workspace/runs/`. Use `--run-name my-run`
 for an explicit name; existing result directories are never overwritten.
@@ -154,4 +154,5 @@ on that repository.
 
 Local checks cover shell syntax and simulated lifecycle and artifact flows.
 The previous concurrency-32 and concurrency-256 runs completed on the provisioned
-H200 SXM instance. The updated concurrency-128 configuration requires a new GPU run.
+H200 SXM instance. The 128-sequence configuration caused OOM on this instance.
+The updated concurrency-64 configuration requires a new GPU run.
