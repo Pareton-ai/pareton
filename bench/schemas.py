@@ -353,6 +353,30 @@ class GpuInfo:
 
 
 @dataclass
+class CpuInfo:
+    """The host's CPU, as decisive for a score as the GPU on this workload.
+
+    A campaign runs a handful of concurrent requests for a few dozen output
+    tokens each, so per-step Python dispatch is a large share of wall clock and
+    core count moves every candidate's timings. A miner benchmarking on a
+    different box cannot reconcile their number with ours without it.
+
+    ``available_cores`` is what the process may actually run on, which is lower
+    than ``logical_cores`` under a cpuset. ``quota_cores`` is the cgroup ceiling
+    in whole-core units, and None means uncapped, not zero.
+    """
+
+    model: str
+    logical_cores: int
+    available_cores: int
+    memory_total_mb: int
+    quota_cores: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class EnvironmentInfo:
     gpu: list[GpuInfo]
     driver_version: str
@@ -360,9 +384,12 @@ class EnvironmentInfo:
     docker_version: str
     harness_version: str
     hostname_hash: str
+    # Absent on reports written before CPU was fingerprinted, so readers must
+    # treat it as optional rather than assuming every stored round has one.
+    cpu: CpuInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "gpu": [g.to_dict() for g in self.gpu],
             "driver_version": self.driver_version,
             "cuda_version": self.cuda_version,
@@ -370,6 +397,9 @@ class EnvironmentInfo:
             "harness_version": self.harness_version,
             "hostname_hash": self.hostname_hash,
         }
+        if self.cpu is not None:
+            out["cpu"] = self.cpu.to_dict()
+        return out
 
 
 @dataclass

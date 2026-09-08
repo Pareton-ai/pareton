@@ -1,0 +1,396 @@
+"""Unit tests for scrubbing a void detail before it becomes public."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+from round.void_detail import MAX_VOID_DETAIL, REDACTED, sanitize_void_detail
+
+
+def test_a_plain_detail_survives_untouched():
+    assert sanitize_void_detail(">1048576 bytes") == ">1048576 bytes"
+
+
+def test_empty_detail_is_empty_so_the_column_can_be_null():
+    assert sanitize_void_detail("") == ""
+    assert sanitize_void_detail(None) == ""
+    assert sanitize_void_detail("   \n  ") == ""
+
+
+def test_a_presigned_url_loses_its_signature():
+    """round_job raises RoundInfraError(VOID_TRACE_UNAVAILABLE, url) with a
+    presigned trace URL. The column is public, so the query must not survive."""
+    detail = (
+        "https://bucket.s3.amazonaws.com/traces/abc.json"
+        "?X-Amz-Signature=deadbeefcafe&X-Amz-Credential=AKIAEXAMPLE"
+    )
+    out = sanitize_void_detail(detail)
+    assert out == f"https://bucket.s3.amazonaws.com/traces/abc.json?{REDACTED}"
+    assert "deadbeefcafe" not in out
+    assert "AKIAEXAMPLE" not in out
+
+
+def test_the_host_and_path_stay_so_the_detail_is_still_useful():
+    out = sanitize_void_detail("https://api.provider.io/v1/pods?token=abc")
+    assert "api.provider.io/v1/pods" in out
+
+
+def test_a_url_without_a_query_is_left_alone():
+    detail = "https://ghcr.io/pareton-ai/engine"
+    assert sanitize_void_detail(detail) == detail
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "token=sk-live-abc123",
+        "api_key=abc123",
+        "Authorization: Bearer abc123",
+        "secret=hunter2",
+        "AWS_ACCESS_KEY=AKIAEXAMPLE",
+    ],
+)
+def test_loose_credential_pairs_are_redacted(secret: str):
+    out = sanitize_void_detail(f"provision failed: {secret} while retrying")
+    assert REDACTED in out
+    for leaked in ("sk-live-abc123", "abc123", "hunter2", "AKIAEXAMPLE"):
+        assert leaked not in out
+    # The surrounding prose is the part an operator reads.
+    assert "provision failed" in out
+    assert "while retrying" in out
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        '{"api_key": "secret"}',
+        "{'Authorization': 'Bearer secret'}",
+        '{"api_key":"secret"}',
+        '{"Authorization": "Bearer secret"}',
+    ],
+)
+def test_quoted_json_and_python_dict_credentials_are_redacted(blob: str):
+    """Provider adapters include raw response bodies in ProvisionError."""
+    out = sanitize_void_detail(f"provision failed: {blob} while retrying")
+    assert REDACTED in out
+    assert "secret" not in out
+    assert "Bearer" not in out
+    assert "provision failed" in out
+    assert "while retrying" in out
+
+
+def test_harness_completion_token_counts_are_not_redacted():
+    """leader_infra_failed copies the leader's disqualify_reason into void_detail.
+
+    That reason is the coalesced-stream error from bench/http.py, and the
+    number is the part a miner needs. `token` is a substring of the count's
+    name, not a credential name.
+    """
+    detail = (
+        "completions stream from http://172.18.0.2:8000/v1/completions: "
+        "completion_tokens=41 but only 6 inter-token gap(s) "
+        "(expected at least 40; coalesced stream)"
+    )
+    out = sanitize_void_detail(detail)
+    assert "completion_tokens=41" in out
+    assert REDACTED not in out
+
+
+@pytest.mark.parametrize(
+    "pair",
+    ["completion_tokens=41", "prompt_tokens=40", "total_tokens=81", "tokens=12"],
+)
+def test_plural_token_counts_keep_their_integer(pair: str):
+    assert sanitize_void_detail(pair) == pair
+
+
+def test_a_singular_token_pair_is_still_redacted():
+    out = sanitize_void_detail("token=sk-live-abc123")
+    assert "sk-live-abc123" not in out
+    assert REDACTED in out
+
+
+def test_escaped_quotes_inside_a_json_value_do_not_leave_the_secret():
+    """`\"` is a character in the value, not the end of the quoted value."""
+    detail = json.dumps({"password": 'prefix"SYNTHETIC_SECRET'})
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+
+
+def test_json_encoded_credential_fields_are_redacted():
+    """A JSON body nested inside another JSON string still carries the key."""
+    detail = json.dumps({"body": json.dumps({"api_key": "SYNTHETIC_SECRET"})})
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+
+
+def test_provider_http_body_is_scrubbed_on_the_void_write_path():
+    """Shadeform/Runpod/Targon put resp.text[:300] into ProvisionError.
+
+    round_job raises RoundInfraError with str(exc); void_round sanitizes
+    that detail before the column (and the public round response) sees it.
+    """
+    from gpu.errors import ProvisionError
+    from round.store import VOID_POD_PROVISION_FAILED
+    from worker.round_job import RoundInfraError
+
+    escaped = json.dumps({"password": 'prefix"SYNTHETIC_SECRET'})
+    encoded = json.dumps({"body": json.dumps({"api_key": "SYNTHETIC_SECRET"})})
+    for body in (escaped, encoded):
+        exc = ProvisionError(
+            f"Shadeform POST /instances/create failed HTTP 403: {body[:300]}"
+        )
+        infra = RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc))
+        published = sanitize_void_detail(infra.detail)
+        assert "SYNTHETIC_SECRET" not in published
+        assert REDACTED in published
+        assert "failed HTTP 403" in published
+
+
+# gpu/providers/{shadeform,runpod,targon}._req cuts the HTTP body here,
+# before sanitize_void_detail runs.
+PROVIDER_ERROR_BODY_LIMIT = 300
+
+
+def test_unterminated_quoted_authorization_is_redacted_through_eof():
+    """A cut inside `"Bearer …"` must not leave the token after the space."""
+    out = sanitize_void_detail('{"Authorization": "Bearer SYNTHETIC_SECRET')
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+    out = sanitize_void_detail("{'Authorization': 'Bearer SYNTHETIC_SECRET")
+    assert "SYNTHETIC_SECRET" not in out
+
+
+def test_provider_body_truncation_does_not_leave_an_unterminated_token():
+    token = "SYNTHETIC_SECRET_" + "A" * 400
+    body = json.dumps({"Authorization": f"Bearer {token}"})
+    detail = (
+        "Shadeform POST /instances/create failed HTTP 403: "
+        f"{body[:PROVIDER_ERROR_BODY_LIMIT]}"
+    )
+    assert "SYNTHETIC_SECRET_" in detail
+    out = sanitize_void_detail(detail)
+    assert token not in out
+    assert "SYNTHETIC_SECRET_" not in out
+    assert REDACTED in out
+
+
+def test_truncated_encoded_credential_field_is_redacted_through_eof():
+    inner = json.dumps({"api_key": "SYNTHETIC_SECRET_" + "B" * 400})
+    detail = json.dumps({"body": inner})[:PROVIDER_ERROR_BODY_LIMIT]
+    assert "SYNTHETIC_SECRET_" in detail
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET_" not in out
+    assert REDACTED in out
+
+
+def test_void_round_binds_the_scrubbed_truncated_body(monkeypatch):
+    """The UPDATE params are what the public column (and GET /v1/rounds) see."""
+    import contextlib
+
+    from gpu.errors import ProvisionError
+    from round import store
+    from round.store import VOID_POD_PROVISION_FAILED, void_round
+    from worker.round_job import RoundInfraError
+
+    token = "SYNTHETIC_SECRET_" + "A" * 400
+    body = json.dumps({"Authorization": f"Bearer {token}"})
+    exc = ProvisionError(
+        "Shadeform POST /instances/create failed HTTP 403: "
+        f"{body[:PROVIDER_ERROR_BODY_LIMIT]}"
+    )
+    infra = RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc))
+    bound: list[Any] = []
+
+    class _Cur:
+        def execute(self, _sql: str, args: Any = None) -> None:
+            bound.append(args)
+
+        def fetchone(self) -> tuple[str]:
+            return ("r1",)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    class _Conn:
+        def cursor(self, cursor_factory: Any = None) -> _Cur:
+            return _Cur()
+
+    @contextlib.contextmanager
+    def fake_db(**_kw: object):
+        yield _Conn()
+
+    monkeypatch.setattr(store, "db_connection", fake_db)
+    assert void_round("r1", infra.reason, infra.detail) is True
+    reason, scrubbed, rid = bound[0]
+    assert reason == VOID_POD_PROVISION_FAILED
+    assert rid == "r1"
+    assert token not in (scrubbed or "")
+    assert "SYNTHETIC_SECRET_" not in (scrubbed or "")
+    assert REDACTED in (scrubbed or "")
+
+
+def test_terminal_escapes_and_newlines_are_flattened():
+    """Provider output arrives coloured and multi-line; a round row is neither."""
+    out = sanitize_void_detail("boom \x1b[31mred\x1b[0m\nsecond line\r\tthird")
+    assert out == "boom red second line third"
+    assert "\x1b" not in out
+
+
+def test_null_bytes_and_control_characters_go():
+    out = sanitize_void_detail("bad\x00detail\x07here")
+    assert "\x00" not in out and "\x07" not in out
+    assert out == "bad detail here"
+
+
+def test_a_long_detail_is_truncated_within_the_limit():
+    """A stack trace must not turn a round row into a log sink."""
+    out = sanitize_void_detail("x" * 5000)
+    assert len(out) <= MAX_VOID_DETAIL
+    assert out.endswith("...")
+
+
+def test_the_limit_is_honoured_exactly():
+    out = sanitize_void_detail("y" * 1000, limit=20)
+    assert len(out) == 20
+
+
+def test_a_detail_at_the_limit_is_not_marked_truncated():
+    out = sanitize_void_detail("z" * MAX_VOID_DETAIL)
+    assert len(out) == MAX_VOID_DETAIL
+    assert not out.endswith("...")
+
+
+def test_a_dangling_backslash_at_the_cut_does_not_leave_the_token():
+    """The 300-character cut can land between a backslash and what it escapes.
+
+    That leaves a value no string grammar accepts. The scan has to consume the
+    rest of the text anyway rather than fall back to a narrower span.
+    """
+    token = "SYNTHETIC_SECRET_" + "A" * 260 + '"' + "B" * 50
+    body = json.dumps({"Authorization": f"Bearer {token}"})
+    detail = body[:304]
+    assert detail.endswith("\\")
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET_" not in out
+    assert REDACTED in out
+
+
+def test_a_doubly_encoded_credential_field_is_redacted():
+    """A body nested two JSON encodings deep escapes its quotes twice."""
+    inner = json.dumps({"password": "SYNTHETIC_SECRET"})
+    detail = json.dumps({"body": json.dumps({"response": inner})})
+    out = sanitize_void_detail(detail)
+    assert "SYNTHETIC_SECRET" not in out
+    assert REDACTED in out
+
+
+def test_a_control_byte_inside_a_value_does_not_end_the_redaction():
+    """Control bytes are flattened to spaces, but only after redaction."""
+    out = sanitize_void_detail("api_key=abc\x00SYNTHETIC_SECRET rest")
+    assert "SYNTHETIC_SECRET" not in out
+    assert "rest" in out
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sk-live-abc123def456",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln",
+        "AKIAIOSFODNN7EXAMPLE",
+        "ghp_0123456789abcdefghij",
+        "Bearer abc123def456",
+    ],
+)
+def test_self_describing_tokens_go_even_under_an_unknown_name(secret: str):
+    """A name we do not recognize must not be the only thing holding the line."""
+    detail = json.dumps({"headers": {"X-Custom": secret}})
+    out = sanitize_void_detail(detail)
+    assert secret not in out
+    assert REDACTED in out
+
+
+# Every carrier below embeds MARKER. Truncating them at every offset is the
+# whole space the provider cut can land in, which is where every leak found in
+# review so far has come from.
+MARKER = "SYNTHETIC_SECRET"
+
+_PAYLOADS = [
+    MARKER + "_" + "A" * 40,
+    MARKER + '_pre"post' + "B" * 40,
+    MARKER + "_" + "\\" * 3 + "C" * 40,
+    MARKER + "_" + "with spaces " + "D" * 40,
+    MARKER + "_" + "}{:," + "E" * 40,
+]
+
+
+def _carriers(secret: str) -> list[str]:
+    flat = secret.replace(" ", "")
+    return [
+        json.dumps({"Authorization": f"Bearer {secret}"}),
+        json.dumps({"api_key": secret}),
+        json.dumps({"body": json.dumps({"api_key": secret})}),
+        json.dumps({"body": json.dumps({"r": json.dumps({"password": secret})})}),
+        "{'Authorization': 'Bearer " + secret.replace("'", "") + "'}",
+        json.dumps({"error": {"message": "denied", "signature": secret}}),
+        f"AWS_ACCESS_KEY={flat} while retrying",
+        f"Authorization: Bearer {flat} while retrying",
+        f"x-api-key: {flat}",
+    ]
+
+
+def _longest_surviving_prefix(secret: str, text: str, minimum: int = 5) -> str:
+    """The most of ``secret`` that ``text`` still contains, "" below minimum."""
+    found = ""
+    for size in range(minimum, len(secret) + 1):
+        if secret[:size] not in text:
+            break
+        found = secret[:size]
+    return found
+
+
+def test_no_truncation_offset_leaves_any_of_the_secret():
+    prefix = "Shadeform POST /instances/create failed HTTP 403: "
+    checked = 0
+    for payload in _PAYLOADS:
+        for carrier in _carriers(payload):
+            detail = prefix + carrier
+            for cut in range(1, len(detail) + 1):
+                truncated = detail[:cut]
+                survives = _longest_surviving_prefix(payload, truncated)
+                if not survives:
+                    continue
+                checked += 1
+                out = sanitize_void_detail(truncated, limit=5000)
+                assert survives not in out, (cut, truncated, out)
+    assert checked > 1000, "the carriers stopped exercising truncation"
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "token_" * 50_000,
+        "authorization" * 5_000,
+        '"' * 20_000,
+        "\\" * 20_000 + '"api_key": "x"',
+        "A" * 100_000 + '{"api_key": "x"}',
+    ],
+)
+def test_sanitizing_stays_linear_on_adversarial_input(detail: str):
+    """A detail is attacker-shaped often enough that backtracking is a bug."""
+    import time
+
+    started = time.monotonic()
+    sanitize_void_detail(detail)
+    assert time.monotonic() - started < 1.0

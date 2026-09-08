@@ -12,11 +12,14 @@ pytestmark = pytest.mark.unit
 
 from bench.score import (
     DEFAULT_SPEED_TOLERANCE,
+    REASON_BELOW_TOLERANCE,
+    REASON_NO_CANDIDATE_TIMING,
     SCORING_RULES,
     PromptTiming,
     aligned_e2e_s,
     prompt_speedup,
     score_candidate,
+    summarize_prompt_scores,
 )
 from campaign.models import SCORING_RULE_NAMES
 
@@ -232,3 +235,84 @@ def test_the_guard_is_a_plain_check_on_status():
     store.assert_scoring_rule_mutable("draft")
     with pytest.raises(ValueError, match="fixed once a campaign leaves draft"):
         store.assert_scoring_rule_mutable("open")
+
+
+# --- summarize_prompt_scores: the counts a miner reads off a stored report ---
+
+
+def _report_prompts(*reasons: str | None) -> list[dict[str, Any]]:
+    """One stored-report prompt per reason. None means the prompt scored."""
+    return [
+        {
+            "request_id": f"req-{i}",
+            "speedup": 0.0 if reason else 0.4,
+            "aligned_tokens": 44,
+            "baseline_e2e_s": 1.8,
+            "candidate_e2e_s": None if reason else 1.1,
+            "reason": reason,
+        }
+        for i, reason in enumerate(reasons)
+    ]
+
+
+def test_summary_counts_scored_and_zeroed_prompts():
+    summary = summarize_prompt_scores(
+        _report_prompts(None, None, REASON_BELOW_TOLERANCE, REASON_NO_CANDIDATE_TIMING)
+    )
+    assert summary["total"] == 4
+    assert summary["scored"] == 2
+    assert summary["zeroed"] == 2
+    assert summary["below_tolerance"] == 1
+    assert summary["zeroed_by_reason"] == {
+        REASON_BELOW_TOLERANCE: 1,
+        REASON_NO_CANDIDATE_TIMING: 1,
+    }
+
+
+def test_a_real_zero_speedup_is_scored_not_zeroed():
+    """0.0 with no reason means baseline speed, which is a measurement."""
+    prompts = _report_prompts(None)
+    prompts[0]["speedup"] = 0.0
+    summary = summarize_prompt_scores(prompts)
+    assert summary["scored"] == 1
+    assert summary["zeroed"] == 0
+    assert summary["zeroed_by_reason"] == {}
+
+
+def test_summary_of_an_entry_that_never_scored_is_all_zeroes():
+    assert summarize_prompt_scores([]) == {
+        "total": 0,
+        "scored": 0,
+        "zeroed": 0,
+        "below_tolerance": 0,
+        "zeroed_by_reason": {},
+    }
+
+
+def test_summary_skips_malformed_prompt_rows():
+    """Reports are read back out of JSONB written by past harness versions."""
+    summary = summarize_prompt_scores(
+        [*_report_prompts(None), "not-an-object", 7, None]  # type: ignore[list-item]
+    )
+    assert summary["total"] == 1
+    assert summary["scored"] == 1
+
+
+def test_summary_matches_what_the_scorer_actually_wrote():
+    """The counts must track score.py, not a second copy of its rules."""
+    baseline = {
+        "a": PromptTiming(ttft_s=0.1, itl_s=[0.05] * 43, completion_tokens=44),
+        "b": PromptTiming(ttft_s=0.1, itl_s=[0.05] * 43, completion_tokens=44),
+    }
+    candidate = {
+        "a": PromptTiming(ttft_s=0.05, itl_s=[0.02] * 43, completion_tokens=44),
+        # Stops well short of the 0.9 tolerance bar: 30 of 44 tokens.
+        "b": PromptTiming(ttft_s=0.05, itl_s=[0.02] * 29, completion_tokens=30),
+    }
+    result = score_candidate(
+        {"name": "median_e2e_speedup"}, baseline=baseline, candidate=candidate
+    )
+    summary = summarize_prompt_scores(result.to_report()["prompts"])
+    assert summary["total"] == 2
+    assert summary["scored"] == 1
+    assert summary["below_tolerance"] == 1
