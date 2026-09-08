@@ -101,10 +101,12 @@ CORRECTNESS_EXTRA_SERVE_ARGS = [
 ]
 
 
-def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
-    """vLLM-only scorer flags. SGLang uses --tp-size and rejects these."""
-    if "--tp-size" in serve_args:
+def correctness_extra_serve_args(engine_name: str) -> list[str]:
+    """Select scorer flags from the pinned engine, independent of CLI aliases."""
+    if engine_name == "sglang":
         return []
+    if engine_name != "vllm":
+        raise ValueError(f"unknown engine name: {engine_name!r}")
     return list(CORRECTNESS_EXTRA_SERVE_ARGS)
 
 
@@ -123,12 +125,13 @@ def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
     from the pinned baseline rather than named separately, so a campaign
     manifest carries no scorer field of its own.
     """
-    extra = correctness_extra_serve_args(spec.serve_args)
+    extra = correctness_extra_serve_args(spec.name)
     return EngineSpec(
         image=spec.image,
         serve_args=list(spec.serve_args) + extra,
         env=dict(spec.env),
         cache_dir=spec.cache_dir,
+        name=spec.name,
     )
 
 

@@ -1,23 +1,19 @@
-# SGLang runtime deps, generated from python/pyproject.toml at tag v0.5.17
-# (commit b6a09f38fcc5e96574324b4acc19d421c539cfc6).
-#
-# Pre-baked so the hermetic build can run --network=none with
-# `pip install --no-deps --no-build-isolation -e python/`.
-#
-# sglang-kernel 0.4.5 is a PREBUILT wheel (no TORCH_CUDA_ARCH_LIST; no GPU to
-# build). Use the SGLang-hosted +cu130 build, not PyPI: PyPI's plain 0.4.5
-# wheel loads sm100/common_ops that fail on RTX 5090 (sm_120) with an
-# undefined TensorBase symbol. Official lmsysorg/sglang:v0.5.17 uses +cu130
-# and imports cleanly on sm_120. Keep the version matched to the source tag
-# (PAR-54: 0.4.5 vs HEAD wanting 0.4.6.post1 died at serve).
+# Runtime dependencies from SGLang python/pyproject.toml at
+# 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc.
+# Torch 2.13.0+cu130 is installed by the Dockerfile. torchvision is pinned to
+# its matching 0.28.0 release, as in the upstream Dockerfile at this commit.
+# The plain sglang-kernel 0.4.6.post1 wheel is the upstream CUDA 13 recipe.
+# These dependencies and the compiled Rust extensions are baked before
+# the offline, no-dependency miner install.
 aiohttp
 anthropic>=0.20.0
 apache-tvm-ffi==0.1.11
 av==16.1.0 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')
 blobfile==3.0.0
 build
-compressed-tensors
+compressed-tensors==0.18.0
 cuda-python>=13.0
+cuda-tile==1.6.0rc5
 datasets
 decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')
 distro
@@ -25,10 +21,9 @@ easydict
 einops
 fastapi
 flash-attn-4>=4.0.0b18
-flashinfer_python[cu13]==0.6.15.post1
+flashinfer_python[cu13]==0.6.18
 gguf
-helion==1.4
-humming-kernels[cu13]==0.1.10
+humming-kernels[cu13]==0.1.12
 interegular
 IPython
 kernels>=0.14.1,<0.15
@@ -39,7 +34,7 @@ msgspec
 ninja
 numba==0.65.1
 numpy
-nvidia-cutlass-dsl[cu13]==4.6.0
+nvidia-cutlass-dsl[cu13]==4.6.2
 nvidia-mathdx==25.6.0
 nvidia-ml-py
 openai==2.6.1
@@ -56,24 +51,26 @@ pybase64
 pydantic
 python-multipart
 pyzmq>=25.1.2
-quack-kernels>=0.6.1
+quack-kernels==0.6.4
 requests
 scipy
 sentencepiece
 setproctitle
-sgl-deep-gemm==0.1.5.post1
-sglang-kernel @ https://github.com/sgl-project/whl/releases/download/v0.4.5/sglang_kernel-0.4.5%2Bcu130-cp310-abi3-manylinux2014_x86_64.whl
+sgl-deep-ep==0.1.2
+sgl-deep-gemm==0.1.7
+sglang-kernel==0.4.6.post1
 smg-grpc-servicer>=0.5.0
 soundfile==0.13.1
 tiktoken
-tilelang==0.1.11
+tilelang==0.1.12
 timm==1.0.16
+tokenizers==0.22.2
 tokenspeed_mla==0.1.8
+tomli ; python_version < '3.11'
 torch_memory_saver>=0.0.9.post1
-torchao==0.17.0
 torchaudio==2.11.0
-torchcodec==0.11.1 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')
-torchvision==0.26.0
+torchcodec==0.15.0 ; sys_platform != 'linux' or (sys_platform == 'linux' and platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')
+torchvision==0.28.0
 tqdm
 transformers==5.12.1
 uvicorn

@@ -217,20 +217,39 @@ def test_build_round_request_keeps_exploit_checks_out_of_competition_policy(
     assert "max_mean_logprob_drop" not in thr
 
 
-def test_build_round_request_omits_max_model_len_for_sglang(tmp_path):
+def test_build_round_request_pins_sglang_launch_and_scorer(tmp_path):
+    from bench.main import plan_round_starts
+    from bench.validate import validate_bench_request_dict
+
     trace = tmp_path / "trace.json"
     raw = _write_trace(trace)
     row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    campaign = _campaign(engine=preset("sglang"))
+    campaign.bench["serve_args"] = ["--mem-fraction-static", "0.80"]
     req = build_round_request(
         row,
-        _campaign(engine=preset("sglang")),
+        campaign,
         _entries(),
         task_id=str(uuid4()),
         trace_path=str(trace),
     )
     args = req["engines"]["candidates"][0]["serve_args"]
     assert "--max-model-len" not in args
-    assert "--dtype" in args
+    assert args == [
+        "--model-path",
+        "/model",
+        "--context-length",
+        "8192",
+        "--dtype",
+        "bfloat16",
+        "--mem-fraction-static",
+        "0.80",
+    ]
+    plan = plan_round_starts(validate_bench_request_dict(req).engines)
+    for start in plan:
+        assert start.spec.name == "sglang"
+        assert start.spec.cache_dir == "/root/.cache/sglang"
+        assert start.spec.serve_args == args
 
 
 @pytest.mark.parametrize(

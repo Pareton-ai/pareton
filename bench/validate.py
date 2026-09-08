@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from bench.schemas import BenchRequest, WorkloadTrace
+from campaign.engine import KNOWN_ENGINE_NAMES
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Bare digest, or registry ref pinned with @sha256:<64 hex> (optional #fragment).
@@ -175,6 +176,11 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         # back to the vLLM path. An SGLang request that omitted it would mount
         # the cache where SGLang never looks and never say so.
         _require_keys(eng, ["image", "cache_dir"], ctx=f"engines.{role}")
+        name = eng.get("name", "vllm")
+        if not isinstance(name, str) or name not in KNOWN_ENGINE_NAMES:
+            raise RequestValidationError(
+                f"engines.{role}.name must be one of {sorted(KNOWN_ENGINE_NAMES)}"
+            )
         try:
             extract_image_digest(str(eng["image"]))
         except RequestValidationError as exc:

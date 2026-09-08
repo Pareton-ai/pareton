@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from bench.main import (
     CORRECTNESS_EXTRA_SERVE_ARGS,
-    scorer_engine_spec,
     correctness_extra_serve_args,
+    scorer_engine_spec,
 )
 from bench.schemas import EngineSpec
 
@@ -27,20 +29,30 @@ def test_scorer_engine_spec_appends_flags_without_mutating():
     assert out.env is not spec.env
 
 
-def test_sglang_serve_args_skip_vllm_correctness_extras():
+@pytest.mark.parametrize(
+    "tp_args",
+    [[], ["--tp-size", "1"], ["--tp-size=1"], ["--tensor-parallel-size", "1"]],
+)
+def test_sglang_serve_args_skip_vllm_correctness_extras(tp_args):
     args = [
-        "--model",
+        "--model-path",
         "/model",
         "--dtype",
         "auto",
-        "--tp-size",
-        "8",
+        *tp_args,
         "--context-length",
         "131072",
     ]
-    assert correctness_extra_serve_args(args) == []
-    spec = EngineSpec(image="sha256:" + ("a" * 64), serve_args=list(args))
+    assert correctness_extra_serve_args("sglang") == []
+    spec = EngineSpec(
+        image="sha256:" + ("a" * 64),
+        serve_args=list(args),
+        name="sglang",
+        cache_dir="/root/.cache/sglang",
+    )
     out = scorer_engine_spec(spec)
     assert out.serve_args == args
     assert "--no-enable-prefix-caching" not in out.serve_args
     assert "--no-enable-flashinfer-autotune" not in out.serve_args
+    assert out.name == "sglang"
+    assert out.cache_dir == spec.cache_dir

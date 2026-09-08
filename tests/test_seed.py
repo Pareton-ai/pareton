@@ -20,6 +20,7 @@ pytestmark = pytest.mark.unit
 
 REAL_BASE = "sha256:" + ("a" * 64)
 REAL_ENGINE = "sha256:" + ("d" * 64)
+SGLANG_COMMIT = "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc"
 
 
 def _patch_store(monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -59,6 +60,106 @@ def test_default_seed_pins_hf_rows_and_stores_no_trace(
     public = m.to_public_dict()
     assert "workload_trace_url" not in public
     assert public["sampling_rule"]["type"] == "hf_rows"
+
+
+def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monkeypatch):
+    from types import SimpleNamespace
+
+    from gate.surface import check_surface
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed, "list_campaigns", lambda **_: [SimpleNamespace(campaign_id=uuid4())]
+    )
+    assert (
+        main(
+            [
+                "--engine",
+                "sglang",
+                "--baseline-commit",
+                SGLANG_COMMIT,
+                "--base-image-digest",
+                REAL_BASE,
+                "--baseline-engine-image-digest",
+                REAL_ENGINE,
+                "--bench-model-repo",
+                "Qwen/Qwen3.8-27B",
+                "--bench-model-revision",
+                "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+                "--gpu-skus",
+                "H200",
+                "--bench-gpu-count",
+                "1",
+                "--bench-serve-args=--mem-fraction-static",
+                "--bench-serve-args=0.80",
+                "--status",
+                "open",
+                "--emission-start-weight",
+                "0",
+                "--emission-floor-weight",
+                "0",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    m = captured["manifest"]
+    assert captured["inserts"] == 1
+    assert m.status == "open"
+    assert m.baseline_repo == "https://github.com/sgl-project/sglang.git"
+    assert m.baseline_commit == SGLANG_COMMIT
+    assert m.allowed_paths == ["python/sglang/**"]
+    assert m.engine["name"] == "sglang"
+    assert m.bench["serve_args"] == ["--mem-fraction-static", "0.80"]
+    assert m.emission_rule["start_weight"] == m.emission_rule["floor_weight"] == 0
+    assert m.customer_signoff.approved_manifest_hash == m.manifest_hash
+    seed.require_correctness_thresholds(m.bench)
+    assert captured["profile_data"]["model"] == "Qwen/Qwen3.8-27B"
+    assert captured["profile_data"]["serving_stack"] == "sglang"
+    assert captured["profile_data"]["gpu_count"] == 1
+    for path, allowed in [
+        ("python/sglang/srt/model_executor/model_runner.py", True),
+        ("vllm/worker.py", False),
+        ("python/pyproject.toml", False),
+        ("python/sglang/setup.py", False),
+        ("python/sglang/test/test_utils.py", False),
+        ("test/test_server.py", False),
+        ("rust/sglang-grpc/src/lib.rs", False),
+    ]:
+        patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n".encode()
+        assert (
+            check_surface(
+                patch_bytes=patch,
+                allowed_paths=m.allowed_paths,
+                denied_paths=m.denied_paths,
+            ).ok
+            is allowed
+        )
+
+
+def test_sglang_requires_source_pin_before_writing(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="explicit --baseline-commit"):
+        seed_synthetic_campaign(engine="sglang", allow_placeholders=True)
+    assert captured["profile_data"] is None
+
+
+def test_seed_cli_pins_path_overrides(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    assert (
+        main(
+            [
+                "--allow-placeholders",
+                "--allowed-path",
+                "vllm/model_executor/**",
+                "--denied-path",
+                "**/test_*.py",
+            ]
+        )
+        == 0
+    )
+    assert captured["manifest"].allowed_paths == ["vllm/model_executor/**"]
+    assert captured["manifest"].denied_paths == ["**/test_*.py"]
 
 
 def test_bench_flags_shape_correctness(monkeypatch: pytest.MonkeyPatch):

@@ -17,8 +17,8 @@ Deliberately **not** fields:
 * ``health_path``  — both engines are ready on ``/v1/models``, which is already
   the default in ``bench.lifecycle.wait_until_healthy``. SGLang's ``/health``
   returns 503 on a fully ready server, so nothing should point at it.
-* ``TORCH_CUDA_ARCH_LIST`` — SGLang does no CUDA compilation at all; its kernels
-  ship as the prebuilt ``sglang-kernel`` wheel.
+* ``TORCH_CUDA_ARCH_LIST``: this SGLang recipe uses prebuilt CUDA wheels.
+  Its baseline image also bakes any Rust extensions required by the source pin.
 
 Consuming this in the builder is PAR-57; this module only defines and validates.
 """
@@ -41,9 +41,8 @@ VLLM_ENGINE: dict[str, Any] = {
     "cache_dir": "/root/.cache/vllm",
 }
 
-# SGLang v0.5.17. Verified on a live B300 (sm_103) in PAR-54: patched build
-# completes in ~5s under --network=none, and the editable install correctly
-# shadows the base image's preinstalled sglang.
+# SGLang's Python package layout. Source and dependency versions belong to the
+# campaign and baseline image, so the install recipe also supports newer pins.
 SGLANG_ENGINE: dict[str, Any] = {
     "name": "sglang",
     "install_cmd": "pip install --no-deps --no-build-isolation -e python/",

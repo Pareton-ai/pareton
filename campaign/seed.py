@@ -16,11 +16,12 @@ from uuid import uuid4
 
 import config
 from bench.sampler import parse_sampling_rule
-from campaign.engine import ENGINE_PRESETS, preset as engine_preset
+from campaign.engine import ENGINE_PRESETS
+from campaign.engine import preset as engine_preset
 from campaign.manifest import build_manifest
 from campaign.models import (
-    CustomerSignoff,
     SLA,
+    CustomerSignoff,
     validate_emission_rule,
     validate_priority_metric,
     validate_scoring_rule,
@@ -222,8 +223,8 @@ def build_seed_bench_spec(
 
 def seed_synthetic_campaign(
     *,
-    baseline_repo: str = DEFAULT_BASELINE_REPO,
-    baseline_commit: str = DEFAULT_BASELINE_COMMIT,
+    baseline_repo: str | None = None,
+    baseline_commit: str | None = None,
     base_image_digest: str = DEFAULT_BASE_IMAGE_DIGEST,
     force: bool = False,
     bench_model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -247,6 +248,8 @@ def seed_synthetic_campaign(
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
     engine: str | None = None,
+    allowed_paths: list[str] | None = None,
+    denied_paths: list[str] | None = None,
 ) -> str:
     # Normalize before floor lookup / profile insert (build_manifest also validates).
     priority_metric = validate_priority_metric(priority_metric)
@@ -254,6 +257,29 @@ def seed_synthetic_campaign(
     # None (not "vllm") is the default: it keeps engine out of the manifest pin
     # set, so re-seeding an existing campaign reproduces its original hash.
     engine_profile = None if engine is None else engine_preset(engine)
+    engine_name = (engine_profile or {}).get("name", "vllm")
+    if engine_name == "sglang":
+        baseline_repo = baseline_repo or "https://github.com/sgl-project/sglang.git"
+        if not baseline_commit:
+            raise ValueError("--engine sglang requires an explicit --baseline-commit")
+        default_allowed = ["python/sglang/**"]
+        default_denied = [
+            *config.DEFAULT_DENIED_PATHS,
+            "test/**",
+            "benchmark/**",
+            "python/sglang/test/**",
+        ]
+    else:
+        baseline_repo = baseline_repo or DEFAULT_BASELINE_REPO
+        baseline_commit = baseline_commit or DEFAULT_BASELINE_COMMIT
+        default_allowed = config.DEFAULT_ALLOWED_PATHS
+        default_denied = config.DEFAULT_DENIED_PATHS
+    allowed = list(default_allowed if allowed_paths is None else allowed_paths)
+    denied = list(default_denied if denied_paths is None else denied_paths)
+    if not allowed or any(not path.strip() for path in [*allowed, *denied]):
+        raise ValueError(
+            "patch paths must be non-empty globs, with at least one allowed path"
+        )
     skus = _normalize_gpu_skus(
         list(DEFAULT_GPU_SKUS) if gpu_skus is None else list(gpu_skus)
     )
@@ -279,10 +305,10 @@ def seed_synthetic_campaign(
     profile_id = insert_profile(
         name="pareton-synthetic-v0",
         data={
-            "model": "Qwen2.5-72B-Instruct",
-            "quantization": "FP8",
-            "serving_stack": "vLLM",
-            "tensor_parallel": 8,
+            "model": bench_model_repo,
+            "quantization": bench_quantization,
+            "serving_stack": engine_name,
+            "gpu_count": bench_gpu_count,
             "hardware": list(skus),
             "priority_metric": priority_metric,
             "success_threshold": success_threshold,
@@ -335,8 +361,8 @@ def seed_synthetic_campaign(
         ),
         scoring_config_sha256=None,
         scoring_config_url=None,
-        allowed_paths=list(config.DEFAULT_ALLOWED_PATHS),
-        denied_paths=list(config.DEFAULT_DENIED_PATHS),
+        allowed_paths=allowed,
+        denied_paths=denied,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         status=status,
@@ -370,8 +396,8 @@ def seed_synthetic_campaign(
         ),
         scoring_config_sha256=None,
         scoring_config_url=None,
-        allowed_paths=list(config.DEFAULT_ALLOWED_PATHS),
-        denied_paths=list(config.DEFAULT_DENIED_PATHS),
+        allowed_paths=allowed,
+        denied_paths=denied,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         status=status,
@@ -393,8 +419,28 @@ def seed_synthetic_campaign(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Seed synthetic Pareton Stage 0 campaign")
-    p.add_argument("--baseline-repo", default=DEFAULT_BASELINE_REPO)
-    p.add_argument("--baseline-commit", default=DEFAULT_BASELINE_COMMIT)
+    p.add_argument(
+        "--baseline-repo",
+        default=None,
+        help="Source repository (default: engine upstream)",
+    )
+    p.add_argument(
+        "--baseline-commit",
+        default=None,
+        help="Pinned source commit (required for SGLang)",
+    )
+    p.add_argument(
+        "--allowed-path",
+        action="append",
+        default=None,
+        help="Allowed patch glob (repeatable; replaces engine defaults)",
+    )
+    p.add_argument(
+        "--denied-path",
+        action="append",
+        default=None,
+        help="Denied patch glob (repeatable; replaces engine defaults)",
+    )
     p.add_argument("--base-image-digest", default=DEFAULT_BASE_IMAGE_DIGEST)
     p.add_argument("--bench-model-repo", default=DEFAULT_BENCH_MODEL_REPO)
     p.add_argument("--bench-model-revision", default=DEFAULT_BENCH_MODEL_REVISION)
@@ -597,6 +643,8 @@ def main(argv: list[str] | None = None) -> int:
             status=args.status,
             no_bench=args.no_bench,
             engine=args.engine,
+            allowed_paths=args.allowed_path,
+            denied_paths=args.denied_path,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
