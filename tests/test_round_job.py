@@ -249,7 +249,10 @@ def test_build_round_request_pins_sglang_launch_and_scorer(tmp_path):
     for start in plan:
         assert start.spec.name == "sglang"
         assert start.spec.cache_dir == "/root/.cache/sglang"
-        assert start.spec.serve_args == args
+        expected_args = list(args)
+        if start.kind == "scorer":
+            expected_args[3] = "8199"
+        assert start.spec.serve_args == expected_args
 
 
 @pytest.mark.parametrize(

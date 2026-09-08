@@ -894,6 +894,8 @@ def _score_sglang_output(
         "/generate",
         {
             "input_ids": full_ids,
+            # scorer_engine_spec reserves input headroom beyond the replay
+            # context so this full sequence and the clamp token both fit.
             "sampling_params": {"temperature": 0.0, "max_new_tokens": 1},
             "return_logprob": True,
             "logprob_start_len": 0,

@@ -5,6 +5,9 @@ and saved GPU reports. Repository: `/Users/arpantripathi/Documents/Github/pareto
 Times below are UTC. Resource and database observations are timestamped historical
 checks, not a guarantee about changes made by other operators after those checks.
 
+The subsequent PR review fix for scorer context exhaustion is recorded in section
+12. The image pins and GPU measurements below remain the original validation.
+
 ## 1. State at handoff
 
 SGLang campaign plumbing, a published baseline image, offline Python patch builds,
@@ -877,3 +880,48 @@ Completion requires all three outstanding technical/operational outcomes:
 effective native modifications, verified FP8 evaluation, and the requested open
 zero-emission campaign on the intended deployed system. None should be inferred
 from the successful historical BF16 smoke alone.
+
+## 12. PR review follow-up: scorer context exhaustion
+
+The user reported that the SGLang scorer teacher-forces the full captured sequence
+and requests one extra token, so an output filling the 8192-token replay context
+can make correctness fail and void a round when the relative quality bar is enabled.
+
+The pinned source confirms two limits. `TokenizerManager._validate_one_request`
+rejects an input equal to the context length, even with `max_new_tokens: 0`.
+`TpModelWorker.get_worker_info` derives `max_req_input_len` as context length minus
+six when the memory pool is sufficient, and `validate_input_length` requires input
+length strictly below that limit. Zero new tokens or one extra context slot alone
+therefore does not fix the complete boundary case.
+
+The fix in `bench/main.py:scorer_engine_spec` reserves seven additional context
+slots for explicit numeric SGLang context arguments, handling both separate and
+equals-form arguments. For this campaign the scorer uses 8199, while baseline,
+candidate and drift replay remain at 8192. The scorer sets
+`SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1` to allow the allocation even when the
+campaign uses the model's full declared context. Forced input positions still fit
+the original replay window; the sampled clamp token is excluded and is never fed
+back into the model. The existing native input-logprob path and all full-token,
+Unicode, coverage and quality checks remain intact. No output is truncated.
+
+Tests cover separate/equals/duplicate context flags, isolation of the scorer's
+arguments and environment, and the real worker-to-round-plan path. The new
+correctness regression supplies 3072 prompt tokens plus 5120 continuation tokens,
+reproduces the old length failure, then verifies that baseline and candidate both
+pass with `max_mean_logprob_drop: 1.5`, 5120 scored positions and coverage 1.0. A
+distinct final-token logprob ensures the last captured token affects the result.
+
+The actual pinned tokenizer length checks, worker limit derivation and scheduler
+input validator were also executed with CPU-only stand-ins. An 8192-token input
+was rejected at contexts 8192, 8193 and 8198, and accepted at 8199. Evidence is in
+`out/sglang-launch/context-scorer-fix/pinned-length-checks.json`. This is execution
+of the source's validation logic, not GPU inference. No new image was published,
+GPU rented, campaign seeded or production service deployed for this review fix.
+
+The full suite passed 1137 tests with 41 skipped and two deprecation warnings in
+82.94 seconds. Its log is `/tmp/pareton-sglang-tests-context-final.log`; relevant
+Ruff lint/format checks and `git diff --check` passed too. The launch guide and
+local ignored technical-decisions file were updated with the headroom requirement.
+Continue to use a numeric context pin generated from the campaign's model settings;
+omitted context arguments do not provide a pinned value from which to derive
+headroom. The earlier H200 results have not been rerun with this scorer setting.

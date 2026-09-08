@@ -16,7 +16,8 @@ from bench.correctness import (
     score_captured_output,
 )
 from bench.lifecycle import EngineError
-from bench.schemas import CorrectnessConfig, CorrectnessThresholds
+from bench.main import scorer_engine_spec
+from bench.schemas import CorrectnessConfig, CorrectnessThresholds, EngineSpec
 
 pytestmark = pytest.mark.unit
 
@@ -167,3 +168,81 @@ def test_grade_all_uses_native_scorer_for_baseline_and_candidate(
     )
     assert reports[BASELINE_INDEX].verdict == reports[0].verdict == "pass"
     assert sum(path == "/generate" for path, _ in native["calls"]) == 2
+
+
+def test_full_replay_context_scores_every_token_with_relative_bar(
+    monkeypatch, tmp_path
+):
+    context_len = 8192
+    prompt_ids = [1] * 3072
+    output_ids = list(range(100, 5220))
+    full_ids = prompt_ids + output_ids
+    token_text = {1: "p", **{i: chr(0x4E00 + i) for i in output_ids}}
+    captured = CapturedOutput(
+        "full-context",
+        "p" * len(prompt_ids),
+        "".join(token_text[i] for i in output_ids),
+        len(output_ids),
+    )
+    assert len(full_ids) == 8192
+    rows = [
+        [None if i == 0 else -0.1, token_id, token_text[token_id]]
+        for i, token_id in enumerate(full_ids)
+    ]
+    rows[-1][0] = -0.7  # The final captured token must contribute to the mean.
+
+    def post(_url, path, body, **_kw):
+        if path == "/tokenize":
+            return {"tokens": [prompt_ids, full_ids]}
+        if path == "/detokenize":
+            return {
+                "text": ["".join(token_text[i] for i in ids) for ids in body["tokens"]]
+            }
+        assert path == "/generate"
+        assert body["input_ids"] == full_ids  # No truncation to make scoring fit.
+        # Pinned SGLang tokenizer + scheduler guards: the worker reserves one
+        # slot, then five input slots, and validate_input_length uses >=.
+        if (
+            len(body["input_ids"]) >= context_len - 6
+            or len(body["input_ids"]) + body["sampling_params"]["max_new_tokens"]
+            > context_len
+        ):
+            raise EngineError("SGLang input exceeds context limit")
+        return {
+            "meta_info": {
+                "input_token_logprobs": rows,
+                "output_token_logprobs": [[-999.0, 99999, "clamp"]],
+            }
+        }
+
+    monkeypatch.setattr(correctness, "post_json", post)
+    monkeypatch.setattr(correctness, "probe_logprob_capability", lambda *a, **kw: {})
+    with pytest.raises(EngineError, match="context limit"):
+        score_captured_output("http://scorer", captured, engine_name="sglang")
+
+    scorer = scorer_engine_spec(
+        EngineSpec(
+            image="sha256:" + ("a" * 64),
+            name="sglang",
+            serve_args=["--context-length", str(context_len)],
+        )
+    )
+    context_len = int(scorer.serve_args[1])
+    cfg = CorrectnessConfig(
+        1, CorrectnessThresholds(-4.0, -12.0, 0.001, 0.5, max_mean_logprob_drop=1.5)
+    )
+    reports = grade_all(
+        "http://scorer",
+        [
+            PendingCorrectness(0, [captured]),
+            PendingCorrectness(BASELINE_INDEX, [captured]),
+        ],
+        cfg=cfg,
+        evidence_dir=tmp_path,
+        engine_name="sglang",
+    )
+    for report in reports.values():
+        assert report.verdict == "pass"
+        assert report.num_positions_scored == 5120
+        assert report.coverage_ratio == 1.0
+        assert report.mean_logprob == pytest.approx((-0.1 * 5119 - 0.7) / 5120)

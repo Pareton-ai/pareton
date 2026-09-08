@@ -169,6 +169,17 @@ three stages: streaming replay, shared correctness scoring and baseline drift.
 Verify `/v1/models`, streamed token counts, scoring coverage and cleanup.
 The model mount is `/model`; do not let the engine fetch a default model.
 
+For an explicit SGLang `--context-length`, the scorer alone reserves seven extra
+context slots. At this pin, the scheduler requires input length strictly below
+`context_length - 6`, so an output that fills the replay window otherwise cannot
+be teacher-forced. An 8192-token campaign therefore starts its scorer with 8199;
+baseline, candidate and drift replay keep 8192. The scorer also sets
+`SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1` so this allocation can exceed a model's
+declared limit without rejecting startup. The forced input still fits the original
+window, and the single extra sampled token is excluded from scoring and never fed
+back into the model. Keep the worker-generated numeric context pin in the request;
+no tokens are truncated and no correctness thresholds are changed.
+
 SGLang runs two full, untimed warmups before each measured replay set, including
 the closing baseline. On the pinned Qwen model, one warmup left a startup stall
 in the first measured repetition. Both warmups are saved under `warmup/` and
