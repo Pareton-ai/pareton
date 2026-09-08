@@ -142,13 +142,14 @@ jobs:
   build-sglang:
     if: inputs.engine == 'sglang'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - name: Free disk on the disposable runner
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/share/swift
           df -h
+          free -h
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -166,7 +167,8 @@ jobs:
         env:
           PARETON_GHCR_USERNAME: ${{ github.actor }}
           PARETON_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PARETON_BUILD_TIMEOUT_S: "7200"
+          PARETON_BUILD_TIMEOUT_S: "18000"
+          PARETON_BUILD_MAX_JOBS: "1"
           PARETON_BUILD_LOG_DIR: ${{ github.workspace }}/out/sglang-build/logs
           SGLANG_REUSE_BUILD_BASE: ${{ inputs.sglang_build_base }}
         run: bash ops/build-sglang-baseline.sh "sglang-4c3d47f-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" out/sglang-build "$SGLANG_REUSE_BUILD_BASE"

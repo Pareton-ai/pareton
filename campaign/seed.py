@@ -262,12 +262,16 @@ def seed_synthetic_campaign(
         baseline_repo = baseline_repo or "https://github.com/sgl-project/sglang.git"
         if not baseline_commit:
             raise ValueError("--engine sglang requires an explicit --baseline-commit")
-        default_allowed = ["python/sglang/**"]
+        default_allowed = ["python/sglang/**", "rust/**"]
         default_denied = [
-            *config.DEFAULT_DENIED_PATHS,
+            # AOT CMake definitions register custom kernel sources. The allowed
+            # roots still exclude the repository's deployment/build tooling.
+            *(p for p in config.DEFAULT_DENIED_PATHS if p != "**/CMakeLists.txt"),
             "test/**",
             "benchmark/**",
             "python/sglang/test/**",
+            "rust/**/tests/**",
+            "rust/**/benches/**",
         ]
     else:
         baseline_repo = baseline_repo or DEFAULT_BASELINE_REPO

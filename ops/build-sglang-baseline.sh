@@ -12,7 +12,7 @@ esac
 mkdir -p "$output_dir"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
 engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
-probe_tag="pareton-sglang-probe:$suffix"
+probe_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-probe"
 commit=4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc
 repo=https://github.com/sgl-project/sglang.git
 
@@ -33,6 +33,11 @@ with builder_storage_lock(blocking=True):
         ], text=True).strip()
         if source_pin != sys.argv[3]:
             raise SystemExit("Build base label does not match the SGLang source pin")
+        native_build = subprocess.check_output([
+            "docker", "inspect", "--format", '{{index .Config.Labels "ai.pareton.sglang.native-build"}}', reuse,
+        ], text=True).strip()
+        if native_build != "1":
+            raise SystemExit("Build base does not support offline native SGLang builds")
     else:
         subprocess.run([
             "docker", "buildx", "build", "--platform", "linux/amd64", "--load",
@@ -47,28 +52,33 @@ python -m builder --engine sglang --baseline-repo "$repo" \
   | tee "$output_dir/baseline-build.txt"
 engine_ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$engine_tag")
 
-cat > "$output_dir/probe.diff" <<'PATCH'
-diff --git a/python/sglang/pareton_build_probe.py b/python/sglang/pareton_build_probe.py
-new file mode 100644
---- /dev/null
-+++ b/python/sglang/pareton_build_probe.py
-@@ -0,0 +1 @@
-+PATCH_APPLIED = True
-PATCH
+python ops/make-sglang-native-probe.py "$engine_ref" "$output_dir/probe.diff"
 python -m builder --engine sglang --baseline-repo "$repo" \
   --baseline-commit "$commit" --base-image "$engine_ref" \
-  --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --no-push \
+  --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push \
   | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python "$probe_tag" -c \
-  'from sglang.pareton_build_probe import PATCH_APPLIED; from pathlib import Path; assert PATCH_APPLIED; assert list(Path("/src/python/sglang").rglob("*.so")); print("offline patched import and Rust extensions: OK")' \
+  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; assert mem_cache.PARETON_NATIVE_PROBE == 41; print("offline patched Rust extension: OK")' \
   | tee "$output_dir/miner-import.txt"
+docker run --rm --network none --entrypoint cat "$probe_tag" /opt/sglang-build-evidence/ccache.json \
+  > "$output_dir/miner-ccache.json"
+probe_ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$probe_tag")
 
-python - "$build_ref" "$engine_ref" "$output_dir" <<'PY'
+python - "$build_ref" "$engine_ref" "$probe_ref" "$output_dir" <<'PY'
+import hashlib
 import json
 import sys
 from pathlib import Path
 
-pins = {"build_base_image": sys.argv[1], "engine_image": sys.argv[2]}
-Path(sys.argv[3], "image-pins.json").write_text(json.dumps(pins, indent=2) + "\n")
+root = Path(sys.argv[4])
+cache = json.loads((root / 'miner-ccache.json').read_text())
+assert cache.get('direct_cache_hit', 0) + cache.get('preprocessed_cache_hit', 0) > 0, cache
+assert cache.get('cache_miss', 0) > 0, cache
+pins = {
+    "build_base_image": sys.argv[1], "engine_image": sys.argv[2],
+    "probe_image": sys.argv[3],
+    "probe_patch_sha256": hashlib.sha256((root / 'probe.diff').read_bytes()).hexdigest(),
+}
+(root / "image-pins.json").write_text(json.dumps(pins, indent=2) + "\n")
 print(json.dumps(pins, indent=2))
 PY

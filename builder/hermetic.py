@@ -449,7 +449,8 @@ def build_engine_image(
                 stderr=checkout.stderr[-2000:],
             )
 
-        # Miner builds stay --network=none. Empty-patch (a2b baseline) needs network for cmake.
+        # vLLM's trusted empty-patch build fetches CMake inputs. SGLang stages
+        # its dependencies in the trusted base and builds offline in both roles.
         build_cmd = [
             "docker",
             "buildx",
@@ -458,7 +459,11 @@ def build_engine_image(
             config.BUILDER_NAME,
             "--load",
             "--progress=plain",
-            *([] if allow_empty_patch else ["--network=none"]),
+            *(
+                []
+                if allow_empty_patch and profile["name"] == "vllm"
+                else ["--network=none"]
+            ),
             "--build-arg",
             f"BASE_IMAGE={base_image}",
             "--build-arg",

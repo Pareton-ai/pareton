@@ -108,7 +108,7 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
     assert m.status == "open"
     assert m.baseline_repo == "https://github.com/sgl-project/sglang.git"
     assert m.baseline_commit == SGLANG_COMMIT
-    assert m.allowed_paths == ["python/sglang/**"]
+    assert m.allowed_paths == ["python/sglang/**", "rust/**"]
     assert m.engine["name"] == "sglang"
     assert m.bench["serve_args"] == ["--mem-fraction-static", "0.80"]
     assert m.emission_rule["start_weight"] == m.emission_rule["floor_weight"] == 0
@@ -124,7 +124,14 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
         ("python/sglang/setup.py", False),
         ("python/sglang/test/test_utils.py", False),
         ("test/test_server.py", False),
-        ("rust/sglang-grpc/src/lib.rs", False),
+        ("rust/sglang-grpc/src/lib.rs", True),
+        ("rust/sglang-radix-tree/src/lib.rs", True),
+        ("rust/sglang-radix-tree/tests/test_utils.rs", False),
+        ("python/sglang/kernels/aot/csrc/gemm/new_kernel.cu", True),
+        ("python/sglang/kernels/aot/include/new_kernel.cuh", True),
+        ("python/sglang/kernels/aot/CMakeLists.txt", True),
+        ("python/sglang/kernels/aot/pyproject.toml", False),
+        ("CMakeLists.txt", False),
     ]:
         patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n".encode()
         assert (
