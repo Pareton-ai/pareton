@@ -85,6 +85,37 @@ def test_quoted_json_and_python_dict_credentials_are_redacted(blob: str):
     assert "while retrying" in out
 
 
+def test_harness_completion_token_counts_are_not_redacted():
+    """leader_infra_failed copies the leader's disqualify_reason into void_detail.
+
+    That reason is the coalesced-stream error from bench/http.py, and the
+    number is the part a miner needs. `token` is a substring of the count's
+    name, not a credential name.
+    """
+    detail = (
+        "completions stream from http://172.18.0.2:8000/v1/completions: "
+        "completion_tokens=41 but only 6 inter-token gap(s) "
+        "(expected at least 40; coalesced stream)"
+    )
+    out = sanitize_void_detail(detail)
+    assert "completion_tokens=41" in out
+    assert REDACTED not in out
+
+
+@pytest.mark.parametrize(
+    "pair",
+    ["completion_tokens=41", "prompt_tokens=40", "total_tokens=81", "tokens=12"],
+)
+def test_plural_token_counts_keep_their_integer(pair: str):
+    assert sanitize_void_detail(pair) == pair
+
+
+def test_a_singular_token_pair_is_still_redacted():
+    out = sanitize_void_detail("token=sk-live-abc123")
+    assert "sk-live-abc123" not in out
+    assert REDACTED in out
+
+
 def test_escaped_quotes_inside_a_json_value_do_not_leave_the_secret():
     """`\"` is a character in the value, not the end of the quoted value."""
     detail = json.dumps({"password": 'prefix"SYNTHETIC_SECRET'})

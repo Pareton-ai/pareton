@@ -176,11 +176,20 @@ def _redact_pairs(text: str) -> str:
         separator = _SEPARATOR.match(text, name_end)
         if separator is None:
             continue
+        value_end = _value_end(text, separator.end())
+        # `completion_tokens=41` is a count, not a credential: no credential
+        # name is plural and no credential value is a bare integer. Without
+        # this the harness's own stream errors lose the number that matters.
+        if (
+            text[word.end() : name_end].lower().startswith("s")
+            and text[separator.end() : value_end].strip().isdigit()
+        ):
+            continue
         name_start = max(_name_start(text, word.start()), pos)
         name = text[name_start:name_end] + separator.group(1)
         out.append(text[pos:name_start])
         out.append(f"{name}={REDACTED}")
-        pos = _value_end(text, separator.end())
+        pos = value_end
     out.append(text[pos:])
     return "".join(out)
 
