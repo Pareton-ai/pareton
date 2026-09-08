@@ -10,6 +10,11 @@ case "$suffix" in
   *[!a-zA-Z0-9_.-]*|'') echo 'Invalid image tag suffix' >&2; exit 2 ;;
 esac
 mkdir -p "$output_dir"
+# A cold CUDA build can exceed eight hours. This applies only to this ops run;
+# production miner builds retain their configured deadline.
+export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-43200}"
+export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-1}"
+export PARETON_BUILD_LOG_DIR="${PARETON_BUILD_LOG_DIR:-$output_dir/logs}"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
 engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
 probe_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-probe"
@@ -46,17 +51,19 @@ with builder_storage_lock(blocking=True):
         subprocess.run(["docker", "push", sys.argv[1]], check=True)
 PY
 build_ref=${reuse_build_ref:-$(docker inspect --format '{{index .RepoDigests 0}}' "$build_tag")}
+printf '%s\n' "$build_ref" > "$output_dir/build-base-image.txt"
 python -m builder --engine sglang --baseline-repo "$repo" \
   --baseline-commit "$commit" --base-image "$build_ref" \
-  --image-ref "$engine_tag" --empty-patch --push \
-  | tee "$output_dir/baseline-build.txt"
+  --image-ref "$engine_tag" --empty-patch --push --stream-build-logs \
+  2>&1 | tee "$output_dir/baseline-build.txt"
 engine_ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$engine_tag")
+printf '%s\n' "$engine_ref" > "$output_dir/engine-image.txt"
 
 python ops/make-sglang-native-probe.py "$engine_ref" "$output_dir/probe.diff"
 python -m builder --engine sglang --baseline-repo "$repo" \
   --baseline-commit "$commit" --base-image "$engine_ref" \
-  --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push \
-  | tee "$output_dir/miner-build.txt"
+  --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push --stream-build-logs \
+  2>&1 | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python "$probe_tag" -c \
   'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; assert mem_cache.PARETON_NATIVE_PROBE == 41; print("offline patched Rust extension: OK")' \
   | tee "$output_dir/miner-import.txt"

@@ -130,19 +130,31 @@ def test_dockerfile_omits_blank_arch():
 
 
 @pytest.mark.unit
-def test_run_logged_tees_and_returns_code(tmp_path, capsys):
+@pytest.mark.parametrize("stream_logs", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_run_logged_tees_and_returns_code(tmp_path, capsys, stream_logs, exit_code):
     from builder.hermetic import _run_logged
 
     log_path = tmp_path / "build.log"
     rc = _run_logged(
-        ["python3", "-c", "print('hello-build')"],
+        [
+            "python3",
+            "-c",
+            "import sys; print('hello-build'); print('build-warning', file=sys.stderr); "
+            f"sys.exit({exit_code})",
+        ],
         log_path=log_path,
         timeout=30,
+        stream_logs=stream_logs,
     )
-    assert rc == 0
-    assert "hello-build" in log_path.read_text(encoding="utf-8")
-    err = capsys.readouterr().err
-    assert "hello-build" not in err
+    assert rc == exit_code
+    log = log_path.read_text(encoding="utf-8")
+    assert "hello-build" in log
+    assert "build-warning" in log
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert ("hello-build" in captured.err) == stream_logs
+    assert ("build-warning" in captured.err) == stream_logs
 
 
 @pytest.mark.unit
@@ -432,7 +444,8 @@ def test_build_engine_image_rejects_bad_engine(tmp_path):
 
 
 @pytest.mark.unit
-def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path):
+@pytest.mark.parametrize("stream_logs", [False, True])
+def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path, stream_logs):
     """`--engine sglang` must reach build_engine_image as the SGLang profile."""
     import builder.__main__ as cli
 
@@ -456,10 +469,12 @@ def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path):
             "--empty-patch",
             "--engine",
             "sglang",
+            *(["--stream-build-logs"] if stream_logs else []),
         ]
     )
     assert rc == 0
     assert seen["engine"] == preset("sglang")
+    assert seen["stream_logs"] is stream_logs
 
     seen.clear()
     cli.main(

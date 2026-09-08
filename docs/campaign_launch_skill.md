@@ -1,7 +1,7 @@
 ---
 name: campaign-launch
 description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with zero emissions."
-version: 3.0.0
+version: 3.1.0
 category: ops
 metadata:
   hermes:
@@ -120,10 +120,13 @@ from the installed `sglang-kernel` wheel. The community FA3 download has no
 Torch 2.13 variant for this pin. Selecting the bundled implementation avoids
 that download in the offline evaluation container.
 
-With repository dependencies installed and Docker logged in to GHCR:
+Use a dedicated Linux x86_64 CPU build host with Docker and repository Python
+dependencies installed, logged in to GHCR. Run in `tmux` so an SSH disconnect does
+not stop compilation. A cold native build may take eight hours or longer:
 
 ```bash
-PARETON_BUILD_LOG_DIR="$PWD/out/sglang-build/logs" \
+PARETON_BUILD_TIMEOUT_S=43200 \
+  PARETON_BUILD_LOG_DIR="$PWD/out/sglang-build/logs" \
   bash ops/build-sglang-baseline.sh sglang-4c3d47f-<unique-suffix> out/sglang-build
 ```
 
@@ -131,8 +134,13 @@ This publishes a new build base, builds the empty-patch engine with `--network=n
 then builds a nonempty CUDA/CMake/JIT/Rust patch through the same miner path. It
 checks the rebuilt Rust marker and records both ccache hits and misses. It writes
 `image-pins.json` with baseline and probe digests only after those checks pass.
-The `Build baseline images` GitHub Actions workflow also accepts
-`engine=sglang` and uploads this evidence. GPU validation is a separate step.
+The script defaults to twelve hours per build and streams Docker output to the
+terminal while keeping durable logs. It records each published base/engine
+reference immediately, even if a later stage fails. Production miner build
+deadlines are unchanged. GPU validation is a separate step.
+
+[GitHub-hosted runners have a six-hour job limit](https://docs.github.com/en/actions/reference/limits).
+Use the direct VPS build below for the long native compile. No GPU is needed.
 
 The SGLang script publishes both roles under the workflow-writable
 `pareton-baseline` package, with `-engine` appended to the serving-image tag.
@@ -142,6 +150,59 @@ an interrupted build after the trusted base was published, pass that base's
 digest reference as the script's third argument or the workflow's
 `sglang_build_base` input. The script checks its source and native-build labels
 before reuse. The original Python-only image is not a native build base.
+Reusing the dependency image skips dependency staging. It does not restore an
+unfinished native build from a deleted runner. On the same persistent Docker
+builder, completed entries in the trusted ccache mount can be reused on retry.
+
+### Build directly on the validator VPS
+
+Run inside a `tmux` session as the same OS user as the worker. The example uses
+the existing `/opt/pareton/.venv` and `/opt/pareton/.env`. This feature branch has
+no `requirements.txt` change relative to `main`. A separate detached checkout
+provides SGLang support without changing the live service checkout.
+
+```bash
+set -e
+cd /opt/pareton
+source .venv/bin/activate
+set -a
+source .env
+set +a
+
+# Resolve the production lock before changing directories, including overrides.
+export PARETON_BUILDER_LOCK_PATH="$(python -c 'import config; print(config.BUILDER_LOCK_PATH)')"
+git fetch origin arpan/sglang-campaigns
+git worktree add --detach /opt/pareton-sglang-build origin/arpan/sglang-campaigns
+cd /opt/pareton-sglang-build
+
+python -m builder.gc_config
+printf '%s' "$PARETON_GHCR_TOKEN" | docker login ghcr.io \
+  --username "$PARETON_GHCR_USERNAME" --password-stdin
+
+PARETON_BUILD_TIMEOUT_S=43200 PARETON_BUILD_MAX_JOBS=1 \
+PARETON_BUILD_LOG_DIR=/var/log/pareton/sglang-baseline \
+python -m builder \
+  --engine sglang \
+  --baseline-repo https://github.com/sgl-project/sglang.git \
+  --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
+  --base-image ghcr.io/pareton-ai/pareton-baseline@sha256:97e1f4e868fc988355f91bb20a6d6f3a9b90c3a901d030730a2646ecbdf00688 \
+  --image-ref "ghcr.io/pareton-ai/pareton-baseline:sglang-4c3d47f-vps-$(date -u +%Y%m%dT%H%M%SZ)-engine" \
+  --empty-patch --push --stream-build-logs
+```
+
+The GHCR credential needs package read and write access. The final stdout line is
+the published serving image's full digest reference; retain it for validation.
+The twelve-hour timeout applies to compilation; waiting for the shared lock and
+clone/push stages have separate limits. This command builds and uploads the
+empty-patch engine. Native mutation probes and FP8 GPU validation still follow.
+
+SGLang uses the BuildKit cache mount
+`pareton-ccache-4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. The vLLM campaign's
+different source commit selects a separate cache mount. There is no prune,
+ccache clear, daemon restart or production configuration change in these commands.
+The GC command validates the existing policy without changing it. The shared lock
+waits for any current build and excludes cleanup while this build runs. New vLLM
+builds wait for the lock; API, chain and weights services remain running.
 
 For vLLM, use `images/baseline/Dockerfile`, then run:
 

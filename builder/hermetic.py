@@ -263,10 +263,12 @@ def _run_logged(
     timeout: float,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    stream_logs: bool = False,
 ) -> int:
-    """Run cmd, tee stdout/stderr to log_path, enforce timeout.
+    """Run cmd, save stdout/stderr to log_path, enforce timeout.
 
-    Output goes to the file only; journald gets _progress milestones.
+    Ops may also stream output to stderr so CI retains progress if its host dies.
+    Worker builds keep file-only output and _progress milestones in journald.
     """
     with log_path.open("a", encoding="utf-8") as logf:
         logf.write(f"+ {' '.join(cmd)}\n")
@@ -286,6 +288,8 @@ def _run_logged(
             for line in proc.stdout:
                 logf.write(line)
                 logf.flush()
+                if stream_logs:
+                    print(line, end="", file=sys.stderr, flush=True)
 
         reader = threading.Thread(target=_tee, name="pareton-build-tee", daemon=True)
         reader.start()
@@ -318,6 +322,7 @@ def build_engine_image(
     image_ref_override: str | None = None,
     engine: dict[str, Any] | None = None,
     torch_cuda_arch_list: str | None = None,
+    stream_logs: bool = False,
 ) -> GateResult:
     """Build and optionally push an engine image tagged by patch_hash.
 
@@ -334,6 +339,8 @@ def build_engine_image(
     ``torch_cuda_arch_list`` is ops-only. Miner builds leave it unset and
     inherit ``TORCH_CUDA_ARCH_LIST`` from the pinned base image. vLLM rejects
     when that image declares none; SGLang may omit it.
+
+    ``stream_logs`` also copies Docker build/push output to stderr for ops.
     """
     if _patch_is_empty(patch_bytes) and not allow_empty_patch:
         return GateResult.reject("empty_patch_not_allowed")
@@ -484,6 +491,7 @@ def build_engine_image(
             log_path=log_path,
             timeout=config.BUILD_TIMEOUT_S,
             env=build_env,
+            stream_logs=stream_logs,
         )
         if rc != 0:
             return GateResult.reject(
@@ -500,6 +508,7 @@ def build_engine_image(
                 ["docker", "push", image_ref],
                 log_path=log_path,
                 timeout=600,
+                stream_logs=stream_logs,
             )
             if push_rc != 0:
                 return GateResult.reject(

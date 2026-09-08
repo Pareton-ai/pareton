@@ -7,7 +7,8 @@ checks, not a guarantee about changes made by other operators after those checks
 
 The subsequent PR review fix for scorer context exhaustion is recorded in section
 12. The resumed native/FP8 work and the operator's VPS launch plan are in section
-13. Sections 1 through 11 describe the original handoff and its historical image
+13. The native build failure and prepared retry are recorded in section 14.
+Sections 1 through 11 describe the original handoff and its historical image
 pins and BF16 GPU measurements; do not use those old pins for the native campaign.
 
 ## 1. State at the original handoff
@@ -1072,3 +1073,76 @@ PR #148 remains an open draft titled "feat: support SGLang native patches and
 Qwen3.8-27B FP8 campaigns". No production deployment or campaign insertion has
 occurred. Temporary continuation helpers live under `/tmp`; preserve or recreate
 them from the recorded steps if the local environment is cleared.
+
+## 14. Runner shutdown and direct validator VPS build
+
+The operator reported that run `34240317476` failed and said the comparable cold
+vLLM build took roughly eight hours. The completed job log explicitly records
+"The runner has received a shutdown signal" followed by exit code 143. Native
+compilation started at 14:50:21 UTC and was terminated at 16:23:04 UTC on
+2026-09-08, about 93 minutes later. This occurred before the configured five-hour
+builder timeout and six-hour job timeout. The available evidence does not identify
+why the runner shut down; it does not establish a compiler error or OOM.
+
+The shutdown skipped the `if: always()` artifact upload and post steps. The
+artifact API returned no artifacts. The job log was downloaded to
+`/tmp/pareton-sglang-native/failed-job.log`, with a structured failure receipt in
+`out/sglang-native-fp8/build-failure.json`. The dependency base ending in `00688`
+remains the only published image from this attempt. The unfinished native objects
+and detailed local compiler log cannot be recovered from a deleted runner.
+
+The operator then directed that GitHub Actions be set aside and requested a
+direct `python -m builder` command for the validator VPS, explicitly preserving
+the ongoing vLLM campaign's ccache. No Actions retry was dispatched. The temporary
+self-hosted workflow changes were removed before committing; no runner setup is
+required for the selected direct build path. This supersedes the pause and runner
+selection question in the preceding checkpoint.
+
+### Completed changes for the direct build
+
+- The ops CLI accepts `--stream-build-logs`. Docker build and push output still
+  goes to its durable log and can additionally stream to stderr. Normal worker
+  builds remain file-only; the CLI's final stdout is the published digest.
+- `ops/build-sglang-baseline.sh` defaults to twelve hours per build, respects
+  explicit overrides, streams logs and records published base/engine refs as
+  each stage finishes. Production build timeout settings are unchanged.
+- The launch guide contains the complete direct VPS command. It fetches the
+  feature branch into `/opt/pareton-sglang-build` as a detached worktree, uses
+  `/opt/pareton/.venv` and `.env`, and builds from the existing dependency digest.
+  There is no requirements change relative to `origin/main` at this checkpoint.
+- Resolve `config.BUILDER_LOCK_PATH` from `/opt/pareton` before entering the
+  worktree and export the absolute result. Otherwise the default lock would be
+  derived from the new checkout, allowing cleanup to race the build. Preserve
+  the production `PARETON_BUILDER_NAME` inherited from `.env`.
+- Run `python -m builder.gc_config` as a read-only preflight. It requires the
+  existing `builder.gc.enabled=false` policy and never edits or restarts Docker.
+  Do not run any prune, ccache clear or daemon-reset command for this build.
+
+SGLang's writable trusted cache mount is
+`pareton-ccache-4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. vLLM uses the mount
+derived from its own different source commit. The new image's installer copies
+only its SGLang cache into `/opt/sglang-ccache` in that container layer. It does
+not replace or clear the vLLM cache. Pareton cleanup also excludes all
+`exec.cachemount` records, and its shared lock skips cleanup during a build.
+
+Sharing the production lock serializes builds: the SGLang command waits for an
+existing vLLM build, then subsequent vLLM builds wait until SGLang releases the
+lock. API, watcher and weights services are not restarted. This preserves cache
+and storage coordination; it does not provide concurrent compilation throughput.
+
+### Verification and continuation
+
+The full offline suite passed **1143 tests, 41 skipped**, with two existing
+deprecation warnings, in 85.49 seconds. Both database URLs were disabled. Log:
+`/tmp/pareton-sglang-native/tests-builder-retry.log`. Regression coverage verifies
+that streamed stdout/stderr reaches the log and terminal, exit codes survive,
+quiet mode stays quiet and the CLI forwards the new flag. Targeted Ruff lint,
+formatting, shell syntax and `git diff --check` also passed.
+
+The direct command has been prepared and checked locally, not executed on the
+VPS. It builds and uploads the empty-patch serving engine only. Await the
+operator's resulting full `ghcr.io/...@sha256:...` reference, then complete the
+native mutation build/ccache receipts, CUDA/JIT/Rust GPU probes, 8192-token scorer
+boundary check and full FP8 round. Update sample pins and give the final
+zero-emission seed commands after validation. No new GPU was rented, campaign
+created or production service modified in response to this failure.
