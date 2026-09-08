@@ -1038,3 +1038,37 @@ inspect its receipts, run native/context probes and a full FP8 round, update the
 sample pins and launch guide, and run final PR CI/review. Then provide the operator
 with the VPS seed and API readback commands. Production deployment and the actual
 campaign insertion/readback will be performed on the operator's VPS.
+
+### Paused at the operator's request
+
+On 2026-09-08 around 15:25 UTC, the operator said the native build will take hours
+and will report when the [build job finishes](https://github.com/Pareton-ai/pareton/actions/runs/34240317476/job/102108498875).
+The local `gh run watch` process was stopped. The remote GitHub Actions build was
+left running. Do not poll it, allocate a GPU or create a campaign while awaiting
+that notification.
+
+When the operator reports completion:
+
+1. Read the completed job result and download its `sglang-build-evidence`
+   artifact. Inspect the compiler logs, native probe build, Rust import and
+   ccache receipts. Use `image-pins.json` from the successful artifact as the
+   source of serving/probe digests. A published dependency build base alone is
+   insufficient.
+2. If the build failed, diagnose its saved logs and fix the specific failure
+   before proceeding. Do not represent the historical Python-only image or
+   BF16 validation as proof of the new native FP8 implementation.
+3. Run the prepared native CUDA/JIT/Rust probes, the exact 8192-token scorer
+   boundary check and the full FP8 round within the existing GPU approval.
+   Verify instance and volume deletion, including on failure.
+4. Update the checked-in sample campaign fields and image pins, launch guide,
+   validation receipts, this handoff and PR #148 with the actual results. Finish
+   the remaining review and CI checks.
+5. Provide the minimal Linux commands for the operator to run on the validator
+   VPS after deployment, using the verified serving digest and the open,
+   zero-start/zero-floor emission seed helper with `--force`. Preserve the
+   existing campaign and include API readback of the new campaign.
+
+PR #148 remains an open draft titled "feat: support SGLang native patches and
+Qwen3.8-27B FP8 campaigns". No production deployment or campaign insertion has
+occurred. Temporary continuation helpers live under `/tmp`; preserve or recreate
+them from the recorded steps if the local environment is cleared.
