@@ -6,9 +6,11 @@ Times below are UTC. Resource and database observations are timestamped historic
 checks, not a guarantee about changes made by other operators after those checks.
 
 The subsequent PR review fix for scorer context exhaustion is recorded in section
-12. The image pins and GPU measurements below remain the original validation.
+12. The resumed native/FP8 work and the operator's VPS launch plan are in section
+13. Sections 1 through 11 describe the original handoff and its historical image
+pins and BF16 GPU measurements; do not use those old pins for the native campaign.
 
-## 1. State at handoff
+## 1. State at the original handoff
 
 SGLang campaign plumbing, a published baseline image, offline Python patch builds,
 and a complete BF16 H200 benchmark round are implemented and verified. The user's
@@ -925,3 +927,114 @@ local ignored technical-decisions file were updated with the headroom requiremen
 Continue to use a numeric context pin generated from the campaign's model settings;
 omitted context arguments do not provide a pinned value from which to derive
 headroom. The earlier H200 results have not been rerun with this scorer setting.
+
+## 13. Resumed native/FP8 completion and VPS launch
+
+The operator now has access to the validator VPS and requests the minimal Linux
+commands to create the campaign there after the technical work is complete. Use
+`/opt/pareton` and `/opt/pareton/.env` on that host. This resolves the earlier local
+database-target ambiguity. Prepare commands for the operator; do not seed from the
+local laptop or switch the production checkout to this feature branch.
+
+### Code completed in the resumed work
+
+- `dd8c287`: new SGLang profiles use `/usr/local/bin/pareton-install-sglang`, a
+  trusted installer outside the patchable tree. It rebuilds Python, all discovered
+  Rust Python extensions and the AOT `sglang-kernel` package from patched source.
+  Both empty-patch and miner builds now use `--network=none` for SGLang.
+- `images/baseline-sglang/prepare-deps.py` stages and verifies all seven upstream
+  URL/SHA256-pinned CMake dependencies, including FlashMLA's nested CUTLASS tree.
+  It writes disconnected CMake source overrides and dependency receipts.
+- The new image stage reuses the previously published dependency bootstrap by
+  digest, adds scikit-build-core 0.11.6 and CMake 3.31.10, and reenables offline
+  Rust builds. The upstream source commit remains unchanged.
+- Trusted builds retain private Rust/CMake outputs and include a ccache snapshot
+  in the immutable serving image. Miner builds read that snapshot on fresh hosts;
+  cache misses compile in their private image layer. Shared host cache mounts
+  remain read-only for miners.
+- SGLang defaults now allow `python/sglang/**` and `rust/**`. In-tree CMake files
+  can register new compiled sources. Packaging, Dockerfiles and tests remain
+  denied; Rust test/bench subdirectories are additionally denied.
+- `ops/make-sglang-native-probe.py` generates a patch that changes AOT CMake and
+  `common_extension.cc`, adds a CUDA add-seven operator, adds an SGLang JIT
+  add-eleven kernel, and adds a marker to the compiled Rust radix-tree module.
+  The publisher builds this through the miner path and publishes a separate probe
+  image for GPU verification. Its receipts require ccache hits and misses.
+- `67e56be`: the seed helper now pins `Qwen/Qwen3.8-27B-FP8` revision
+  `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, BF16 activation dtype and
+  `quantization: fp8`. It uses the full native path defaults, an open status,
+  both zero emission weights, normal correctness/evaluation and `--force`.
+- `ops/validate_sglang_gpu.py` runs the native mutation probes, stages pinned
+  model weights, starts the scorer derived by `scorer_engine_spec`, and sends
+  exactly 8192 forced IDs with one clamp token. It requires all 8192 returned
+  IDs, finite logprobs after the unscored first position, and one output token.
+  This is followed by a separate normal full FP8 round.
+
+### Evidence collected before the new GPU run
+
+The full offline suite passed **1139 tests, 41 skipped**, with two existing
+Starlette/AnyIO warnings, in 88.01 seconds. Log:
+`/tmp/pareton-sglang-native-tests.log`. It ran with both database URLs empty.
+The first sandboxed attempt could not bind mock HTTP ports; the successful run
+had localhost permissions. No DB e2e or GPU tests were represented as unit tests.
+Ruff formatting, targeted lint for new scripts, shell syntax and `git diff --check`
+passed. PR CI remains skipped while the PR is a draft.
+
+The actual native probe patch passes `gate.surface.check_surface` with the new
+seed defaults and `git apply --check` against the exact pinned sources. Receipts:
+`out/sglang-native-fp8/native-gate-check.json` and `probe-source-check.diff`.
+These checks do not establish that the native binaries run; the GPU probes do.
+
+The FP8 checkpoint contains 30,866,866,928 bytes of safetensors weights, versus
+55,563,006,776 for the BF16 checkpoint. The pinned tokenizer JSON, tokenizer
+configuration and chat template match between both repositories. The same audited
+workload trace can be reused. Hugging Face metadata receipts are in
+`out/sglang-native-fp8/model-pins.json`.
+
+A public API read on 2026-09-08 around 14:53 UTC still showed one open campaign:
+`7e0462e4-5806-44ac-9f5b-af0542a4bb86`, vLLM, `Qwen/Qwen3.8-27B-FP8`, emissions
+start 0.1 and floor 0.02. Snapshot:
+`out/sglang-native-fp8/public-campaigns-before.json`. No rows were changed.
+
+### Native image build in progress
+
+[Native build run 34240317476](https://github.com/Pareton-ai/pareton/actions/runs/34240317476)
+runs the recipe at `dd8c287` on an isolated GitHub Actions Linux/amd64 host.
+The host reported 15 GiB total RAM, 14 GiB available and 106 GB free disk.
+Build jobs and compiler threads are bounded at one; workflow timeout is six hours.
+
+The trusted dependency build base published successfully:
+
+```text
+ghcr.io/pareton-ai/pareton-baseline@sha256:97e1f4e868fc988355f91bb20a6d6f3a9b90c3a901d030730a2646ecbdf00688
+```
+
+**This is a build base, not a validated serving image.** At this checkpoint, the
+empty-patch native compilation is still running. The serving/probe image pins,
+ccache results and real CUDA/JIT/Rust execution results are not available yet.
+No new GPU has been rented during the resumed work.
+
+### Prepared GPU continuation
+
+The clean validation clone is at `67e56be` in
+`/tmp/pareton-sglang-validation-repo`. The new helper scripts are:
+
+- `/tmp/pareton-sglang-native/prepare-request.py`: captures the actual FP8 seed
+  helper arguments with mocked database inserts and writes the actual worker
+  request and sample fields under `out/sglang-native-fp8/`.
+- `/tmp/pareton-sglang-native/run-gpu.py`: extends image pull in the local driver
+  to run native/context probes before invoking the normal remote round harness.
+  It writes separate probe and round evidence and retains default teardown.
+
+The prepared allocation is one Lium H200 at at most $3/hour, TTL two hours,
+115-minute local deadline and 70-minute full-round timeout. Together with the
+previous roughly 37 GPU minutes, that remains within the operator's existing
+three-hour validation approval. No persistent production budget settings are
+changed. Run only once the serving and probe images have published and their
+build checks passed, and confirm provider cleanup afterwards.
+
+Still required before supplying a launch-ready pin: finish the native build,
+inspect its receipts, run native/context probes and a full FP8 round, update the
+sample pins and launch guide, and run final PR CI/review. Then provide the operator
+with the VPS seed and API readback commands. Production deployment and the actual
+campaign insertion/readback will be performed on the operator's VPS.
