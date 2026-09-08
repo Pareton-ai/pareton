@@ -664,6 +664,7 @@ def run_round(
                         cfg=req.correctness,
                         evidence_dir=layout.correctness_dir,
                         baseline_degeneracy=baseline_degeneracy,
+                        engine_name=start.spec.name,
                     )
             except EngineError as exc:
                 # Correctness is a hard gate, so an unusable scorer means no

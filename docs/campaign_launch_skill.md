@@ -136,8 +136,15 @@ SGLang omits tensor-parallel arguments or uses another accepted alias.
 Generate a trace with `bench.sampler.sample_workload` and the campaign's pinned
 sampling rule. Run the same trace against the baseline and candidate. Use all
 three stages: streaming replay, shared correctness scoring and baseline drift.
-Verify `/v1/models`, streamed token counts, echo logprobs, coverage and cleanup.
+Verify `/v1/models`, streamed token counts, scoring coverage and cleanup.
 The model mount is `/model`; do not let the engine fetch a default model.
+
+vLLM scoring uses OpenAI echo logprobs. SGLang scoring uses `/tokenize`,
+`/detokenize` and native `/generate` input logprobs. Its OpenAI adapter reports
+`-1` offsets and decodes each byte token separately, so emojis can become
+replacement characters. The harness verifies the prompt boundary, decoded
+continuation and every returned token ID before scoring. Generated clamp tokens
+are excluded, and decoded token prefixes still feed the repetition checks.
 
 ```bash
 # Load the configured provider credentials without printing them.
