@@ -233,6 +233,9 @@ CREATE TABLE IF NOT EXISTS rounds (
   UNIQUE (campaign_id, ordinal)
 );
 
+-- CREATE TABLE IF NOT EXISTS does not add columns to existing tables.
+ALTER TABLE rounds ADD COLUMN IF NOT EXISTS void_detail TEXT;
+
 -- At most one live round per campaign.
 CREATE UNIQUE INDEX IF NOT EXISTS rounds_one_live_per_campaign_idx
   ON rounds (campaign_id) WHERE status IN ('pending', 'running');
