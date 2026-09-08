@@ -2,9 +2,9 @@
 # Run once, after image publication, miner build verification and GPU smoke.
 # PARETON_DATABASE_URL must be configured. This creates a public open campaign.
 set -euo pipefail
-engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST}
-if [[ ! "$engine_ref" =~ ^(ghcr\.io/pareton-ai/pareton-engine@)?sha256:[a-f0-9]{64}$ ]]; then
-  echo 'Pass the published SGLang engine digest, not a tag' >&2
+engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF}
+if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
+  echo 'Pass the full published SGLang engine reference by digest' >&2
   exit 2
 fi
 

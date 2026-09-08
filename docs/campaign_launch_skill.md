@@ -91,6 +91,14 @@ patched module imports offline. It writes `image-pins.json` only after those che
 pass. The `Build baseline images` GitHub Actions workflow also accepts
 `engine=sglang` and uploads this evidence. GPU validation is a separate step.
 
+The SGLang script publishes both roles under the workflow-writable
+`pareton-baseline` package, with `-engine` appended to the serving-image tag.
+Use full `ghcr.io/...@sha256:...` references in both campaign image fields.
+Bare engine digests default to the separate `pareton-engine` package. To retry
+an interrupted build after the trusted base was published, pass that base's
+digest reference as the script's third argument or the workflow's
+`sglang_build_base` input. The script checks its source-pin label before reuse.
+
 For vLLM, use `images/baseline/Dockerfile`, then run:
 
 ```bash
@@ -206,7 +214,7 @@ The seed command supplies both image fields and signs the completed manifest.
 After successful image and GPU checks, run this once with the published engine ref:
 
 ```bash
-bash ops/seed-sglang-qwen38-27b.sh ghcr.io/pareton-ai/pareton-engine@sha256:<published-digest>
+bash ops/seed-sglang-qwen38-27b.sh ghcr.io/pareton-ai/pareton-baseline@sha256:<published-engine-digest>
 ```
 
 It uses `--status open --emission-start-weight 0 --emission-floor-weight 0 --force`.

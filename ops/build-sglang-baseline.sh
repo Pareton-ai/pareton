@@ -3,31 +3,44 @@
 # Use a new suffix for each run. Publishes new tags; it never seeds a campaign.
 set -euo pipefail
 
-suffix=${1:?Usage: build-sglang-baseline.sh UNIQUE_TAG_SUFFIX OUTPUT_DIR}
+suffix=${1:?Usage: build-sglang-baseline.sh UNIQUE_TAG_SUFFIX OUTPUT_DIR [PUBLISHED_BUILD_BASE_REF]}
 output_dir=${2:?An evidence output directory is required}
+reuse_build_ref=${3:-}
 case "$suffix" in
   *[!a-zA-Z0-9_.-]*|'') echo 'Invalid image tag suffix' >&2; exit 2 ;;
 esac
 mkdir -p "$output_dir"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
-engine_tag="ghcr.io/pareton-ai/pareton-engine:$suffix"
+engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
 probe_tag="pareton-sglang-probe:$suffix"
 commit=4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc
 repo=https://github.com/sgl-project/sglang.git
 
-python - "$build_tag" <<'PY'
+python - "$build_tag" "$reuse_build_ref" "$commit" <<'PY'
+import re
 import subprocess
 import sys
 from builder.lock import builder_storage_lock
 
 with builder_storage_lock(blocking=True):
-    subprocess.run([
-        "docker", "buildx", "build", "--platform", "linux/amd64", "--load",
-        "--file", "images/baseline-sglang/Dockerfile", "--tag", sys.argv[1], ".",
-    ], check=True)
-    subprocess.run(["docker", "push", sys.argv[1]], check=True)
+    reuse = sys.argv[2]
+    if reuse:
+        if not re.fullmatch(r"ghcr\.io/pareton-ai/pareton-baseline@sha256:[a-f0-9]{64}", reuse):
+            raise SystemExit("Reuse requires a digest-pinned Pareton build base")
+        subprocess.run(["docker", "pull", "--platform", "linux/amd64", reuse], check=True)
+        source_pin = subprocess.check_output([
+            "docker", "inspect", "--format", '{{index .Config.Labels "ai.pareton.sglang.commit"}}', reuse,
+        ], text=True).strip()
+        if source_pin != sys.argv[3]:
+            raise SystemExit("Build base label does not match the SGLang source pin")
+    else:
+        subprocess.run([
+            "docker", "buildx", "build", "--platform", "linux/amd64", "--load",
+            "--file", "images/baseline-sglang/Dockerfile", "--tag", sys.argv[1], ".",
+        ], check=True)
+        subprocess.run(["docker", "push", sys.argv[1]], check=True)
 PY
-build_ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$build_tag")
+build_ref=${reuse_build_ref:-$(docker inspect --format '{{index .RepoDigests 0}}' "$build_tag")}
 python -m builder --engine sglang --baseline-repo "$repo" \
   --baseline-commit "$commit" --base-image "$build_ref" \
   --image-ref "$engine_tag" --empty-patch --push \

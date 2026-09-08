@@ -14,6 +14,10 @@ on:
         type: choice
         options: [vllm, sglang]
         default: vllm
+      sglang_build_base:
+        description: Optional published SGLang build base by digest to reuse
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -164,7 +168,8 @@ jobs:
           PARETON_GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PARETON_BUILD_TIMEOUT_S: "7200"
           PARETON_BUILD_LOG_DIR: ${{ github.workspace }}/out/sglang-build/logs
-        run: bash ops/build-sglang-baseline.sh "sglang-4c3d47f-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" out/sglang-build
+          SGLANG_REUSE_BUILD_BASE: ${{ inputs.sglang_build_base }}
+        run: bash ops/build-sglang-baseline.sh "sglang-4c3d47f-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" out/sglang-build "$SGLANG_REUSE_BUILD_BASE"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
