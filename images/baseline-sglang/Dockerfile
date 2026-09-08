@@ -44,14 +44,18 @@ RUN git init \
     && test "$(git rev-parse HEAD)" = 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
     && CARGO_BUILD_JOBS=4 pip install --no-deps --no-build-isolation -e python/ \
     && python -c "from pathlib import Path; assert list(Path('/src/python/sglang').rglob('*.so')), 'Rust extensions missing'" \
-    && kernels lock python \
-    && kernels download python \
     && pip check \
     && pip freeze > /opt/sglang-dependencies.lock \
     && rm -rf /src/.git /src/rust/target /src/rust/sglang-radix-tree/target /tmp/pip-* /root/.cache/pip
 
 ENV SGLANG_BUILD_RUST_EXTS=none \
-    CARGO_NET_OFFLINE=true
+    CARGO_NET_OFFLINE=true \
+    SGLANG_USE_SGL_FA3_KERNEL=1
+
+# This pin's community FA3 repository has no Torch 2.13 build. Use the
+# implementation bundled in the pinned sglang-kernel wheel directly, as
+# supported by sglang/kernels/ops/attention/flash_attention_v3.py. This also
+# avoids a Hugging Face lookup from the offline evaluation container.
 
 LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
       org.opencontainers.image.description="Pareton hermetic SGLang baseline" \

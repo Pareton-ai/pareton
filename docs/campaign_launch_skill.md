@@ -66,17 +66,23 @@ and [upstream Dockerfile](https://github.com/sgl-project/sglang/blob/4c3d47f1df9
 CUDA 13.0.3, Torch 2.13.0, torchvision 0.28.0 and sglang-kernel 0.4.6.post1.
 Do not reuse the older v0.5.17 dependency image for this source commit.
 
-The trusted base compiles the pinned Rust extensions in `/src`, installs runtime
-dependencies and downloads kernel artifacts. It then sets
+The trusted base compiles the pinned Rust extensions in `/src` and installs the
+runtime and CUDA kernel wheels. It then sets
 `SGLANG_BUILD_RUST_EXTS=none` so subsequent editable installs retain the baked Rust
 binaries. Miners can patch Python and Python-defined kernels under the allowed
 surface. They cannot change the pinned Rust or wheel implementations. CUDA wheels
 and these compiled extensions must work on the target GPU, which step 3 verifies.
 
+The image also pins `SGLANG_USE_SGL_FA3_KERNEL=1`, selecting FlashAttention-3
+from the installed `sglang-kernel` wheel. The community FA3 download has no
+Torch 2.13 variant for this pin. Selecting the bundled implementation avoids
+that download in the offline evaluation container.
+
 With repository dependencies installed and Docker logged in to GHCR:
 
 ```bash
-bash ops/build-sglang-baseline.sh sglang-4c3d47f-<unique-suffix> out/sglang-build
+PARETON_BUILD_LOG_DIR="$PWD/out/sglang-build/logs" \
+  bash ops/build-sglang-baseline.sh sglang-4c3d47f-<unique-suffix> out/sglang-build
 ```
 
 This publishes a new build base, builds the empty-patch engine with `--network=none`,
