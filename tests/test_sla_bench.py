@@ -266,6 +266,62 @@ def test_warmup_excluded_from_metrics(tmp_path: Path):
         assert all(not r["warmup"] for r in rep_rows)
 
 
+@pytest.mark.parametrize("role", ["baseline", "candidate-0", "baseline-drift"])
+@pytest.mark.parametrize("engine_name,warmups", [("vllm", 1), ("sglang", 2)])
+def test_engine_warmups_excluded_from_score_and_outputs(
+    tmp_path: Path, monkeypatch, role, engine_name, warmups
+):
+    requests = [
+        TraceRequest(
+            id=rid,
+            arrival_offset_ms=i * 10,
+            max_tokens=2,
+            sampling=TraceSampling(0.0, 1.0),
+            prompt=rid,
+        )
+        for i, rid in enumerate(["r1", "r2"])
+    ]
+    calls = []
+
+    def replay(base_url, batch, **kwargs):
+        assert batch == requests
+        calls.append(kwargs["is_warmup"])
+        cold = len(calls) <= warmups
+        rows = [
+            dict(
+                _row(req.id, 3000 if cold else 10, [5], 3005 if cold else 15, tokens=2),
+                warmup=kwargs["is_warmup"],
+                rep=kwargs["rep"],
+                text="cold" if cold else "ready",
+            )
+            for req in batch
+        ]
+        return rows, 10.0 if cold else 1.0, []
+
+    monkeypatch.setattr("bench.sla_bench._replay", replay)
+    result = run_sla_engine(
+        "http://unused",
+        role=role,
+        requests=requests,
+        cfg=SlaBenchConfig(
+            repetitions=3, thresholds=SlaThresholds(p99_ttft_ms=100, p99_itl_ms=100)
+        ),
+        evidence_dir=tmp_path,
+        engine_name=engine_name,
+    )
+    assert calls == [True] * warmups + [False] * 3
+    assert result.result.metrics.e2e_ms.p99 == 15
+    assert result.result.cross_rep_variance["p99_e2e_ms_rel_range"] == 0
+    assert result.outputs == {req.id: "ready" for req in requests}
+    assert all(samples == ("ready",) * 3 for samples in result.output_samples.values())
+    paths = sorted((tmp_path / role).glob("warmup*/requests.jsonl"))
+    assert len(paths) == warmups
+    for path in paths:
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert {r["request_id"] for r in rows if "request_id" in r} == {"r1", "r2"}
+        assert all(r["warmup"] for r in rows if "request_id" in r)
+
+
 def test_arrival_offsets_respected(tmp_path: Path):
     # A late-arriving request must not start before its offset.
     trace = WorkloadTrace(

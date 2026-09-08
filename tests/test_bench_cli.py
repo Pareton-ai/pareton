@@ -315,7 +315,7 @@ def test_leader_crash_short_circuits_and_streams_infra_failed(
         result=types.SimpleNamespace(timings={}), outputs={}, output_samples={}
     )
 
-    def fake_run(url, *, role, requests, cfg, evidence_dir):
+    def fake_run(url, *, role, requests, cfg, evidence_dir, engine_name):
         if role == "candidate-0":
             raise bm.EngineCrashedError("leader engine died")
         return replay
@@ -438,7 +438,7 @@ def test_cli_host_environment_error_exit_2(tmp_path: Path, monkeypatch):
 
 def test_variance_gate_infra_fails_before_score():
     """p99 e2e relative range over the 0.335 bar lands infra_failed, not a score."""
-    from bench.main import _CandidateRun, _build_entries
+    from bench.main import _build_entries, _CandidateRun
     from bench.sla_bench import REPRO_BAR_MAX_REL_RANGE
 
     class _Result:

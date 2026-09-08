@@ -552,6 +552,7 @@ def run_round(
                         requests=requests,
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
                     )
                     if start.kind == "baseline" and req.mode == "all":
                         natural_stops = capture_baseline_natural_stops(
@@ -604,6 +605,7 @@ def run_round(
                         requests=requests,
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
                     )
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and

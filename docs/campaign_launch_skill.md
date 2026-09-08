@@ -139,12 +139,21 @@ three stages: streaming replay, shared correctness scoring and baseline drift.
 Verify `/v1/models`, streamed token counts, scoring coverage and cleanup.
 The model mount is `/model`; do not let the engine fetch a default model.
 
+SGLang runs two full, untimed warmups before each measured replay set, including
+the closing baseline. On the pinned Qwen model, one warmup left a startup stall
+in the first measured repetition. Both warmups are saved under `warmup/` and
+`warmup_2/` and excluded from scores. vLLM keeps one full warmup.
+
 vLLM scoring uses OpenAI echo logprobs. SGLang scoring uses `/tokenize`,
 `/detokenize` and native `/generate` input logprobs. Its OpenAI adapter reports
 `-1` offsets and decodes each byte token separately, so emojis can become
 replacement characters. The harness verifies the prompt boundary, decoded
 continuation and every returned token ID before scoring. Generated clamp tokens
 are excluded, and decoded token prefixes still feed the repetition checks.
+
+Check `entries[].status` and `entries[].score` in the report as well as its
+top-level verdict. A completed harness run can still contain an `infra_failed`
+candidate, including a failure of the unchanged reproducibility bar.
 
 ```bash
 # Load the configured provider credentials without printing them.
