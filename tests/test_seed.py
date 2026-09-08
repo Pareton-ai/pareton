@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -83,9 +86,11 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
                 "--baseline-engine-image-digest",
                 REAL_ENGINE,
                 "--bench-model-repo",
-                "Qwen/Qwen3.8-27B",
+                "Qwen/Qwen3.8-27B-FP8",
                 "--bench-model-revision",
-                "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+                "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+                "--bench-quantization",
+                "fp8",
                 "--gpu-skus",
                 "H200",
                 "--bench-gpu-count",
@@ -114,7 +119,8 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
     assert m.emission_rule["start_weight"] == m.emission_rule["floor_weight"] == 0
     assert m.customer_signoff.approved_manifest_hash == m.manifest_hash
     seed.require_correctness_thresholds(m.bench)
-    assert captured["profile_data"]["model"] == "Qwen/Qwen3.8-27B"
+    assert captured["profile_data"]["model"] == "Qwen/Qwen3.8-27B-FP8"
+    assert m.bench["model"]["quantization"] == "fp8"
     assert captured["profile_data"]["serving_stack"] == "sglang"
     assert captured["profile_data"]["gpu_count"] == 1
     for path, allowed in [
@@ -149,6 +155,83 @@ def test_sglang_requires_source_pin_before_writing(monkeypatch):
     with pytest.raises(ValueError, match="explicit --baseline-commit"):
         seed_synthetic_campaign(engine="sglang", allow_placeholders=True)
     assert captured["profile_data"] is None
+
+
+def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path):
+    from bench.validate import sha256_file
+    from worker.round_job import build_round_request
+
+    captured = _patch_store(monkeypatch)
+    engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
+    helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
+    # Expand the executable launch helper with Bash, intercepting its final CLI.
+    argv = (
+        subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2"',
+                "capture",
+                str(helper),
+                engine_ref,
+            ],
+            cwd=helper.parent.parent,
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    assert argv[:2] == ["-m", "campaign.seed"]
+    assert main(argv[2:]) == 0
+    manifest = captured["manifest"]
+    (tmp_path / "trace.json").write_text(
+        json.dumps({"requests": [{"prompt": "hi"}] * 32})
+    )
+    request = build_round_request(
+        {
+            "gpu_sku": "H200",
+            "sampled_trace_sha256": sha256_file(tmp_path / "trace.json"),
+            "scoring_rule": manifest.scoring_rule,
+        },
+        manifest,
+        [
+            {"role": "baseline", "engine_image_ref": engine_ref},
+            {"role": "challenger", "engine_image_ref": engine_ref},
+        ],
+        task_id=str(uuid4()),
+        trace_path=str(tmp_path / "trace.json"),
+    )
+    assert captured["inserts"] == 1
+    assert manifest.status == "open"
+    assert (
+        manifest.emission_rule["start_weight"]
+        == manifest.emission_rule["floor_weight"]
+        == 0
+    )
+    assert manifest.allowed_paths == ["python/sglang/**", "rust/**"]
+    assert "**/CMakeLists.txt" not in manifest.denied_paths
+    assert manifest.engine["install_cmd"] == "/usr/local/bin/pareton-install-sglang"
+    assert request["model"]["hf_repo"] == "Qwen/Qwen3.8-27B-FP8"
+    assert request["model"]["hf_revision"] == "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
+    assert request["model"]["quantization"] == "fp8"
+    baseline = request["engines"]["baseline"]
+    assert baseline["name"] == "sglang"
+    assert baseline["serve_args"] == [
+        "--model-path",
+        "/model",
+        "--context-length",
+        "8192",
+        "--dtype",
+        "bfloat16",
+        "--quantization",
+        "fp8",
+        "--tp-size",
+        "1",
+        "--mem-fraction-static",
+        "0.80",
+        "--max-running-requests",
+        "32",
+    ]
 
 
 def test_seed_cli_pins_path_overrides(monkeypatch):

@@ -14,11 +14,10 @@ python -m campaign.seed \
   --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
   --base-image-digest "$engine_ref" \
   --baseline-engine-image-digest "$engine_ref" \
-  --allowed-path 'python/sglang/**' \
   --gpu-skus H200 --bench-gpu-count 1 \
-  --bench-model-repo Qwen/Qwen3.8-27B \
-  --bench-model-revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
-  --bench-dtype bfloat16 --bench-max-model-len 8192 \
+  --bench-model-repo Qwen/Qwen3.8-27B-FP8 \
+  --bench-model-revision 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a \
+  --bench-dtype bfloat16 --bench-quantization fp8 --bench-max-model-len 8192 \
   --bench-serve-args=--tp-size --bench-serve-args=1 \
   --bench-serve-args=--mem-fraction-static --bench-serve-args=0.80 \
   --bench-serve-args=--max-running-requests --bench-serve-args=32 \
