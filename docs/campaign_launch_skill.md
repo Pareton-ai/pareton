@@ -66,12 +66,42 @@ and [upstream Dockerfile](https://github.com/sgl-project/sglang/blob/4c3d47f1df9
 CUDA 13.0.3, Torch 2.13.0, torchvision 0.28.0 and sglang-kernel 0.4.6.post1.
 Do not reuse the older v0.5.17 dependency image for this source commit.
 
-The trusted base compiles the pinned Rust extensions in `/src` and installs the
-runtime and CUDA kernel wheels. It then sets
+The current trusted base compiles the pinned Rust extensions in `/src` and
+installs the runtime and CUDA kernel wheels. It then sets
 `SGLANG_BUILD_RUST_EXTS=none` so subsequent editable installs retain the baked Rust
-binaries. Miners can patch Python and Python-defined kernels under the allowed
-surface. They cannot change the pinned Rust or wheel implementations. CUDA wheels
-and these compiled extensions must work on the target GPU, which step 3 verifies.
+binaries. The miner install rebuilds only the `python/` package. It does not
+rebuild the separate `sglang-kernel` wheel from the patched AOT sources.
+
+### Kernel source coverage at this pin
+
+`python/sglang/**` permits all file extensions, including CUDA and C++.
+At this commit, the former `sgl-kernel/` source tree lives inside
+`python/sglang/kernels/aot/`. The upstream
+[kernel layout](https://github.com/sgl-project/sglang/blob/4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc/python/sglang/kernels/README.md)
+and [AOT build guide](https://github.com/sgl-project/sglang/blob/4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc/python/sglang/kernels/aot/README.md)
+distinguish these paths:
+
+| Path | Optimization surface | Current recipe |
+| --- | --- | --- |
+| `python/sglang/srt/**` | Qwen model, FP8 dispatch, scheduling, attention and cache management | Patched Python is installed |
+| `python/sglang/kernels/ops/**` | Triton, CuTe, fusions, quantization and backend selection | Patched source is installed; invoked kernels can compile at runtime |
+| `python/sglang/kernels/jit/**` | CUDA/C++ JIT sources, headers and loaders | Sources pass the gate; custom kernel execution needs a GPU probe |
+| `python/sglang/kernels/aot/{csrc,include,python}/**` | Native kernels, FP8 GEMM and `sgl_kernel` bindings | Sources pass the gate, but the installed wheel is not rebuilt |
+| `python/sglang/kernels/aot/CMakeLists.txt` | Register additional compiled kernel sources | Denied by `**/CMakeLists.txt` |
+| `rust/sglang-radix-tree/**` | Native prefix-cache implementation | Outside the allowlist; its compiled extension is retained |
+
+The existing Python import probe and unchanged-image BF16 evaluation do not
+establish full native-kernel patch support. That requires rebuilding and installing
+`sglang-kernel` from patched AOT source, permitting the kernel build definitions
+needed to register new sources, and staging the pinned CMake dependencies in the
+trusted base for offline builds. Miner ccache mounts must remain read-only.
+Verify an actual CUDA change by compiling it and checking its GPU output.
+Opening Rust source requires an offline Rust rebuild as well.
+
+FlashInfer, CUTLASS, FlashAttention and other dependencies are separately pinned
+build inputs. Adding a top-level `3rdparty/**` glob does not expose all their
+sources in this SGLang checkout. Custom in-tree replacements can instead be
+selected through the kernel dispatch code.
 
 The image also pins `SGLANG_USE_SGL_FA3_KERNEL=1`, selecting FlashAttention-3
 from the installed `sglang-kernel` wheel. The community FA3 download has no
@@ -182,6 +212,15 @@ requests and up to 5120 output tokens. The model revision verified on 2026-09-08
 `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`. It contains 27,781,427,952 BF16
 parameters, about 51.7 GiB of weights before KV cache and workspace. The workload
 pin is in `fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json`.
+
+The completed GPU validation used that BF16 model, not the FP8 checkpoint.
+For `Qwen/Qwen3.8-27B-FP8`, the separately verified model revision is
+`017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`. Its
+[model configuration](https://huggingface.co/Qwen/Qwen3.8-27B-FP8/blob/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a/config.json)
+declares the Qwen3.5 architecture, BF16 activation dtype and dynamic FP8 E4M3
+quantization with 128-by-128 weight blocks. An FP8 campaign should pin this repo
+and revision with `bench.model.quantization: "fp8"` and
+`bench.model.dtype: "bfloat16"`, then undergo its own full GPU validation.
 
 Sample campaign entries, in addition to the source and image pins:
 
