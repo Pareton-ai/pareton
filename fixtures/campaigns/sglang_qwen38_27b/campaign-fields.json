@@ -1,0 +1,96 @@
+{
+  "baseline_repo": "https://github.com/sgl-project/sglang.git",
+  "baseline_commit": "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11",
+  "gpu_skus": [
+    "H200"
+  ],
+  "sla": {
+    "p99_ttft_ms": 2000.0,
+    "p99_itl_ms": 50.0,
+    "quality_floor_spec": "greedy token-match >= 0.99 vs baseline"
+  },
+  "scoring_config_sha256": null,
+  "scoring_config_url": null,
+  "allowed_paths": [
+    "python/sglang/**"
+  ],
+  "denied_paths": [
+    "tests/**",
+    "benchmarks/**",
+    ".github/**",
+    "docker/**",
+    "**/Dockerfile*",
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/requirements*.txt",
+    "**/CMakeLists.txt",
+    "test/**",
+    "benchmark/**",
+    "python/sglang/test/**"
+  ],
+  "status": "open",
+  "priority_metric": "gpu_hours",
+  "success_threshold": ">=10% GPU-hour reduction at SLA",
+  "bench": {
+    "model": {
+      "hf_repo": "Qwen/Qwen3.8-27B",
+      "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "dtype": "bfloat16",
+      "quantization": null,
+      "max_model_len": 8192
+    },
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11",
+    "gpu_count": 1,
+    "serve_args": [
+      "--tp-size",
+      "1",
+      "--mem-fraction-static",
+      "0.80",
+      "--max-running-requests",
+      "32"
+    ],
+    "correctness": {
+      "thresholds": {
+        "min_mean_logprob": -4.0,
+        "min_token_logprob": -12.0,
+        "min_token_quantile": 0.001,
+        "min_coverage_ratio": 0.5,
+        "max_mean_logprob_drop": 1.5
+      },
+      "num_prompts": 32
+    }
+  },
+  "engine": {
+    "name": "sglang",
+    "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
+    "entrypoint": [
+      "python3",
+      "-m",
+      "sglang.launch_server"
+    ],
+    "cache_dir": "/root/.cache/sglang"
+  },
+  "scoring_rule": {
+    "name": "median_e2e_speedup"
+  },
+  "emission_rule": {
+    "name": "linear_decay",
+    "start_weight": 0.0,
+    "floor_weight": 0.0,
+    "decay_blocks": 201600
+  },
+  "sampling_rule": {
+    "algo_version": 2,
+    "config": "default",
+    "dataset": "nebius/SWE-agent-trajectories",
+    "max_tokens": 5120,
+    "n_prompts": 32,
+    "n_rows": 80036,
+    "revision": "68195a1450865274106246d0d0296a1d6807b88e",
+    "seed_block_offset": 10,
+    "split": "train",
+    "type": "hf_rows"
+  }
+}

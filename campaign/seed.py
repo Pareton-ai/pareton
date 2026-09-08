@@ -516,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-serve-args",
         action="append",
         default=None,
-        help="Extra serve arg (repeatable); prepended after --model /model pins",
+        help="Extra serve arg (repeatable); appended after engine-specific model pins",
     )
     p.add_argument(
         "--force",

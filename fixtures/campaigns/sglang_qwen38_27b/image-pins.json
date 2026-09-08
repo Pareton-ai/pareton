@@ -1,0 +1,5 @@
+{
+  "build_base_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:38c742f147cb8926200e429022b7979b5d359578e6d790c62def91cc2ab78a05",
+  "engine_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11",
+  "build_run": "https://github.com/Pareton-ai/pareton/actions/runs/34213253195"
+}

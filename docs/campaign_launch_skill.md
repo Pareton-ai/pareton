@@ -211,10 +211,15 @@ Sample campaign entries, in addition to the source and image pins:
 ```
 
 The seed command supplies both image fields and signs the completed manifest.
+Complete sample fields with the published digest are in
+`fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json`. The companion
+`image-pins.json` records the trusted base, serving image and successful offline
+build run. These files contain no campaign ID; they do not represent a created row.
+
 After successful image and GPU checks, run this once with the published engine ref:
 
 ```bash
-bash ops/seed-sglang-qwen38-27b.sh ghcr.io/pareton-ai/pareton-baseline@sha256:<published-engine-digest>
+bash ops/seed-sglang-qwen38-27b.sh ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11
 ```
 
 It uses `--status open --emission-start-weight 0 --emission-floor-weight 0 --force`.
