@@ -41,7 +41,7 @@ class SubmissionState(StrEnum):
     BUILT = "built"
     BENCH_QUEUED = "bench_queued"
     ROUND_ASSIGNED = "round_assigned"
-    # Not terminal. The image never ran because of infrastructure; one requeue.
+    # Infrastructure failure. One requeue, then terminal if that retry also fails.
     INFRA_FAILED = "infra_failed"
     # Terminal. The image ran and holds a round score.
     SCORED = "scored"

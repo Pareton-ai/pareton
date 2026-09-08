@@ -61,14 +61,14 @@ def scenario(monkeypatch):
         server,
         "list_events",
         lambda _: (
-            events
-            + [
+            [
                 {
                     "state": "committed",
                     "detail": {"patch_reveal_delayed": SID in times},
                     "created_at": NOW.isoformat(),
                 }
             ]
+            + events
         ),
     )
     monkeypatch.setattr(server, "list_latest_states", lambda _: {SID: "scored"})
@@ -121,7 +121,7 @@ def test_every_route_withholds_until_evaluated_and_delay_elapsed(
         assert payload["submission"]["patch_download_url"] is None
         assert payload["submission"]["patch_hash"] == HASH
         assert (
-            payload["events"][0]["detail"]["build_log_tail"] == "public compiler output"
+            payload["events"][1]["detail"]["build_log_tail"] == "public compiler output"
         )
         assert payload["jobs"][0]["last_error"] == "public diagnostics"
         download = client.get(path + "/patch", follow_redirects=False)
@@ -220,13 +220,13 @@ def test_error_metadata_cannot_reveal_the_withheld_url(scenario):
     for path in (BASE, f"/v1/submissions/{HASH}"):
         response = client.get(path)
         assert RAW_URL not in response.text
-        assert response.json()["events"][0]["detail"]["error"].endswith(": timed out")
-        assert response.json()["events"][0]["detail"]["nested"][0]["code"] == 504
+        assert response.json()["events"][1]["detail"]["error"].endswith(": timed out")
+        assert response.json()["events"][1]["detail"]["nested"][0]["code"] == 504
     assert detail["retrieval_url"] == RAW_URL  # Never mutate stored audit events.
     times[SID] = NOW - timedelta(hours=6)
-    assert client.get(BASE).json()["events"][0]["detail"] == detail
+    assert client.get(BASE).json()["events"][1]["detail"] == detail
     times.clear()
-    assert client.get(BASE).json()["events"][0]["detail"] == detail
+    assert client.get(BASE).json()["events"][1]["detail"] == detail
 
 
 def test_patch_routes_preserve_missing_and_ambiguous_lookup_behavior(
@@ -236,6 +236,38 @@ def test_patch_routes_preserve_missing_and_ambiguous_lookup_behavior(
     assert client.get(BASE.replace(CID, "other") + "/patch").status_code == 404
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _: 2)
     assert client.get(f"/v1/submissions/{HASH}/patch").status_code == 409
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["scored", "rejected_duplicate", "rejected", "disqualified", "infra_failed"],
+)
+@pytest.mark.parametrize("age", [timedelta(hours=5), timedelta(hours=6)])
+def test_final_outcome_reveals_detail_without_a_completed_round(scenario, state, age):
+    client, _, _, history = scenario
+    terminal = NOW - age
+    history[:] = [{"state": state, "detail": {}, "created_at": terminal}]
+    for path in (BASE, f"/v1/submissions/{HASH}"):
+        submission = client.get(path).json()["submission"]
+        assert (
+            submission["patch_reveal_at"] == (terminal + timedelta(hours=6)).isoformat()
+        )
+        assert submission["retrieval_url"] == (
+            RAW_URL if age >= timedelta(hours=6) else ""
+        )
+
+
+@pytest.mark.parametrize("state", ["bench_queued", "round_assigned", "scoring"])
+def test_retrying_infrastructure_failure_does_not_reveal_detail(scenario, state):
+    client, _, _, history = scenario
+    old = NOW - timedelta(days=3)
+    history[:] = [
+        {"state": "infra_failed", "created_at": old, "detail": {}},
+        {"state": state, "created_at": old, "detail": {}},
+    ]
+    submission = client.get(BASE).json()["submission"]
+    assert submission["retrieval_url"] == ""
+    assert submission["patch_reveal_at"] is None
 
 
 @pytest.mark.parametrize("age", [None, timedelta(hours=6)])

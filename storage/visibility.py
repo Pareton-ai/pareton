@@ -4,6 +4,15 @@ from datetime import datetime, timedelta, timezone
 
 import config
 
+# Retried infra failures end in bench_queued; live round results are not events.
+PATCH_TERMINAL_STATES = (
+    "scored",
+    "disqualified",
+    "rejected",
+    "rejected_duplicate",
+    "infra_failed",
+)
+
 
 def patch_reveal_at(evaluated_at: datetime | None) -> datetime | None:
     if evaluated_at is None:

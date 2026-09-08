@@ -701,7 +701,7 @@ def _seed_incumbent(campaign_id: UUID, sid: str, image_ref: str) -> str:
 
 
 def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
-    from campaign.store import append_event, list_campaign_submissions
+    from campaign.store import append_event, list_campaign_submissions, list_events
     from round.store import list_patch_evaluation_times, list_submission_round_entries
 
     cid = _campaign()
@@ -710,6 +710,7 @@ def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
     failed = _submission(cid, image_ref=IMAGE_C, block=12)
     banned = _submission(cid, image_ref=IMAGE_D, block=13)
     append_event(banned, "disqualified", detail={"reason": "operator ban"})
+    banned_at = list_events(banned)[-1]["created_at"]
     first = datetime(2026, 9, 7, 8, tzinfo=timezone.utc)
     cases = [
         ("void", 6, [(scored, "scored"), (disqualified, "disqualified")]),
@@ -782,7 +783,7 @@ def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
         scored: first,
         disqualified: first,
         failed: None,
-        banned: None,
+        banned: banned_at,
     }
     assert list_patch_evaluation_times([]) == {}
     # Both JSON paths reuse these existing reads instead of a visibility query.
@@ -795,7 +796,8 @@ def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
     rows = {str(r["id"]): r for r in page["items"]}
     assert rows[scored]["_patch_evaluated_at"] == first
     assert rows[disqualified]["_patch_evaluated_at"] == first
-    for sid in (failed, banned, legacy):
+    assert rows[banned]["_patch_evaluated_at"] == banned_at
+    for sid in (failed, legacy):
         assert rows[sid]["_patch_evaluated_at"] is None
     assert all(
         rows[sid]["_patch_reveal_delayed"]
@@ -805,6 +807,32 @@ def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
     paged = list_campaign_submissions(cid, limit=2, offset=2)
     assert paged["total"] == page["total"]
     assert paged["items"] == page["items"][2:4]
+
+
+def test_terminal_events_start_reveal_without_a_completed_round():
+    from campaign.store import append_event, list_campaign_submissions, list_events
+    from round.store import list_patch_evaluation_times
+
+    cid = _campaign()
+    expected = {}
+    cases = [
+        ("scored",),
+        ("disqualified",),
+        ("rejected",),
+        ("rejected_duplicate",),
+        ("infra_failed", "bench_queued"),
+        ("infra_failed", "bench_queued", "infra_failed"),
+    ]
+    for block, states in enumerate(cases):
+        sid = _submission(cid, image_ref=IMAGE_A, block=block)
+        for state in states:
+            append_event(sid, state)
+        expected[sid] = (
+            None if states[-1] == "bench_queued" else list_events(sid)[-1]["created_at"]
+        )
+    assert list_patch_evaluation_times(list(expected)) == expected
+    page = list_campaign_submissions(cid)
+    assert {str(r["id"]): r["_patch_evaluated_at"] for r in page["items"]} == expected
 
 
 def _history(campaign_id: UUID) -> list[tuple]:

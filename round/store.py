@@ -24,6 +24,7 @@ from campaign.exclusion import (
 )
 from db.connection import db_connection
 from gate.types import SubmissionState
+from storage.visibility import PATCH_TERMINAL_STATES
 from round.rank import (
     ENTRY_STATUSES,
     EVENT_OVERTAKEN,
@@ -1498,12 +1499,11 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
 def list_patch_evaluation_times(
     submission_ids: list[UUID | str],
 ) -> dict[str, datetime | None]:
-    """First finalized evaluation for submissions enrolled in delayed disclosure.
+    """Reveal-clock start for submissions enrolled in delayed disclosure.
 
     Missing keys are legacy submissions and retain immediate URL visibility.
-    A None value means an enrolled submission has no finalized evaluation yet.
-    Live entries, void rounds, operator bans and infrastructure failures do not
-    start the clock. Re-evaluated leaders keep their first qualifying timestamp.
+    Use the latest terminal event or an earlier completed evaluation. Live round
+    results and queued retries do not qualify. None means no trigger yet.
     """
     if not submission_ids:
         return {}
@@ -1511,8 +1511,16 @@ def list_patch_evaluation_times(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT c.submission_id, MIN(r.completed_at) AS evaluated_at
+                SELECT c.submission_id,
+                       LEAST(MIN(r.completed_at),
+                             CASE WHEN st.state = ANY(%s) THEN st.created_at END
+                       ) AS evaluated_at
                 FROM submission_events c
+                LEFT JOIN LATERAL (
+                    SELECT state, created_at FROM submission_events
+                    WHERE submission_id = c.submission_id
+                    ORDER BY created_at DESC, id DESC LIMIT 1
+                ) st ON true
                 LEFT JOIN round_entries e ON e.submission_id = c.submission_id
                   AND e.status IN ('scored', 'disqualified')
                 LEFT JOIN rounds r ON r.id = e.round_id
@@ -1520,9 +1528,9 @@ def list_patch_evaluation_times(
                 WHERE c.submission_id = ANY(%s::uuid[])
                   AND c.state = 'committed'
                   AND c.detail @> '{"patch_reveal_delayed": true}'::jsonb
-                GROUP BY c.submission_id
+                GROUP BY c.submission_id, st.state, st.created_at
                 """,
-                ([str(sid) for sid in submission_ids],),
+                (list(PATCH_TERMINAL_STATES), [str(sid) for sid in submission_ids]),
             )
             return {str(r["submission_id"]): r["evaluated_at"] for r in cur.fetchall()}
 

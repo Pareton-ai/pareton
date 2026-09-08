@@ -11,6 +11,7 @@ from psycopg2.extras import Json, RealDictCursor
 
 from db.connection import db_connection
 from gate.types import SUBMISSION_STATES
+from storage.visibility import PATCH_TERMINAL_STATES
 
 from .exclusion import ACTION_WAIVED, latest_campaign_hotkey_action
 from .manifest import build_manifest
@@ -749,7 +750,9 @@ def list_campaign_submissions(
                        re.round_id, re.ordinal AS round_ordinal,
                        re.status AS round_entry_status, re.score AS round_score,
                        re.disqualify_reason AS round_disqualify_reason,
-                       re.patch_evaluated_at AS _patch_evaluated_at,
+                       LEAST(re.patch_evaluated_at,
+                             CASE WHEN st.state = ANY(%s) THEN st.created_at END
+                       ) AS _patch_evaluated_at,
                        EXISTS (
                            SELECT 1 FROM submission_events c
                            WHERE c.submission_id = s.id AND c.state = 'committed'
@@ -762,7 +765,7 @@ def list_campaign_submissions(
                     LIMIT %s OFFSET %s
                 ) s
                 LEFT JOIN LATERAL (
-                    SELECT e.state
+                    SELECT e.state, e.created_at
                     FROM submission_events e
                     WHERE e.submission_id = s.id
                     ORDER BY e.created_at DESC, e.id DESC
@@ -786,7 +789,7 @@ def list_campaign_submissions(
                 ) re ON true
                 ORDER BY s.committed_at DESC, s.id DESC
                 """,
-                (cid, int(limit), int(offset)),
+                (list(PATCH_TERMINAL_STATES), cid, int(limit), int(offset)),
             )
             rows = cur.fetchall()
     items: list[dict[str, Any]] = []

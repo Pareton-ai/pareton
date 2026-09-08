@@ -43,7 +43,7 @@ from round.store import (
 )
 from storage.s3 import create_presigned_patch_upload, private_patch_key, publish_patch
 from storage.upload_auth import verify_upload_request
-from storage.visibility import patch_is_revealed, patch_reveal_at
+from storage.visibility import PATCH_TERMINAL_STATES, patch_is_revealed, patch_reveal_at
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # Build logs use no-store until the submission reaches a terminal state.
@@ -607,6 +607,9 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     evaluated_at = (
         round_info.pop("_patch_evaluated_at", None) if round_info is not None else None
     )
+    if events and events[-1]["state"] in PATCH_TERMINAL_STATES:
+        terminal_at = events[-1]["created_at"]
+        evaluated_at = min(evaluated_at, terminal_at) if evaluated_at else terminal_at
     enrolled = any(
         e["state"] == "committed"
         and (e.get("detail") or {}).get("patch_reveal_delayed") is True
