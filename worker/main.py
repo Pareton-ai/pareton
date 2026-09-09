@@ -1,6 +1,8 @@
-"""Stage 0 worker: claim jobs and run the gate + bench pipeline.
+"""Submission builds and round execution, with independent production queues.
 
 Chain ingest is a separate process: ``python -m worker.watcher``.
+Production runs one process with ``--queue submissions`` and another with
+``--queue rounds`` so a build cannot block round scheduling.
 
 Usage:
     PARETON_DATABASE_URL=... python -m worker.main --mock-build
@@ -15,11 +17,12 @@ import logging
 import signal
 import sys
 import threading
+from typing import Literal
 
 import config
 from campaign.store import claim_next_job, count_pending_jobs
 from observability.events import heartbeat as _heartbeat
-from round.store import claim_pending_round
+from round.store import claim_pending_round, count_pending_rounds
 from worker.pipeline import process_submission
 from worker.round_job import process_round
 
@@ -28,27 +31,35 @@ logger = logging.getLogger(__name__)
 # Heartbeats must continue while a long gates/build/bench job blocks the main
 # loop, otherwise the 15-minute heartbeat-absent monitor pages on healthy work.
 HEARTBEAT_INTERVAL_S = 300.0
+Queue = Literal["all", "submissions", "rounds"]
 
 
-def _queue_depth() -> int | None:
-    """Pending job count, or None if the read fails.
+def _queue_depth(queue: Queue = "all") -> int | None:
+    """Pending work in this worker's queues, or None if the read fails.
 
     A database hiccup must not stop the beat: losing one field is cheap,
     whereas a dead heartbeat thread pages heartbeat-absent as though the
     whole worker had died.
     """
     try:
-        return count_pending_jobs()
+        if queue == "submissions":
+            return count_pending_jobs()
+        if queue == "rounds":
+            return count_pending_rounds()
+        return count_pending_jobs() + count_pending_rounds()
     except Exception:
         logger.warning("queue depth unavailable; heartbeat omits it", exc_info=True)
         return None
 
 
 def _heartbeat_loop(
-    stop: threading.Event, interval_s: float = HEARTBEAT_INTERVAL_S
+    stop: threading.Event,
+    interval_s: float = HEARTBEAT_INTERVAL_S,
+    *,
+    queue: Queue = "all",
 ) -> None:
     while not stop.is_set():
-        _heartbeat(queue_depth=_queue_depth())
+        _heartbeat(queue=queue, queue_depth=_queue_depth(queue))
         stop.wait(interval_s)
 
 
@@ -65,7 +76,30 @@ def run_once(
     mock_bench: bool,
     mock_correctness_fail: bool,
     registered_hotkeys: list[str] | None,
+    queue: Queue = "all",
 ) -> bool:
+    # Combined mode remains useful for local smoke runs. Round priority avoids
+    # submission backlog starvation, but only separate processes isolate rounds
+    # that arrive after a build has already started or blocked on its lock.
+    if queue in ("all", "rounds"):
+        claimed = claim_pending_round()
+        if claimed is not None:
+            logger.info(
+                "processing round %s ordinal=%s campaign=%s",
+                claimed["id"],
+                claimed["ordinal"],
+                claimed["campaign_id"],
+            )
+            outcome = process_round(
+                claimed,
+                mock_bench=mock_bench,
+                mock_correctness_fail=mock_correctness_fail,
+            )
+            logger.info("round %s -> %s", claimed["id"], outcome)
+            return True
+    if queue == "rounds":
+        return False
+
     row = claim_next_job()
     if row is not None:
         # Ingest already filtered to metagraph members (chain.watcher).
@@ -86,22 +120,7 @@ def run_once(
         )
         return True
 
-    claimed = claim_pending_round()
-    if claimed is None:
-        return False
-    logger.info(
-        "processing round %s ordinal=%s campaign=%s",
-        claimed["id"],
-        claimed["ordinal"],
-        claimed["campaign_id"],
-    )
-    outcome = process_round(
-        claimed,
-        mock_bench=mock_bench,
-        mock_correctness_fail=mock_correctness_fail,
-    )
-    logger.info("round %s -> %s", claimed["id"], outcome)
-    return True
+    return False
 
 
 def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:
@@ -113,7 +132,13 @@ def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Pareton Stage 0 gate + bench worker")
+    p = argparse.ArgumentParser(description="Pareton submission and round worker")
+    p.add_argument(
+        "--queue",
+        choices=("all", "submissions", "rounds"),
+        default="all",
+        help="Queue to process. Production uses separate submissions and rounds services.",
+    )
     p.add_argument(
         "--once", action="store_true", help="Process at most one job and exit"
     )
@@ -160,8 +185,12 @@ def main(argv: list[str] | None = None) -> int:
 
     registered_hotkeys = args.registered_hotkey
 
+    logger.info("starting worker queue=%s", args.queue)
     threading.Thread(
-        target=_heartbeat_loop, args=(threading.Event(),), daemon=True
+        target=_heartbeat_loop,
+        args=(threading.Event(),),
+        kwargs={"queue": args.queue},
+        daemon=True,
     ).start()
 
     # A killed worker strands its claimed job in 'running' forever (only
@@ -180,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             mock_bench=args.mock_bench,
             mock_correctness_fail=args.mock_correctness_fail,
             registered_hotkeys=registered_hotkeys,
+            queue=args.queue,
         )
 
     def _request_drain(signum, _frame):

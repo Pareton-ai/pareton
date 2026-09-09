@@ -226,7 +226,15 @@ class TestHeartbeatQueueDepth:
         from worker import main as worker_main
 
         monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 4)
-        assert worker_main._queue_depth() == 4
+        assert worker_main._queue_depth("submissions") == 4
+
+    def test_reports_round_and_combined_counts(self, monkeypatch: pytest.MonkeyPatch):
+        from worker import main as worker_main
+
+        monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 4)
+        monkeypatch.setattr(worker_main, "count_pending_rounds", lambda: 2)
+        assert worker_main._queue_depth("rounds") == 2
+        assert worker_main._queue_depth("all") == 6
 
     def test_zero_pending_is_reported_not_dropped(
         self, monkeypatch: pytest.MonkeyPatch
@@ -234,7 +242,7 @@ class TestHeartbeatQueueDepth:
         from worker import main as worker_main
 
         monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 0)
-        payload = obs.heartbeat(queue_depth=worker_main._queue_depth())
+        payload = obs.heartbeat(queue_depth=worker_main._queue_depth("submissions"))
         assert payload["queue_depth"] == 0
 
     def test_database_error_still_beats(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -287,19 +295,24 @@ class TestTimer:
 class TestHeartbeatLoop:
     """Background heartbeat thread: keeps emitting while jobs block the loop."""
 
+    @pytest.mark.parametrize("queue", ["submissions", "rounds"])
     def test_emits_repeatedly_until_stopped(
-        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        queue: str,
     ) -> None:
         import threading
 
         from worker import main as worker_main
 
         monkeypatch.setattr(worker_main, "count_pending_jobs", lambda: 2)
+        monkeypatch.setattr(worker_main, "count_pending_rounds", lambda: 3)
         stop = threading.Event()
         thread = threading.Thread(
             target=worker_main._heartbeat_loop,
             args=(stop,),
-            kwargs={"interval_s": 0.05},
+            kwargs={"interval_s": 0.05, "queue": queue},
             daemon=True,
         )
         with caplog.at_level(logging.INFO, logger="pareton.lifecycle"):
@@ -309,4 +322,8 @@ class TestHeartbeatLoop:
             thread.join(timeout=2)
         beats = [r for r in caplog.records if '"heartbeat"' in r.message]
         assert len(beats) >= 2
-        assert all(json.loads(r.message)["queue_depth"] == 2 for r in beats)
+        assert all(json.loads(r.message)["queue"] == queue for r in beats)
+        expected_depth = 2 if queue == "submissions" else 3
+        assert all(
+            json.loads(r.message)["queue_depth"] == expected_depth for r in beats
+        )

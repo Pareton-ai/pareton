@@ -357,6 +357,13 @@ def infra_failed_follow_up_states(had_prior: bool) -> tuple[str, ...]:
     return (SubmissionState.INFRA_FAILED, SubmissionState.BENCH_QUEUED)
 
 
+def count_pending_rounds() -> int:
+    """Pending rounds, including capacity backoff. Read-only, for observability."""
+    with db_connection(readonly=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM rounds WHERE status = 'pending'")
+        return int(cur.fetchone()[0])
+
+
 def claim_pending_round() -> dict[str, Any] | None:
     """Claim the oldest pending round. started_at and heartbeat_at are set here.
 

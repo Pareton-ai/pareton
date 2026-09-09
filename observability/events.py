@@ -49,8 +49,10 @@ def _emit(event: str, **kwargs: Any) -> dict[str, Any]:
 # -- Worker heartbeat --------------------------------------------------------
 
 
-def heartbeat(*, queue_depth: int | None = None) -> dict[str, Any]:
-    return _emit("heartbeat", queue_depth=queue_depth)
+def heartbeat(
+    *, queue: str | None = None, queue_depth: int | None = None
+) -> dict[str, Any]:
+    return _emit("heartbeat", queue=queue, queue_depth=queue_depth)
 
 
 # -- Chain / ingestion -------------------------------------------------------
