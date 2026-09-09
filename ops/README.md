@@ -1,16 +1,16 @@
 # ops/
 
-Deployment sources for the production VPS. Change the copy here first, then
-reinstall it on the box. Historical differences from the live files are recorded
-below.
+Deployment artifacts for the production VPS. Files here are **verbatim copies of
+what runs in production** — not templates. Change the copy here first, then
+re-install it on the box, so the two never drift.
 
 ## Layout
 
 | Path                              | Installed to                    | Notes                                                            |
 | --------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
 | `systemd/pareton-api.service`     | `/etc/systemd/system/`          | uvicorn on `0.0.0.0:8000`                                        |
-| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds, `--queue submissions`               |
-| `systemd/pareton-round-worker.service` | `/etc/systemd/system/`     | Round evaluation on provisioned GPUs, `--queue rounds`           |
+| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds (`--queue submissions`)              |
+| `systemd/pareton-round-worker.service` | `/etc/systemd/system/`     | Round evaluation (`--queue rounds`)                              |
 | `systemd/pareton-watcher.service` | `/etc/systemd/system/`          | Chain ingest, `python -m worker.watcher`                         |
 | `systemd/pareton-weights.service` | `/etc/systemd/system/`          | Weight cadence, `python -m weights`. Holds the validator wallet. |
 | `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer                                    |
@@ -33,20 +33,18 @@ That is also why it needs re-installing by hand after a change here.
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
 separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
-and `pareton-weights` within a minute. Each execution worker has its own deferred
-restart. `pareton-round-worker` restarts when no round is running, even if a
-submission build is busy. `pareton-worker` waits for both queues to be idle,
-because an older combined process may still own a round during migration.
+and `pareton-weights` within a minute. It restarts both execution workers on the
+next tick where no submission job or round is running. Their execution loops are
+independent; a build blocks neither round claims nor evaluation.
 
-Installing the round unit and updating the existing worker's command are required
-for queue isolation. A code pull alone keeps an old unit in combined mode. Follow
-[the worker rollout guide](worker-queues.md), including reinstalling the deploy
-script outside the checkout.
+Install `pareton-round-worker.service` and change the existing worker's command
+to `python -m worker.main --queue submissions`. Reinstall `deploy.sh` as well.
+The CLI defaults to the existing combined behavior for local and legacy commands.
 
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.
 
-## Known drift requiring a decision
+## Known drift — needs a decision
 
 Captured from the live boxes on 2026-08-17. These are _not_ resolved here,
 because each one changes production behavior:
@@ -60,7 +58,7 @@ because each one changes production behavior:
 2. **`TimeoutStopSec` is set in two places with different values.** The
    committed unit says `8h`. Both boxes carry a hand-installed drop-in at
    `/etc/systemd/system/pareton-worker.service.d/timeout.conf` pinning `4h`,
-   and **drop-ins override the unit file**, so the effective value then was
+   and **drop-ins override the unit file** — so the effective value today is
    `4h`, not the `8h` the unit asks for. Either delete the drop-in when this
    deploys, or change the unit to `4h`.
 

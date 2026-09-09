@@ -51,5 +51,5 @@ def test_scan_chain_flag_is_accepted_noop(monkeypatch):
     import worker.main as wm
 
     monkeypatch.setattr(wm, "run_once", lambda **_: False)
-    monkeypatch.setattr(wm, "_heartbeat_loop", lambda _, **kwargs: None)
+    monkeypatch.setattr(wm, "_heartbeat_loop", lambda _: None)
     assert wm.main(["--scan-chain", "--once"]) == 0
