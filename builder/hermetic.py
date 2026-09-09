@@ -120,6 +120,7 @@ def dockerfile_for_patch(
     max_jobs: int | None = None,
     torch_cuda_arch_list: str | None = None,
     engine: dict[str, Any] | None = None,
+    verbose_install: bool = False,
 ) -> str:
     """Generate the hermetic engine Dockerfile text (unit-testable, no Docker).
 
@@ -131,6 +132,9 @@ def dockerfile_for_patch(
 
     ``engine`` is the campaign's engine profile (``install_cmd``, ``entrypoint``).
     ``None`` is the vLLM default, so pre-profile campaigns emit the same Dockerfile.
+
+    ``verbose_install`` exposes pip backend output for long ops builds. It does
+    not change compiler flags or the cache mount identity.
     """
     jobs = int(config.BUILD_MAX_JOBS if max_jobs is None else max_jobs)
     if jobs < 1:
@@ -192,6 +196,16 @@ def dockerfile_for_patch(
         mount_opts = f"id={cache_id},target=/root/.ccache,readonly"
         # Read-only cache makes ccache's default tmp unwritable; miss would abort.
         run_parts.insert(1, "export CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp/ccache-tmp")
+    if verbose_install:
+        run_parts.insert(0, "export PIP_VERBOSE=1")
+        if skip_apply:
+            # Report retained trusted cache entries before a potentially long retry.
+            run_parts.insert(
+                2,
+                "if command -v ccache >/dev/null 2>&1; then "
+                'echo "pareton-builder: trusted ccache before install"; '
+                "ccache --show-stats --verbose; fi",
+            )
     # No # syntax= line: BuildKit builtin frontend supports RUN --mount.
     lines.append(
         f"RUN --mount=type=cache,{mount_opts} " + " \\\n    && ".join(run_parts)
@@ -394,6 +408,7 @@ def build_engine_image(
             baseline_commit=baseline_commit,
             engine=engine,
             torch_cuda_arch_list=df_arch,
+            verbose_install=stream_logs,
         )
     except ValueError as exc:
         return GateResult.reject("build_config_invalid", error=str(exc))

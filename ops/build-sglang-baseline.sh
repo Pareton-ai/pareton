@@ -10,9 +10,9 @@ case "$suffix" in
   *[!a-zA-Z0-9_.-]*|'') echo 'Invalid image tag suffix' >&2; exit 2 ;;
 esac
 mkdir -p "$output_dir"
-# A cold CUDA build can exceed eight hours. This applies only to this ops run;
-# production miner builds retain their configured deadline.
-export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-43200}"
+# A cold native build exceeded twelve hours on the validator VPS. This limit is
+# ops-only; production miner builds retain their configured deadline.
+export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-172800}"
 export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-1}"
 export PARETON_BUILD_LOG_DIR="${PARETON_BUILD_LOG_DIR:-$output_dir/logs}"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"

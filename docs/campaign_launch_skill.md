@@ -122,10 +122,12 @@ that download in the offline evaluation container.
 
 Use a dedicated Linux x86_64 CPU build host with Docker and repository Python
 dependencies installed, logged in to GHCR. Run in `tmux` so an SSH disconnect does
-not stop compilation. A cold native build may take eight hours or longer:
+not stop compilation. The full native build exceeded twelve hours with one
+compiler job on an 8-vCPU, 15-GiB validator VPS. The retry ceiling below is not an
+estimate of completion time:
 
 ```bash
-PARETON_BUILD_TIMEOUT_S=43200 \
+PARETON_BUILD_TIMEOUT_S=172800 \
   PARETON_BUILD_LOG_DIR="$PWD/out/sglang-build/logs" \
   bash ops/build-sglang-baseline.sh sglang-4c3d47f-<unique-suffix> out/sglang-build
 ```
@@ -134,8 +136,11 @@ This publishes a new build base, builds the empty-patch engine with `--network=n
 then builds a nonempty CUDA/CMake/JIT/Rust patch through the same miner path. It
 checks the rebuilt Rust marker and records both ccache hits and misses. It writes
 `image-pins.json` with baseline and probe digests only after those checks pass.
-The script defaults to twelve hours per build and streams Docker output to the
-terminal while keeping durable logs. It records each published base/engine
+The script defaults to forty-eight hours per build and streams Docker output to
+the terminal while keeping durable logs. Verbose mode also enables `PIP_VERBOSE=1`
+inside the build, exposing backend compiler output instead of just pip's
+"still running" messages. It reports trusted ccache statistics before installation
+without clearing the cache or resetting counters. It records each published base/engine
 reference immediately, even if a later stage fails. Production miner build
 deadlines are unchanged. GPU validation is a separate step.
 
@@ -179,20 +184,22 @@ python -m builder.gc_config
 printf '%s' "$PARETON_GHCR_TOKEN" | docker login ghcr.io \
   --username "$PARETON_GHCR_USERNAME" --password-stdin
 
-PARETON_BUILD_TIMEOUT_S=43200 PARETON_BUILD_MAX_JOBS=1 \
-PARETON_BUILD_LOG_DIR=/var/log/pareton/sglang-baseline \
+sglang_build_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+PARETON_BUILD_TIMEOUT_S=172800 PARETON_BUILD_MAX_JOBS=1 \
+PARETON_BUILD_LOG_DIR="/var/log/pareton/sglang-baseline/$sglang_build_stamp" \
 python -m builder \
   --engine sglang \
   --baseline-repo https://github.com/sgl-project/sglang.git \
   --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
   --base-image ghcr.io/pareton-ai/pareton-baseline@sha256:97e1f4e868fc988355f91bb20a6d6f3a9b90c3a901d030730a2646ecbdf00688 \
-  --image-ref "ghcr.io/pareton-ai/pareton-baseline:sglang-4c3d47f-vps-$(date -u +%Y%m%dT%H%M%SZ)-engine" \
+  --image-ref "ghcr.io/pareton-ai/pareton-baseline:sglang-4c3d47f-vps-$sglang_build_stamp-engine" \
   --empty-patch --push --stream-build-logs
 ```
 
+Each attempt gets a separate log directory, preserving earlier failure logs.
 The GHCR credential needs package read and write access. The final stdout line is
 the published serving image's full digest reference; retain it for validation.
-The twelve-hour timeout applies to compilation; waiting for the shared lock and
+The forty-eight-hour timeout applies to compilation; waiting for the shared lock and
 clone/push stages have separate limits. This command builds and uploads the
 empty-patch engine. Native mutation probes and FP8 GPU validation still follow.
 
@@ -203,6 +210,28 @@ ccache clear, daemon restart or production configuration change in these command
 The GC command validates the existing policy without changing it. The shared lock
 waits for any current build and excludes cleanup while this build runs. New vLLM
 builds wait for the lock; API, chain and weights services remain running.
+
+For a retry in the existing build worktree, replace `git worktree add` with:
+
+```bash
+git -C /opt/pareton-sglang-build switch --detach origin/arpan/sglang-campaigns
+```
+
+Keep the same base digest, source commit, compiler flags and Docker builder to
+reuse completed cache entries. A canceled `RUN` does not produce a complete image
+layer; its Rust/CMake output directories are not a checkpoint. The persistent
+ccache mount can supply completed, retained objects, but the next run must show
+its actual hit rate before saved time can be claimed. An object still compiling
+at cancellation must be rebuilt. Do not assume that `TORCH_CUDA_ARCH_LIST=9.0`
+prunes this pinned SGLang recipe: its CMake explicitly emits SM90, SM100 and SM120
+code and builds both common-library variants plus attention extensions.
+
+Keep one compiler job on the observed 15-GiB VPS until compiler peak memory has
+been measured. Its eight vCPUs and 63-GiB swap do not establish enough RAM for
+multiple CUDA template compilations without heavy swapping. The reported 166 GiB
+free Docker disk needs no cache purge for this retry. Monitor compiler progress
+and current disk/memory use; the longer ceiling is not a reason to leave a stalled
+or resource-starved build running unexamined.
 
 For vLLM, use `images/baseline/Dockerfile`, then run:
 

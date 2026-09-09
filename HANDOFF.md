@@ -7,7 +7,8 @@ checks, not a guarantee about changes made by other operators after those checks
 
 The subsequent PR review fix for scorer context exhaustion is recorded in section
 12. The resumed native/FP8 work and the operator's VPS launch plan are in section
-13. The native build failure and prepared retry are recorded in section 14.
+13. The native build failure and direct VPS command are recorded in section 14.
+The VPS twelve-hour timeout and updated retry are recorded in section 15.
 Sections 1 through 11 describe the original handoff and its historical image
 pins and BF16 GPU measurements; do not use those old pins for the native campaign.
 
@@ -1146,3 +1147,81 @@ native mutation build/ccache receipts, CUDA/JIT/Rust GPU probes, 8192-token scor
 boundary check and full FP8 round. Update sample pins and give the final
 zero-emission seed commands after validation. No new GPU was rented, campaign
 created or production service modified in response to this failure.
+
+## 15. VPS build exceeded twelve hours
+
+On 2026-09-09 the operator reported that the VPS build was still in
+`Building wheel for sglang-kernel` when the builder's 43,200-second limit expired.
+The log ended with `#11 CANCELED`, Docker's `context canceled` and
+`FAIL build_timeout after 43200s`. This is an enforced build timeout, distinct
+from the earlier GitHub runner shutdown. The supplied excerpt shows no compiler
+error. The `InvalidDefaultArgInFrom` message concerns the generated Dockerfile's
+argument default; the command supplied its real base image and had already
+compiled for hours, so that warning did not cause cancellation.
+
+The operator supplied these VPS resources after the build stopped:
+
+| Resource | Reported value |
+| --- | --- |
+| CPUs | 8 vCPUs |
+| RAM | 15 GiB total, 14 GiB available |
+| Swap | 63 GiB total, 494 MiB used |
+| Docker filesystem | 464 GiB total, 299 GiB used, 166 GiB free, 65% used |
+
+The previous twelve-hour ceiling was too short for this attempt. Source review
+confirms that the pinned AOT CMake builds both `common_ops_sm90_build` and
+`common_ops_sm100_build`; under CUDA 13 it emits SM90, SM100-family and SM120
+code, plus FA3, InfLLM, FlashMLA and spatial extensions. `ENABLE_BELOW_SM90=OFF`
+only removes older targets. `TORCH_CUDA_ARCH_LIST=9.0` is not an effective way
+to reduce this explicit target list. No source, target or compiler-flag changes
+were made for the retry, preserving compatibility with completed cache entries.
+
+### Retry improvements and limits
+
+- `--stream-build-logs` now also exports `PIP_VERBOSE=1` inside the generated
+  build step. Previously Docker output was streamed, but pip still hid successful
+  backend compiler output behind repeated "still running" messages. The new
+  setting exposes backend progress without rebuilding the dependency image.
+- A verbose trusted empty-patch build prints `ccache --show-stats --verbose`
+  before installation. It does not clear data or reset counters. This makes
+  retained cache size, misses, hits and uncacheable calls visible on retry.
+- The ops helper and current direct-build example use a 172,800-second
+  (forty-eight-hour) compilation ceiling. This is a ceiling, not a completion
+  estimate. Production miner timeout settings remain unchanged.
+- Keep `PARETON_BUILD_MAX_JOBS=1` on the observed VPS until peak compiler memory
+  is measured. Eight vCPUs and ample swap do not prove that multiple CUDA
+  template compilations fit RAM without competing with the validator.
+- Reuse the same Docker builder, exact source/base pins and production storage
+  lock. Update only the dedicated `/opt/pareton-sglang-build` worktree to obtain
+  the improved diagnostics. No prune or Docker restart is needed.
+- The direct command uses a timestamped log directory for each attempt, so the
+  new empty-patch build does not overwrite the previous attempt's log.
+
+A canceled Docker `RUN` has no finished image layer. The Rust/CMake outputs inside
+that uncommitted layer are not a durable checkpoint. Completed objects retained
+in the separate SGLang ccache mount can be reused; an in-flight object must be
+compiled again. Actual cache contents and savings have not been inspected on the
+VPS, so do not claim that all twelve hours are recoverable. The 20-GiB per-cache
+limit is unchanged; startup cache counters will help identify eviction or
+uncacheable work. The existing vLLM cache ID and contents are not cleared by any
+prepared command. The shared lock still serializes vLLM and SGLang builds.
+
+### Verification
+
+The existing builder, cleanup and GC-policy tests passed: **54 tests**. Targeted
+Ruff lint/format checks, shell syntax and `git diff --check` passed. Generated
+default Dockerfiles for vLLM/SGLang, both empty and nonempty patches, match
+`61af589` byte-for-byte. Enabling verbosity retains each original cache mount,
+including its read-only or trusted-writable mode. Receipt:
+`out/sglang-native-fp8/build-retry-compatibility.json`.
+
+An offline PEP 517 wheel-build probe using local pip 24.2 confirmed that backend
+output is hidden with `PIP_VERBOSE=0` and visible with `PIP_VERBOSE=1`. Both builds
+succeeded with `--no-index --no-deps --no-build-isolation`; no package was installed
+and no CUDA compilation was represented as part of this test. Receipt:
+`out/sglang-native-fp8/pip-verbosity-check.json`.
+
+No VPS retry was launched by the assistant. The operator still needs to produce
+the serving digest before native mutation/cache checks and FP8 GPU validation can
+finish. The source pin, FP8 model pin, path policy and zero-emission campaign plan
+remain unchanged. No campaign, GPU allocation or production deployment occurred.

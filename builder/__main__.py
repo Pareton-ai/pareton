@@ -52,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--stream-build-logs",
         action="store_true",
-        help="Also stream Docker build/push logs to stderr (for ops and CI)",
+        help="Stream Docker logs and verbose pip build progress (for ops and CI)",
     )
     p.add_argument(
         "--engine",
