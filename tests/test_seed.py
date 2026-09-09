@@ -137,6 +137,15 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
         ("python/sglang/kernels/aot/include/new_kernel.cuh", True),
         ("python/sglang/kernels/aot/CMakeLists.txt", True),
         ("python/sglang/kernels/aot/pyproject.toml", False),
+        ("python/sglang/kernels/aot/tests/test_fp8_gemm.py", False),
+        ("python/sglang/kernels/aot/tests/spatial/test_greenctx_stream.py", False),
+        ("python/sglang/kernels/aot/python/sgl_kernel/test_utils.py", False),
+        (
+            "python/sglang/kernels/aot/python/sgl_kernel/testing/rotary_embedding.py",
+            False,
+        ),
+        ("python/sglang/kernels/aot/python/sgl_kernel/__init__.py", True),
+        ("python/sglang/kernels/aot/cmake/utils.cmake", True),
         ("CMakeLists.txt", False),
     ]:
         patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n".encode()

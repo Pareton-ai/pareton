@@ -876,10 +876,25 @@ def _score_sglang_output(
         raise EngineError("SGLang tokenize response has invalid token IDs")
     prompt_ids, full_ids = tokenized
     cut = len(prompt_ids)
-    if full_ids[:cut] != prompt_ids or len(full_ids) <= cut:
-        raise EngineError(
-            "SGLang forced continuation does not start at a token boundary"
-        )
+    if full_ids[:cut] != prompt_ids:
+        # BPE can merge a leading output newline with trailing prompt newlines.
+        # Keep the prompt the engine saw, and encode only the continuation
+        # without inserting BOS/EOS. The decoded sequence is verified below.
+        continuation_ids = post_json(
+            base_url,
+            "/tokenize",
+            {"prompt": captured.output_text, "add_special_tokens": False},
+            timeout=timeout,
+        ).get("tokens")
+        if (
+            not isinstance(continuation_ids, list)
+            or not continuation_ids
+            or any(type(t) is not int or t < 0 for t in continuation_ids)
+        ):
+            raise EngineError("SGLang tokenize response has invalid continuation IDs")
+        full_ids = prompt_ids + continuation_ids
+    if len(full_ids) <= cut:
+        raise EngineError("SGLang tokenize response has no continuation IDs")
     continuation_ids = full_ids[cut:]
     prefix = _sglang_prefix(
         base_url,

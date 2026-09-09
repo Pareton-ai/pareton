@@ -270,6 +270,9 @@ def seed_synthetic_campaign(
             "test/**",
             "benchmark/**",
             "python/sglang/test/**",
+            "python/sglang/kernels/aot/tests/**",
+            "python/sglang/kernels/aot/python/sgl_kernel/test_utils.py",
+            "python/sglang/kernels/aot/python/sgl_kernel/testing/**",
             "rust/**/tests/**",
             "rust/**/benches/**",
         ]

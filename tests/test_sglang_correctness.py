@@ -33,6 +33,7 @@ CFG = CorrectnessConfig(1, CorrectnessThresholds(-4.0, -12.0, 0.001, 0.5))
 def native(monkeypatch):
     state = {
         "tokens": [list(PROMPT_IDS), PROMPT_IDS + OUTPUT_IDS],
+        "continuation_ids": list(OUTPUT_IDS),
         "rows": [
             [None if i == 0 else -0.1, token_id, text]
             for i, (token_id, text) in enumerate(
@@ -47,6 +48,9 @@ def native(monkeypatch):
     def post(_url, path, body, **_kw):
         state["calls"].append((path, body))
         if path == "/tokenize":
+            if isinstance(body["prompt"], str):
+                assert body["add_special_tokens"] is False
+                return {"tokens": deepcopy(state["continuation_ids"])}
             return {"tokens": deepcopy(state["tokens"])}
         if path == "/detokenize":
             assert body["skip_special_tokens"] is False
@@ -92,19 +96,28 @@ def test_native_score_handles_unicode_and_excludes_generated_token(native):
     ]
 
 
-@pytest.mark.parametrize(
-    "problem", ["wrong_id", "missing_row", "wrong_boundary", "wrong_text"]
-)
-def test_native_score_rejects_misaligned_sequence(native, problem):
+@pytest.mark.parametrize("problem", ["wrong_id", "missing_row", "wrong_text"])
+@pytest.mark.parametrize("merged_boundary", [False, True])
+def test_native_score_rejects_misaligned_sequence(native, problem, merged_boundary):
+    if merged_boundary:
+        native["tokens"][1][0] = 999
     if problem == "wrong_id":
         native["rows"][0][1] = 999
     elif problem == "missing_row":
         native["rows"].pop()
-    elif problem == "wrong_boundary":
-        native["tokens"][1][0] = 999
     else:
         native["decoded"] = "different output"
     with pytest.raises(EngineError):
+        score_captured_output("http://scorer", CAPTURED, engine_name="sglang")
+
+
+@pytest.mark.parametrize("ids", [None, [], [True]])
+def test_native_score_rejects_invalid_continuation_ids_after_boundary_merge(
+    native, ids
+):
+    native["tokens"][1][0] = 999
+    native["continuation_ids"] = ids
+    with pytest.raises(EngineError, match="invalid continuation IDs"):
         score_captured_output("http://scorer", CAPTURED, engine_name="sglang")
 
 
@@ -168,6 +181,88 @@ def test_grade_all_uses_native_scorer_for_baseline_and_candidate(
     )
     assert reports[BASELINE_INDEX].verdict == reports[0].verdict == "pass"
     assert sum(path == "/generate" for path, _ in native["calls"]) == 2
+
+
+@pytest.mark.parametrize(
+    "leading_newlines,output_token,merged_token",
+    [("\n", 198, 1358), ("\n\n", 271, 987)],
+)
+def test_native_score_preserves_prompt_when_newlines_merge(
+    monkeypatch, tmp_path, leading_newlines, output_token, merged_token
+):
+    # Recorded from the Qwen tokenizer shared by the pinned BF16/FP8 models:
+    # SHA256 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3.
+    # Encoding the concatenated text merges trailing prompt newlines with the
+    # first output token. Preserve the original prompt even with a BOS prefix.
+    prompt_ids = [12675, 10838, 247, 226, 271]
+    output_ids = [output_token, 9419, 13]
+    merged_ids = prompt_ids[:-1] + [merged_token, 9419, 13]
+    captured = CapturedOutput("newlines", "Hi 🙄\n\n", leading_newlines + "Hello.", 3)
+    calls = []
+
+    def post(_url, path, body, **_kw):
+        calls.append((path, body))
+        if path == "/tokenize":
+            if isinstance(body["prompt"], list):
+                assert body["prompt"] == [
+                    captured.prompt,
+                    captured.prompt + captured.output_text,
+                ]
+                return {"tokens": [prompt_ids, merged_ids]}
+            assert body["prompt"] == captured.output_text
+            assert body["add_special_tokens"] is False
+            return {"tokens": output_ids}
+        if path == "/detokenize":
+            assert body["skip_special_tokens"] is False
+            assert body["tokens"] == [
+                prompt_ids,
+                prompt_ids + output_ids,
+                prompt_ids + output_ids[:1],
+            ]
+            prompt = "<bos>" + captured.prompt
+            return {
+                "text": [
+                    prompt,
+                    prompt + captured.output_text,
+                    prompt + leading_newlines,
+                ]
+            }
+        assert path == "/generate"
+        assert body["input_ids"] == prompt_ids + output_ids
+        return {
+            "meta_info": {
+                "input_token_logprobs": [
+                    [None if i == 0 else -0.1, token_id, "token"]
+                    for i, token_id in enumerate(prompt_ids + output_ids)
+                ],
+                "output_token_logprobs": [[-999.0, 99, "clamp"]],
+            }
+        }
+
+    monkeypatch.setattr(correctness, "post_json", post)
+    monkeypatch.setattr(correctness, "probe_logprob_capability", lambda *a, **kw: {})
+    cfg = CorrectnessConfig(
+        1, CorrectnessThresholds(-4.0, -12.0, 0.001, 0.5, max_mean_logprob_drop=1.5)
+    )
+    reports = grade_all(
+        "http://scorer",
+        [
+            PendingCorrectness(0, [captured]),
+            PendingCorrectness(BASELINE_INDEX, [captured]),
+        ],
+        cfg=cfg,
+        evidence_dir=tmp_path,
+        engine_name="sglang",
+        baseline_degeneracy={"newlines": BaselineDegeneracyReference(1, 1.0, 0.0)},
+    )
+    for report in reports.values():
+        assert report.verdict == "pass"
+        assert report.num_positions_scored == 3
+        assert report.coverage_ratio == 1.0
+        assert report.mean_logprob == pytest.approx(-0.1)
+        evidence = tmp_path / report.evidence.rsplit("/", 1)[-1]
+        assert json.loads(evidence.read_text())["prefix_chars"] == len(leading_newlines)
+    assert sum(path == "/generate" for path, _ in calls) == 2
 
 
 def test_full_replay_context_scores_every_token_with_relative_bar(

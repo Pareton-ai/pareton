@@ -49,9 +49,9 @@ Seed chooses the upstream repository and patch paths from the engine. SGLang
 requires an explicit `--baseline-commit`. Repeatable `--allowed-path` and
 `--denied-path` options replace their respective defaults. Keep packaging, tests
 and Dockerfiles denied. The SGLang default permits in-tree CMake registration so
-miners can compile new kernel files, and adds denials for `python/sglang/test/**`,
-`rust/**/tests/**` and `rust/**/benches/**`. External dependency repositories remain
-separately pinned inputs.
+miners can compile new kernel files. It denies `python/sglang/test/**`, AOT tests
+and packaged test helpers, `rust/**/tests/**` and `rust/**/benches/**`. External
+dependency repositories remain separately pinned inputs.
 
 ## 2. Build and publish the baseline
 
@@ -294,9 +294,11 @@ in the first measured repetition. Both warmups are saved under `warmup/` and
 vLLM scoring uses OpenAI echo logprobs. SGLang scoring uses `/tokenize`,
 `/detokenize` and native `/generate` input logprobs. Its OpenAI adapter reports
 `-1` offsets and decodes each byte token separately, so emojis can become
-replacement characters. The harness verifies the prompt boundary, decoded
-continuation and every returned token ID before scoring. Generated clamp tokens
-are excluded, and decoded token prefixes still feed the repetition checks.
+replacement characters. If tokenizing the combined text merges tokens across the
+prompt boundary, the harness preserves the prompt IDs and tokenizes the output
+separately without adding special tokens. It verifies the decoded continuation
+and every returned token ID before scoring. Generated clamp tokens are excluded,
+and decoded token prefixes still feed the repetition checks.
 
 Check `entries[].status` and `entries[].score` in the report as well as its
 top-level verdict. A completed harness run can still contain an `infra_failed`
