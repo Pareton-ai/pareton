@@ -1267,8 +1267,9 @@ combined mode must check eligible pending rounds before submissions. The fix now
   priority and fallback, and independent deployment restarts with deferred retries.
 - Add a short installation note in `ops/README.md`.
 
-The heartbeat changes, pending-round counter, Vector changes, deployment helper
-refactor and long rollout document remain removed. Builder locking, ccache and
+The heartbeat payload changes, pending-round counter, deployment helper refactor
+and long rollout document remain removed. Section 18 restores the required Vector
+allowlist and records per-service alert setup. Builder locking, ccache and
 campaign pins remain unchanged. New vLLM builds still wait behind a manual SGLang build; rounds
 using built images execute independently.
 
@@ -1322,6 +1323,14 @@ touch .deploy-pending .deploy-rounds-pending
 if systemctl is-active --quiet pareton-worker; then
     systemctl kill --kill-who=main --signal=SIGTERM pareton-worker
 fi
+sed -i '/^\[sources\.journald\]/,/^\[/ {
+  /^[[:space:]]*include_units[[:space:]]*=/ {
+    /"pareton-round-worker"/!s/\[/["pareton-round-worker", /
+    /"pareton-weights"/!s/\[/["pareton-weights", /
+  }
+}' /etc/vector/vector.toml
+(set -a; . ./.env; set +a; vector validate --no-environment /etc/vector/vector.toml)
+systemctl restart vector
 systemctl enable --now pareton-round-worker
 SH
 systemctl start pareton-deploy.timer
@@ -1367,3 +1376,52 @@ and `git diff --check` passed. No VPS build, cancellation, cache purge, GPU rent
 or deployment was performed. An already-running build retains its original job
 count; the operator must use six on the next invocation. Pre-existing uncommitted
 section-16 handoff edits were preserved separately.
+
+## 18. Preserve logging and heartbeat alerts through the worker split
+
+The operator supplied a production review showing that Vector uses an explicit
+service allowlist. Neither the live list nor the reduced PR included the new
+round worker. The live list also omitted weights, although the repo includes it.
+The review reports weights events in journald but absent from Axiom, accompanied
+by false stalled-weight alerts. Those live observations were not independently
+rechecked in this task.
+
+PR #149 commit `cb193fd` adds `pareton-round-worker` to the repo Vector list and
+adds service-specific heartbeat alert instructions to `ops/README.md`. The PR's
+post-merge deploy block, also reflected in section 16 above, edits only the live
+journald allowlist to add missing round and weights units, validates the result
+and restarts Vector before starting the round service. It preserves existing
+sink credentials and unrelated configuration. The full repo configuration must
+not overwrite the live file because their credentials differ.
+
+After logs arrive, narrow the existing `worker-heartbeat-absent` monitor to
+`_SYSTEMD_UNIT == "pareton-worker.service"`, then clone it as
+`round-worker-heartbeat-absent` for `pareton-round-worker.service`. Each query
+filters `event == "heartbeat"` and ends with an ungrouped `summarize count()`.
+Keep the existing notifiers and evaluation frequency, Below 1 over 15 minutes,
+and enable Alert on no data. Fixed filters avoid one worker satisfying the
+other's alert or a missing service disappearing from grouped query results.
+No heartbeat payload or pending-round counter change is needed. These alerts
+still cannot detect work stalled inside a process that continues heartbeating.
+
+Local checks parsed the repo TOML and exercised the live-edit transformation
+against representative configurations. Required units are added, repeated edits
+are idempotent, and credentials and unrelated settings are preserved. The PR's
+shell blocks passed syntax checks and its description was verified by readback.
+No Vector binary is installed locally, so native `vector validate` remains a
+rollout check. The Axiom queries were not executed against production here.
+
+Linux CI for `cb193fd` passed on Python 3.10 and 3.11 in
+[34337076885](https://github.com/Pareton-ai/pareton/actions/runs/34337076885), and
+formatting passed in
+[34337076875](https://github.com/Pareton-ai/pareton/actions/runs/34337076875).
+No live Vector or Axiom monitor configuration was changed. The operator must
+complete both rollout steps and verify fresh round/worker events plus the next
+scheduled weights event. Adding a unit does not backfill logs already discarded
+by Vector, and no manual weight submission was requested or performed.
+
+The review's minor follow-up, narrowing the existing worker's deployment probe
+from both queues to submissions after legacy combined processes are gone, is
+recorded for later work. It is deliberately unchanged in this PR; no issue was
+created because Linear tooling is unavailable. The SGLang image/FP8 campaign
+work, including the six-job operator choice in section 17, remains unchanged.
