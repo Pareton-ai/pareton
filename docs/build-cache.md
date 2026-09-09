@@ -5,6 +5,11 @@ BuildKit builder and a registry such as GHCR. Run it after a successful trusted
 `--empty-patch` build to avoid repeating all compilation on a fresh VPS.
 It works with both `--engine vllm` and `--engine sglang`.
 
+The native SGLang build command for commit `4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`
+also requires the recipe and `--stream-build-logs` support from
+[PR #148](https://github.com/Pareton-ai/pareton/pull/148). Include those changes
+alongside this cache CLI; the cache PR alone does not add the native build recipe.
+
 This command transfers compiler cache entries. It does not transfer Docker layer
 caches, Rust build directories, or inference-time caches. Pull a previously
 published engine image if you only need to run that exact engine build.
@@ -83,6 +88,11 @@ Only restore snapshots produced by a trusted baseline builder. A digest pins
 content, not its trustworthiness. Miner builds keep their existing read-only
 cache access, and neither worker configuration nor campaign manifests gain a
 cache-import setting.
+
+The native SGLang installer copies the trusted build's cache into
+`/opt/sglang-ccache` in the resulting engine image. Its miner builds read that
+image copy. Restoring the host mount seeds a subsequent trusted baseline build;
+it does not modify an already published engine image or its embedded cache.
 
 ## Smoke test without an engine build
 
