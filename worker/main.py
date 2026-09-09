@@ -67,7 +67,25 @@ def run_once(
     registered_hotkeys: list[str] | None,
     queue: str = "all",
 ) -> bool:
-    row = claim_next_job() if queue != "rounds" else None
+    claimed = claim_pending_round() if queue != "submissions" else None
+    if claimed is not None:
+        logger.info(
+            "processing round %s ordinal=%s campaign=%s",
+            claimed["id"],
+            claimed["ordinal"],
+            claimed["campaign_id"],
+        )
+        outcome = process_round(
+            claimed,
+            mock_bench=mock_bench,
+            mock_correctness_fail=mock_correctness_fail,
+        )
+        logger.info("round %s -> %s", claimed["id"], outcome)
+        return True
+    if queue == "rounds":
+        return False
+
+    row = claim_next_job()
     if row is not None:
         # Ingest already filtered to metagraph members (chain.watcher).
         # A row in submissions is the registration proof; re-reading the
@@ -87,24 +105,7 @@ def run_once(
         )
         return True
 
-    if queue == "submissions":
-        return False
-    claimed = claim_pending_round()
-    if claimed is None:
-        return False
-    logger.info(
-        "processing round %s ordinal=%s campaign=%s",
-        claimed["id"],
-        claimed["ordinal"],
-        claimed["campaign_id"],
-    )
-    outcome = process_round(
-        claimed,
-        mock_bench=mock_bench,
-        mock_correctness_fail=mock_correctness_fail,
-    )
-    logger.info("round %s -> %s", claimed["id"], outcome)
-    return True
+    return False
 
 
 def _run_loop(cycle, drain: threading.Event, poll_interval_s: float) -> None:

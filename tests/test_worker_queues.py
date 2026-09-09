@@ -2,8 +2,38 @@
 
 import multiprocessing
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 from builder.lock import builder_storage_lock
+
+
+@pytest.mark.parametrize("pending_round", [True, False])
+def test_combined_mode_checks_rounds_before_submissions(monkeypatch, pending_round):
+    from worker import main as worker_main
+
+    claim_job = Mock(return_value={"id": "s1", "hotkey": "hk1", "patch_hash": "abc"})
+    round_row = {"id": "r32", "ordinal": 32, "campaign_id": "c1"}
+    run_round = Mock()
+    run_submission = Mock(
+        return_value=SimpleNamespace(ok=True, state="built", reason=None)
+    )
+    monkeypatch.setattr(worker_main, "claim_next_job", claim_job)
+    monkeypatch.setattr(
+        worker_main, "claim_pending_round", lambda: round_row if pending_round else None
+    )
+    monkeypatch.setattr(worker_main, "process_round", run_round)
+    monkeypatch.setattr(worker_main, "process_submission", run_submission)
+    assert worker_main.run_once(
+        mock_build=False,
+        mock_bench=False,
+        mock_correctness_fail=False,
+        registered_hotkeys=None,
+    )
+    assert run_round.call_count == int(pending_round)
+    assert claim_job.call_count == int(not pending_round)
+    assert run_submission.call_count == int(not pending_round)
 
 
 def _worker(queue, lock_path, started, finished):

@@ -8,7 +8,9 @@
 #     commit (stateless enough to be always safe). Watcher and weights restart
 #     is skipped if the unit is not installed yet so a first-ship tick cannot
 #     abort the deploy.
-#   - Execution workers restart only when no submission jobs or rounds run.
+#   - Execution workers have separate pending restart flags. The round worker
+#     waits only for rounds; the existing worker checks both queues to protect
+#     legacy combined processes during migration.
 #     A running job killed mid-bench is never requeued (claim_next_job only
 #     claims 'pending'), and its GPU pod burns money until the TTL reaper.
 #     When busy, a pending flag defers the restart to a later idle tick.
@@ -22,6 +24,7 @@ set -euo pipefail
 
 REPO=/opt/pareton
 PENDING_FLAG="$REPO/.deploy-pending"
+ROUND_PENDING_FLAG="$REPO/.deploy-rounds-pending"
 DEPLOYED_FILE="$REPO/.deploy-done"
 LOCK=/run/pareton-deploy.lock
 
@@ -42,12 +45,14 @@ import sys
 try:
     from db.connection import db_connection
     with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(\"SELECT 1 FROM submission_jobs WHERE status = 'running' \"
-                    \"UNION ALL SELECT 1 FROM rounds WHERE status = 'running' LIMIT 1\")
+        cur.execute(\"SELECT 1 FROM rounds WHERE status = 'running' \"
+                    \"UNION ALL SELECT 1 FROM submission_jobs \"
+                    \"WHERE status = 'running' AND %s LIMIT 1\",
+                    (sys.argv[1] != 'rounds',))
         sys.exit(0 if cur.fetchone() else 1)
 except Exception:
     sys.exit(2)
-"
+" "$1"
 }
 
 git fetch --quiet origin main
@@ -63,7 +68,7 @@ if [ "$DEPLOYED" != "$REMOTE" ]; then
     # Mark the worker restart owed before the steps that can fail. If one does,
     # set -e aborts here and the pending block below never runs, so the worker
     # is not restarted onto a half-deployed tree.
-    touch "$PENDING_FLAG"
+    touch "$PENDING_FLAG" "$ROUND_PENDING_FLAG"
     git pull --ff-only --quiet origin main
     if git diff --name-only "$DEPLOYED" HEAD | grep -qx requirements.txt; then
         "$REPO/.venv/bin/pip" install --quiet -r requirements.txt
@@ -83,19 +88,23 @@ if [ "$DEPLOYED" != "$REMOTE" ]; then
     git rev-parse HEAD > "$DEPLOYED_FILE"
 fi
 
-if [ -f "$PENDING_FLAG" ]; then
-    worker_busy && rc=0 || rc=$?
-    if [ "$rc" -eq 1 ]; then
-        systemctl restart pareton-worker
-        if systemctl cat pareton-round-worker >/dev/null 2>&1; then
-            systemctl restart pareton-round-worker
-            echo "deploy: pareton-round-worker restarted"
-        fi
-        rm -f "$PENDING_FLAG"
-        echo "deploy: pareton-worker restarted"
-    elif [ "$rc" -eq 0 ]; then
-        echo "deploy: a submission job or round is running; worker restarts deferred"
-    else
-        echo "deploy: worker probe failed (rc=$rc); treating as busy, restart deferred"
+for unit in pareton-round-worker pareton-worker; do
+    pending="$PENDING_FLAG"
+    queue=all
+    if [ "$unit" = pareton-round-worker ]; then
+        pending="$ROUND_PENDING_FLAG"
+        queue=rounds
     fi
-fi
+    [ -f "$pending" ] || continue
+    systemctl cat "$unit" >/dev/null 2>&1 || continue
+    worker_busy "$queue" && rc=0 || rc=$?
+    if [ "$rc" -eq 1 ]; then
+        systemctl restart "$unit"
+        rm -f "$pending"
+        echo "deploy: $unit restarted"
+    elif [ "$rc" -eq 0 ]; then
+        echo "deploy: $unit has running work; restart deferred"
+    else
+        echo "deploy: $unit probe failed (rc=$rc); treating as busy, restart deferred"
+    fi
+done

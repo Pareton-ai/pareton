@@ -33,13 +33,15 @@ That is also why it needs re-installing by hand after a change here.
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
 separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
-and `pareton-weights` within a minute. It restarts both execution workers on the
-next tick where no submission job or round is running. Their execution loops are
-independent; a build blocks neither round claims nor evaluation.
+and `pareton-weights` within a minute. Each execution worker has its own pending
+restart. The round worker waits only for running rounds; the existing worker checks
+both queues to protect legacy combined processes. A busy build does not defer an
+idle round worker's update.
 
 Install `pareton-round-worker.service` and change the existing worker's command
 to `python -m worker.main --queue submissions`. Reinstall `deploy.sh` as well.
-The CLI defaults to the existing combined behavior for local and legacy commands.
+The CLI defaults to combined mode, which checks rounds first. Only the separate
+round service can handle rounds arriving after a build has already blocked.
 
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.
