@@ -1341,3 +1341,29 @@ mutation/cache receipts, FP8 GPU validation and zero-emission launch remain
 unfinished. The private technical decision record reflects the scope reduction;
 Linear tools remain unavailable. Unrelated `docs/production-map.md` and
 `idempotent.diff` were preserved.
+
+## 17. Operator-selected six-job SGLang build
+
+On 2026-09-09 the operator explicitly selected six concurrent jobs for the native
+SGLang build. This supersedes the one-job recommendation in section 15.
+`ops/build-sglang-baseline.sh` now defaults `PARETON_BUILD_MAX_JOBS` to six while
+respecting explicit environment overrides. Both current launch-guide commands
+set it to six explicitly, including when the VPS environment contains an older
+one-job setting. The compilation ceiling remains 172,800 seconds.
+
+The existing builder forwards six to `MAX_JOBS` and `CMAKE_BUILD_PARALLEL_LEVEL`;
+the pinned trusted installer derives `CARGO_BUILD_JOBS` from `MAX_JOBS`. NVCC's
+internal thread count remains one per job, avoiding six threads inside each of
+six compiler jobs. No dependency image rebuild is needed for this change.
+Production miner defaults and the unused GitHub Actions configuration are
+unchanged. Existing vLLM and SGLang cache IDs, cache mount modes, compiler flags,
+source/base pins and the shared storage lock remain unchanged.
+
+Verification executed the actual ops helper with a shell stand-in before any
+Docker operation: its default was six and an explicit override of three remained
+three. Generated one-job and six-job Dockerfiles have identical cache mounts and
+installer commands; only the two parallelism ARG defaults differ. Shell syntax
+and `git diff --check` passed. No VPS build, cancellation, cache purge, GPU rental
+or deployment was performed. An already-running build retains its original job
+count; the operator must use six on the next invocation. Pre-existing uncommitted
+section-16 handoff edits were preserved separately.

@@ -127,7 +127,7 @@ compiler job on an 8-vCPU, 15-GiB validator VPS. The retry ceiling below is not 
 estimate of completion time:
 
 ```bash
-PARETON_BUILD_TIMEOUT_S=172800 \
+PARETON_BUILD_TIMEOUT_S=172800 PARETON_BUILD_MAX_JOBS=6 \
   PARETON_BUILD_LOG_DIR="$PWD/out/sglang-build/logs" \
   bash ops/build-sglang-baseline.sh sglang-4c3d47f-<unique-suffix> out/sglang-build
 ```
@@ -136,7 +136,8 @@ This publishes a new build base, builds the empty-patch engine with `--network=n
 then builds a nonempty CUDA/CMake/JIT/Rust patch through the same miner path. It
 checks the rebuilt Rust marker and records both ccache hits and misses. It writes
 `image-pins.json` with baseline and probe digests only after those checks pass.
-The script defaults to forty-eight hours per build and streams Docker output to
+The script defaults to six concurrent build jobs and forty-eight hours per build,
+respecting explicit environment overrides. It streams Docker output to
 the terminal while keeping durable logs. Verbose mode also enables `PIP_VERBOSE=1`
 inside the build, exposing backend compiler output instead of just pip's
 "still running" messages. It reports trusted ccache statistics before installation
@@ -185,7 +186,7 @@ printf '%s' "$PARETON_GHCR_TOKEN" | docker login ghcr.io \
   --username "$PARETON_GHCR_USERNAME" --password-stdin
 
 sglang_build_stamp=$(date -u +%Y%m%dT%H%M%SZ)
-PARETON_BUILD_TIMEOUT_S=172800 PARETON_BUILD_MAX_JOBS=1 \
+PARETON_BUILD_TIMEOUT_S=172800 PARETON_BUILD_MAX_JOBS=6 \
 PARETON_BUILD_LOG_DIR="/var/log/pareton/sglang-baseline/$sglang_build_stamp" \
 python -m builder \
   --engine sglang \
@@ -226,12 +227,13 @@ at cancellation must be rebuilt. Do not assume that `TORCH_CUDA_ARCH_LIST=9.0`
 prunes this pinned SGLang recipe: its CMake explicitly emits SM90, SM100 and SM120
 code and builds both common-library variants plus attention extensions.
 
-Keep one compiler job on the observed 15-GiB VPS until compiler peak memory has
-been measured. Its eight vCPUs and 63-GiB swap do not establish enough RAM for
-multiple CUDA template compilations without heavy swapping. The reported 166 GiB
-free Docker disk needs no cache purge for this retry. Monitor compiler progress
-and current disk/memory use; the longer ceiling is not a reason to leave a stalled
-or resource-starved build running unexamined.
+The operator selected six concurrent jobs on the observed 8-vCPU, 15-GiB VPS.
+`MAX_JOBS=6` sets `CMAKE_BUILD_PARALLEL_LEVEL=6` and the trusted installer's
+`CARGO_BUILD_JOBS=6`. NVCC's internal thread count stays at one per compiler job;
+six jobs do not mean six NVCC threads per job. This override applies to the ops
+build, leaving production miner defaults unchanged. Monitor compiler progress,
+memory and swap use during the run. The source pin, compiler flags, cache IDs and
+shared storage lock remain unchanged.
 
 For vLLM, use `images/baseline/Dockerfile`, then run:
 

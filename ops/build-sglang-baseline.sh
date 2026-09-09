@@ -13,7 +13,9 @@ mkdir -p "$output_dir"
 # A cold native build exceeded twelve hours on the validator VPS. This limit is
 # ops-only; production miner builds retain their configured deadline.
 export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-172800}"
-export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-1}"
+# Operator-selected parallelism for this SGLang ops build. NVCC threads per job
+# remain one; MAX_JOBS also controls CMake and Rust build concurrency.
+export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-6}"
 export PARETON_BUILD_LOG_DIR="${PARETON_BUILD_LOG_DIR:-$output_dir/logs}"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
 engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
