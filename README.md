@@ -48,7 +48,7 @@ deployment prerequisites, and a local patch-hash command.
 | `campaign/`             | Profiles, manifests, seed CLI                 |
 | `chain/`                | Patch commitment parse + chain watcher/RPC    |
 | `gate/`                 | Patch validation gates a–d                    |
-| `builder/`              | Hermetic build + GHCR tagging                 |
+| `builder/`              | Hermetic build + GHCR tagging; [cache backup/restore](docs/build-cache.md) |
 | `bench/`                | Correctness / SLA harness                     |
 | `gpu/`                  | GPU pod rent/provision/destroy + remote bench |
 | `storage/`              | Pareton-presigned S3 uploads                  |
