@@ -9,7 +9,8 @@ re-install it on the box, so the two never drift.
 | Path                              | Installed to                    | Notes                                                            |
 | --------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
 | `systemd/pareton-api.service`     | `/etc/systemd/system/`          | uvicorn on `0.0.0.0:8000`                                        |
-| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Gate + bench worker                                              |
+| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds (`--queue submissions`)              |
+| `systemd/pareton-round-worker.service` | `/etc/systemd/system/`     | Round evaluation (`--queue rounds`)                              |
 | `systemd/pareton-watcher.service` | `/etc/systemd/system/`          | Chain ingest, `python -m worker.watcher`                         |
 | `systemd/pareton-weights.service` | `/etc/systemd/system/`          | Weight cadence, `python -m weights`. Holds the validator wallet. |
 | `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer                                    |
@@ -32,8 +33,47 @@ That is also why it needs re-installing by hand after a change here.
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
 separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
-and `pareton-weights` within a minute, and restarts `pareton-worker` on the
-next tick where no `submission_jobs` row is `running`.
+and `pareton-weights` within a minute. Each execution worker has its own pending
+restart. The round worker waits only for running rounds; the existing worker checks
+both queues to protect legacy combined processes. A busy build does not defer an
+idle round worker's update.
+
+Install `pareton-round-worker.service` and change the existing worker's command
+to `python -m worker.main --queue submissions`. Reinstall `deploy.sh` as well.
+The CLI defaults to combined mode, which checks rounds first. Only the separate
+round service can handle rounds arriving after a build has already blocked.
+
+Add `pareton-round-worker` and `pareton-weights` to the live Vector
+`sources.journald.include_units` and restart Vector before starting the round
+service. Edit only that allowlist: the live sink credentials differ from the repo
+copy. The PR deployment commands include this step.
+
+### Worker heartbeat alerts
+
+After both services are shipping logs, filter the existing Axiom
+`worker-heartbeat-absent` monitor to `pareton-worker.service`, then clone it as
+`round-worker-heartbeat-absent` with the second query below. Keep the current
+notifiers and evaluation frequency, use **Below 1 over 15 minutes**, and enable
+**Alert on no data** for each. The existing `_SYSTEMD_UNIT` field identifies the
+process, so the heartbeat payload does not need changing.
+
+```apl
+['pareton-prod']
+| where event == "heartbeat" and _SYSTEMD_UNIT == "pareton-worker.service"
+| summarize count()
+```
+
+```apl
+['pareton-prod']
+| where event == "heartbeat" and _SYSTEMD_UNIT == "pareton-round-worker.service"
+| summarize count()
+```
+
+Use two fixed filters: a grouped query can lose a missing service's group while
+the other continues reporting. These alerts detect absent processes or telemetry;
+progress stalls still require round phase/heartbeat monitoring. Adding weights
+to the allowlist resumes its telemetry on the next scheduled event, without
+forcing a weight submission or recovering previously discarded logs.
 
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.

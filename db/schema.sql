@@ -210,6 +210,8 @@ CREATE TABLE IF NOT EXISTS rounds (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'running', 'complete', 'void')),
   void_reason TEXT,
+  -- Scrubbed free text behind void_reason (round/void_detail.py). Public.
+  void_detail TEXT,
   incumbent_submission_id UUID REFERENCES submissions(id),
   winner_submission_id UUID REFERENCES submissions(id),
   leader_changed BOOLEAN,
@@ -230,6 +232,9 @@ CREATE TABLE IF NOT EXISTS rounds (
   completed_at TIMESTAMPTZ,
   UNIQUE (campaign_id, ordinal)
 );
+
+-- CREATE TABLE IF NOT EXISTS does not add columns to existing tables.
+ALTER TABLE rounds ADD COLUMN IF NOT EXISTS void_detail TEXT;
 
 -- At most one live round per campaign.
 CREATE UNIQUE INDEX IF NOT EXISTS rounds_one_live_per_campaign_idx
