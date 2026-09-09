@@ -21,6 +21,11 @@ from builder.digest import (
     mock_digest_from_patch_hash,
     resolve_image_repo_digest,
 )
+from builder.layer_cache import (
+    cache_arguments,
+    resolve_cache_ref,
+    stabilize_git_metadata,
+)
 from builder.lock import serialized_build_storage
 from builder.registry import engine_image_ref
 from campaign.engine import resolve_engine
@@ -318,6 +323,8 @@ def build_engine_image(
     image_ref_override: str | None = None,
     engine: dict[str, Any] | None = None,
     torch_cuda_arch_list: str | None = None,
+    layer_cache_from: str | None = None,
+    layer_cache_to: str | None = None,
 ) -> GateResult:
     """Build and optionally push an engine image tagged by patch_hash.
 
@@ -334,9 +341,26 @@ def build_engine_image(
     ``torch_cuda_arch_list`` is ops-only. Miner builds leave it unset and
     inherit ``TORCH_CUDA_ARCH_LIST`` from the pinned base image. vLLM rejects
     when that image declares none; SGLang may omit it.
+
+    ``layer_cache_from``/``layer_cache_to`` opt trusted empty-patch builds into
+    registry layer caching with normalized Git metadata. Export is independent
+    of the engine-image ``push`` setting; patched builds reject either option.
     """
     if _patch_is_empty(patch_bytes) and not allow_empty_patch:
         return GateResult.reject("empty_patch_not_allowed")
+
+    image_ref = image_ref_override or engine_image_ref(patch_hash)
+    try:
+        layer_args = cache_arguments(
+            layer_cache_from,
+            layer_cache_to,
+            image_ref=image_ref,
+            baseline_commit=baseline_commit,
+            base_image=base_image,
+            trusted=allow_empty_patch and _patch_is_empty(patch_bytes),
+        )
+    except ValueError as exc:
+        return GateResult.reject("build_config_invalid", error=str(exc))
 
     log_dir = log_dir or (
         config.BUILD_LOG_DIR / patch_hash.replace(":", "_").replace("/", "_")
@@ -392,7 +416,6 @@ def build_engine_image(
         return GateResult.reject("build_config_invalid", error=str(exc))
     (ctx / "Dockerfile").write_text(dockerfile)
 
-    image_ref = image_ref_override or engine_image_ref(patch_hash)
     log_path = log_dir / "build.log"
     log_path.write_text("", encoding="utf-8")
     _progress(f"work_root={root}")
@@ -449,6 +472,11 @@ def build_engine_image(
                 stderr=checkout.stderr[-2000:],
             )
 
+        if layer_args:
+            _progress("stabilize Git metadata for registry layer caching")
+            stabilize_git_metadata(repo_dir)
+            _docker_login_ghcr()
+
         # Miner builds stay --network=none. Empty-patch (a2b baseline) needs network for cmake.
         build_cmd = [
             "docker",
@@ -458,6 +486,7 @@ def build_engine_image(
             config.BUILDER_NAME,
             "--load",
             "--progress=plain",
+            *layer_args,
             *([] if allow_empty_patch else ["--network=none"]),
             "--build-arg",
             f"BASE_IMAGE={base_image}",
@@ -486,6 +515,11 @@ def build_engine_image(
                 **_sanitized_tail(log_path),
                 image_ref=image_ref,
             )
+
+        cache_evidence = {}
+        if layer_cache_to:
+            cache_evidence["layer_cache_ref"] = resolve_cache_ref(layer_cache_to)
+            _progress(f"layer_cache_ref={cache_evidence['layer_cache_ref']}")
 
         image_tag = image_ref
         if push:
@@ -521,6 +555,7 @@ def build_engine_image(
             image_ref=image_ref,
             image_tag=image_tag,
             build_log=str(log_path),
+            **cache_evidence,
             **pushed,
         )
     except subprocess.TimeoutExpired as exc:

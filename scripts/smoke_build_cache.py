@@ -7,6 +7,7 @@ Hub; pushes only to a disposable loopback registry. No GPU or Python extras need
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -30,7 +31,124 @@ def run(*args: str, **kwargs) -> str:
     return result.stdout.strip()
 
 
+def smoke_layers(root, source, base, registry, create_builder, builders) -> None:
+    # Use the production build path, with a tiny C recipe instead of an engine.
+    sys.path.insert(0, str(REPO))
+    import config
+    from builder.hermetic import build_engine_image
+
+    config.BUILDER_LOCK_PATH = root / "storage.lock"
+    config.GHCR_USERNAME = config.GHCR_TOKEN = ""
+    repo = root / "tiny-repo"
+    repo.mkdir()
+
+    def git(*args):
+        return run(
+            "git",
+            "-c",
+            "user.name=Cache Smoke",
+            "-c",
+            "user.email=cache@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            *args,
+            cwd=repo,
+        )
+
+    def write_source(message):
+        (repo / "hello.c").write_text(
+            '#include <stdio.h>\nint main(void) { puts("'
+            + message
+            + '"); return 0; }\n'
+        )
+        git("add", ".")
+        git("commit", "-m", message)
+        return git("rev-parse", "HEAD")
+
+    git("init", "-b", "main")
+    commit = write_source("layer cache works")
+    git("tag", "v1.0.0")
+    images = []
+
+    def build(builder, commit, suffix, cache_from=None, cache_to=None):
+        config.BUILDER_NAME = builder
+        image = f"{root.name}:{suffix}"
+        images.append(image)
+        result = build_engine_image(
+            baseline_repo=str(repo),
+            baseline_commit=commit,
+            base_image=base,
+            patch_bytes=b"",
+            patch_hash="sha256:" + "0" * 64,
+            allow_empty_patch=True,
+            push=False,
+            image_ref_override=image,
+            log_dir=root / suffix,
+            layer_cache_from=cache_from,
+            layer_cache_to=cache_to,
+            engine={
+                "name": "sglang",
+                "cache_dir": "/tmp/cache",
+                "entrypoint": ["/hello"],
+                "install_cmd": "git describe --tags --always > /source-version "
+                "&& ccache gcc -c hello.c -o /hello.o && gcc /hello.o -o /hello "
+                "&& cat /proc/sys/kernel/random/uuid > /build-marker",
+            },
+        )
+        if not result.ok:
+            raise RuntimeError(result.evidence)
+        marker = run(
+            "docker", "run", "--rm", "--entrypoint", "/bin/cat", image, "/build-marker"
+        )
+        output = run("docker", "run", "--rm", image)
+        return result.evidence, marker, output
+
+    try:
+        evidence, first_marker, output = build(
+            source, commit, "first", cache_to=f"{registry}/layers:test"
+        )
+        assert output == "layer cache works"
+        cache_ref = evidence["layer_cache_ref"]
+        run("docker", "buildx", "rm", source)
+        builders.remove(source)
+        target = create_builder("layers-restored")
+        # Advance the source repo before cloning the old pin again, like upstream.
+        next_commit = write_source("layer cache changed")
+        _, second_marker, output = build(target, commit, "second", cache_from=cache_ref)
+        assert output == "layer cache works"
+        assert first_marker == second_marker, (
+            "compilation ran again instead of reusing the layer"
+        )
+        print(
+            "PASS layers: fresh builder reused the full install layer after source builder deletion",
+            flush=True,
+        )
+        _, changed_marker, output = build(
+            target, next_commit, "changed", cache_from=cache_ref
+        )
+        assert output == "layer cache changed"
+        assert changed_marker != first_marker, (
+            "changed source reused stale build outputs"
+        )
+        print(
+            "PASS layers: changed source invalidated the layer and rebuilt correctly",
+            flush=True,
+        )
+    finally:
+        for image in images:
+            subprocess.run(["docker", "image", "rm", image], check=False, timeout=120)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--layers",
+        action="store_true",
+        help="Test registry layer reuse through the real builder",
+    )
+    args = parser.parse_args()
     name = "pareton-cache-smoke-" + uuid.uuid4().hex[:10]
     builders: list[str] = []
     registry_started = False
@@ -106,7 +224,7 @@ def main() -> None:
             base_context = root / "base"
             base_context.mkdir()
             (base_context / "Dockerfile").write_text(
-                "FROM alpine:3.22\nRUN apk add --no-cache ccache gcc musl-dev\n"
+                "FROM alpine:3.22\nRUN apk add --no-cache ccache gcc musl-dev git\n"
             )
             base_tag = f"{registry}/base:test"
             result_file = root / "base.json"
@@ -121,6 +239,9 @@ def main() -> None:
                 str(result_file),
             )
             base = f"{registry}/base@{json.loads(result_file.read_text())['containerimage.digest']}"
+            if args.layers:
+                smoke_layers(root, source, base, registry, create_builder, builders)
+                return
             context = root / "compile"
             context.mkdir()
             (context / "hello.c").write_text(

@@ -1,4 +1,4 @@
-# Back up and restore compiler caches
+# Back up and restore build caches
 
 `python -m builder.cache` copies Pareton's commit-scoped `ccache` between a
 BuildKit builder and a registry such as GHCR. Run it after a successful trusted
@@ -10,8 +10,9 @@ also requires the recipe and `--stream-build-logs` support from
 [PR #148](https://github.com/Pareton-ai/pareton/pull/148). Include those changes
 alongside this cache CLI; the cache PR alone does not add the native build recipe.
 
-This command transfers compiler cache entries. It does not transfer Docker layer
-caches, Rust build directories, or inference-time caches. Pull a previously
+The snapshot command transfers compiler cache entries. Complete build layers use
+the separate options below. Snapshots do not transfer Rust build directories or
+inference-time caches. Pull a previously
 published engine image if you only need to run that exact engine build.
 
 ## Back up a completed build
@@ -71,6 +72,55 @@ configured. Loading `.env` follows the usual shell setup; this CLI does not load
 Budget disk space for both the cache and its snapshot layers. Registry downloads
 and local copies can still take time for a large cache.
 
+## Cache complete baseline build layers
+
+The trusted `python -m builder --empty-patch` command also accepts:
+
+- `--layer-cache-to REGISTRY_TAG`: export build layers with `mode=max` while
+  building, even if engine-image `--push` is omitted. Use a different tag from
+  the engine image and compiler snapshot. Export failures fail the command.
+- `--layer-cache-from REGISTRY_DIGEST`: import a trusted, digest-pinned layer
+  cache on a later build. A missing/unusable import can fall back to rebuilding.
+
+For example, append this to the initial trusted build command:
+
+```bash
+--layer-cache-to "ghcr.io/pareton-ai/pareton-buildcache:sglang-${COMMIT}"
+```
+
+A successful CLI build reports `layer_cache_ref=...@sha256:...` on stderr.
+Save that reference outside the VM. On a new builder, append:
+
+```bash
+--layer-cache-from "$(cat layer-cache-ref.txt)"
+```
+
+Here `layer-cache-ref.txt` contains only the reported digest reference, without
+`layer_cache_ref=`. Both flags may be combined to import an older cache and
+publish an updated one. Enable export during the producing build; the standalone
+ccache snapshot command does not export layer-cache metadata.
+
+[Registry export](https://docs.docker.com/build/cache/backends/registry/) requires a compatible Buildx builder: the `docker-container`
+driver, or the `docker` driver with the containerd image store enabled. Select an
+already compatible builder with `PARETON_BUILDER_NAME`. This feature does not
+change the validator's Docker driver, image store, or GC settings.
+
+An identical build can reuse the entire installation layer, skipping compilation,
+linking, and packaging. Source, base image, platform, recipe, and build arguments
+must match. Opt-in builds normalize `.git` into a deterministic pack and index,
+retaining the pinned commit's history and reachable tags for package versioning.
+Clone-specific refs, logs, config, and index timestamps are excluded. Repacking
+adds some CPU/disk work; different Git versions can still affect cache keys.
+Builds without these options keep their existing source context.
+
+Changed source normally invalidates the installation layer. Restore the compiler
+snapshot too when you want unchanged compilation units to remain reusable across
+commits. A layer hit does **not** populate a fresh host's ccache mount. Registry
+layer imports/exports are rejected for patched builds; miner permissions and
+worker/campaign configuration stay unchanged. Rust/CMake directories present in
+an exported layer are reused with that layer, not independently restored across
+changed builds. Inference caches are outside this workflow.
+
 ## Seed a later commit
 
 Use a previous snapshot as `--image-ref` and set `--baseline-commit` to the full
@@ -120,3 +170,13 @@ cache hits and correct executable output after the source builder was deleted.
 All test containers, builders, and cache volumes were cleaned up. This validates
 cache transfer and reuse with unchanged C source across synthetic commit IDs;
 it does not measure CUDA build speedups or test Docker Hub/GHCR publication.
+
+Run `python scripts/smoke_build_cache.py --layers` to test the full baseline
+builder with a tiny C recipe. It exports a registry layer cache, deletes the
+source builder, advances the source repository, and rebuilds the original pin
+on a fresh builder. An unchanged random marker proves the install command was
+skipped. Building the new commit must change the marker and executable output.
+
+Verified on 2026-09-09: the fresh-builder installation layer was reused after the
+source builder was deleted, and the changed commit rebuilt with the new output.
+This tests layer reuse through the real builder, not a CUDA performance claim.

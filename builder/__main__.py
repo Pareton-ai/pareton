@@ -63,12 +63,25 @@ def main(argv: list[str] | None = None) -> int:
             "Omit to inherit the value from the base image."
         ),
     )
+    p.add_argument(
+        "--layer-cache-from",
+        default=None,
+        help="Trusted empty-patch build: import a digest-pinned registry layer cache",
+    )
+    p.add_argument(
+        "--layer-cache-to",
+        default=None,
+        help="Trusted empty-patch build: export layers to a separate registry tag (also with --no-push)",
+    )
     args = p.parse_args(argv)
 
     if args.empty_patch and args.patch_file is not None:
         p.error("use either --empty-patch or --patch-file, not both")
     if not args.empty_patch and args.patch_file is None:
         p.error("provide --patch-file or --empty-patch")
+
+    if (args.layer_cache_from or args.layer_cache_to) and not args.empty_patch:
+        p.error("layer cache options require --empty-patch")
 
     patch_bytes = b"" if args.empty_patch else args.patch_file.read_bytes()
     patch_hash = "sha256:" + hashlib.sha256(patch_bytes).hexdigest()
@@ -86,10 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         image_ref_override=args.image_ref,
         engine=None if args.engine is None else preset(args.engine),
         torch_cuda_arch_list=args.torch_cuda_arch_list,
+        layer_cache_from=args.layer_cache_from,
+        layer_cache_to=args.layer_cache_to,
     )
     if not result.ok:
         print(f"FAIL {result.reason}: {result.evidence}", file=sys.stderr)
         return 1
+    if result.evidence.get("layer_cache_ref"):
+        print(f"layer_cache_ref={result.evidence['layer_cache_ref']}", file=sys.stderr)
     image = result.evidence.get("image_ref") or result.evidence.get("image_tag")
     log = result.evidence.get("build_log")
     if log:
