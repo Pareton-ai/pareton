@@ -1248,46 +1248,51 @@ accounted for serialization of builds but missed the resulting round starvation.
 execution from submission builds`, is independent of the unfinished SGLang image.
 It lives on `codex/round-worker-isolation`, worktree
 `/tmp/pareton-round-worker-isolation`, based on main commit `5d42b91`.
-The current implementation commit is `56300a1`.
+The review-fix commit is `01d1c05`, superseding scope-reduction checkpoint `56300a1`.
 
 The original `13941d4` implementation was too broad. The operator requested a
-minimal revision. The final diff is six files, 130 insertions and nine deletions:
+minimal revision. Review then identified two safeguards that reduction removed:
+an idle round worker's deployment must remain independent of blocked builds, and
+combined mode must check eligible pending rounds before submissions. The fix now:
 
 - Add a queue selector to the worker. `--queue submissions` claims only gate/build
-  jobs; `--queue rounds` claims only rounds. Default combined behavior and its
-  original submission-first claim order remain unchanged.
+  jobs; `--queue rounds` claims only rounds. Default combined mode checks rounds
+  first. It cannot preempt a build for a round arriving after that build blocks.
 - Configure the existing service for submissions and add a separate round service.
-- Extend the existing deployment idle probe to include running rounds, and restart
-  the installed round service in the existing guarded block. Keep one pending
-  flag. Either busy queue defers both restarts; running workers remain independent.
-- Keep one regression test demonstrating that a round evaluates in a separate
-  process while a submission waits on the real builder flock.
+- Keep separate pending restart flags in a small loop in the existing deploy
+  script. The round service probes rounds only; the existing worker probes both
+  queues to protect legacy combined processes. Missing units retain their flag,
+  and failed database probes defer restart.
+- Test real-process separation during a builder lock wait, combined-mode round
+  priority and fallback, and independent deployment restarts with deferred retries.
 - Add a short installation note in `ops/README.md`.
 
 The heartbeat changes, pending-round counter, Vector changes, deployment helper
-refactor, separate restart flag, combined-mode priority change, extra tests and
-long rollout document were removed. Builder locking, ccache and campaign pins
-remain unchanged. New vLLM builds still wait behind a manual SGLang build; rounds
+refactor and long rollout document remain removed. Builder locking, ccache and
+campaign pins remain unchanged. New vLLM builds still wait behind a manual SGLang build; rounds
 using built images execute independently.
 
 ### Verification
 
-The reduced offline suite passed **1,184 tests, 39 skipped, five deselected** in
-66.48 seconds, with both database URLs disabled and Docker tests excluded as in CI.
-Log: `/tmp/pareton-round-worker-minimal-tests.log`. The strengthened regression
-was also rerun individually and passed. Its persistence and evaluation handlers
-are mocked; processes and the storage lock are real. Offline deployment probes
-confirmed idle restart and deferral for an active submission, active round or
-failed database probe. Ruff formatting/lint and shell syntax checks passed.
+The review fixes passed **1,191 tests, 39 skipped, five deselected** in 70.22 seconds,
+with both database URLs disabled and Docker tests excluded as in CI. Log:
+`/tmp/pareton-round-worker-review-tests.log`. Eight focused regression cases also
+passed independently. The new deployment tests execute the actual shell script
+and SQL probes with offline database and service stand-ins. They cover an idle
+round service updating during a running submission, active rounds protecting both
+services (including legacy combined workers), failed probes, missing units and
+retrying only the still-owed restarts without another commit. Combined-mode tests
+check round priority and submission fallback. The real-process builder lock test
+continues to pass. Ruff formatting/lint and shell syntax checks passed.
 
-Linux CI for `56300a1` passed on Python 3.10 and 3.11 in
-[34325787607](https://github.com/Pareton-ai/pareton/actions/runs/34325787607), and
+Linux CI for `01d1c05` passed on Python 3.10 and 3.11 in
+[34327048475](https://github.com/Pareton-ai/pareton/actions/runs/34327048475), and
 formatting passed in
-[34325787599](https://github.com/Pareton-ai/pareton/actions/runs/34325787599).
-The PR remains open and unmerged; the separate automated review is pending.
-Earlier passing CI and the 1,200-test result belonged to the superseded larger
-patch. The initial unfiltered run also hit two existing Docker container-name
-conflicts; no existing containers were removed to resolve those conflicts.
+[34327048672](https://github.com/Pareton-ai/pareton/actions/runs/34327048672).
+The PR is open and unmerged; the separate automated review remains pending.
+The earlier 1,184-test and 1,200-test results belong to superseded revisions. The
+initial unfiltered run hit existing Docker container-name conflicts; no existing
+containers were removed to resolve those conflicts.
 
 ### Deployment remains an operator step
 
@@ -1313,7 +1318,7 @@ ExecStart=
 ExecStart=/opt/pareton/.venv/bin/python -m worker.main --queue submissions
 UNIT
 systemctl daemon-reload
-touch .deploy-pending
+touch .deploy-pending .deploy-rounds-pending
 if systemctl is-active --quiet pareton-worker; then
     systemctl kill --kill-who=main --signal=SIGTERM pareton-worker
 fi
