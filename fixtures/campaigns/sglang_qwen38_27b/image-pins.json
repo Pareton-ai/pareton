@@ -1,5 +1,8 @@
 {
-  "build_base_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:38c742f147cb8926200e429022b7979b5d359578e6d790c62def91cc2ab78a05",
-  "engine_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11",
-  "build_run": "https://github.com/Pareton-ai/pareton/actions/runs/34213253195"
+  "build_base_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:97e1f4e868fc988355f91bb20a6d6f3a9b90c3a901d030730a2646ecbdf00688",
+  "engine_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+  "probe_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:6280aeb5d3c7c0383c6830ed29f3d1c4c02b5da4e534404bd248a1a8c5aa5873",
+  "probe_patch_sha256": "b6bf2cc50994218e504745fa0cc77c16dc1aca4dbb335c84e18c67864b3a3d34",
+  "validation_evidence": "validation-evidence.json",
+  "round_report": "validation/bench_report.json"
 }

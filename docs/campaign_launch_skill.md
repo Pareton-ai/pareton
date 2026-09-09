@@ -262,7 +262,8 @@ Use explicit values, then verify that an honest baseline passes and that the
 harness extracts enough logprobs. Record actual observations separately.
 
 Build a full round request through `worker.round_job.build_round_request`, using
-the baseline engine as an unchanged candidate. This ensures the dry run carries
+the baseline engine as an unchanged candidate, or the native mutation probe after
+its dedicated GPU checks pass. This ensures the dry run carries
 the same launch arguments, engine name, cache path and thresholds as production.
 Handwritten SGLang requests must set `name: "sglang"` and
 `cache_dir: "/root/.cache/sglang"` on every engine. Omitting the name selects vLLM
@@ -336,9 +337,16 @@ and `bench.model.dtype: "bfloat16"`. Its safetensors weights total about 28.75 G
 before KV cache and workspace. The workload pin is in
 `fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json`.
 
-The earlier passing GPU round used the separate BF16 checkpoint. It is historical
-evidence only. The native images and FP8 configuration require their own GPU
-validation before opening this campaign; current progress is recorded in `HANDOFF.md`.
+The native images and this FP8 configuration passed H200 validation on 2026-09-09
+with harness commit `bd5aae39fce676d69daee80ee6e3e4e42e663826`. The mutation
+candidate passed correctness at full coverage and received score 0.0. Its p99 E2E
+relative range was 2.78%, below the unchanged 33.5% reproducibility bar. Baseline
+drift was 0.29%, below the unchanged 5% ceiling. Native CUDA/JIT/Rust checks and the
+exact 8192-token scorer probe also passed. All validation pods and volumes were
+deleted, with provider API readback. See the
+[validation record](../fixtures/campaigns/sglang_qwen38_27b/validation-evidence.json)
+and [full round report](../fixtures/campaigns/sglang_qwen38_27b/validation/bench_report.json).
+The earlier BF16/Python-only measurements remain historical evidence in `HANDOFF.md`.
 
 Sample campaign entries, in addition to the source and image pins:
 
@@ -385,10 +393,11 @@ Sample campaign entries, in addition to the source and image pins:
 
 The seed command supplies both image fields and signs the completed manifest.
 Sample fields are in `fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json`.
-The companion `image-pins.json` records published images and build evidence.
-While native validation is in progress, those files still contain the historical
-BF16/Python-only image pins. Replace them with the successful native build's pins
-before launching. They contain no campaign ID and do not represent a created row.
+The companion `image-pins.json` records the validated native serving and mutation
+image digests. The sample uses FP8 weights, the native installer, Rust/CMake
+allowances and the nested AOT test exclusions. It contains no campaign ID and
+does not represent a created row. Use its `engine_image` for both campaign image
+fields. The dependency build base and mutation image have separate roles.
 
 After successful image and GPU checks, run this once with the published engine ref:
 

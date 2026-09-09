@@ -1,7 +1,7 @@
 {
   "baseline_repo": "https://github.com/sgl-project/sglang.git",
   "baseline_commit": "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc",
-  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
   "gpu_skus": [
     "H200"
   ],
@@ -13,7 +13,8 @@
   "scoring_config_sha256": null,
   "scoring_config_url": null,
   "allowed_paths": [
-    "python/sglang/**"
+    "python/sglang/**",
+    "rust/**"
   ],
   "denied_paths": [
     "tests/**",
@@ -25,23 +26,27 @@
     "**/setup.py",
     "**/setup.cfg",
     "**/requirements*.txt",
-    "**/CMakeLists.txt",
     "test/**",
     "benchmark/**",
-    "python/sglang/test/**"
+    "python/sglang/test/**",
+    "python/sglang/kernels/aot/tests/**",
+    "python/sglang/kernels/aot/python/sgl_kernel/test_utils.py",
+    "python/sglang/kernels/aot/python/sgl_kernel/testing/**",
+    "rust/**/tests/**",
+    "rust/**/benches/**"
   ],
   "status": "open",
   "priority_metric": "gpu_hours",
   "success_threshold": ">=10% GPU-hour reduction at SLA",
   "bench": {
     "model": {
-      "hf_repo": "Qwen/Qwen3.8-27B",
-      "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+      "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
       "dtype": "bfloat16",
-      "quantization": null,
+      "quantization": "fp8",
       "max_model_len": 8192
     },
-    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:18cc454de82eebf0fcc3afae9f843645fa1bb2ba64f742cf3b8bba3af5a7ae11",
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
     "gpu_count": 1,
     "serve_args": [
       "--tp-size",
@@ -64,7 +69,7 @@
   },
   "engine": {
     "name": "sglang",
-    "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
+    "install_cmd": "/usr/local/bin/pareton-install-sglang",
     "entrypoint": [
       "python3",
       "-m",

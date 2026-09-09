@@ -5,6 +5,11 @@ and saved GPU reports. Repository: `/Users/arpantripathi/Documents/Github/pareto
 Times below are UTC. Resource and database observations are timestamped historical
 checks, not a guarantee about changes made by other operators after those checks.
 
+Native/FP8 validation completed on 2026-09-09. Section 19 records the published
+serving and mutation images, production-limit miner rebuild, passing H200 probes
+and full round, and verified cleanup. The sample fixtures now carry these native
+FP8 pins. Earlier sections retain their historical status and image references.
+
 The subsequent PR review fix for scorer context exhaustion is recorded in section
 12. The resumed native/FP8 work and the operator's VPS launch plan are in section
 13. The native build failure and direct VPS command are recorded in section 14.
@@ -1425,3 +1430,84 @@ from both queues to submissions after legacy combined processes are gone, is
 recorded for later work. It is deliberately unchanged in this PR; no issue was
 created because Linear tooling is unavailable. The SGLang image/FP8 campaign
 work, including the six-job operator choice in section 17, remains unchanged.
+
+## 19. Native/FP8 validation completed
+
+On 2026-09-09, the PR's native/FP8 acceptance checks completed using harness
+commit `bd5aae39fce676d69daee80ee6e3e4e42e663826` and the pinned SGLang commit
+`4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. The subsequent fixture and evidence
+updates do not change application code. No campaign was seeded and no production
+deployment was performed during this validation.
+
+The published images are:
+
+- Dependency build base:
+  `ghcr.io/pareton-ai/pareton-baseline@sha256:97e1f4e868fc988355f91bb20a6d6f3a9b90c3a901d030730a2646ecbdf00688`.
+- Native serving image, used for both campaign image fields:
+  `ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431`.
+- Native mutation candidate:
+  `ghcr.io/pareton-ai/pareton-baseline@sha256:6280aeb5d3c7c0383c6830ed29f3d1c4c02b5da4e534404bd248a1a8c5aa5873`.
+
+The serving image was recovered from the operator's completed local build and
+published to GHCR, then read back by digest. Its recipe at `4e55f24` matches the
+SGLang installer and builder recipe at the validated harness head. The trusted
+baseline recorded 394 ccache hits and one miss.
+
+The six-file CUDA/CMake/JIT/Rust mutation passed the actual campaign surface gate
+and rebuilt through `python -m builder` against the serving digest. It used the
+production defaults of one build job and a 7200-second timeout, with network
+disabled and a read-only shared compiler cache. Native installation took 341.3
+seconds and recorded 114 cache hits and six misses. The rebuilt Rust extension
+exported `PARETON_NATIVE_PROBE=41` in an offline CPU import.
+
+On H200, the custom registered CUDA operation and JIT operation returned exact
+results over 1027 elements, and the Rust marker passed. The FP8 scorer accepted
+8192 input token IDs without truncation and returned 8191 finite scored positions
+plus one excluded generated token. The scorer used context 8199 and the context
+override; replay retained 8192.
+
+The full FP8 round used the real worker-generated request, 32 sampled prompts,
+two untimed warmups and three measured repetitions for baseline, candidate and
+closing drift. Both baseline and candidate had 100% scoring coverage. The
+candidate passed correctness over 1218 positions, with mean logprob -0.101219,
+and received status `scored`, score 0.0. The mutation adds separately tested
+operations and a marker; it does not claim an inference speed improvement.
+Candidate p99 E2E relative range was 2.78%, below the unchanged 33.5% bar. Baseline
+drift was 0.29%, below the unchanged 5% ceiling. The pure production ranker
+accepted the report without voiding the round or seating a new leader.
+
+The first allocation completed the native/context probes but stopped before its
+round because the external validation driver treated an rsync destination
+directory as a log file. That driver was corrected. A replacement pod failed at
+provider startup; a different H200 then completed the full round. Every attempt's
+pod and volume was removed and checked through the provider API. All attempts
+totaled approximately 34 minutes from start to cleanup, within the approved
+three-hour budget and $3/hour compute cap. The saved 15-minute TTL, price cap and
+volume defaults were unchanged.
+
+The builder's static GC preflight found no explicit disable flag in its daemon
+file. The running Docker 27.3.1 worker reported no GC policies, consistent with
+that version's [GC implementation](https://github.com/moby/moby/blob/v27.3.1/builder/builder-next/controller.go#L401-L438).
+Both observations are recorded. No daemon configuration, restart or cache prune
+was performed; persistent builders should retain the launch guide's explicit
+`builder.gc.enabled=false` setting.
+
+The sample fixtures now use these native images, the FP8 model revision
+`017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, native installer, Rust/CMake allowances
+and nested AOT test exclusions. The
+[validation record](fixtures/campaigns/sglang_qwen38_27b/validation-evidence.json)
+contains pins, cache receipts, probe results, score and drift evidence, sampling
+receipt, test results and cleanup checks. The
+[full round report](fixtures/campaigns/sglang_qwen38_27b/validation/bench_report.json)
+retains measured timings. Full logs and request evidence are saved under
+`out/sglang-native-fp8/validation-20260909/` locally and
+`/opt/pareton-sglang-validation-20260909/out/sglang-native-fp8/` on the builder.
+
+The offline suite passed 1261 tests with 41 skipped and both database URLs
+disabled. Formatting passed for 180 Python files. The vLLM comparison against
+main `055a602` matched 36 Dockerfiles, four scorer specs, eight worker requests,
+four seeded manifests, 24 HTTP bodies, 56 correctness cases and three SLA roles.
+The worker requests differ only by the explicit default engine-name field. The
+two audit findings are fixed, and the existing context-window review thread is
+resolved. Production rollout and one-time campaign creation remain separate
+operator actions after merge.
