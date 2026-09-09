@@ -43,6 +43,38 @@ to `python -m worker.main --queue submissions`. Reinstall `deploy.sh` as well.
 The CLI defaults to combined mode, which checks rounds first. Only the separate
 round service can handle rounds arriving after a build has already blocked.
 
+Add `pareton-round-worker` and `pareton-weights` to the live Vector
+`sources.journald.include_units` and restart Vector before starting the round
+service. Edit only that allowlist: the live sink credentials differ from the repo
+copy. The PR deployment commands include this step.
+
+### Worker heartbeat alerts
+
+After both services are shipping logs, filter the existing Axiom
+`worker-heartbeat-absent` monitor to `pareton-worker.service`, then clone it as
+`round-worker-heartbeat-absent` with the second query below. Keep the current
+notifiers and evaluation frequency, use **Below 1 over 15 minutes**, and enable
+**Alert on no data** for each. The existing `_SYSTEMD_UNIT` field identifies the
+process, so the heartbeat payload does not need changing.
+
+```apl
+['pareton-prod']
+| where event == "heartbeat" and _SYSTEMD_UNIT == "pareton-worker.service"
+| summarize count()
+```
+
+```apl
+['pareton-prod']
+| where event == "heartbeat" and _SYSTEMD_UNIT == "pareton-round-worker.service"
+| summarize count()
+```
+
+Use two fixed filters: a grouped query can lose a missing service's group while
+the other continues reporting. These alerts detect absent processes or telemetry;
+progress stalls still require round phase/heartbeat monitoring. Adding weights
+to the allowlist resumes its telemetry on the next scheduled event, without
+forcing a weight submission or recovering previously discarded logs.
+
 **During a maintenance window, stop this timer first.** Stopping any other unit
 while the timer is live means the timer may restart it underneath you.
 
