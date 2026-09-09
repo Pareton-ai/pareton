@@ -103,3 +103,10 @@ builders using the original and a different synthetic commit SHA, verifies direc
 compiler-cache hits, and checks the executable's output. No vLLM/SGLang code is
 built. It removes its builders and registry on exit and leaves the selected
 Docker builder unchanged.
+
+Verified on 2026-09-09 with Docker Desktop ARM64, Alpine 3.22, GCC 14.2.0, and
+ccache 4.11.3: both backups succeeded, and all four restores produced direct
+cache hits and correct executable output after the source builder was deleted.
+All test containers, builders, and cache volumes were cleaned up. This validates
+cache transfer and reuse with unchanged C source across synthetic commit IDs;
+it does not measure CUDA build speedups or test Docker Hub/GHCR publication.
