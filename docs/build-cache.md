@@ -83,3 +83,23 @@ Only restore snapshots produced by a trusted baseline builder. A digest pins
 content, not its trustworthiness. Miner builds keep their existing read-only
 cache access, and neither worker configuration nor campaign manifests gain a
 cache-import setting.
+
+## Smoke test without an engine build
+
+From the repository root, run:
+
+```bash
+python scripts/smoke_build_cache.py
+```
+
+This requires a local Docker Engine and Buildx, with access to pull Alpine,
+BuildKit, and `registry:2` from Docker Hub. It needs no GPU or extra Python
+packages. The test publishes only to a temporary registry bound to loopback.
+
+The script compiles and runs a tiny C program, checks a cold compiler-cache miss,
+and backs up snapshots under both engine labels. It then removes the source
+builder and its cache volume. For each label, it restores into separate fresh
+builders using the original and a different synthetic commit SHA, verifies direct
+compiler-cache hits, and checks the executable's output. No vLLM/SGLang code is
+built. It removes its builders and registry on exit and leaves the selected
+Docker builder unchanged.
