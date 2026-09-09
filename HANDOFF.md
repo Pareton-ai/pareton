@@ -9,6 +9,8 @@ The subsequent PR review fix for scorer context exhaustion is recorded in sectio
 12. The resumed native/FP8 work and the operator's VPS launch plan are in section
 13. The native build failure and direct VPS command are recorded in section 14.
 The VPS twelve-hour timeout and updated retry are recorded in section 15.
+The production round starvation incident and independent worker fix are recorded
+in section 16. Deploy that fix separately from the unfinished native image work.
 Sections 1 through 11 describe the original handoff and its historical image
 pins and BF16 GPU measurements; do not use those old pins for the native campaign.
 
@@ -1225,3 +1227,128 @@ No VPS retry was launched by the assistant. The operator still needs to produce
 the serving digest before native mutation/cache checks and FP8 GPU validation can
 finish. The source pin, FP8 model pin, path policy and zero-emission campaign plan
 remain unchanged. No campaign, GPU allocation or production deployment occurred.
+
+## 16. Isolate rounds from submission builds
+
+On 2026-09-09 the operator reported that the manual SGLang build had blocked the
+ongoing vLLM campaign for roughly twelve hours and that a round had to be fired
+manually with SQL. The supplied production timeline for 2026-09-08 was:
+
+| UTC | Reported event |
+| --- | --- |
+| 16:51:15 | Manual SGLang warm build, PID 3889046, acquired `/opt/pareton/.pareton-work/builder-storage.lock`. |
+| 16:52:52 | `pareton-worker` claimed submission job 120 for a vLLM patch. |
+| 16:53:11 | Job 120 entered `building`. Worker PID 3832984 blocked in `locks_lock_inode_wait` while acquiring that same lock. |
+| 21:04:40 | The watcher created round 32 for campaign `7e0462e4-5806-44ac-9f5b-af0542a4bb86`; no execution process could claim it. |
+
+These are operator-provided observations, not a new SSH inspection. The current
+state of job 120, round 32 and the manual build was not queried or modified.
+
+Source review confirmed the cause. `worker.main.run_once` originally processed a
+submission synchronously before checking the round queue. The builder decorator
+waits in blocking `flock` before entering `build_engine_image`, so the build's own
+timeout does not bound that wait. Prioritizing `claim_pending_round` alone cannot
+help when the round is created after the same process has already blocked.
+
+Section 14 correctly described serialization of vLLM and SGLang builds but did
+not account for the resulting round starvation in the combined worker. The
+production queue split below is required to keep built-image rounds moving while
+the shared builder storage lock remains held.
+
+### Implementation and review
+
+The fix is independent of the SGLang feature branch and can ship before its native
+image build finishes:
+
+| Item | State |
+| --- | --- |
+| Pull request | [PR #149](https://github.com/Pareton-ai/pareton/pull/149), `fix: isolate round execution from submission builds` |
+| Branch | `codex/round-worker-isolation` |
+| Implementation commit | `13941d4` |
+| Base | `origin/main` at `5d42b914b6c5b70522bc717b0bbcdd67d1257b8b` |
+| Local worktree | `/tmp/pareton-round-worker-isolation` |
+| Rollout guide | [ops/worker-queues.md](https://github.com/Pareton-ai/pareton/blob/codex/round-worker-isolation/ops/worker-queues.md) |
+
+- Add `--queue submissions` and `--queue rounds` to the existing worker CLI.
+  Production runs each in its own process. The default `--queue all` remains
+  compatible with local invocations and now checks pending rounds first.
+- `pareton-worker.service` becomes a submission gate/build worker. The new
+  `pareton-round-worker.service` handles round claims, provisioned GPU evaluation,
+  scoring and teardown. It has no builder GC startup dependency and never claims
+  submission jobs or enters the hermetic builder.
+- Keep the existing atomic round claim and one-live-round-per-campaign database
+  constraint. No schema change, campaign reseed, new image or model pin is needed.
+- Give each service its own deferred deployment restart flag. The round worker's
+  probe checks running rounds independently of submission builds. The existing
+  worker checks both queues to protect older combined processes during migration.
+  A failed database probe defers restart. A missing round unit is skipped while
+  retaining its pending restart for installation.
+- Heartbeats identify their queue and report its pending depth. Round depth
+  includes capacity backoff. Add the new service to the repo Vector allowlist;
+  live log shipping and per-role heartbeat monitors still require operator setup.
+- Preserve all builder storage locking, source-derived ccache mounts, cleanup
+  behavior and production build deadlines. New vLLM builds can still wait behind
+  a manual SGLang build. Rounds using already built images have their own process.
+
+### Validation
+
+The CI-equivalent offline suite passed **1,200 tests, 39 skipped, 5 deselected** in
+71.51 seconds using `pytest tests -q -m 'not docker'`, with both database URLs
+disabled. Log: `/tmp/pareton-round-worker-offline-tests.log`.
+
+The process regression holds the real builder storage flock, starts a submission
+worker that waits for it, sends SIGTERM to request a graceful drain, and starts a
+separate round worker. The round completes while the submission worker is still
+blocked. After the lock is released, the submission finishes and the drained
+worker exits. Persistence and GPU evaluation are mocked; the OS lock, processes
+and signal handling are real. Additional tests cover queue isolation, combined
+priority, CLI selection, per-queue heartbeats and deployment restart behavior.
+
+The initial unfiltered `pytest tests -q` run reported 1,201 passed, 41 skipped and
+two Docker integration failures. Existing containers occupied the fixed names
+`pareton-bench-itpub0000000-baseline` and
+`pareton-bench-it2en0000000-baseline`. Those containers were left in place. The
+offline run uses the same Docker exclusion as CI. Both runs had two existing
+FastAPI/Starlette deprecation warnings. Unfiltered log:
+`/tmp/pareton-round-worker-tests.log`.
+
+Ruff formatting, focused lint, shell syntax and `git diff --check` passed. The
+rollout's shell blocks and new unit structure were checked locally; no claim is
+made that the unit was validated by running systemd on this macOS workspace.
+
+PR #149's Linux offline CI passed on Python 3.10 and 3.11 in
+[run 34324542587](https://github.com/Pareton-ai/pareton/actions/runs/34324542587).
+The pinned Ruff 0.15.21 formatting check passed in
+[run 34324542593](https://github.com/Pareton-ai/pareton/actions/runs/34324542593).
+The PR is open and ready for review, unmerged. The separate automated code review
+was still pending at this checkpoint.
+
+### Deployment and continuation
+
+No production deployment, service restart, SQL change or GPU rental was performed
+for this fix. A code pull alone does not install a new service or change the live
+worker's command. After merging PR #149, follow its rollout guide to:
+
+1. Pause the deploy timer and serialize installation with the deploy lock.
+2. Install the updated script at `/usr/local/bin/pareton-deploy` and the round unit
+   under `/etc/systemd/system/`. A repository pull does not replace that script.
+3. Apply a command-only drop-in for `pareton-worker` so live restart policy and
+   timeout overrides are preserved. Signal only its Python process to drain,
+   allowing its current build to finish without starting a systemd stop timeout.
+4. Enable the separate round worker, resume deployment and inspect its journal.
+   An old combined worker may finish a round it already owns; if other campaigns
+   are pending, wait for that round to finish before starting the new service when
+   strictly one GPU round at a time is required during migration.
+5. Add the round service to live Vector log collection while preserving its
+   existing credentials. Monitor each execution role separately.
+
+Do not reset or replay round 32 if the operator has already completed it. The new
+worker uses the normal pending queue and needs no manual SQL round trigger.
+
+This handoff remains on `arpan/sglang-campaigns`; worker implementation is on the
+independent hotfix branch. Bring the merged main fix into the SGLang branch before
+its eventual production deployment. PR #148's native serving digest, mutation and
+cache receipts, FP8 GPU validation and zero-emission campaign launch remain
+unfinished as described in section 15. The private technical decision record was
+updated; Linear tools are unavailable. Unrelated `docs/production-map.md` and
+`idempotent.diff` were preserved.
