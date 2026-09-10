@@ -47,6 +47,7 @@ def _cdn(monkeypatch):
     monkeypatch.setattr(config, "S3_REGION", "us-east-2")
     monkeypatch.setattr(config, "S3_ENDPOINT_URL", "")
     monkeypatch.setattr(config, "COMPETITION_START_DATETIME", None)
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", frozenset())
     monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url, **_kwargs: PATCH)
     monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: None)
     watcher._failed_hash_checks.clear()
@@ -308,6 +309,35 @@ def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
 def test_ingest_with_fee_rejects_missing_proof(fee_on, inserted):
     sid = watcher.ingest_commitment(_com())
     assert sid is None
+    assert inserted == {}
+
+
+@pytest.mark.parametrize("proof", [{}, {"payment_block": 900, "payment_tx": 2}])
+def test_exempt_hotkey_skips_fee_without_consuming_proof(
+    monkeypatch, fee_on, inserted, proof
+):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", {"hk1", "dev2"})
+    monkeypatch.setattr(
+        watcher, "check_fee_proof", lambda *_: pytest.fail("exempt fee checked")
+    )
+    assert watcher.ingest_commitment(_com(**proof)) == "sid"
+    assert inserted["payment_block"] is None
+    assert inserted["payment_tx"] is None
+    assert inserted["patch_fingerprint"] == patch_fingerprint_bytes(PATCH)
+
+
+@pytest.mark.parametrize("exempt", [{"hk2"}, {"ck1"}, {"HK1"}, {"hk"}])
+def test_fee_exemption_requires_exact_submitting_hotkey(
+    monkeypatch, fee_on, inserted, exempt
+):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", exempt)
+    assert watcher.ingest_commitment(_com()) is None
+    assert inserted == {}
+
+
+def test_exempt_hotkey_still_requires_patch_integrity(monkeypatch, fee_on, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", {"hk1"})
+    assert watcher.ingest_commitment(_com(), fetcher=lambda _: b"wrong patch") is None
     assert inserted == {}
 
 

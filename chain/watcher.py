@@ -179,10 +179,14 @@ def ingest_commitment(
         )
         return None
 
-    # No GPU spend without proof the miner paid: reject before insert so a
-    # missing or junk proof cannot burn the first-seen dedupe slot either.
+    # Only validator-configured dev hotkeys may bypass an enabled fee. Reject
+    # missing or junk proofs before they can burn the first-seen dedupe slot.
+    # Exempt submissions do not consume any unverified payment reference.
     payment_block = payment_tx = None
-    if config.SUBMISSION_FEE_TAO > 0:
+    if (
+        config.SUBMISSION_FEE_TAO > 0
+        and com.hotkey not in config.SUBMISSION_FEE_EXEMPT_HOTKEYS
+    ):
         check = check_fee_proof(com, fetch_block)
         if not check.ok:
             logger.info(
