@@ -103,6 +103,9 @@ def _campaign(**over) -> UUID:
             "revision": "r",
             "n_rows": 8,
             "n_prompts": 2,
+            # These SQL/state fixtures use plain prompts and no model tokenizer.
+            # Keep that contract explicit when production sampler defaults move.
+            "algo_version": 1,
         },
         "sla": SLA(),
         "scoring_config_sha256": None,
@@ -202,7 +205,7 @@ def _rounds(campaign_id: UUID) -> list[dict]:
                 """
                 SELECT id, ordinal, status, gpu_sku, seed_block, seed_block_hash,
                        sampled_trace_sha256, scoring_rule, void_reason,
-                       incumbent_submission_id
+                       incumbent_submission_id, seed_hex, sampling_receipt
                 FROM rounds WHERE campaign_id = %s ORDER BY ordinal
                 """,
                 (str(campaign_id),),
@@ -224,7 +227,7 @@ def _entries(round_id: str) -> list[tuple]:
             return [(r[0], str(r[1]) if r[1] else None, r[2]) for r in cur.fetchall()]
 
 
-def test_aged_cohort_of_three_creates_a_round_of_three():
+def test_aged_cohort_of_three_creates_a_round_of_three(tmp_path):
     campaign_id = _campaign()
     sids = [
         _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000),
@@ -240,7 +243,24 @@ def test_aged_cohort_of_three_creates_a_round_of_three():
     assert rnd["gpu_sku"] == "H200"
     assert rnd["seed_block"] == 1000 - 1
     assert rnd["scoring_rule"] == {"name": "median_e2e_speedup"}
-    assert rnd["sampled_trace_sha256"] == "sha256:" + "e" * 64
+    # The round stores the sampled trace's real digest, not a fixture placeholder.
+    # Reconstruct it from the persisted receipt, as the remote round worker does.
+    import hashlib
+
+    from worker.round_job import materialize_round_trace
+
+    trace = materialize_round_trace(
+        rnd,
+        get_campaign(campaign_id),
+        tmp_path,
+        row_fetcher=lambda idx: {
+            "trajectory": [{"role": "user", "content": f"prompt-{idx}"}]
+        },
+    )
+    assert (
+        rnd["sampled_trace_sha256"]
+        == "sha256:" + hashlib.sha256(trace.read_bytes()).hexdigest()
+    )
 
     entries = _entries(str(rnd["id"]))
     assert entries[0] == (

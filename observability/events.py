@@ -1,7 +1,7 @@
 """Structured lifecycle event emitter for Axiom observability.
 
 Every public function emits one single-line JSON object through the
-``pareton.lifecycle`` logger at INFO level.  journald captures it;
+``pareton.lifecycle`` logger at INFO level. Docker captures stdout/stderr;
 Vector ships it to Axiom.
 
 Rules (from the integration brief):

@@ -1124,17 +1124,16 @@ def test_bootstrap_script_verify_first_no_token():
     assert "command -v docker" in script
     assert "nvidia-smi" in script
     assert "import ensurepip" in script
-    assert "python${PYVER}-venv" in script or "python${PYVER}-venv" in script
+    assert '"python${PYVER}-venv"' in script
+    assert "command -v rsync" in script
     assert "ghp_" not in script
     assert "PARETON_GHCR_TOKEN" not in script
     # gpg must not prompt on existing keyring (no /dev/tty over ssh)
     assert "gpg --batch --yes --dearmor" in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
-    # sock ACL after toolkit restart so chmod hits the final socket
-    assert script.index("systemctl restart docker") < script.index(
-        "chmod 666 /var/run/docker.sock"
-    )
+    assert "chmod 666 /var/run/docker.sock" not in script
+    assert 'usermod -aG docker "$(id -un)"' in script
     assert "stable/deb/nvidia-container-toolkit.list" in script
     assert "$distribution/libnvidia-container.list" not in script
     assert "grep -q '^deb '" in script
@@ -1181,6 +1180,9 @@ def test_orchestrate_repetitions_one_pod_five_runs(tmp_path: Path, monkeypatch):
     assert len(bench_cmds) == 5
     for i, cmd in enumerate(bench_cmds, start=1):
         assert f"/opt/pareton/out/run-{i:03d}" in cmd
+        assert "/opt/pareton/.venv/bin/python -m bench" in cmd
+        assert "export PARETON_BENCH_CODE_SHA=deadbeef" in cmd
+        assert "docker run" not in cmd
         assert (out / f"run-{i:03d}").is_dir()
     assert (out / "run-001" / "bench_request.remote.json").is_file()
 
@@ -1778,12 +1780,12 @@ def _pull_command(
 def test_pull_hands_docker_credentials_back_to_the_pod_user():
     """Non-root pods log in under sudo, so the config lands owned by root.
 
-    bench/lifecycle.py runs bare docker as the pod user and must be able to read
-    it, otherwise the pull falls back to anonymous and GHCR refuses the private
-    image. The chown has to sit between the login and the pulls.
+    The remote host harness uses the pod user's default Docker configuration.
+    The SSH user must retain access to these files across runs.
     """
     remote = _pull_command("shadeform")
     assert "sudo -E docker login" in remote
+    assert 'export DOCKER_CONFIG="$HOME/.docker"' in remote
     assert 'chown -R "$(id -u):$(id -g)" "$HOME/.docker"' in remote
     assert (
         remote.index("login ghcr.io")
@@ -1839,7 +1841,9 @@ def _run_pull_script(
         '#!/bin/bash\nwhile [[ "$1" == -* ]]; do shift; done\nexec "$@"\n',
         encoding="utf-8",
     )
-    for f in ("docker", "sudo"):
+    # Do not touch the developer's Docker credentials while testing the script.
+    (stub / "chown").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    for f in ("docker", "sudo", "chown"):
         (stub / f).chmod(0o755)
 
     remote = _pull_command(user, env_file=str(env_file), refs=refs)
@@ -1927,3 +1931,115 @@ def test_failed_login_raises_rather_than_warning(tmp_path: Path):
             ),
             state_dir=tmp_path / "st",
         )
+
+
+def test_bootstrap_installs_venv_on_remote_host(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from gpu import bootstrap
+
+    pod = SimpleNamespace(ssh=SimpleNamespace(user="root"))
+    calls = []
+
+    def remote_exec(target, command, **kwargs):
+        assert target is pod
+        calls.append(("ssh", command))
+        return SshResult(0, "", "")
+
+    def transfer(target, source, destination, **kwargs):
+        assert target is pod
+        assert source == tmp_path
+        assert destination == "/opt/pareton/"
+        calls.append(("rsync", destination))
+
+    monkeypatch.setattr(bootstrap, "ssh_exec", remote_exec)
+    monkeypatch.setattr(bootstrap, "push", transfer)
+    monkeypatch.setattr(bootstrap, "authorize_extra_keys", lambda *a, **k: None)
+    monkeypatch.setenv("PARETON_CODE_SHA", "coordinator-image-sha")
+
+    assert bootstrap.bootstrap_pod(pod, repo_root=tmp_path) == "coordinator-image-sha"
+    assert calls[-2][0] == "rsync"
+    assert calls[-1][0] == "ssh"
+    install = calls[-1][1]
+    assert "python3 -m venv /opt/pareton/.venv" in install
+    assert (
+        "/opt/pareton/.venv/bin/pip install -q -r /opt/pareton/requirements.txt"
+        in install
+    )
+    assert not any("docker build" in command for _, command in calls)
+
+
+@pytest.mark.parametrize("bench_status,mock_engine", [(0, False), (7, True)])
+def test_remote_venv_command_environment_and_exit_status(
+    tmp_path, monkeypatch, bench_status, mock_engine
+):
+    """Execute the actual generated SSH command with a fake remote Python."""
+    import os
+    import subprocess
+    import sys
+
+    from gpu import orchestrate
+
+    remote_repo = tmp_path / "remote"
+    remote_venv = remote_repo / ".venv"
+    remote_bin = remote_venv / "bin"
+    remote_bin.mkdir(parents=True)
+    invocation = tmp_path / "invocation.json"
+    python = remote_bin / "python"
+    python.write_text(f"""#!{sys.executable}
+import json, os, sys
+from pathlib import Path
+Path({str(invocation)!r}).write_text(json.dumps({{
+    "argv": sys.argv[1:], "cwd": os.getcwd(),
+    "sha": os.environ["PARETON_BENCH_CODE_SHA"], "token": os.environ["HF_TOKEN"]
+}}))
+sys.exit({bench_status})
+""")
+    python.chmod(0o755)
+    env_file = remote_repo / ".pareton-bench.env"
+    env_file.write_text("HF_TOKEN='test token'\n")
+    monkeypatch.setattr(orchestrate, "REMOTE_REPO", str(remote_repo))
+    monkeypatch.setattr(orchestrate, "REMOTE_VENV", str(remote_venv))
+    monkeypatch.setattr(orchestrate, "REMOTE_ENV", str(env_file))
+    monkeypatch.setattr(orchestrate, "REMOTE_OUT", str(remote_repo / "out with spaces"))
+    code_sha = "sha with spaces; false"
+    monkeypatch.setattr(orchestrate, "bootstrap_pod", lambda *a, **k: code_sha)
+    for name in ("push", "pull", "_write_remote_env", "_delete_remote_env"):
+        monkeypatch.setattr(orchestrate, name, lambda *a, **k: None)
+
+    def runner(cmd, *, timeout, input_text=None):
+        if f"{remote_venv}/bin/python -m bench" not in cmd[-1]:
+            return SshResult(0, "", "")
+        result = subprocess.run(
+            ["bash", "-c", cmd[-1]],
+            capture_output=True,
+            text=True,
+            env=os.environ,
+            check=False,
+        )
+        return SshResult(result.returncode, result.stdout, result.stderr)
+
+    request = json.loads(SAMPLE_REQUEST.read_text())
+    request["workload_trace"]["path"] = str(SAMPLE_TRACE)
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+    provider = FakeProvider()
+    result = orchestrate.run_bench_on_pod(
+        PodSpec(provider="targon", force=True),
+        request_path=request_path,
+        output_dir=tmp_path / "local-out",
+        mock_engine=mock_engine,
+        provider=provider,
+        runner=runner,
+        state_dir=tmp_path / "st",
+        repo_root=ROOT,
+    )
+    assert result == bench_status
+    recorded = json.loads(invocation.read_text())
+    assert recorded["cwd"] == str(remote_repo)
+    assert recorded["sha"] == code_sha
+    assert recorded["token"] == "test token"
+    assert recorded["argv"][:2] == ["-m", "bench"]
+    assert ("--mock-engine" in recorded["argv"]) is mock_engine
+    assert str(remote_repo / "out with spaces") in recorded["argv"]
+    assert len(provider.destroy_calls) == 1

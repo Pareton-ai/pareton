@@ -7,21 +7,29 @@ After a successful submission it waits 360 blocks. After a failure it waits
 36 blocks. SN10 uses commit-reveal, so a successful call means the commitment
 was accepted; the vector goes live after reveal.
 
-## Install
+## Install with Docker Compose
+
+Use Docker Engine and Compose v2. The auditor runs in its own Compose project and
+only needs its validator wallet; it does not require Pareton backend credentials.
+Use it as the weight-setting process for that wallet, with no second weights
+process signing from the same hotkey.
 
 ```bash
-# Download the standalone script
-curl -O https://raw.githubusercontent.com/Pareton-ai/pareton/main/scripts/auditor.py
-# Install the two dependencies
-python -m pip install 'requests>=2.31' 'bittensor==11.0.2'
-# Confirm the CLI loads
-python auditor.py --help
+git clone https://github.com/Pareton-ai/pareton.git
+cd pareton
+export PARETON_WALLET_NAME=my-validator-coldkey
+export PARETON_WALLET_HOTKEY=my-validator-hotkey
+export PARETON_WALLET_DIR="$HOME/.bittensor/wallets"
+PARETON_CODE_SHA=$(git rev-parse HEAD) docker compose -f ops/compose.auditor.yaml build
+docker compose -f ops/compose.auditor.yaml run --rm auditor python scripts/auditor.py --help
 ```
 
 ## Configure
 
-Only the wallet is configurable. Network, netuid, and the API URL are fixed
-in the script.
+Network, netuid, and the API URL are fixed in the script. Put the wallet settings
+in a private `.env` file at the repository root for subsequent Compose commands,
+or keep exporting them in your shell. `PARETON_WALLET_DIR` is the existing host
+wallet directory mounted read-only into the container.
 
 | Variable                | Flag        | Meaning                              |
 | ----------------------- | ----------- | ------------------------------------ |
@@ -36,34 +44,28 @@ if it is not.
 ## Run
 
 ```bash
-export PARETON_WALLET_NAME=my-validator-coldkey
-export PARETON_WALLET_HOTKEY=my-validator-hotkey
-
-python auditor.py --once   # one attempt, exit 0 on acceptance, 1 on failure
-python auditor.py          # run forever
+# One attempt, exit 0 on acceptance, 1 on failure:
+docker compose -f ops/compose.auditor.yaml run --rm auditor python scripts/auditor.py --once
+# Run continuously, including after host restart:
+docker compose -f ops/compose.auditor.yaml up -d
+docker compose -f ops/compose.auditor.yaml logs -f --tail 100
 ```
 
-Stop the foreground process with `Ctrl-C`.
-
-## Run in the background
-
-With PM2:
+Stop with:
 
 ```bash
-pm2 start auditor.py --name pareton-auditor --interpreter "$(command -v python)"
-pm2 save
-pm2 logs pareton-auditor
+docker compose -f ops/compose.auditor.yaml down
 ```
 
-PM2 inherits the environment of the shell that started it. Run `pm2 startup`
-once if it should start after a reboot.
-
-With nohup:
+## Update
 
 ```bash
-nohup python auditor.py > pareton-auditor.log 2>&1 &
-echo $! > pareton-auditor.pid
-tail -f pareton-auditor.log
-
-kill "$(cat pareton-auditor.pid)"
+git fetch origin main
+git merge --ff-only origin/main
+PARETON_CODE_SHA=$(git rev-parse HEAD) docker compose -f ops/compose.auditor.yaml build
+docker compose -f ops/compose.auditor.yaml down
+docker compose -f ops/compose.auditor.yaml up -d
 ```
+
+The Python file remains independently runnable for one-off use; the container
+provides its dependencies and virtualenv for the managed service.

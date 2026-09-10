@@ -335,12 +335,42 @@ def test_static_ssh_never_discovers_home_ssh(
     assert p._key_path == key.resolve()
 
 
-def test_reap_timer_unit_interval():
-    timer = (ROOT / "ops" / "gpu" / "pareton-gpu-reap.timer").read_text(
-        encoding="utf-8"
+def test_reap_compose_interval_and_shared_registry():
+    import yaml
+
+    services = yaml.safe_load((ROOT / "compose.yaml").read_text())["services"]
+    reaper = services["gpu-reap"]
+    command = reaper["command"]
+    assert command[command.index("--interval") + 1] == "600"
+    assert command[-4:] == ["python", "-m", "gpu", "reap"]
+    state = reaper["volumes"][0]
+    assert state in services["round-worker"]["volumes"]
+
+
+def test_repo_rsync_preserves_source_without_copying_local_runtime_state(tmp_path):
+    import shutil
+    import subprocess
+
+    rsync = shutil.which("rsync")
+    if rsync is None:
+        pytest.skip("rsync is unavailable")
+    source, destination = tmp_path / "source", tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    excluded = [".env", ".deploy-state/current.yaml", ".pareton-work/build/context"]
+    included = ["gpu/bootstrap.py", "fixtures/example.key", "requirements.txt"]
+    for relative in excluded + included:
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("test fixture")
+    args = [rsync, "-a"]
+    for pattern in REPO_RSYNC_EXCLUDES:
+        args.extend(["--exclude", pattern])
+    subprocess.run(
+        [*args, f"{source}/", f"{destination}/"],
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    service = (ROOT / "ops" / "gpu" / "pareton-gpu-reap.service").read_text(
-        encoding="utf-8"
-    )
-    assert "OnUnitActiveSec=10min" in timer
-    assert "python -m gpu reap" in service
+    assert all(not (destination / relative).exists() for relative in excluded)
+    assert all((destination / relative).is_file() for relative in included)

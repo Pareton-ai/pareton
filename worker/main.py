@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
+from pathlib import Path
 
 import config
 from campaign.store import claim_next_job, count_pending_jobs
@@ -49,6 +51,8 @@ def _heartbeat_loop(
 ) -> None:
     while not stop.is_set():
         _heartbeat(queue_depth=_queue_depth())
+        if health_file := os.environ.get("PARETON_HEALTH_FILE"):
+            Path(health_file).touch()
         stop.wait(interval_s)
 
 
@@ -176,8 +180,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # A killed worker strands its claimed job in 'running' forever (only
     # 'pending' jobs are re-claimed) and orphans any rented GPU pod, so on
-    # SIGTERM/SIGINT finish the in-flight job before exiting. systemd allows
-    # this up to TimeoutStopSec, then SIGKILLs. The drain flag is defined
+    # SIGTERM/SIGINT finish the in-flight job before exiting. Compose allows
+    # this up to stop_grace_period, then SIGKILLs. The drain flag is defined
     # before _cycle so a signal arriving mid-job stops the worker before it
     # claims a fresh one.
     drain = threading.Event()

@@ -25,6 +25,10 @@ REPO_RSYNC_EXCLUDES: tuple[str, ...] = (
     "out/",
     "*.pyc",
     "docs/",
+    # Host CLI runs can ship a checkout containing build work and deployment
+    # snapshots. The snapshots include resolved environment credentials.
+    ".pareton-work/",
+    ".deploy-state/",
 )
 
 

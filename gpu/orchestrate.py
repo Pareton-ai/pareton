@@ -831,7 +831,6 @@ def run_bench_on_pod(
                 state_dir=registry.state_dir,
             )
 
-        mock_flag = " --mock-engine" if mock_engine else ""
         for req_p, local_out, _req, trace_path in preflighted:
             local_out.mkdir(parents=True, exist_ok=True)
             if pool or repetitions > 1:
@@ -850,12 +849,14 @@ def run_bench_on_pod(
                 state_dir=registry.state_dir,
             )
 
+            mock_flag = " --mock-engine" if mock_engine else ""
             bench_cmd = (
                 f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
-                f"export PARETON_BENCH_CODE_SHA={code_sha} && "
-                f"mkdir -p {remote_out} && "
+                f"export PARETON_BENCH_CODE_SHA={shlex.quote(code_sha)} && "
+                f"mkdir -p {shlex.quote(remote_out)} && "
                 f"{REMOTE_VENV}/bin/python -m bench "
-                f"--request {REMOTE_REQUEST} --output-dir {remote_out}{mock_flag}"
+                f"--request {REMOTE_REQUEST} "
+                f"--output-dir {shlex.quote(remote_out)}{mock_flag}"
             )
             # ssh exec does not stream; poll the harness marker while it blocks.
             poller = _PodPhasePoller(

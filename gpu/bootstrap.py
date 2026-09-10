@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -20,6 +21,10 @@ REMOTE_ENGINE_CACHE = "/workspace/engine-cache"
 
 
 def local_code_sha(repo_root: Path) -> str:
+    # Runtime images exclude .git; the image build records the source revision.
+    baked = os.environ.get("PARETON_CODE_SHA", "")
+    if baked and baked != "unknown":
+        return baked
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -76,12 +81,16 @@ nvidia-smi >/dev/null
 {toolkit}
 $SUDO docker info 2>/dev/null | grep -qi nvidia || echo "warning: nvidia runtime still not listed in docker info"
 
-# Non-root (e.g. Shadeform): allow bare docker for bench/lifecycle.
-# Must run AFTER any docker restart (toolkit install) so chmod hits the
-# final socket; usermod alone is best-effort and may not apply mid-session.
-if [ "$(id -u)" -ne 0 ]; then
-  $SUDO usermod -aG docker "$(id -un)" 2>/dev/null || true
-  $SUDO chmod 666 /var/run/docker.sock 2>/dev/null || true
+# The harness uses bare docker. Each later SSH call opens a new session,
+# so it sees the updated groups without exposing the socket to all users.
+if [ "$(id -u)" -ne 0 ] && ! docker info >/dev/null 2>&1; then
+  $SUDO usermod -aG docker "$(id -un)"
+fi
+
+# SSH data transfer and remote Python are host tools.
+if ! command -v rsync >/dev/null || ! command -v python3 >/dev/null; then
+  $SUDO apt-get update -y
+  $SUDO apt-get install -y rsync python3
 fi
 
 # Python venv tooling: ``import venv`` can succeed without ensurepip on
@@ -160,7 +169,7 @@ def bootstrap_pod(
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
 ) -> str:
-    """Bootstrap remote host and ship the repo. Returns local git SHA."""
+    """Ship source and create the GPU host virtualenv. Returns source SHA."""
     del image_refs  # pulled later after env file is written (orchestrate)
     script = bootstrap_script()
     ssh_exec(
@@ -233,6 +242,7 @@ def pull_engine_images(
     env_q = shlex.quote(env_file)
     # Single shell so login sees vars from the env file; password via stdin.
     remote = (
+        'export DOCKER_CONFIG="$HOME/.docker" && '
         f"set -a && . {env_q} && set +a && "
         'if [ -n "${PARETON_GHCR_TOKEN:-}" ]; then '
         f'echo "$PARETON_GHCR_TOKEN" | {docker} login ghcr.io '

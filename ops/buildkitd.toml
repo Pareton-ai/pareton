@@ -1,0 +1,7 @@
+# Pareton's filtered cleanup owns GC, including for named Buildx builders.
+# Never allow BuildKit to independently delete the trusted ccache mounts.
+[worker.oci]
+gc = false
+
+[worker.containerd]
+gc = false

@@ -14,6 +14,15 @@ This command transfers compiler cache entries. It does not transfer Docker layer
 caches, Rust build directories, or inference-time caches. Pull a previously
 published engine image if you only need to run that exact engine build.
 
+## Run through Compose
+
+On a Compose host, prefix the commands below with
+`docker compose run --rm --no-deps cli`. The CLI container shares the configured
+Buildx metadata, Docker socket and builder storage lock with the workers and
+cleanup. Keep the same `PARETON_BUILDER_NAME` for builds, backups and restores.
+Do not create a new builder during a routine deployment: its ccache starts empty.
+See [operations](../ops/README.md) for driver-specific GC configuration.
+
 ## Back up a completed build
 
 Use the same full commit SHA, base-image digest, Docker builder, and platform

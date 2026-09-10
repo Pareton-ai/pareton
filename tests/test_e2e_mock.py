@@ -229,12 +229,15 @@ def test_e2e_mock_commitment_to_built(tmp_path, monkeypatch):
 
 def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
     """One --mock-bench round: claim, run, complete. No GPU, no Docker pull."""
+    from functools import partial
+
     import config
+    from bench.mock_engine import MockEngineConfig
     from campaign.models import SLA
     from campaign.seed import build_seed_bench_spec
     from round.create import create_due_rounds
     from round.store import claim_pending_round, get_round, list_round_entries
-    from worker.round_job import process_round
+    from worker.round_job import process_round, run_bench
 
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.test")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
@@ -246,6 +249,21 @@ def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr("round.create.fetch_hf_row", _fetch)
     monkeypatch.setattr("worker.round_job.fetch_hf_row", _fetch)
+    # Long repeat loops correctly fail the production degeneracy checks. Give
+    # the mock a diverse continuation and enough tokens for stable timing.
+    monkeypatch.setattr(
+        "bench.main.MockEngineConfig",
+        partial(
+            MockEngineConfig,
+            greedy_text=" ".join(f"token{i:04d}" for i in range(256)),
+        ),
+    )
+
+    def measured_mock(request_path, output_dir, **kwargs):
+        # Host scheduling noise must be small compared with token latency;
+        # keep the actual SLA and baseline-drift checks enabled.
+        kwargs["mock_plan"].baseline_token_latency_s = 0.01
+        return run_bench(request_path, output_dir, **kwargs)
 
     engine_digest = "sha256:" + "a" * 64
     image_a = "ghcr.io/pareton-ai/pareton-engine@sha256:" + "1" * 64
@@ -268,6 +286,8 @@ def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
             "revision": "r",
             "n_rows": 8,
             "n_prompts": 2,
+            "algo_version": 1,  # Plain mock prompts; no external tokenizer.
+            "max_tokens": 64,
         },
         sla=SLA(p99_ttft_ms=2000.0, p99_itl_ms=50.0),
         scoring_config_sha256=None,
@@ -337,6 +357,7 @@ def test_e2e_mock_round_runs_end_to_end(tmp_path, monkeypatch):
         claimed,
         mock_bench=True,
         work_root=tmp_path / "round-work",
+        run_bench_fn=measured_mock,
     )
     assert outcome == "ok"
     settled = get_round(claimed["id"])

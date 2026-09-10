@@ -166,6 +166,10 @@ cython_debug/
 testing/
 
 .pareton-work/
+.deploy-state/
+.deploy-done
+.deploy-pending
+.deploy-rounds-pending
 .dependencies_installed
 
 # Editors / local agent tooling

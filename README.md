@@ -25,6 +25,20 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 4. **Hermetic build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
 5. **Rounds** batch queued submissions. One round rents one pod, draws one prompt set, and runs the baseline, the current leader, and every challenger against that set. The best image takes the crown. Scores compare inside one round only. On-chain scoring is still design-only.
 
+## Run with Docker Compose
+
+The application services, maintenance schedules, Caddy and Vector are managed by
+Docker Compose. Python runs in a virtualenv inside the runtime image. See the
+[operations guide](ops/README.md) for setup, builder/ccache preservation, Axiom,
+GPU execution, automatic deployments and migration from existing systemd hosts.
+
+```sh
+cd /opt/pareton
+cp .env.example .env
+# Configure credentials, host paths, builder policy and the validator wallet.
+bash ops/deploy.sh --local
+```
+
 ## Patch visibility
 
 For newly ingested submissions, the API and dashboard withhold the patch download

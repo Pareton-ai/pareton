@@ -1,6 +1,6 @@
 # Continuous integration
 
-## Offline tests
+## Regression tests
 
 The `Tests` workflow runs on pull requests and pushes to `main`. It runs:
 
@@ -8,8 +8,10 @@ The `Tests` workflow runs on pull requests and pushes to `main`. It runs:
 pytest -q -m "not docker"
 ```
 
-These tests do not require a database, chain, GPU, or Docker daemon. Tests marked
-`e2e` skip when `PARETON_TEST_DATABASE_URL` is not set.
+Chain and GPU interactions are mocked. Locally, tests marked `e2e` skip when
+`PARETON_TEST_DATABASE_URL` is not set. CI supplies disposable Postgres 16 service
+containers initialized from `db/schema.sql`, so those tests run on both Python
+versions without a Neon or production account.
 
 ## Testnet smoke
 
@@ -64,3 +66,23 @@ workflow inputs or logs.
 A red run prints the ordered submission events and the last 200 API, worker, and
 patch-server log lines. Download the `testnet-smoke-logs-*` artifact for the
 complete process logs.
+
+## Container integration
+
+The Tests workflow also builds both Dockerfile targets and validates Compose and
+Vector's existing worker-alert identity. `scripts/smoke_compose.py` derives an
+isolated stack from the actual Compose service definitions, replaces external
+integrations with a disposable local Postgres, mock workers and a console log
+sink, then checks API readiness, both worker heartbeat streams, shared build logs,
+and persistence across down/up. It never loads the production environment and
+removes only its randomly named test project's containers and volumes.
+
+Docker lifecycle/correctness tests also run inside the runtime image using the
+host socket and host networking to check the bundled Docker client. In production,
+the GPU harness runs in a virtualenv on the rented host; bootstrap and SSH
+orchestration have offline tests. Real GPU/provider, S3, wallet and Axiom
+credentials are not exercised by this job.
+
+Deployment regressions cover interruption during a rollout and rollback after a
+same-commit redeployment. A Docker test also stops the actual deployment
+controller container and verifies that its active rollout finishes before exit.

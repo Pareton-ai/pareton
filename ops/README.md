@@ -1,61 +1,198 @@
-# ops/
+# Docker Compose operations
 
-Deployment artifacts for the production VPS. Files here are **verbatim copies of
-what runs in production** — not templates. Change the copy here first, then
-re-install it on the box, so the two never drift.
+Pareton's API, submission worker, round worker, watcher, weights, GPU reaper,
+builder cleanup, Vector and Caddy run in `compose.yaml`. Postgres remains Neon;
+S3, GHCR and GPU providers retain their existing roles. Application containers
+share one runtime image with a virtualenv at `/opt/venv`. The Compose host does
+not need Python; rented GPU hosts run the benchmark harness in their own virtualenv.
 
-## Layout
+## First start
 
-| Path                              | Installed to                    | Notes                                                            |
-| --------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
-| `systemd/pareton-api.service`     | `/etc/systemd/system/`          | uvicorn on `0.0.0.0:8000`                                        |
-| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds (`--queue submissions`)              |
-| `systemd/pareton-round-worker.service` | `/etc/systemd/system/`     | Round evaluation (`--queue rounds`)                              |
-| `systemd/pareton-watcher.service` | `/etc/systemd/system/`          | Chain ingest, `python -m worker.watcher`                         |
-| `systemd/pareton-weights.service` | `/etc/systemd/system/`          | Weight cadence, `python -m weights`. Holds the validator wallet. |
-| `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer                                    |
-| `systemd/pareton-deploy.timer`    | `/etc/systemd/system/`          | **Fires every 60s**                                              |
-| `systemd/pareton-builder-cleanup.service` | `/etc/systemd/system/` | Docker image and BuildKit cleanup oneshot                         |
-| `systemd/pareton-builder-cleanup.timer` | `/etc/systemd/system/` | Runs builder cleanup hourly                                      |
-| `docker/daemon.json`                  | Merge into `/etc/docker/daemon.json` | Disables Docker's competing BuildKit GC without selecting an image store |
-| `deploy.sh`                       | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself                                    |
-| `gpu/pareton-gpu-reap.service`    | `/etc/systemd/system/`          | Oneshot GPU TTL reap                                             |
-| `gpu/pareton-gpu-reap.timer`      | `/etc/systemd/system/`          | Fires every 10 min                                               |
-| `vector/vector.service`           | `/etc/systemd/system/`          | Log shipping                                                     |
-| `vector/vector.toml`              | `/etc/vector/`                  | Axiom sink, dataset `pareton-prod`                               |
-| `caddy/Caddyfile`                 | `/etc/caddy/`                   | TLS terminator, proxies to `127.0.0.1:8000`                      |
+Use a Linux Docker host with Docker Engine and Compose v2.39 or newer. The host
+still supplies disk, swap and the Docker daemon. GPU hosts additionally need
+working NVIDIA drivers; bootstrap verifies them and installs the NVIDIA container
+runtime only when absent. Do not restart the builder daemon during active work.
 
-`deploy.sh` installs to `/usr/local/bin` rather than running from the repo
-checkout so that a `git pull` cannot rewrite the script while it is executing.
-That is also why it needs re-installing by hand after a change here.
+```sh
+cd /opt/pareton
+cp .env.example .env
+# Fill .env with the existing database, S3, GHCR, provider and Axiom credentials.
+# Set host paths, API domain and the existing Buildx builder name.
+chmod 600 .env
+mkdir -p /opt/pareton/.pareton-work /var/log/pareton/builds
+mkdir -p /root/.cache/pareton/gpu /root/.docker
+# Install the existing validator wallet in PARETON_WALLET_DIR before starting.
+docker compose config --quiet
+# Build, validate, start, and save the first release for subsequent rollbacks.
+bash ops/deploy.sh --local
+```
 
-## A merge to `main` is a production deploy
+The default topology co-locates API and submission worker, since build-log API
+responses read the shared build-log filesystem. Configure the same mounts across
+all services. For a split-host deployment, explicitly provide shared log storage;
+a named Docker volume does not share files between machines. Run only one weights
+process for a validator wallet. The `cli` service is opt-in and never runs at boot.
 
-`pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
-separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
-and `pareton-weights` within a minute. Each execution worker has its own pending
-restart. The round worker waits only for running rounds; the existing worker checks
-both queues to protect legacy combined processes. A busy build does not defer an
-idle round worker's update.
+Validators running only the standalone auditor can use the independent
+`ops/compose.auditor.yaml` project; see [auditor setup](../docs/auditor.md).
 
-Install `pareton-round-worker.service` and change the existing worker's command
-to `python -m worker.main --queue submissions`. Reinstall `deploy.sh` as well.
-The CLI defaults to combined mode, which checks rounds first. Only the separate
-round service can handle rounds arriving after a build has already blocked.
+The API binds loopback port 8000. Caddy exposes 80/443 and routes to `api:8000`.
+API readiness checks both HTTP and Postgres. Worker health checks use the same
+background heartbeat that continues during long builds and rounds. A Docker
+health failure is visible in `compose ps`; restart policies handle process exits,
+while Axiom alerts continue to detect missing heartbeats and stalled progress.
 
-Add `pareton-round-worker` and `pareton-weights` to the live Vector
-`sources.journald.include_units` and restart Vector before starting the round
-service. Edit only that allowlist: the live sink credentials differ from the repo
-copy. The PR deployment commands include this step.
+## Builder and ccache
 
-### Worker heartbeat alerts
+Keep `PARETON_BUILDER_NAME=default` when migrating an existing Docker-driver
+builder. Worker, cleanup, cache CLI and deployment builds all select that builder.
+`PARETON_DOCKER_CONFIG_DIR` mounts the Docker client's credentials and Buildx
+metadata; copying only the socket would lose discovery of a named builder.
+The Docker storage filesystem is mounted read-only so cleanup measures its actual
+usage. Worker, cleanup and cache commands share the same file lock under WORK_DIR.
 
-After both services are shipping logs, filter the existing Axiom
-`worker-heartbeat-absent` monitor to `pareton-worker.service`, then clone it as
-`round-worker-heartbeat-absent` with the second query below. Keep the current
-notifiers and evaluation frequency, use **Below 1 over 15 minutes**, and enable
-**Alert on no data** for each. The existing `_SYSTEMD_UNIT` field identifies the
-process, so the heartbeat payload does not need changing.
+For the `docker` driver, merge `ops/docker/daemon.json` into the existing host
+configuration. Preserve every unrelated setting and the current image store.
+Validate the merged JSON with `dockerd --validate`, then restart Docker during a
+maintenance window. `builder.preflight` requires `builder.gc.enabled=false`.
+Containers read the host config through a read-only bind mount; no container
+rewrites it. The configured file and Docker storage directory must already exist.
+
+For a **new, separate named builder**, create it once using the checked-in policy:
+
+```sh
+docker buildx create --name pareton --driver docker-container \
+  --buildkitd-config ops/buildkitd.toml --bootstrap
+# Set PARETON_BUILDER_NAME=pareton in .env, then:
+docker compose run --rm --no-deps cli python -m builder.preflight
+```
+
+For this driver, startup checks the selected node's mounted BuildKit configuration
+and requires both workers' GC settings to be disabled. Unsupported drivers and
+multiple nodes fail closed. Use a builder attached to this same Docker host.
+Do not delete/recreate a warmed builder: its compiler caches belong to that
+builder. Restore a trusted snapshot when intentionally switching builders.
+
+```sh
+docker compose run --rm --no-deps cli python -m builder.cleanup --dry-run --force
+docker compose run --rm --no-deps cli python -m builder.cache --help
+```
+
+See [cache backup/restore](../docs/build-cache.md) for the full arguments. Run all
+manual build/cache commands through `cli` so they share the selected builder and
+storage lock. Filtered cleanup retains active baselines and excludes
+`exec.cachemount`; it never runs a daemon-wide image/system prune or deletes GHCR
+artifacts. Cleanup runs hourly and skips when the build lock is busy.
+
+The host's RAM/swap must still support CUDA compilation. Existing 16 GB build
+hosts relied on a 64 GB swapfile. Compose does not provision swap or put a memory
+limit on sibling BuildKit builds; keep `PARETON_BUILD_MAX_JOBS` appropriate for the
+actual builder host. Check disk and swap before the first real miner build.
+
+The A2b baseline helper also runs in the Compose CLI image:
+
+```sh
+export BASE=ghcr.io/pareton-ai/pareton-baseline@sha256:YOUR_A2_DIGEST
+export TORCH_CUDA_ARCH_LIST=9.0
+bash ops/a2b-build.sh --detach
+# Follow the returned container ID with docker logs -f ID.
+```
+
+It validates the selected builder, smoke-checks the base, builds and pushes the
+empty-patch engine, then checks its imports. Credentials come from `.env` with
+explicit shell overrides supported. Compiler job/timeout defaults are two jobs
+and eight hours. Its context uses the shared work directory, and build logs remain
+in the shared build-log directory after the one-off container exits.
+
+## Updates and rollback
+
+Run an update from the host with `bash ops/deploy.sh`, or enable the independent
+Docker deployment controller below. The script fetches `origin/main`, merges only
+fast-forward changes, builds the new runtime image, pulls infrastructure images,
+and validates Vector and the selected builder **before stopping services**.
+Tracked operator changes or divergent Git history stop the update.
+
+It stops the watcher, drains both execution workers and weights while API/Vector
+remain available, then performs `docker compose down` followed by `up -d --wait`.
+The full down/up step has an API interruption; this is not a zero-downtime rollout.
+Workers have an eight-hour grace period and weights fifteen minutes. No timeout
+flag shortens these settings. An expired grace period can still force-kill a job;
+inspect failed/stranded work and GPU teardown before resuming after such a failure.
+
+No deployment removes volumes. Runtime image tags combine the source commit with
+a unique deployment suffix. Rebuilding the same commit keeps the previous image
+and mounted configurations intact for rollback.
+After successful startup, the `pareton-runtime:local` alias advances to the same
+image so ordinary `docker compose run cli` commands use the deployed code.
+Rendered configuration, environment, and copies of Vector/Caddy configuration live
+under `.deploy-state` (mode 0700/0600, excluded from Git and image contexts). This
+contains secrets and must remain private. The deployed marker advances only after
+startup succeeds. A startup failure restores the previous saved Compose release;
+the next polling tick retries the new commit. Previous images must remain locally
+available for rollback. Database schema changes still need their own compatible
+migration; this script never rewrites production schema.
+
+Enable the original automatic main-to-production behavior with a second project:
+
+```sh
+# PARETON_REPO_DIR and PARETON_HOST_WORK_DIR must be absolute and match the host.
+docker compose -p pareton-deploy --env-file .env -f ops/compose.deploy.yaml up -d --build
+docker compose -p pareton-deploy -f ops/compose.deploy.yaml logs -f
+```
+
+The controller polls every 60 seconds and executes its baked-in script; a Git
+fetch cannot rewrite the running script. It has the host Docker socket, Docker
+client configuration, source checkout and read-only deployment SSH keys. Configure
+a working Git remote/authentication before enabling it. It manages the `pareton`
+application project, so application `down` never stops the controller itself.
+Rebuild this separate project when the deployment script or controller definition
+changes. All host bind paths must agree inside/outside the controller.
+
+Pause automatic deployment before maintenance or rollback:
+
+```sh
+docker compose -p pareton-deploy --env-file .env -f ops/compose.deploy.yaml stop
+# Restart the last successful release, if needed:
+docker compose -f .deploy-state/current.yaml up -d --no-build --wait
+```
+
+`bash ops/deploy.sh --local` deploys the currently checked-out commit without
+fetching, including for an operator-selected rollback. Stop the controller before
+checking out an older commit, and resume it only when main should deploy again.
+
+## GPU execution
+
+The coordinator runs in Compose and connects over SSH to the rented GPU machine.
+Remote bootstrap checks Docker, NVIDIA support, rsync and Python's venv tooling,
+ships the trusted source, then creates `/opt/pareton/.venv` using `python3 -m venv`
+and installs the project dependencies there. The benchmark harness runs directly
+in this remote host virtualenv. Engine images continue to run in Docker on that
+same GPU machine; no separate harness image is built or started.
+
+The coordinator's image records the source revision, so evidence retains its code
+SHA even when the coordinator has no `.git` directory. The remote harness keeps
+direct GPU probes, loopback engine access, and the existing host cache paths
+`/workspace/hf-cache` and `/workspace/engine-cache`. Phase/status files and final
+evidence remain visible to SSH polling and rsync. Non-root provider accounts gain
+the Docker group in bootstrap, which takes effect in subsequent SSH sessions.
+
+Source transfer excludes the existing environment/development artifacts and
+output directories, plus `.pareton-work/` and `.deploy-state/`. The latter contains
+deployment snapshots with resolved credentials and must stay on the coordinator.
+The run's required credentials and workload traces are transferred separately.
+
+Provider fallback, per-round pod reuse, model and engine caches, evidence upload,
+`--keep`, and TTL teardown retain their existing behavior. The GPU reaper runs
+every ten minutes and shares the durable registry/SSH directory with round-worker
+and `cli`. `static_ssh` keys must be placed under that mounted directory (and
+`PARETON_GPU_SSH_KEY_PATH` set accordingly), or explicitly mounted at their
+configured path. The inference containers themselves receive no Docker socket.
+
+## Vector and Axiom
+
+Vector collects this Compose project's Docker stdout/stderr, removes DEBUG noise,
+and parses lifecycle JSON into the existing top-level event fields. Service labels
+supply `_SYSTEMD_UNIT`, preserving the current Axiom filters:
 
 ```apl
 ['pareton-prod']
@@ -63,136 +200,63 @@ process, so the heartbeat payload does not need changing.
 | summarize count()
 ```
 
-```apl
-['pareton-prod']
-| where event == "heartbeat" and _SYSTEMD_UNIT == "pareton-round-worker.service"
-| summarize count()
-```
+The round monitor uses `pareton-round-worker.service`. Retain separate fixed
+filters, **Below 1 over 15 minutes**, and **Alert on no data**. Weights, watcher and
+GPU lifecycle event names are unchanged. Builder cleanup telemetry is now included.
+`PARETON_AXIOM_DATASET` controls the dataset, and `PARETON_AXIOM_TOKEN` must contain
+the working ingest token; historical production notes recorded a mismatch between
+the old inline token and the environment token, so verify the actual credential.
 
-Use two fixed filters: a grouped query can lose a missing service's group while
-the other continues reporting. These alerts detect absent processes or telemetry;
-progress stalls still require round phase/heartbeat monitoring. Adding weights
-to the allowlist resumes its telemetry on the next scheduled event, without
-forcing a weight submission or recovering previously discarded logs.
+Vector's 512 MiB disk buffer survives recreation in `vector-data`. Docker logs are
+rotated at 20 MiB x 5 per application service. Vector starts before application
+services and stops after them; the Docker log source is still best effort, so the
+buffer protects already-collected events, not logs missed during collector outages.
+Confirm ingestion and both heartbeat monitors during cutover. No live Axiom
+configuration is changed by this repository.
 
-**During a maintenance window, stop this timer first.** Stopping any other unit
-while the timer is live means the timer may restart it underneath you.
+## One-time migration from systemd
 
-## Known drift — needs a decision
+The old unit files have been removed from the repository. They remain installed
+on existing hosts until an operator disables them. Before the first Compose start:
 
-Captured from the live boxes on 2026-08-17. These are _not_ resolved here,
-because each one changes production behavior:
+1. Disable the old deploy timer first so it cannot restart services underneath the
+   migration. Stop/disable the GPU reap and builder cleanup timers, then the
+   watcher, both workers and weights, allowing their running jobs to drain.
+2. Preserve the existing work directory, build logs, GPU registry and keys. Point
+   `.env` at those paths. GPU state is mounted at its original absolute path,
+   because `pods.json` stores absolute key paths. Preserve Docker/Buildx metadata,
+   the selected builder, all ccache state and the validator wallet.
+3. Stop host Caddy and Vector. Copy Vector's existing data directory into the
+   `pareton_vector-data` volume. Copy host Caddy's data into
+   `pareton_caddy-data` under `caddy/` so certificates/account state survive.
+   These volumes can be created ahead of time with `docker volume create`.
+   Preserve ownership and do not copy live, actively written buffer files.
+4. Disable every old Pareton service/timer plus host Vector/Caddy; ensure no old
+   weights process or execution worker remains. Retain their previous configuration
+   privately until the migration has been verified. Resolve the old 4h/8h worker
+   drop-in discrepancy in the explicit Compose grace setting.
+5. Run the startup commands, inspect `docker compose ps` and logs, verify API,
+   Axiom, build-log access and a real build/round, then enable the Docker deploy
+   controller. A rollback to systemd must stop the Compose stack/controller first.
 
-1. **`systemd/pareton-worker.service` does not match the live unit.** The
-   committed file carries a `[Unit]` section, `Type=simple`, `User=root` and
-   `Restart=on-failure`. The live unit has none of those and uses
-   `Restart=always`. Installing the committed file would change restart
-   behavior. Decide which is intended, then make both sides agree.
-
-2. **`TimeoutStopSec` is set in two places with different values.** The
-   committed unit says `8h`. Both boxes carry a hand-installed drop-in at
-   `/etc/systemd/system/pareton-worker.service.d/timeout.conf` pinning `4h`,
-   and **drop-ins override the unit file** — so the effective value today is
-   `4h`, not the `8h` the unit asks for. Either delete the drop-in when this
-   deploys, or change the unit to `4h`.
-
-3. **`aws/pareton-api-iam-policy.json` overstates the live IAM policy.** It
-   grants `s3:ListBucket` and `s3:DeleteObject`; the live `pareton-api` user
-   has neither. Only `PutObject`/`GetObject` on `stage0/*` actually work.
-   Private patch uploads, validator reads, and public copies require only
-   `PutObject`/`GetObject`. The file should not be treated as an accurate record
-   of live permissions.
-
-4. **`vector/vector.toml` does not match the live config.** The committed file
-   reads the Axiom token from `${PARETON_AXIOM_TOKEN}`; the live file has a
-   literal token inlined, and the env var holds a _different_ token that the
-   Vector Axiom sink rejects. The env-var form is the better design — it needs
-   the correct token in `.env` before it will work.
-
-5. **The box needs swap, and nothing here says so.** Hermetic builds compile
-   vLLM's CUDA kernels; `cicc` peaks at 6–12 GB per job and will OOM a 16 GB
-   box. The only record of this is a comment in `a2b-build.sh` telling you to
-   `fallocate` a 64 G swapfile by hand. A host rebuilt from this directory
-   silently gets no swap, and the first submission dies with `Killed` /
-   `exit status 137` — which surfaces as `hermetic_build_failed` and rejects
-   the miner's patch for an infrastructure fault. `pareton-prod-02` now has a
-   64 G swapfile with an `/etc/fstab` entry; provisioning should create one.
-
-## Reinstalling a unit
+## Daily commands and checks
 
 ```sh
-scp ops/systemd/pareton-deploy.timer root@<host>:/etc/systemd/system/
-ssh root@<host> systemctl daemon-reload
-ssh root@<host> systemctl restart pareton-deploy.timer
+docker compose ps
+docker compose logs -f --tail 100 worker round-worker
+docker compose logs -f vector
+docker compose run --rm --no-deps cli python -m campaign --help
+docker compose run --rm --no-deps cli python -m gpu reap --dry-run
 ```
 
-## Builder disk cleanup
-
-The persistent build host keeps local retention tags for the build-base and
-baseline engine images of every draft or open campaign. Published candidate
-tags are removed after their digest-pinned reference is stored in Postgres.
-The hourly fallback sweep removes leftover candidate tags and prunes ordinary
-BuildKit records after Docker storage crosses 75% usage. It targets the same
-explicit Buildx builder as miner builds and does not run daemon-wide image or
-system prune commands.
-BuildKit `exec.cachemount` records are excluded because they hold the warmed
-baseline ccache used by later miner builds.
-
-Docker Engine's background BuildKit GC is disabled on the dedicated builder
-host. Pareton's filtered cleanup is the only BuildKit GC authority, so Docker
-cannot independently reclaim `exec.cachemount`. Both the worker and cleanup
-units fail their startup check unless `/etc/docker/daemon.json` has
-`builder.gc.enabled=false`.
-
-Baseline build and serving images for every draft or open campaign have local
-retention tags. Candidate and leader images are durable in GHCR by digest.
-Rounds read those digest-pinned references from Postgres and pull them on the
-GPU host, so removing a builder-host candidate tag never causes a rebuild.
-This cleanup never deletes registry artifacts.
-
-The cleanup fails without deleting anything when Postgres is unavailable, and
-skips a run when a build holds the shared storage lock. Preview it before
-installing the timer:
+Container integration checks (isolated test database; no cloud spend or signing):
 
 ```sh
-cd /opt/pareton
-set -a
-. ./.env
-set +a
-.venv/bin/python -m builder.cleanup --dry-run --force
+PARETON_CODE_SHA=$(git rev-parse HEAD) docker compose build api
+python3 scripts/smoke_compose.py
 ```
 
-Install the Docker policy and both units during a maintenance window. The
-committed file is a merge fragment, not a replacement daemon configuration.
-It deliberately omits `features.containerd-snapshotter`. Merge it into the
-host's current configuration so Docker keeps its active classic or containerd
-image store and every unrelated daemon setting. Record the active storage
-driver before the restart and require the same value afterward.
-
-```sh
-systemctl stop pareton-deploy.timer
-systemctl stop pareton-worker
-command -v jq
-test -f /etc/docker/daemon.json
-image_store_before=$(docker info --format '{{json .DriverStatus}}')
-cp -a /etc/docker/daemon.json /etc/docker/daemon.json.pre-pareton-gc
-daemon_merged=$(mktemp)
-jq -s '.[0] * .[1]' \
-  /etc/docker/daemon.json ops/docker/daemon.json > "$daemon_merged"
-dockerd --validate --config-file="$daemon_merged"
-install -m 0644 "$daemon_merged" /etc/docker/daemon.json
-rm -f "$daemon_merged"
-systemctl restart docker
-image_store_after=$(docker info --format '{{json .DriverStatus}}')
-test "$image_store_after" = "$image_store_before"
-.venv/bin/python -m builder.gc_config
-cp ops/systemd/pareton-worker.service /etc/systemd/system/
-cp ops/systemd/pareton-builder-cleanup.service /etc/systemd/system/
-cp ops/systemd/pareton-builder-cleanup.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl start pareton-worker
-systemctl enable --now pareton-builder-cleanup.timer
-systemctl start pareton-builder-cleanup.service
-systemctl start pareton-deploy.timer
-journalctl -u pareton-builder-cleanup.service -n 100 --no-pager
-```
+CI also checks the runtime image's Docker client against mock engine containers.
+Remote host bootstrap/orchestration has offline tests. Real provider/GPU and
+production Axiom verification is a cutover
+check; mock tests cannot establish those external services are configured correctly.

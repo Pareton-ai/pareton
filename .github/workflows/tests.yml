@@ -17,6 +17,20 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10", "3.11"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PARETON_TEST_DATABASE_URL: postgresql://test:test@127.0.0.1:5432/test
 
     steps:
       - uses: actions/checkout@v4
@@ -33,5 +47,50 @@ jobs:
 
       - name: Run offline tests
         # `-m unit` ran only 94/347; bench/ and gpu/ tests were silently
-        # excluded. Everything except docker-marked runs without GPU/network.
-        run: pytest -q -m "not docker"
+        # excluded. These tests use local Postgres and no external GPU/cloud.
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import psycopg2
+          with psycopg2.connect(os.environ["PARETON_TEST_DATABASE_URL"]) as conn:
+              with conn.cursor() as cur:
+                  cur.execute(Path("db/schema.sql").read_text())
+          PY
+          pytest -q -m "not docker"
+
+  container-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime and deploy controller
+        run: |
+          docker build --target runtime --build-arg PARETON_CODE_SHA="$GITHUB_SHA" -t pareton-runtime:local .
+          docker build --target deployer -t pareton-deployer:local .
+      - name: Validate Compose and Vector alert compatibility
+        env:
+          PARETON_AXIOM_TOKEN: test
+          PARETON_ENV_FILE: .env.example
+        run: |
+          docker compose config --quiet
+          docker compose -f ops/compose.deploy.yaml config --quiet
+          PARETON_WALLET_NAME=test PARETON_WALLET_HOTKEY=test \
+            docker compose -f ops/compose.auditor.yaml config --quiet
+          docker run --rm -e PARETON_AXIOM_TOKEN=test -e PARETON_AXIOM_DATASET=pareton-prod \
+            -e PARETON_COMPOSE_PROJECT=pareton \
+            -v "$PWD/ops/vector/vector.toml:/etc/vector/vector.toml:ro" \
+            timberio/vector:0.51.1-debian test /etc/vector/vector.toml
+      - name: Compose startup, logs and redeployment persistence
+        run: python3 scripts/smoke_compose.py
+      - name: Docker client and engine lifecycle
+        run: |
+          shared=$(mktemp -d)
+          # Root inside the container creates private pytest directories on the host.
+          trap 'sudo rm -rf -- "$shared"' EXIT
+          docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$shared:$shared" -e TMPDIR="$shared" \
+            pareton-runtime:local python -m pytest -q -m docker \
+            tests/test_lifecycle_docker.py tests/test_correctness_docker.py tests/test_container_ops.py \
+            tests/test_deploy_workers.py

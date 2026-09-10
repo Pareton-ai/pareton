@@ -1,0 +1,230 @@
+name: pareton
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-environment: &environment
+  PARETON_WORK_DIR: /var/lib/pareton/work
+  PARETON_BUILD_LOG_DIR: /var/log/pareton/builds
+  PARETON_BUILDER_LOCK_PATH: /var/lib/pareton/work/builder-storage.lock
+  PARETON_BUILDER_NAME: ${PARETON_BUILDER_NAME:-default}
+  PARETON_GPU_STATE_DIR: ${PARETON_GPU_STATE_DIR:-/root/.cache/pareton/gpu}
+  PARETON_DOCKER_DAEMON_CONFIG_PATH: /etc/docker/daemon.json
+  PARETON_BUILDER_DOCKER_ROOT: /var/lib/docker
+  DOCKER_HOST: unix:///var/run/docker.sock
+  DOCKER_CONFIG: /root/.docker
+
+x-app: &app
+  image: ${PARETON_RUNTIME_IMAGE:-pareton-runtime:local}
+  build:
+    context: .
+    target: runtime
+    args:
+      PARETON_CODE_SHA: ${PARETON_CODE_SHA:-unknown}
+  env_file: ${PARETON_ENV_FILE:-.env}
+  environment: *environment
+  init: true
+  restart: unless-stopped
+  logging: *logging
+  depends_on:
+    vector:
+      condition: service_started
+
+x-work: &work
+  type: bind
+  source: ${PARETON_HOST_WORK_DIR:-./.pareton-work}
+  target: /var/lib/pareton/work
+x-build-logs: &build-logs
+  type: bind
+  source: ${PARETON_HOST_BUILD_LOG_DIR:-/var/log/pareton/builds}
+  target: /var/log/pareton/builds
+x-gpu-state: &gpu-state
+  type: bind
+  source: ${PARETON_GPU_STATE_DIR:-/root/.cache/pareton/gpu}
+  target: ${PARETON_GPU_STATE_DIR:-/root/.cache/pareton/gpu}
+x-socket: &socket
+  type: bind
+  source: ${PARETON_DOCKER_SOCKET:-/var/run/docker.sock}
+  target: /var/run/docker.sock
+x-docker-config: &docker-config
+  type: bind
+  source: ${PARETON_DOCKER_CONFIG_DIR:-/root/.docker}
+  target: /root/.docker
+x-daemon-config: &daemon-config
+  type: bind
+  source: ${PARETON_DOCKER_DAEMON_CONFIG_PATH:-/etc/docker/daemon.json}
+  target: /etc/docker/daemon.json
+  read_only: true
+  bind:
+    create_host_path: false
+x-docker-storage: &docker-storage
+  type: bind
+  source: ${PARETON_BUILDER_DOCKER_ROOT:-/var/lib/docker}
+  target: /var/lib/docker
+  read_only: true
+  bind:
+    create_host_path: false
+
+services:
+  api:
+    <<: *app
+    command: [python, -m, api]
+    labels:
+      ai.pareton.systemd-unit: pareton-api.service
+    volumes:
+      - <<: *build-logs
+        read_only: true
+    ports:
+      - "127.0.0.1:${PARETON_API_PORT:-8000}:8000"
+    healthcheck:
+      test: [CMD, python, -m, ops.healthcheck]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  worker:
+    <<: *app
+    command: [python, -m, worker.main, --queue, submissions]
+    environment:
+      <<: *environment
+      PARETON_REQUIRE_BUILDER: "1"
+      PARETON_HEALTH_FILE: /tmp/worker-heartbeat
+    labels:
+      ai.pareton.systemd-unit: pareton-worker.service
+    stop_grace_period: ${PARETON_WORKER_STOP_GRACE_PERIOD:-8h}
+    healthcheck: &worker-health
+      test: [CMD, python, -m, ops.healthcheck, worker]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    volumes:
+      - *work
+      - *build-logs
+      - *socket
+      - *docker-config
+      - *daemon-config
+      - *docker-storage
+
+  round-worker:
+    <<: *app
+    command: [python, -m, worker.main, --queue, rounds]
+    environment:
+      <<: *environment
+      PARETON_HEALTH_FILE: /tmp/worker-heartbeat
+    labels:
+      ai.pareton.systemd-unit: pareton-round-worker.service
+    stop_grace_period: ${PARETON_WORKER_STOP_GRACE_PERIOD:-8h}
+    healthcheck: *worker-health
+    volumes:
+      - *work
+      - *gpu-state
+      - hf-cache:/root/.cache/huggingface
+
+  watcher:
+    <<: *app
+    command: [python, -m, worker.watcher]
+    labels:
+      ai.pareton.systemd-unit: pareton-watcher.service
+    stop_grace_period: 30s
+    volumes:
+      - *work
+      - hf-cache:/root/.cache/huggingface
+
+  weights:
+    <<: *app
+    command: [python, -m, weights]
+    labels:
+      ai.pareton.systemd-unit: pareton-weights.service
+    stop_grace_period: 15m
+    volumes:
+      - type: bind
+        source: ${PARETON_WALLET_DIR:-/root/.bittensor/wallets}
+        target: /root/.bittensor/wallets
+        read_only: true
+        bind:
+          create_host_path: false
+
+  gpu-reap:
+    <<: *app
+    command: [python, -m, ops.schedule, --interval, "600", --initial-delay, "120", --, python, -m, gpu, reap]
+    labels:
+      ai.pareton.systemd-unit: pareton-gpu-reap.service
+    stop_grace_period: 30m
+    volumes:
+      - *gpu-state
+
+  builder-cleanup:
+    <<: *app
+    command: [python, -m, ops.schedule, --interval, "3600", --initial-delay, "600", --, python, -m, builder.cleanup]
+    environment:
+      <<: *environment
+      PARETON_REQUIRE_BUILDER: "1"
+    labels:
+      ai.pareton.systemd-unit: pareton-builder-cleanup.service
+    stop_grace_period: 35m
+    volumes:
+      - *work
+      - *socket
+      - *docker-config
+      - *daemon-config
+      - *docker-storage
+
+  cli:
+    <<: *app
+    profiles: [tools]
+    restart: "no"
+    depends_on: {}
+    command: [python, -m, campaign, --help]
+    volumes:
+      - *work
+      - *build-logs
+      - *gpu-state
+      - *socket
+      - *docker-config
+      - *daemon-config
+      - *docker-storage
+      - hf-cache:/root/.cache/huggingface
+
+  vector:
+    image: timberio/vector:0.51.1-debian
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      PARETON_AXIOM_TOKEN: ${PARETON_AXIOM_TOKEN:?Set the working Axiom ingest token in .env}
+      PARETON_AXIOM_DATASET: ${PARETON_AXIOM_DATASET:-pareton-prod}
+      PARETON_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-pareton}
+    command: [--config, /etc/vector/vector.toml]
+    stop_grace_period: 60s
+    volumes:
+      - *socket
+      - ${PARETON_VECTOR_CONFIG:-./ops/vector/vector.toml}:/etc/vector/vector.toml:ro
+      - vector-data:/var/lib/vector
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      PARETON_API_DOMAIN: ${PARETON_API_DOMAIN:-api.pareton.ai}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ${PARETON_CADDY_CONFIG:-./ops/caddy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  vector-data:
+  caddy-data:
+  caddy-config:
+  hf-cache:
