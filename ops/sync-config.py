@@ -340,6 +340,17 @@ def run_check(args: argparse.Namespace) -> tuple[list[dict], list[Entry]]:
 def scan_unexpected(entries: list[Entry]) -> list[dict]:
     findings: list[dict] = []
     managed = {entry.target for entry in entries}
+    # Drop-in scanning is limited to MANAGED units (spec 4.1: the load sources
+    # of the pareton-*/vector units we own). OS-provided units may carry their
+    # own drop-ins — those belong to the system, not to us.
+    managed_units = set()
+    for entry in entries:
+        parent = Path(entry.target).parent.name
+        name = Path(entry.target).name
+        if parent.endswith(".d"):
+            managed_units.add(parent[:-2])
+        elif name.endswith((".service", ".timer")) and parent == "systemd":
+            managed_units.add(name)
     etc = p("/etc/systemd/system")
     try:
         present = sorted(
@@ -347,9 +358,6 @@ def scan_unexpected(entries: list[Entry]) -> list[dict]:
             for f in etc.iterdir()
             if (f.name.startswith("pareton-") or f.name == "vector.service")
             and not f.is_dir()
-        )
-        drop_dirs = sorted(
-            f for f in etc.iterdir() if f.is_dir() and f.name.endswith(".d")
         )
     except FileNotFoundError:
         return []  # Nothing installed yet (fresh bootstrap); mapping covers the rest.
@@ -367,18 +375,20 @@ def scan_unexpected(entries: list[Entry]) -> list[dict]:
                 {"category": "unexpected", "target": absolute, "detail": "not-managed"}
             )
     # Drop-in directories: unmanaged *.conf files and /run overrides both count.
-    for dropdir in drop_dirs:
-        for conf in sorted(dropdir.glob("*.conf")):
-            absolute = f"/etc/systemd/system/{dropdir.name}/{conf.name}"
-            if absolute not in managed:
-                findings.append(
-                    {
-                        "category": "unexpected",
-                        "target": absolute,
-                        "detail": "unmanaged-drop-in",
-                    }
-                )
-        runtime = p(f"/run/systemd/system/{dropdir.name}")
+    for unit in sorted(managed_units):
+        dropdir = etc / f"{unit}.d"
+        if dropdir.is_dir():
+            for conf in sorted(dropdir.glob("*.conf")):
+                absolute = f"/etc/systemd/system/{unit}.d/{conf.name}"
+                if absolute not in managed:
+                    findings.append(
+                        {
+                            "category": "unexpected",
+                            "target": absolute,
+                            "detail": "unmanaged-drop-in",
+                        }
+                    )
+        runtime = p(f"/run/systemd/system/{unit}.d")
         if runtime.is_dir() and any(runtime.iterdir()):
             findings.append(
                 {
@@ -554,9 +564,15 @@ def daemon_reload() -> None:
 
 
 def restart_vector() -> None:
+    # A crash-looping unit can hit systemd's start rate limit; reset it so the
+    # config-driven restart is not refused with "repeated too quickly".
+    run_cmd(["systemctl", "reset-failed", "vector"])
     result = run_cmd(["systemctl", "restart", "vector"])
     if result.returncode != 0:
         raise Fail(4, "vector-restart-failed")
+    # Type=simple units look "active" for a moment even when the process dies
+    # immediately; settle before judging, or a broken candidate slips through.
+    time.sleep(1)
     active = run_cmd(["systemctl", "is-active", "vector"])
     if active.stdout.strip() != "active":
         raise Fail(4, "vector-not-active", detail=active.stdout.strip())
@@ -593,7 +609,11 @@ def rollback(
     if did_reload:
         run_cmd(["systemctl", "daemon-reload"])
     if did_vector_restart:
-        run_cmd(["systemctl", "restart", "vector"])
+        # Stop first to cancel any queued auto-restart job from the failed
+        # candidate, then reset the rate limiter and start the restored unit.
+        run_cmd(["systemctl", "stop", "vector"])
+        run_cmd(["systemctl", "reset-failed", "vector"])
+        run_cmd(["systemctl", "start", "vector"])
     return log
 
 
@@ -741,8 +761,15 @@ def emit(payload: dict) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
+MODES = ("check", "apply", "deploy-hook", "owed-restarts", "clear-restarts")
+
+
 def build_parser() -> argparse.ArgumentParser:
+    # A plain positional (not subparsers) so `--repo X apply` and
+    # `apply --repo X` are both accepted; deploy.sh and the runbook use the
+    # mode-first form.
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("mode", choices=MODES)
     parser.add_argument(
         "--repo", required=True, help="repository root (explicit, spec 5)"
     )
@@ -751,19 +778,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", default="/opt/pareton/.env")
     parser.add_argument("--notify-program", default=None)
     parser.add_argument("--skip-validation", action="store_true")
-    sub = parser.add_subparsers(dest="mode", required=True)
-    sub.add_parser("check")
-    sub.add_parser("apply")
-    sub.add_parser("deploy-hook")
-    sub.add_parser("owed-restarts")
-    clear = sub.add_parser("clear-restarts")
-    clear.add_argument("units", nargs="+")
+    parser.add_argument("units", nargs="*", help="clear-restarts: units to drop")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     args.repo = Path(args.repo)
+    if args.mode == "clear-restarts" and not args.units:
+        print("sync-config: clear-restarts needs at least one unit", file=sys.stderr)
+        return 2
     try:
         if args.mode == "check":
             findings, _ = run_check(args)
