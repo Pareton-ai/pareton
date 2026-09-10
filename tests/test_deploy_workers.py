@@ -220,7 +220,7 @@ def test_owed_restarts_run_and_clear_on_no_change_tick(deploy):
     result = run(owed=True)  # no-change tick with an owed restart reported
     assert result["rc"] == 0, result["stderr"]
     # The no-change tick must restart exactly the owed unit and clear the debt.
-    assert (repo / "restarts.log").read_text().splitlines() == ["pareton-api"]
+    assert (repo / "restarts.log").read_text().splitlines() == ["pareton-api.service"]
     assert any(c.startswith("sync clear-restarts --repo") for c in result["ops"])
 
 
