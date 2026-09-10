@@ -23,9 +23,8 @@ mkdir -p /opt/pareton/.pareton-work /var/log/pareton/builds
 mkdir -p /root/.cache/pareton/gpu /root/.docker
 # Install the existing validator wallet in PARETON_WALLET_DIR before starting.
 docker compose config --quiet
-PARETON_CODE_SHA=$(git rev-parse HEAD) docker compose build api
-docker compose run --rm --no-deps cli python -m builder.preflight
-docker compose up -d --wait
+# Build, validate, start, and save the first release for subsequent rollbacks.
+bash ops/deploy.sh --local
 ```
 
 The default topology co-locates API and submission worker, since build-log API
@@ -120,7 +119,9 @@ Workers have an eight-hour grace period and weights fifteen minutes. No timeout
 flag shortens these settings. An expired grace period can still force-kill a job;
 inspect failed/stranded work and GPU teardown before resuming after such a failure.
 
-No deployment removes volumes. Runtime images use the source commit as their tag.
+No deployment removes volumes. Runtime image tags combine the source commit with
+a unique deployment suffix. Rebuilding the same commit keeps the previous image
+and mounted configurations intact for rollback.
 After successful startup, the `pareton-runtime:local` alias advances to the same
 image so ordinary `docker compose run cli` commands use the deployed code.
 Rendered configuration, environment, and copies of Vector/Caddy configuration live

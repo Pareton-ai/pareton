@@ -33,10 +33,10 @@ Docker Compose. Python runs in a virtualenv inside the runtime image. See the
 GPU execution, automatic deployments and migration from existing systemd hosts.
 
 ```sh
+cd /opt/pareton
 cp .env.example .env
 # Configure credentials, host paths, builder policy and the validator wallet.
-PARETON_CODE_SHA=$(git rev-parse HEAD) docker compose build api
-docker compose up -d --wait
+bash ops/deploy.sh --local
 ```
 
 ## Patch visibility

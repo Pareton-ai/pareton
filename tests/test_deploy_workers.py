@@ -85,7 +85,8 @@ def test_prepare_before_drain_and_down_then_up(deploy):
     )
     assert "--builder default" in log
     assert "--wait" in log
-    assert "image tag pareton-runtime:new pareton-runtime:local" in log
+    assert "image tag pareton-runtime:new." in log
+    assert " pareton-runtime:local" in log
     assert "--volumes" not in log and " down -v" not in log
     assert (repo / ".deploy-state/done").read_text().strip() == "new"
     assert (repo / ".deploy-state/current.yaml").stat().st_mode & 0o777 == 0o600
@@ -133,3 +134,183 @@ def test_local_deploy_does_not_fetch_or_merge(deploy):
     assert result.returncode == 0
     assert "git fetch" not in log and "git merge" not in log
     assert " down " in log and " up " in log
+
+
+def test_failed_same_commit_redeploy_preserves_previous_release(deploy):
+    repo, run = deploy
+    result, first_log = run("--local")
+    assert result.returncode == 0
+    releases = repo / ".deploy-state/releases"
+    first_release = next(releases.iterdir())
+    original_vector = (first_release / "vector.toml").read_text()
+    first_tag = next(
+        line for line in first_log.splitlines() if "image tag" in line
+    ).split()[-2]
+    (repo / "ops/vector/vector.toml").write_text("changed vector configuration")
+    result, second_log = run("--local", TEST_UP_RC=1)
+    assert result.returncode != 0
+    assert (first_release / "vector.toml").read_text() == original_vector
+    assert len(list(releases.iterdir())) == 2
+    assert first_tag not in second_log  # Never build over the previous image tag.
+
+
+def test_stopping_watch_drains_active_deployment(deploy):
+    import signal
+    import time
+
+    repo, _run = deploy
+    stub = repo.parent / "bin"
+    docker = stub / "docker"
+    text = docker.read_text().replace(
+        '*" build "*) exit "${TEST_BUILD_RC:-0}" ;;',
+        '*" build "*)\n'
+        '        touch "$TEST_BUILD_STARTED"\n'
+        '        while [ ! -f "$TEST_BUILD_RELEASE" ]; do sleep 0.05; done\n'
+        "        exit 0 ;;",
+    )
+    docker.write_text(text)
+    started, release = repo.parent / "started", repo.parent / "release"
+    log = repo.parent / "watch.log"
+    proc = subprocess.Popen(
+        ["bash", str(ROOT / "ops/deploy.sh"), "--watch"],
+        env={
+            **os.environ,
+            "PATH": f"{stub}:{os.environ['PATH']}",
+            "PARETON_REPO_DIR": str(repo),
+            "PARETON_ENV_FILE": str(repo / ".env"),
+            "TEST_LOG": str(log),
+            "TEST_BUILD_STARTED": str(started),
+            "TEST_BUILD_RELEASE": str(release),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started.exists()
+        proc.terminate()
+        time.sleep(0.2)
+        assert proc.poll() is None, (
+            "controller exited before its active deployment drained"
+        )
+        release.touch()
+        stdout, stderr = proc.communicate(timeout=5)
+        assert proc.returncode == 0, (stdout, stderr)
+        assert (repo / ".deploy-state/done").read_text().strip() == "new"
+        assert log.read_text().count("git fetch") == 1
+    finally:
+        release.touch()
+        # Clean up the entire isolated test process group, including any orphans.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate(timeout=5)
+
+
+@pytest.mark.docker
+def test_controller_drains_when_docker_stops_it():
+    """Docker init must forward SIGTERM to the watch shell, which drains first."""
+    import shutil
+    import time
+    import uuid
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is unavailable")
+    if subprocess.run(["docker", "info"], capture_output=True, timeout=15).returncode:
+        pytest.skip("Docker daemon is unavailable")
+    image = os.environ.get("PARETON_DEPLOYER_IMAGE", "pareton-deployer:local")
+    name = "pareton-deploy-test-" + uuid.uuid4().hex[:10]
+    setup = r"""
+set -eu
+mkdir -p /testrepo/ops/vector /testrepo/ops/caddy /fake
+touch /testrepo/.env /testrepo/compose.yaml /testrepo/ops/vector/vector.toml /testrepo/ops/caddy/Caddyfile
+cat > /fake/git <<'GIT'
+#!/bin/sh
+case "$1" in rev-parse) echo deadbeef ;; esac
+GIT
+cat > /fake/docker <<'DOCKER'
+#!/bin/sh
+case " $* " in
+    *" config "*) echo 'services: {}' ;;
+    *" build "*)
+        touch /started
+        while [ ! -f /release ]; do sleep 0.05; done ;;
+esac
+DOCKER
+chmod +x /fake/*
+export PATH="/fake:$PATH"
+export PARETON_REPO_DIR=/testrepo
+exec /usr/local/bin/pareton-deploy --watch
+"""
+    stopping = None
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--init",
+                "--name",
+                name,
+                "--entrypoint",
+                "bash",
+                image,
+                "-c",
+                setup,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        deadline = time.monotonic() + 10
+        while subprocess.run(
+            ["docker", "exec", name, "test", "-f", "/started"],
+            capture_output=True,
+            timeout=5,
+        ).returncode:
+            assert time.monotonic() < deadline, "controller never reached the build"
+            time.sleep(0.1)
+        stopping = subprocess.Popen(
+            ["docker", "stop", "--time", "10", name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(0.3)
+        assert stopping.poll() is None, "controller stopped before the rollout drained"
+        subprocess.run(
+            ["docker", "exec", name, "touch", "/release"], check=True, timeout=5
+        )
+        stdout, stderr = stopping.communicate(timeout=15)
+        assert stopping.returncode == 0, (stdout, stderr)
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.ExitCode}}", name],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.stdout.strip() == "0"
+        logs = subprocess.run(
+            ["docker", "logs", name],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert "deploy: deadbeef running" in logs.stdout
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", name],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        if stopping is not None:
+            stopping.communicate(timeout=15)

@@ -8,9 +8,14 @@ if [[ ${PARETON_DEPLOY_SNAPSHOT:-0} != 1 ]]; then
     deploy_copy=$(mktemp)
     cp -- "$0" "$deploy_copy"
     export PARETON_DEPLOY_SNAPSHOT=1
-    trap 'rm -f "$deploy_copy"' EXIT
-    bash "$deploy_copy" "$@"
-    exit $?
+    export PARETON_DEPLOY_SNAPSHOT_PID=$$
+    # Keep the watch shell as the signal recipient, including under Docker's
+    # init. A wrapper shell would exit on SIGTERM and interrupt the rollout.
+    exec bash "$deploy_copy" "$@"
+fi
+if [[ ${PARETON_DEPLOY_SNAPSHOT_PID:-} == $$ ]]; then
+    # One-shot children reuse this file; only its owning watch shell removes it.
+    trap 'rm -f -- "$0"' EXIT
 fi
 
 REPO=${PARETON_REPO_DIR:-/opt/pareton}
@@ -48,9 +53,11 @@ redeploy() (
     fi
     export PARETON_CODE_SHA
     PARETON_CODE_SHA=$(git rev-parse HEAD)
-    export PARETON_RUNTIME_IMAGE="pareton-runtime:$PARETON_CODE_SHA"
-    release="$STATE/releases/$PARETON_CODE_SHA"
-    mkdir -p "$release"
+    mkdir -p "$STATE/releases"
+    # A retry or --local redeployment can reuse the SHA with new config or
+    # dependencies. Never overwrite the last working image or mounted configs.
+    release=$(mktemp -d "$STATE/releases/$PARETON_CODE_SHA.XXXXXXXX")
+    export PARETON_RUNTIME_IMAGE="pareton-runtime:${release##*/}"
     cp "$REPO/ops/vector/vector.toml" "$release/vector.toml"
     cp "$REPO/ops/caddy/Caddyfile" "$release/Caddyfile"
     export PARETON_VECTOR_CONFIG="$release/vector.toml"
