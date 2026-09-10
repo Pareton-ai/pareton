@@ -126,6 +126,14 @@ def send_with_retry(url: str, content: str) -> tuple[bool, str | None]:
 
 
 def systemctl_show_deploy() -> dict:
+    """Query the failed deploy unit's facts as Key=Value lines.
+
+    Deliberately WITHOUT --value and WITHOUT any ordering assumption:
+    systemd emits properties in its own internal order, not the requested
+    one (owner-verified on the production box — positional parsing labeled
+    the wrong value as the invocation ID, so every alert reported unknown
+    facts). Map by key name instead.
+    """
     facts: dict = {}
     try:
         result = subprocess.run(
@@ -133,7 +141,6 @@ def systemctl_show_deploy() -> dict:
                 "systemctl",
                 "show",
                 DEPLOY_UNIT,
-                "--value",
                 "--property=InvocationID,ExecMainStatus,Result",
             ],
             capture_output=True,
@@ -145,9 +152,13 @@ def systemctl_show_deploy() -> dict:
         return facts
     if result.returncode != 0:
         return facts
-    keys = ["invocation_id", "exec_main_status", "result"]
-    for key, value in zip(keys, result.stdout.splitlines()):
-        facts[key] = value.strip()
+    for line in result.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in ("InvocationID", "ExecMainStatus", "Result"):
+            facts[key] = value.strip()
+    facts["invocation_id"] = facts.get("InvocationID", "")
+    facts["exec_main_status"] = facts.get("ExecMainStatus", "")
+    facts["result"] = facts.get("Result", "")
     return facts
 
 

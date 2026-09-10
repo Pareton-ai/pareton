@@ -280,6 +280,12 @@ fault = state.get("fault") or {}
 assert fault.get("count", 0) >= 1, fault
 assert fault.get("last_notified") is None, fault
 assert state.get("send_failures", 0) >= 1, state
+# Owner-verified bug regression: the invocation must match the failed run
+# (parsed by key, not by systemd's output order), so the alert facts and the
+# fault key identify the actual deploy run.
+key = fault.get("key") or {}
+assert key.get("step") == "probe-worker", key
+assert key.get("target_commit") not in ("", "unknown", None), key
 PY
 sed -i '/TEST_DB_ERROR/d' "$REPO/.env"
 rm -f "$REPO/.deploy-pending" "$REPO/.deploy-rounds-pending"

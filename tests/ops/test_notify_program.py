@@ -35,9 +35,14 @@ def notifier(tmp_path, monkeypatch):
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    # Key=Value lines in a NON-requested order, exactly like real systemd
+    # (owner-verified on prod): positional parsing silently mislabels values.
     (bin_dir / "systemctl").write_text(
         "#!/bin/sh\n"
-        'if [ "$1" = show ]; then printf "inv-1\\n1\\nfailed\\n"; exit 0; fi\n'
+        'if [ "$1" = show ]; then\n'
+        '  printf "Result=failed\\nExecMainStatus=1\\nInvocationID=inv-1\\n"\n'
+        "  exit 0\n"
+        "fi\n"
         "exit 1\n"
     )
     (bin_dir / "systemctl").chmod(0o755)
@@ -154,11 +159,27 @@ def test_first_failure_sends_with_required_fields(notifier):
         "host:",
         "unit: pareton-deploy.service",
         "step: install-config",
-        "commits:",
         "count: 1",
     ):
         assert field in message
-    assert state(notifier)["fault"]["count"] == 1
+    # The invocation must match despite systemd's own property order, so the
+    # run's facts resolve and the fault key is specific (owner-verified bug).
+    assert "000000 -> abc123" in message
+    fault = state(notifier)["fault"]
+    assert fault["count"] == 1
+    assert fault["key"]["step"] == "install-config"
+    assert fault["key"]["target_commit"] == "abc123"
+
+
+def test_facts_unmatched_reports_unknown_without_breaking(notifier):
+    notifier._write_env_file()
+    # A last-run.env from a DIFFERENT run (e.g. the next tick already ran).
+    notifier._write_run_env(step="fetch", invocation="someone-else")
+    code, _out, _err = run_mode(notifier, "notify-failure")
+    assert code == 0
+    message = notifier._test_sent[0]["payload"]["content"]
+    assert "step: unknown" in message
+    assert state(notifier)["fault"]["key"]["step"] == "unknown"
 
 
 def test_same_fault_suppressed_then_reminded_after_window(notifier, monkeypatch):
