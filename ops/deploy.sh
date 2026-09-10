@@ -61,9 +61,10 @@ mkdir -p "$STATE_DIR"
 record_step() {
   # KEY=VALUE lines parsed by the notifier with the same env-file parser.
   # Never log environment contents here; values are commits and step names.
+  # Write via temp + rename so a concurrent notifier never reads half a file.
   printf 'invocation_id=%s\nstarted_at=%s\nfrom_commit=%s\ntarget_commit=%s\nlast_step=%s\n' \
     "$INVOCATION" "$STARTED_UTC" "${FROM_COMMIT:-unknown}" "${TARGET_COMMIT:-unknown}" "$1" \
-    > "$RUN_STATE"
+    > "$RUN_STATE.tmp.$$" && mv -f "$RUN_STATE.tmp.$$" "$RUN_STATE"
 }
 
 install_ops() {

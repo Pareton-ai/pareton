@@ -74,6 +74,9 @@ fi""",
             "# deploy.sh call missing the flag fails loudly instead of silently.\n"
             '[ "$2" = "--repo" ] || { echo "sync stub: missing --repo" >&2; exit 2; }\n'
             'echo "sync $@" >> "$OPS_LOG"\n'
+            'if [ "$1" = owed-restarts ] && [ "${FAKE_OWED:-0}" = 1 ]; then\n'
+            '  echo "pareton-api.service"\n'
+            "fi\n"
             "exit ${FAKE_SYNC_RC:-0}\n"
         ),
         "notify-deploy-failure.py": 'echo "notify $@" >> "$OPS_LOG"\nexit 0\n',
@@ -90,6 +93,7 @@ fi""",
         missing="",
         sync_rc=0,
         invocation="inv-test",
+        owed=False,
     ):
         log = repo / "restarts.log"
         log.write_text("")
@@ -109,6 +113,7 @@ fi""",
                 "PARETON_DEPLOY_LOCK": str(tmp_path / "lock"),
                 "OPS_LOG": str(ops_log),
                 "FAKE_SYNC_RC": str(sync_rc),
+                "FAKE_OWED": str(int(owed)),
                 "INVOCATION_ID": invocation,
                 "TEST_JOB": str(int(job)),
                 "TEST_ROUND": str(int(round)),
@@ -205,6 +210,18 @@ def test_no_change_tick_still_runs_config_check(deploy):
     assert second["rc"] == 0
     # Every locked tick re-checks config; HEAD did not change (spec 5.3).
     assert any(c.startswith("sync deploy-hook") for c in second["ops"])
+
+
+def test_owed_restarts_run_and_clear_on_no_change_tick(deploy):
+    # Regression (owner/Cursor review): owed-restarts/clear-restarts used to be
+    # called without --repo and silently no-op; the stub now rejects that.
+    repo, _ops, _tmp, run = deploy
+    run()  # first tick: .deploy-done becomes "new" == origin/main
+    result = run(owed=True)  # no-change tick with an owed restart reported
+    assert result["rc"] == 0, result["stderr"]
+    # The no-change tick must restart exactly the owed unit and clear the debt.
+    assert (repo / "restarts.log").read_text().splitlines() == ["pareton-api"]
+    assert any(c.startswith("sync clear-restarts --repo") for c in result["ops"])
 
 
 def test_install_ops_self_installs_helpers_atomically(deploy):
