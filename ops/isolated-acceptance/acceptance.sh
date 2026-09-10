@@ -136,6 +136,12 @@ quiet_units() {
 }
 
 echo "=== A2: bootstrap-order install (runbook steps 5+6) ==="
+# Regression (Cursor review): production carries a deploy unit WITHOUT the
+# OnFailure line; bootstrap must converge it, not block on it.
+install -d /etc/systemd/system
+grep -v "^OnFailure=" "$REPO/ops/systemd/pareton-deploy.service" \
+  > /etc/systemd/system/pareton-deploy.service
+chmod 0644 /etc/systemd/system/pareton-deploy.service
 install -d -m 0755 "$OPS"
 for f in ops_common.py sync-config.py notify-deploy-failure.py; do
   install -m 0755 "$REPO/ops/$f" "$OPS/$f"

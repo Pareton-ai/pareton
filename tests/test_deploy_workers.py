@@ -68,7 +68,14 @@ def db_connection():
 else
     echo "$2" >> restarts.log
 fi""",
-        "sync-config.py": 'echo "sync $@" >> "$OPS_LOG"\nexit ${FAKE_SYNC_RC:-0}\n',
+        "sync-config.py": (
+            "#!/bin/sh\n"
+            "# The real CLI requires --repo for every mode; enforce it here so a\n"
+            "# deploy.sh call missing the flag fails loudly instead of silently.\n"
+            '[ "$2" = "--repo" ] || { echo "sync stub: missing --repo" >&2; exit 2; }\n'
+            'echo "sync $@" >> "$OPS_LOG"\n'
+            "exit ${FAKE_SYNC_RC:-0}\n"
+        ),
         "notify-deploy-failure.py": 'echo "notify $@" >> "$OPS_LOG"\nexit 0\n',
     }.items():
         tool = bin_dir if name in ("flock", "git", "systemctl") else ops_dir

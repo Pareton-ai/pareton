@@ -232,16 +232,20 @@ def test_runtime_override_blocks(env):
     assert any(f["category"] == "override" for f in payload["findings"])
 
 
-def test_missing_onfailure_is_flagged(env):
+def test_missing_onfailure_converges_like_any_drift(env):
+    # Production state: a live deploy unit WITHOUT the OnFailure line must not
+    # block the apply that installs it (Cursor review: the standalone check
+    # deadlocked bootstrap). Content equality is the guarantee (spec 5.1).
     install_clean_state(env)
     deploy = env.target("/etc/systemd/system/pareton-deploy.service")
     stripped = deploy.read_text().replace(
         "OnFailure=pareton-deploy-failed.service\n", ""
     )
     deploy.write_text(stripped)
-    _code, payload = run_mode(env, "check")
-    details = [f.get("detail", "") for f in payload["findings"]]
-    assert any(d.startswith("OnFailure-") for d in details)
+    code, payload = run_mode(env, "deploy-hook")
+    assert code == 0
+    assert payload["action"] == "applied"
+    assert "OnFailure=pareton-deploy-failed.service" in deploy.read_text()
 
 
 # ---------------------------------------------------------------- validation
@@ -318,6 +322,24 @@ def test_vector_restart_failure_rolls_back(env, monkeypatch):
     code, _ = run_mode(env, "deploy-hook")
     assert code != 0
     assert toml.read_text() == original
+    # Cursor review: a failed restart must still run the recovery sequence and
+    # record the debt for the next tick.
+    calls = env.calls()
+    assert "stop vector" in calls
+    assert "reset-failed vector" in calls
+    assert "start vector" in calls
+    pending = json.loads(
+        (env.base / "var/lib/pareton-deploy/sync-pending.json").read_text()
+    )
+    assert pending["vector_restart"] is True
+
+    monkeypatch.delenv("FAKE_SYSTEMCTL_FAIL")
+    code, _ = run_mode(env, "deploy-hook")
+    assert code == 0
+    pending = json.loads(
+        (env.base / "var/lib/pareton-deploy/sync-pending.json").read_text()
+    )
+    assert pending["vector_restart"] is False
 
 
 # ---------------------------------------------------------------- owed actions

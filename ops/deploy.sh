@@ -107,7 +107,7 @@ except Exception:
 
 run_owed_restarts() {
   local owed unit
-  owed=$("$SYNC" owed-restarts 2>/dev/null || true)
+  owed=$("$SYNC" owed-restarts --repo "$REPO" 2>/dev/null || true)
   [ -n "$owed" ] || return 0
   for unit in $owed; do
     if systemctl cat "$unit" >/dev/null 2>&1; then
@@ -115,7 +115,7 @@ run_owed_restarts() {
       echo "deploy: $unit restarted (config change effectuation)"
     fi
   done
-  "$SYNC" clear-restarts $owed >/dev/null || true
+  "$SYNC" clear-restarts --repo "$REPO" $owed >/dev/null || true
 }
 
 record_step fetch
@@ -159,7 +159,7 @@ if [ "$DEPLOYED" != "$REMOTE" ]; then
     fi
     # The three app units were just restarted onto the new commit; whatever
     # restart debt pointed at them is settled.
-    "$SYNC" clear-restarts \
+    "$SYNC" clear-restarts --repo "$REPO" \
       pareton-api.service pareton-watcher.service pareton-weights.service \
       >/dev/null 2>&1 || true
     echo "deploy: $DEPLOYED -> $(git rev-parse HEAD); $restarted restarted"

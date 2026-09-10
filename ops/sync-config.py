@@ -277,24 +277,6 @@ def check_notify_prereq(args: argparse.Namespace, entries: list[Entry]) -> list[
     return [{"category": category, "target": str(program), "detail": detail}]
 
 
-def check_deploy_onfailure(entries: list[Entry]) -> list[dict]:
-    """Explicit section 5.1 check: installed deploy unit must chain OnFailure."""
-    target = p(f"/etc/systemd/system/{DEPLOY_UNIT}")
-    try:
-        text = target.read_text()
-    except OSError:
-        return []  # Missing file is already reported through the mapping.
-    if re.search(rf"^OnFailure=.*{re.escape(DEPLOY_FAILED_UNIT)}", text, re.MULTILINE):
-        return []
-    return [
-        {
-            "category": "notify_prereq",
-            "target": str(target),
-            "detail": f"OnFailure-{DEPLOY_FAILED_UNIT}-missing",
-        }
-    ]
-
-
 def run_check(args: argparse.Namespace) -> tuple[list[dict], list[Entry]]:
     entries, mapping_error = build_mapping(args.repo, args.ref, args.source == "git")
     if entries is None:
@@ -332,7 +314,6 @@ def run_check(args: argparse.Namespace) -> tuple[list[dict], list[Entry]]:
             )
 
     findings.extend(scan_unexpected(entries))
-    findings.extend(check_deploy_onfailure(entries))
     findings.extend(check_notify_prereq(args, entries))
     return findings, entries
 
@@ -590,7 +571,7 @@ def restart_changed_timers(changed: list[str]) -> None:
 
 
 def rollback(
-    records: list[dict], did_reload: bool, did_vector_restart: bool
+    records: list[dict], reload_attempted: bool, vector_restart_attempted: bool
 ) -> list[str]:
     """Best-effort restore of this run's replaced files (spec section 5.3)."""
     log: list[str] = []
@@ -606,9 +587,9 @@ def rollback(
                 log.append(f"removed:{record['target']}")
         except OSError as exc:
             log.append(f"rollback-error:{record['target']}:{type(exc).__name__}")
-    if did_reload:
+    if reload_attempted:
         run_cmd(["systemctl", "daemon-reload"])
-    if did_vector_restart:
+    if vector_restart_attempted:
         # Stop first to cancel any queued auto-restart job from the failed
         # candidate, then reset the rate limiter and start the restored unit.
         run_cmd(["systemctl", "stop", "vector"])
@@ -647,31 +628,37 @@ def run_apply(args: argparse.Namespace) -> dict:
     stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     backup_dir = p(f"/var/lib/pareton-deploy/sync-backup/{stamp}")
     records: list[dict] = []
-    did_reload = False
-    did_vector = False
+    # Set BEFORE the action they describe: a failed daemon-reload or vector
+    # restart must still trigger the matching rollback recovery and leave the
+    # debt recorded for the next tick (Cursor review: flags set only after
+    # success skipped both).
+    reload_attempted = False
+    vector_attempted = False
     try:
         for entry, content in plan:
             records.append(install_entry(entry, content, backup_dir))
 
         changed = units_changed(plan)
         if changed:
+            reload_attempted = True
             daemon_reload()
-            did_reload = True
             restart_changed_timers(changed)
             pending = load_pending()
             pending["daemon_reload"] = False
 
         if vector_changed(plan):
+            vector_attempted = True
             restart_vector()
-            did_vector = True
             pending = load_pending()
             pending["vector_restart"] = False
             save_pending(pending)
     except Fail as failure:
-        log = rollback(records, did_reload, did_vector)
+        log = rollback(records, reload_attempted, vector_attempted)
         pending = load_pending()
-        if not did_reload and units_changed(plan):
+        if reload_attempted and units_changed(plan):
             pending["daemon_reload"] = True
+        if vector_attempted and vector_changed(plan):
+            pending["vector_restart"] = True
         save_pending(pending)
         raise Fail(
             failure.code, failure.reason, rollback=log, installed=records
@@ -713,8 +700,8 @@ def run_apply(args: argparse.Namespace) -> dict:
         "action": "applied",
         "installed": records,
         "changed_units": units_changed(plan),
-        "vector_restarted": did_vector,
-        "daemon_reloaded": did_reload,
+        "vector_restarted": vector_attempted,
+        "daemon_reloaded": reload_attempted,
         "owed_restart_units": owed,
     }
 
