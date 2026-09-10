@@ -87,7 +87,8 @@ jobs:
       - name: Docker client and engine lifecycle
         run: |
           shared=$(mktemp -d)
-          trap 'rm -rf "$shared"' EXIT
+          # Root inside the container creates private pytest directories on the host.
+          trap 'sudo rm -rf -- "$shared"' EXIT
           docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$shared:$shared" -e TMPDIR="$shared" \
             pareton-runtime:local python -m pytest -q -m docker \
