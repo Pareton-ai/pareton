@@ -2,8 +2,13 @@
 # The mock variant used during Stage 0 bring-up adds `--mock-bench` to ExecStart.
 # Reconstructed from a partial `systemctl cat` observation (2026-08-09):
 # diff against the live unit before installing and keep any extra directives.
+#
+# Captured 2026-09-10 from the live box: the queue split lives in the
+# queue.conf drop-in (it clears ExecStart and re-sets it with
+# --queue submissions), and the stop budget is overridden to 4h by
+# timeout.conf. Keep all three files together.
 [Unit]
-Description=Pareton submission gate + build worker (live)
+Description=Pareton Stage 0 gate + bench worker (live)
 After=network-online.target
 Wants=network-online.target
 
@@ -13,7 +18,7 @@ User=root
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
 ExecStartPre=/opt/pareton/.venv/bin/python -m builder.gc_config
-ExecStart=/opt/pareton/.venv/bin/python -m worker.main --queue submissions
+ExecStart=/opt/pareton/.venv/bin/python -m worker.main
 Restart=on-failure
 RestartSec=10
 # The worker drains on SIGTERM (finishes the in-flight job before exiting).

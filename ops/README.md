@@ -9,44 +9,57 @@ re-install it on the box, so the two never drift.
 | Path                              | Installed to                    | Notes                                                            |
 | --------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
 | `systemd/pareton-api.service`     | `/etc/systemd/system/`          | uvicorn on `0.0.0.0:8000`                                        |
-| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds (`--queue submissions`)              |
+| `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds (queue via drop-in)                  |
+| `systemd/pareton-worker.service.d/queue.conf` | `/etc/systemd/system/pareton-worker.service.d/` | Clears `ExecStart`, re-sets it with `--queue submissions` |
+| `systemd/pareton-worker.service.d/timeout.conf` | `/etc/systemd/system/pareton-worker.service.d/` | `TimeoutStopSec=4h`, overrides the unit's `8h` |
 | `systemd/pareton-round-worker.service` | `/etc/systemd/system/`     | Round evaluation (`--queue rounds`)                              |
 | `systemd/pareton-watcher.service` | `/etc/systemd/system/`          | Chain ingest, `python -m worker.watcher`                         |
 | `systemd/pareton-weights.service` | `/etc/systemd/system/`          | Weight cadence, `python -m weights`. Holds the validator wallet. |
-| `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer                                    |
+| `systemd/pareton-deploy.service`  | `/etc/systemd/system/`          | Oneshot, invoked by the timer; `OnFailure=` chains the alerter  |
 | `systemd/pareton-deploy.timer`    | `/etc/systemd/system/`          | **Fires every 60s**                                              |
+| `systemd/pareton-deploy-failed.service` | `/etc/systemd/system/`     | Started by `OnFailure`; sends the Discord deploy-failure alert  |
 | `systemd/pareton-builder-cleanup.service` | `/etc/systemd/system/` | Docker image and BuildKit cleanup oneshot                         |
 | `systemd/pareton-builder-cleanup.timer` | `/etc/systemd/system/` | Runs builder cleanup hourly                                      |
 | `docker/daemon.json`                  | Merge into `/etc/docker/daemon.json` | Disables Docker's competing BuildKit GC without selecting an image store |
 | `deploy.sh`                       | `/usr/local/bin/pareton-deploy` | The pull-deploy script itself                                    |
+| `sync-config.py`                   | `/usr/local/lib/pareton-ops/`   | Stage-1 config check/apply; called by deploy.sh every tick       |
+| `notify-deploy-failure.py`        | `/usr/local/lib/pareton-ops/`   | Deploy-failure notifier (4 modes); runs on `OnFailure`           |
+| `ops_common.py`                    | `/usr/local/lib/pareton-ops/`   | Shared stdlib helpers for the two programs above                 |
 | `gpu/pareton-gpu-reap.service`    | `/etc/systemd/system/`          | Oneshot GPU TTL reap                                             |
 | `gpu/pareton-gpu-reap.timer`      | `/etc/systemd/system/`          | Fires every 10 min                                               |
 | `vector/vector.service`           | `/etc/systemd/system/`          | Log shipping                                                     |
-| `vector/vector.toml`              | `/etc/vector/`                  | Axiom sink, dataset `pareton-prod`                               |
+| `vector/vector.toml`              | `/etc/vector/`                  | Axiom sink, dataset `pareton-prod`, token via env ref           |
 | `caddy/Caddyfile`                 | `/etc/caddy/`                   | TLS terminator, proxies to `127.0.0.1:8000`                      |
 
 `deploy.sh` installs to `/usr/local/bin` rather than running from the repo
 checkout so that a `git pull` cannot rewrite the script while it is executing.
-That is also why it needs re-installing by hand after a change here.
+Since stage 1 it **self-installs** that copy (plus the `/usr/local/lib/pareton-ops`
+programs) from the just-pulled commit on every successful deploy, helpers first
+and the main entry last. The one-time manual bootstrap that installs the first
+self-updating copy is in [`runbook.md`](runbook.md).
 
 ## A merge to `main` is a production deploy
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
-separate promote step. Any merge restarts `pareton-api`, `pareton-watcher`,
-and `pareton-weights` within a minute. Each execution worker has its own pending
+separate promote step. Every tick that holds the deploy lock first runs the
+stage-1 config sync (`sync-config.py deploy-hook`): managed-file drift
+converges to the Git content automatically, while unknown files, masks, or a
+broken alert credential fail the deploy and page the team. Any merge then
+restarts `pareton-api`, `pareton-watcher`, and `pareton-weights` within a
+minute. Each execution worker has its own pending
 restart. The round worker waits only for running rounds; the existing worker checks
 both queues to protect legacy combined processes. A busy build does not defer an
-idle round worker's update.
+idle round worker's update. A deploy that fails — including a failing worker
+busy-probe — triggers `OnFailure=pareton-deploy-failed.service`, which sends a
+rate-limited alert straight to the team Discord channel (independent of
+Vector/Axiom).
 
-Install `pareton-round-worker.service` and change the existing worker's command
-to `python -m worker.main --queue submissions`. Reinstall `deploy.sh` as well.
-The CLI defaults to combined mode, which checks rounds first. Only the separate
-round service can handle rounds arriving after a build has already blocked.
-
-Add `pareton-round-worker` and `pareton-weights` to the live Vector
-`sources.journald.include_units` and restart Vector before starting the round
-service. Edit only that allowlist: the live sink credentials differ from the repo
-copy. The PR deployment commands include this step.
+**During a maintenance window, stop this timer first.** Stopping any other unit
+while the timer is live means the timer may restart it underneath you. Stopping
+the timer does not stop a deploy that is already running — wait for it, then
+work. After a manual hotfix to a managed file, the fix must be **merged to
+`main`** (a pushed branch or open PR is not enough) before the timer is
+resumed, or the next tick reverts the live change as drift.
 
 ### Worker heartbeat alerts
 
@@ -80,21 +93,21 @@ while the timer is live means the timer may restart it underneath you.
 
 ## Known drift — needs a decision
 
-Captured from the live boxes on 2026-08-17. These are _not_ resolved here,
-because each one changes production behavior:
+Resolved on 2026-09-10 by the stage-1 capture (files here now mirror the live
+box, verified against the read-only audit output of that day):
 
-1. **`systemd/pareton-worker.service` does not match the live unit.** The
-   committed file carries a `[Unit]` section, `Type=simple`, `User=root` and
-   `Restart=on-failure`. The live unit has none of those and uses
-   `Restart=always`. Installing the committed file would change restart
-   behavior. Decide which is intended, then make both sides agree.
+1. ~~`pareton-worker.service` differs from the live unit~~ — the committed file
+   is now the captured live version; the queue split lives in the
+   `queue.conf` drop-in (also captured).
+2. ~~`TimeoutStopSec` drop-in drift~~ — `timeout.conf` (4h) is committed next
+   to the unit; the effective value stays 4h. Revisit the value itself later.
+4. ~~`vector.toml` inline token~~ — the repo keeps the `${PARETON_AXIOM_TOKEN}`
+   form; the owner verified the env token via a direct ingest test, so the
+   live file migrates to the env reference at the stage-1 bootstrap and new
+   events arriving in `pareton-prod` are the acceptance evidence
+   (`vector validate` passing proves nothing about token validity).
 
-2. **`TimeoutStopSec` is set in two places with different values.** The
-   committed unit says `8h`. Both boxes carry a hand-installed drop-in at
-   `/etc/systemd/system/pareton-worker.service.d/timeout.conf` pinning `4h`,
-   and **drop-ins override the unit file** — so the effective value today is
-   `4h`, not the `8h` the unit asks for. Either delete the drop-in when this
-   deploys, or change the unit to `4h`.
+Still open, each because it changes production behavior:
 
 3. **`aws/pareton-api-iam-policy.json` overstates the live IAM policy.** It
    grants `s3:ListBucket` and `s3:DeleteObject`; the live `pareton-api` user
@@ -102,12 +115,6 @@ because each one changes production behavior:
    Private patch uploads, validator reads, and public copies require only
    `PutObject`/`GetObject`. The file should not be treated as an accurate record
    of live permissions.
-
-4. **`vector/vector.toml` does not match the live config.** The committed file
-   reads the Axiom token from `${PARETON_AXIOM_TOKEN}`; the live file has a
-   literal token inlined, and the env var holds a _different_ token that the
-   Vector Axiom sink rejects. The env-var form is the better design — it needs
-   the correct token in `.env` before it will work.
 
 5. **The box needs swap, and nothing here says so.** Hermetic builds compile
    vLLM's CUDA kernels; `cicc` peaks at 6–12 GB per job and will OOM a 16 GB
