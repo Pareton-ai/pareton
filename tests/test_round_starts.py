@@ -50,6 +50,7 @@ def _request(
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["workload_trace"]["path"] = str(SAMPLE_TRACE)
     raw["engines"]["baseline"] = {
+        "name": "sglang" if serve_args == SGLANG_SERVE_ARGS else "vllm",
         "image": "ghcr.io/example/engine@sha256:" + ("a" * 64),
         "serve_args": list(serve_args),
         "env": {},
@@ -57,6 +58,7 @@ def _request(
     }
     raw["engines"]["candidates"] = [
         {
+            "name": raw["engines"]["baseline"]["name"],
             "image": f"ghcr.io/example/engine@sha256:{'0123456789abcdef'[i] * 64}",
             "serve_args": list(serve_args),
             "env": {},

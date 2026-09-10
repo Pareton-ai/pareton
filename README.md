@@ -15,7 +15,11 @@
 
 </div>
 
-Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM baseline. Pareton validates patch integrity and allowed changes, builds patches in a reproducible container environment, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
+Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM or SGLang baseline. Pareton validates patch integrity and allowed changes, builds patches in a reproducible container environment, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
+
+The [campaign launch guide](docs/campaign_launch_skill.md) covers framework-specific
+patch paths, image builds and launch arguments, including a zero-emission
+SGLang campaign for Qwen/Qwen3.8-27B-FP8 on one H200.
 
 ## How It Works
 

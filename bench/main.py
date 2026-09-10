@@ -99,12 +99,18 @@ CORRECTNESS_EXTRA_SERVE_ARGS = [
     "--no-enable-prefix-caching",
     "--no-enable-flashinfer-autotune",
 ]
+# At the pinned SGLang commit, max_req_input_len is context_length - 6
+# and inputs must be strictly shorter. Reserve seven slots for a scorer
+# input that fills the replay context, including room for the clamp token.
+SGLANG_SCORER_CONTEXT_HEADROOM = 7
 
 
-def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
-    """vLLM-only scorer flags. SGLang uses --tp-size and rejects these."""
-    if "--tp-size" in serve_args:
+def correctness_extra_serve_args(engine_name: str) -> list[str]:
+    """Select scorer flags from the pinned engine, independent of CLI aliases."""
+    if engine_name == "sglang":
         return []
+    if engine_name != "vllm":
+        raise ValueError(f"unknown engine name: {engine_name!r}")
     return list(CORRECTNESS_EXTRA_SERVE_ARGS)
 
 
@@ -123,12 +129,33 @@ def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
     from the pinned baseline rather than named separately, so a campaign
     manifest carries no scorer field of its own.
     """
-    extra = correctness_extra_serve_args(spec.serve_args)
+    extra = correctness_extra_serve_args(spec.name)
+    args = list(spec.serve_args)
+    env = dict(spec.env)
+    if spec.name == "sglang":
+        # The worker pins a numeric --context-length. Cover argparse's = form
+        # too, and preserve duplicate flags' last-value-wins behavior.
+        for i, arg in enumerate(spec.serve_args):
+            if arg == "--context-length":
+                args[i + 1] = str(
+                    int(spec.serve_args[i + 1]) + SGLANG_SCORER_CONTEXT_HEADROOM
+                )
+            elif arg.startswith("--context-length="):
+                args[i] = "--context-length=" + str(
+                    int(arg.partition("=")[2]) + SGLANG_SCORER_CONTEXT_HEADROOM
+                )
+            else:
+                continue
+            # Only the scorer allocates beyond a model's declared context.
+            # Forced input positions still fit the original replay window;
+            # the one sampled token is excluded and never fed back to the model.
+            env["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
     return EngineSpec(
         image=spec.image,
-        serve_args=list(spec.serve_args) + extra,
-        env=dict(spec.env),
+        serve_args=args + extra,
+        env=env,
         cache_dir=spec.cache_dir,
+        name=spec.name,
     )
 
 
@@ -549,6 +576,7 @@ def run_round(
                         requests=requests,
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
                     )
                     if start.kind == "baseline" and req.mode == "all":
                         natural_stops = capture_baseline_natural_stops(
@@ -601,6 +629,7 @@ def run_round(
                         requests=requests,
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
                     )
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and
@@ -661,6 +690,7 @@ def run_round(
                         cfg=req.correctness,
                         evidence_dir=layout.correctness_dir,
                         baseline_degeneracy=baseline_degeneracy,
+                        engine_name=start.spec.name,
                     )
             except EngineError as exc:
                 # Correctness is a hard gate, so an unusable scorer means no

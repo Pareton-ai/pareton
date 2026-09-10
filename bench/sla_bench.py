@@ -414,6 +414,7 @@ def _run_engine(
     cfg: SlaBenchConfig,
     engine_evidence_dir: Path,
     timeout_s: float,
+    warmup_repetitions: int,
 ) -> tuple[list[dict], list[dict]]:
     """Warmup + N measured reps for one engine.
 
@@ -423,15 +424,17 @@ def _run_engine(
     # trace, so a partial warmup leaves the first measured rep cold on
     # engines with prefix caching and inflates cross-rep variance past the
     # reproducibility bar.
-    warm_rows, _, _ = _replay(
-        base_url,
-        requests,
-        role=role,
-        rep=0,
-        is_warmup=True,
-        timeout_s=timeout_s,
-    )
-    _write_rep(engine_evidence_dir / WARMUP_DIRNAME, warm_rows, 0.0)
+    for warmup in range(warmup_repetitions):
+        warm_rows, _, _ = _replay(
+            base_url,
+            requests,
+            role=role,
+            rep=0,
+            is_warmup=True,
+            timeout_s=timeout_s,
+        )
+        dirname = WARMUP_DIRNAME if warmup == 0 else f"warmup_{warmup + 1}"
+        _write_rep(engine_evidence_dir / dirname, warm_rows, 0.0)
 
     rep_metrics: list[dict] = []
     measured: list[dict] = []
@@ -510,12 +513,13 @@ def run_sla_engine(
     cfg: SlaBenchConfig,
     evidence_dir: Path,
     request_timeout_s: float = 120.0,
+    engine_name: str = "vllm",
 ) -> EngineReplay:
     """Replay the trace against one healthy engine and persist its evidence.
 
     Every engine in a round goes through this one path: the baseline, each
-    candidate, and the closing drift baseline. Nothing here varies by engine
-    or by role, so every image in the round is measured the same way.
+    candidate, and the closing drift baseline. Warmup depends only on the
+    campaign's engine, so every image in the round is measured the same way.
     """
     if not requests:
         raise EngineError("sla_bench: empty workload trace")
@@ -523,6 +527,10 @@ def run_sla_engine(
         _require_text_prompt(req)
 
     engine_evidence_dir = evidence_dir / role
+    # SGLang/Qwen needs both a cold-prefix and a cached-prefix warmup. On H200,
+    # one full warmup still left a ~3s stall at the start of the next replay;
+    # subsequent replays were stable. Warm both paths before measuring, for
+    # baseline and candidates alike, without changing the reproducibility bar.
     rep_metrics, measured = _run_engine(
         base_url,
         role=role,
@@ -530,6 +538,7 @@ def run_sla_engine(
         cfg=cfg,
         engine_evidence_dir=engine_evidence_dir,
         timeout_s=request_timeout_s,
+        warmup_repetitions=2 if engine_name == "sglang" else 1,
     )
     metrics = _engine_metrics_from_reps(rep_metrics)
 

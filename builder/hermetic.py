@@ -120,6 +120,7 @@ def dockerfile_for_patch(
     max_jobs: int | None = None,
     torch_cuda_arch_list: str | None = None,
     engine: dict[str, Any] | None = None,
+    verbose_install: bool = False,
 ) -> str:
     """Generate the hermetic engine Dockerfile text (unit-testable, no Docker).
 
@@ -131,6 +132,9 @@ def dockerfile_for_patch(
 
     ``engine`` is the campaign's engine profile (``install_cmd``, ``entrypoint``).
     ``None`` is the vLLM default, so pre-profile campaigns emit the same Dockerfile.
+
+    ``verbose_install`` exposes pip backend output for long ops builds. It does
+    not change compiler flags or the cache mount identity.
     """
     jobs = int(config.BUILD_MAX_JOBS if max_jobs is None else max_jobs)
     if jobs < 1:
@@ -192,6 +196,16 @@ def dockerfile_for_patch(
         mount_opts = f"id={cache_id},target=/root/.ccache,readonly"
         # Read-only cache makes ccache's default tmp unwritable; miss would abort.
         run_parts.insert(1, "export CCACHE_READONLY=1 CCACHE_TEMPDIR=/tmp/ccache-tmp")
+    if verbose_install:
+        run_parts.insert(0, "export PIP_VERBOSE=1")
+        if skip_apply:
+            # Report retained trusted cache entries before a potentially long retry.
+            run_parts.insert(
+                2,
+                "if command -v ccache >/dev/null 2>&1; then "
+                'echo "pareton-builder: trusted ccache before install"; '
+                "ccache --show-stats --verbose; fi",
+            )
     # No # syntax= line: BuildKit builtin frontend supports RUN --mount.
     lines.append(
         f"RUN --mount=type=cache,{mount_opts} " + " \\\n    && ".join(run_parts)
@@ -263,10 +277,12 @@ def _run_logged(
     timeout: float,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    stream_logs: bool = False,
 ) -> int:
-    """Run cmd, tee stdout/stderr to log_path, enforce timeout.
+    """Run cmd, save stdout/stderr to log_path, enforce timeout.
 
-    Output goes to the file only; journald gets _progress milestones.
+    Ops may also stream output to stderr so CI retains progress if its host dies.
+    Worker builds keep file-only output and _progress milestones in journald.
     """
     with log_path.open("a", encoding="utf-8") as logf:
         logf.write(f"+ {' '.join(cmd)}\n")
@@ -286,6 +302,8 @@ def _run_logged(
             for line in proc.stdout:
                 logf.write(line)
                 logf.flush()
+                if stream_logs:
+                    print(line, end="", file=sys.stderr, flush=True)
 
         reader = threading.Thread(target=_tee, name="pareton-build-tee", daemon=True)
         reader.start()
@@ -318,6 +336,7 @@ def build_engine_image(
     image_ref_override: str | None = None,
     engine: dict[str, Any] | None = None,
     torch_cuda_arch_list: str | None = None,
+    stream_logs: bool = False,
 ) -> GateResult:
     """Build and optionally push an engine image tagged by patch_hash.
 
@@ -334,6 +353,8 @@ def build_engine_image(
     ``torch_cuda_arch_list`` is ops-only. Miner builds leave it unset and
     inherit ``TORCH_CUDA_ARCH_LIST`` from the pinned base image. vLLM rejects
     when that image declares none; SGLang may omit it.
+
+    ``stream_logs`` also copies Docker build/push output to stderr for ops.
     """
     if _patch_is_empty(patch_bytes) and not allow_empty_patch:
         return GateResult.reject("empty_patch_not_allowed")
@@ -387,6 +408,7 @@ def build_engine_image(
             baseline_commit=baseline_commit,
             engine=engine,
             torch_cuda_arch_list=df_arch,
+            verbose_install=stream_logs,
         )
     except ValueError as exc:
         return GateResult.reject("build_config_invalid", error=str(exc))
@@ -449,7 +471,8 @@ def build_engine_image(
                 stderr=checkout.stderr[-2000:],
             )
 
-        # Miner builds stay --network=none. Empty-patch (a2b baseline) needs network for cmake.
+        # vLLM's trusted empty-patch build fetches CMake inputs. SGLang stages
+        # its dependencies in the trusted base and builds offline in both roles.
         build_cmd = [
             "docker",
             "buildx",
@@ -458,7 +481,11 @@ def build_engine_image(
             config.BUILDER_NAME,
             "--load",
             "--progress=plain",
-            *([] if allow_empty_patch else ["--network=none"]),
+            *(
+                []
+                if allow_empty_patch and profile["name"] == "vllm"
+                else ["--network=none"]
+            ),
             "--build-arg",
             f"BASE_IMAGE={base_image}",
             "--build-arg",
@@ -479,6 +506,7 @@ def build_engine_image(
             log_path=log_path,
             timeout=config.BUILD_TIMEOUT_S,
             env=build_env,
+            stream_logs=stream_logs,
         )
         if rc != 0:
             return GateResult.reject(
@@ -495,6 +523,7 @@ def build_engine_image(
                 ["docker", "push", image_ref],
                 log_path=log_path,
                 timeout=600,
+                stream_logs=stream_logs,
             )
             if push_rc != 0:
                 return GateResult.reject(

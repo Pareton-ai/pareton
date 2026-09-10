@@ -1,88 +1,72 @@
-# Pareton Stage 0 baseline (build) image -- SGLang variant.
-# Pre-bake CUDA/Python/torch + SGLang's runtime deps so hermetic builds can
-# run with --network=none and `pip install --no-deps --no-build-isolation -e python/`.
-# Aligned to SGLang pin v0.5.17 (b6a09f38): CUDA 13.0.2, torch 2.11.0, Python 3.12.
-# Pin and publish; put the resulting digest into the campaign manifest.
-#
-# Unlike the vLLM baseline this image bakes NO TORCH_CUDA_ARCH_LIST: SGLang
-# compiles no CUDA kernels. sglang-kernel ships as a prebuilt wheel, so no GPU
-# is needed to build. The wheel is CUDA-flavor specific (+cu130 for this pin),
-# not a generic "any GPU" binary: PyPI's plain 0.4.5 fails on RTX 5090 (sm_120).
-#
-# The kernel wheel MUST stay version-matched to the source tag the campaign
-# pins. sglang-kernel 0.4.5 pairs with v0.5.17; a mismatched pair builds green
-# and then dies at serve time, which is how the PAR-54 spike first failed.
-
-ARG CUDA_VERSION=13.0.2
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+# Trusted SGLang build base for 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc.
+# The final image digest pins the resolved OS, Python, CUDA and kernel wheels.
+# Build on linux/amd64, then use python -m builder --engine sglang for
+# the offline empty-patch baseline and the non-empty miner build check.
+FROM nvidia/cuda:13.0.3-devel-ubuntu24.04 AS bootstrap
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
-# Python 3.12 (deadsnakes) + build toolchain + Rust (setuptools-rust).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        software-properties-common \
-        curl \
-        ca-certificates \
-        gnupg \
-        git \
-        build-essential \
-        ninja-build \
-        cmake \
-        ccache \
-        pkg-config \
-        libssl-dev \
-        libnuma-dev \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 \
-        python3.12-dev \
-        python3.12-venv \
+        python3.12 python3.12-dev python3.12-venv \
+        curl ca-certificates git build-essential ninja-build cmake ccache \
+        pkg-config libssl-dev libnuma-dev protobuf-compiler \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-    && python3.12 /tmp/get-pip.py \
-    && rm /tmp/get-pip.py \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && python3.12 -m venv /opt/venv \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain stable --profile minimal \
-    && . "$HOME/.cargo/env" \
-    && rustc --version \
-    && rm -rf /tmp/* /var/tmp/*
+        | sh -s -- -y --default-toolchain stable --profile minimal
 
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV PATH="/opt/venv/bin:/root/.cargo/bin:${PATH}"
 
-# Build-system requires from SGLang python/pyproject.toml at v0.5.17 (except torch).
 RUN pip install --upgrade pip \
-    && pip install --no-cache-dir \
-        "setuptools>=61.0" \
-        "setuptools-rust>=1.10" \
-        "setuptools-scm>=8.0" \
-        wheel \
-        ninja \
-        "cmake>=3.26.1" \
-        "packaging>=24.2" \
-    && rm -rf /tmp/* /root/.cache/pip
+    && pip install "setuptools>=61.0" "setuptools-rust>=1.11" \
+        "setuptools-scm>=8.0" wheel ninja "cmake>=3.26.1" "packaging>=24.2"
 
-# Torch from the cu130 index (plain PyPI 2.11.0 is not +cu130). Official
-# lmsysorg/sglang:v0.5.17 is torch==2.11.0+cu130; an unpinned torchvision
-# previously pulled torch 2.13 and broke sglang-kernel 0.4.5 on sm_120.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
-        "torch==2.11.0" "torchvision==0.26.0" "torchaudio==2.11.0" \
-    && rm -rf /tmp/* /root/.cache/pip
-
-# Runtime deps for hermetic `pip install --no-deps --no-build-isolation -e python/`.
-# Must cover sglang.launch_server start, not a lean subset: the server imports
-# gated paths (flashinfer, sglang-kernel, xgrammar) at startup.
+# Match the source commit's Torch ABI and its official CUDA 13 recipe.
+RUN pip install --index-url https://download.pytorch.org/whl/cu130 \
+        "torch==2.13.0" "torchvision==0.28.0" "torchaudio==2.11.0"
 COPY images/baseline-sglang/requirements-runtime.txt /tmp/requirements-runtime.txt
-RUN pip install --no-cache-dir -r /tmp/requirements-runtime.txt \
-    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
-        "torch==2.11.0" "torchvision==0.26.0" "torchaudio==2.11.0" \
-    && python3 -c "import torch; v=torch.__version__; assert v.startswith('2.11.0'), v; assert (torch.version.cuda or '').startswith('13'), torch.version.cuda" \
-    && rm -rf /tmp/* /root/.cache/pip
+RUN pip install -r /tmp/requirements-runtime.txt \
+    && python -c "import torch; assert torch.__version__.startswith('2.13.0'), torch.__version__; assert (torch.version.cuda or '').startswith('13'), torch.version.cuda"
 
-WORKDIR /opt/pareton
+# Bootstrap Rust and retain Cargo's resolved dependency sources. The native
+# stage below reenables Rust rebuilds against this offline dependency cache.
+WORKDIR /src
+RUN git init \
+    && git remote add origin https://github.com/sgl-project/sglang.git \
+    && git fetch --depth=1 origin 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
+    && CARGO_BUILD_JOBS=4 pip install --no-deps --no-build-isolation -e python/ \
+    && python -c "from pathlib import Path; assert list(Path('/src/python/sglang').rglob('*.so')), 'Rust extensions missing'" \
+    && pip check \
+    && pip freeze > /opt/sglang-dependencies.lock \
+    && rm -rf /src/.git /src/rust/target /src/rust/sglang-radix-tree/target /tmp/pip-* /root/.cache/pip
+
+ENV SGLANG_BUILD_RUST_EXTS=none \
+    CARGO_NET_OFFLINE=true \
+    SGLANG_USE_SGL_FA3_KERNEL=1
+
+# This pin's community FA3 repository has no Torch 2.13 build. Use the
+# implementation bundled in the pinned sglang-kernel wheel directly, as
+# supported by sglang/kernels/ops/attention/flash_attention_v3.py. This also
+# avoids a Hugging Face lookup from the offline evaluation container.
+
 LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
-      org.opencontainers.image.description="Pareton Stage 0 hermetic baseline (SGLang v0.5.17 pin)"
+      org.opencontainers.image.description="Pareton hermetic SGLang baseline" \
+      ai.pareton.sglang.commit="4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc"
+
+# Reuse the verified dependency/Rust bootstrap by digest. The subsequent trusted
+# empty-patch build replaces the prebuilt AOT package with the pinned source build.
+FROM ghcr.io/pareton-ai/pareton-baseline@sha256:38c742f147cb8926200e429022b7979b5d359578e6d790c62def91cc2ab78a05 AS native
+RUN pip install 'scikit-build-core==0.11.6' 'cmake==3.31.10'
+COPY images/baseline-sglang/prepare-deps.py /opt/pareton/prepare-sglang-deps.py
+RUN python /opt/pareton/prepare-sglang-deps.py
+COPY images/baseline-sglang/install.sh /usr/local/bin/pareton-install-sglang
+RUN chmod 755 /usr/local/bin/pareton-install-sglang
+ENV CARGO_NET_OFFLINE=true \
+    SGLANG_BUILD_RUST_EXTS=all \
+    CARGO_TARGET_DIR=/opt/sglang-rust-target
+LABEL ai.pareton.sglang.native-build="1"

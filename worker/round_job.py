@@ -290,10 +290,10 @@ def build_round_request(
     extra_serve = list(bench.get("serve_args") or [])
     engine_profile = _campaign_engine_profile(campaign)
     cache_dir = str(engine_profile["cache_dir"])
-    serve_args = ["--model", "/model"]
-    # SGLang rejects --max-model-len (it uses campaign --context-length).
-    if engine_profile["name"] != "sglang":
-        serve_args.extend(["--max-model-len", str(max_model_len)])
+    if engine_profile["name"] == "sglang":
+        serve_args = ["--model-path", "/model", "--context-length", str(max_model_len)]
+    else:
+        serve_args = ["--model", "/model", "--max-model-len", str(max_model_len)]
     serve_args.extend(["--dtype", dtype])
     quantization = model.get("quantization")
     if quantization is not None and str(quantization).strip() != "":
@@ -366,6 +366,7 @@ def build_round_request(
         },
         "engines": {
             "baseline": {
+                "name": engine_profile["name"],
                 "image": baseline_image,
                 "serve_args": list(serve_args),
                 "env": {},
@@ -373,6 +374,7 @@ def build_round_request(
             },
             "candidates": [
                 {
+                    "name": engine_profile["name"],
                     "image": str(row["engine_image_ref"]),
                     "serve_args": list(serve_args),
                     "env": {},

@@ -31,7 +31,6 @@ def post_completion(
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """Serial non-streaming /v1/completions client (stdlib only)."""
-    url = base_url.rstrip("/") + "/v1/completions"
     # vLLM accepts max_tokens=0 for echo-only scoring. SGLang rejects it.
     send_max = max_tokens if max_tokens >= 1 else 1
     body: dict[str, Any] = {
@@ -46,6 +45,15 @@ def post_completion(
         body["top_p"] = top_p
     if seed is not None:
         body["seed"] = seed
+    return post_json(base_url, "/v1/completions", body, timeout=timeout)
+
+
+def post_json(
+    base_url: str, path: str, body: dict[str, Any], *, timeout: float = 60.0
+) -> dict[str, Any]:
+    """POST to an engine endpoint and require an object response."""
+    url = base_url.rstrip("/") + path
+    endpoint = path.rsplit("/", 1)[-1]
     data = json.dumps(body).encode("utf-8")
     req = Request(
         url,
@@ -59,18 +67,18 @@ def post_completion(
             payload = json.loads(raw.decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise EngineError(f"completions HTTP {exc.code} from {url}: {detail}") from exc
+        raise EngineError(f"{endpoint} HTTP {exc.code} from {url}: {detail}") from exc
     except URLError as exc:
-        raise EngineError(f"completions request failed for {url}: {exc}") from exc
+        raise EngineError(f"{endpoint} request failed for {url}: {exc}") from exc
     except TimeoutError as exc:
-        raise EngineError(f"completions timed out for {url}") from exc
+        raise EngineError(f"{endpoint} timed out for {url}") from exc
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise EngineError(
-            f"invalid JSON from completions endpoint {url}: {exc}"
+            f"invalid JSON from {endpoint} endpoint {url}: {exc}"
         ) from exc
     if not isinstance(payload, dict):
         raise EngineError(
-            f"completions response from {url} must be a JSON object, "
+            f"{endpoint} response from {url} must be a JSON object, "
             f"got {type(payload).__name__}"
         )
     return payload

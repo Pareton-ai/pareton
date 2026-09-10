@@ -62,7 +62,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from bench.http import post_completion
+from bench.http import post_completion, post_json
 from bench.lifecycle import EngineError
 from bench.mock_engine import response_shape_fingerprint
 from bench.schemas import CorrectnessConfig, CorrectnessReport, TraceRequest
@@ -228,6 +228,7 @@ class _PositionScore:
     text_offset: int
     logprob: float
     top1: str | None
+    token_id: int | None = None
 
 
 def _score_at(
@@ -753,13 +754,22 @@ def score_captured_output(
     captured: CapturedOutput,
     *,
     request_timeout_s: float = 300.0,
-) -> tuple[list[_PositionScore], int]:
+    engine_name: str = "vllm",
+    prefix_token_limit: int | None = None,
+) -> tuple[list[_PositionScore], int, str]:
     """Scored token positions in the candidate's forced output.
 
-    Returns the scorer's token-aligned positions and the size of the forced
-    span. Both come from the scorer, so the candidate cannot choose where the
-    trusted baseline stop boundary lands in its own text.
+    Returns token-aligned positions, the forced span size and its decoded
+    prefix through the trusted stop limit. The candidate cannot choose where
+    that baseline stop boundary lands in its own text.
     """
+    if engine_name == "sglang":
+        return _score_sglang_output(
+            scorer_url,
+            captured,
+            timeout=request_timeout_s,
+            prefix_token_limit=prefix_token_limit,
+        )
     full = captured.prompt + captured.output_text
     resp = post_completion(
         scorer_url,
@@ -777,12 +787,160 @@ def score_captured_output(
         continuation=captured.output_text,
     )
     if not scores:
-        return [], 0
+        return [], 0, ""
     # Positions in the forced span are contiguous, and a position is only
     # dropped when the scorer returned no logprob for it, so first..last spans
     # everything the scorer saw of this output.
     span = scores[-1].position - scores[0].position + 1
-    return scores, span
+    prefix = (
+        captured.output_text
+        if prefix_token_limit is None
+        else "".join(p.token for p in scores[:prefix_token_limit])
+    )
+    return scores, span, prefix
+
+
+def _sglang_prefix(
+    base_url: str,
+    prompt_ids: list[int],
+    continuation_ids: list[int],
+    continuation: str,
+    *,
+    limit: int | None,
+    timeout: float,
+) -> str:
+    """Decode in prompt context, preserving spaces and complete UTF-8 characters."""
+    prefix_ids = continuation_ids if limit is None else continuation_ids[:limit]
+    resp = post_json(
+        base_url,
+        "/detokenize",
+        {
+            "tokens": [
+                prompt_ids,
+                prompt_ids + continuation_ids,
+                prompt_ids + prefix_ids,
+            ],
+            "skip_special_tokens": False,
+        },
+        timeout=timeout,
+    )
+    texts = resp.get("text")
+    if (
+        not isinstance(texts, list)
+        or len(texts) != 3
+        or any(not isinstance(t, str) for t in texts)
+    ):
+        raise EngineError("SGLang detokenize response is missing text")
+    prompt, full, prefix = texts
+    if not full.startswith(prompt) or full[len(prompt) :] != continuation:
+        raise EngineError(
+            "SGLang token IDs did not reconstruct the forced continuation"
+        )
+    if not prefix.startswith(prompt):
+        raise EngineError("SGLang decoded prefix does not match the forced output")
+    prefix = prefix[len(prompt) :]
+    if not continuation.startswith(prefix):
+        # A trusted token stop can bisect one UTF-8 character. Exclude the
+        # decoder placeholder for that incomplete trailing character.
+        if prefix.endswith("\ufffd") and continuation.startswith(prefix[:-1]):
+            prefix = prefix[:-1]
+        else:
+            raise EngineError("SGLang decoded prefix does not match the forced output")
+    return prefix
+
+
+def _score_sglang_output(
+    base_url: str,
+    captured: CapturedOutput,
+    *,
+    timeout: float,
+    prefix_token_limit: int | None,
+) -> tuple[list[_PositionScore], int, str]:
+    """Force exact token IDs; per-token decoded strings can corrupt UTF-8."""
+    tokenized = post_json(
+        base_url,
+        "/tokenize",
+        {"prompt": [captured.prompt, captured.prompt + captured.output_text]},
+        timeout=timeout,
+    ).get("tokens")
+    if (
+        not isinstance(tokenized, list)
+        or len(tokenized) != 2
+        or any(
+            not isinstance(ids, list)
+            or not ids
+            or any(type(t) is not int or t < 0 for t in ids)
+            for ids in tokenized
+        )
+    ):
+        raise EngineError("SGLang tokenize response has invalid token IDs")
+    prompt_ids, full_ids = tokenized
+    cut = len(prompt_ids)
+    if full_ids[:cut] != prompt_ids:
+        # BPE can merge a leading output newline with trailing prompt newlines.
+        # Keep the prompt the engine saw, and encode only the continuation
+        # without inserting BOS/EOS. The decoded sequence is verified below.
+        continuation_ids = post_json(
+            base_url,
+            "/tokenize",
+            {"prompt": captured.output_text, "add_special_tokens": False},
+            timeout=timeout,
+        ).get("tokens")
+        if (
+            not isinstance(continuation_ids, list)
+            or not continuation_ids
+            or any(type(t) is not int or t < 0 for t in continuation_ids)
+        ):
+            raise EngineError("SGLang tokenize response has invalid continuation IDs")
+        full_ids = prompt_ids + continuation_ids
+    if len(full_ids) <= cut:
+        raise EngineError("SGLang tokenize response has no continuation IDs")
+    continuation_ids = full_ids[cut:]
+    prefix = _sglang_prefix(
+        base_url,
+        prompt_ids,
+        continuation_ids,
+        captured.output_text,
+        limit=prefix_token_limit,
+        timeout=timeout,
+    )
+    resp = post_json(
+        base_url,
+        "/generate",
+        {
+            "input_ids": full_ids,
+            # scorer_engine_spec reserves input headroom beyond the replay
+            # context so this full sequence and the clamp token both fit.
+            "sampling_params": {"temperature": 0.0, "max_new_tokens": 1},
+            "return_logprob": True,
+            "logprob_start_len": 0,
+            "return_text_in_logprobs": True,
+        },
+        timeout=timeout,
+    )
+    meta = resp.get("meta_info")
+    rows = meta.get("input_token_logprobs") if isinstance(meta, dict) else None
+    if not isinstance(rows, list) or len(rows) != len(full_ids):
+        raise EngineError("SGLang input logprobs do not cover the forced token IDs")
+    scores = []
+    for i, (expected_id, row) in enumerate(zip(full_ids, rows)):
+        if (
+            not isinstance(row, list)
+            or len(row) != 3
+            or type(row[1]) is not int
+            or row[1] != expected_id
+            or not isinstance(row[2], str)
+        ):
+            raise EngineError("SGLang input logprob token IDs are misaligned")
+        if i < cut or row[0] is None:
+            continue
+        if type(row[0]) not in (int, float) or not math.isfinite(row[0]):
+            raise EngineError("SGLang returned an invalid input logprob")
+        scores.append(
+            _PositionScore(i, row[2], -1, float(row[0]), None, token_id=expected_id)
+        )
+    # Only input positions are scored. Any generated clamp token is excluded.
+    return scores, len(continuation_ids), prefix
 
 
 def grade_candidate(
@@ -794,6 +952,7 @@ def grade_candidate(
     request_timeout_s: float = 300.0,
     baseline_mean_logprob: float | None = None,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
+    engine_name: str = "vllm",
 ) -> CorrectnessReport:
     """Teacher-force one engine's captured outputs through the scorer.
 
@@ -850,8 +1009,14 @@ def grade_candidate(
             if not captured.output_text:
                 empty.append(captured.request_id)
                 continue
-            positions, span = score_captured_output(
-                scorer_url, captured, request_timeout_s=request_timeout_s
+            positions, span, scored_prefix = score_captured_output(
+                scorer_url,
+                captured,
+                request_timeout_s=request_timeout_s,
+                engine_name=engine_name,
+                prefix_token_limit=None
+                if reference is None
+                else reference.natural_stop_tokens,
             )
             scored = [position.logprob for position in positions]
             logprobs.extend(scored)
@@ -869,10 +1034,7 @@ def grade_candidate(
                 )
                 relative_degenerate = None
             else:
-                prefix_text = "".join(
-                    position.token
-                    for position in positions[: reference.natural_stop_tokens]
-                )
+                prefix_text = scored_prefix
                 prefix_distinct_ratio = distinct_ngram_ratio(prefix_text)
                 prefix_repeated_span_ratio = longest_repeated_substring_ratio(
                     prefix_text
@@ -1035,6 +1197,7 @@ def grade_all(
     evidence_dir: Path,
     request_timeout_s: float = 300.0,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
+    engine_name: str = "vllm",
 ) -> dict[int, CorrectnessReport]:
     """Grade everything queued against one already-running scorer.
 
@@ -1066,6 +1229,7 @@ def grade_all(
                 request_timeout_s=request_timeout_s,
                 baseline_mean_logprob=None if is_baseline else baseline_mean,
                 baseline_degeneracy=baseline_degeneracy,
+                engine_name=engine_name,
             )
         except EngineError as exc:
             # The text being forced through the scorer is whatever an engine

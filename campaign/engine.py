@@ -17,8 +17,9 @@ Deliberately **not** fields:
 * ``health_path``  — both engines are ready on ``/v1/models``, which is already
   the default in ``bench.lifecycle.wait_until_healthy``. SGLang's ``/health``
   returns 503 on a fully ready server, so nothing should point at it.
-* ``TORCH_CUDA_ARCH_LIST`` — SGLang does no CUDA compilation at all; its kernels
-  ship as the prebuilt ``sglang-kernel`` wheel.
+* ``TORCH_CUDA_ARCH_LIST``: SGLang's pinned AOT CMake recipe selects its targets.
+  The trusted installer rebuilds the in-tree AOT package and Rust extensions
+  offline, using staged dependencies and immutable baseline compiler caches.
 
 Consuming this in the builder is PAR-57; this module only defines and validates.
 """
@@ -41,12 +42,11 @@ VLLM_ENGINE: dict[str, Any] = {
     "cache_dir": "/root/.cache/vllm",
 }
 
-# SGLang v0.5.17. Verified on a live B300 (sm_103) in PAR-54: patched build
-# completes in ~5s under --network=none, and the editable install correctly
-# shadows the base image's preinstalled sglang.
+# The installer is part of the pinned trusted image, outside miner-patchable /src.
+# It rebuilds Python, AOT CUDA and Rust code for this campaign's source pin.
 SGLANG_ENGINE: dict[str, Any] = {
     "name": "sglang",
-    "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
+    "install_cmd": "/usr/local/bin/pareton-install-sglang",
     "entrypoint": ["python3", "-m", "sglang.launch_server"],
     "cache_dir": "/root/.cache/sglang",
 }

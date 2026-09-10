@@ -130,19 +130,31 @@ def test_dockerfile_omits_blank_arch():
 
 
 @pytest.mark.unit
-def test_run_logged_tees_and_returns_code(tmp_path, capsys):
+@pytest.mark.parametrize("stream_logs", [False, True])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_run_logged_tees_and_returns_code(tmp_path, capsys, stream_logs, exit_code):
     from builder.hermetic import _run_logged
 
     log_path = tmp_path / "build.log"
     rc = _run_logged(
-        ["python3", "-c", "print('hello-build')"],
+        [
+            "python3",
+            "-c",
+            "import sys; print('hello-build'); print('build-warning', file=sys.stderr); "
+            f"sys.exit({exit_code})",
+        ],
         log_path=log_path,
         timeout=30,
+        stream_logs=stream_logs,
     )
-    assert rc == 0
-    assert "hello-build" in log_path.read_text(encoding="utf-8")
-    err = capsys.readouterr().err
-    assert "hello-build" not in err
+    assert rc == exit_code
+    log = log_path.read_text(encoding="utf-8")
+    assert "hello-build" in log
+    assert "build-warning" in log
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert ("hello-build" in captured.err) == stream_logs
+    assert ("build-warning" in captured.err) == stream_logs
 
 
 @pytest.mark.unit
@@ -334,7 +346,7 @@ def test_dockerfile_sglang_profile_swaps_install_and_entrypoint(monkeypatch):
     vllm_text = dockerfile_for_patch(**kw)
     sglang_text = dockerfile_for_patch(**kw, engine=preset("sglang"))
 
-    assert "pip install --no-deps --no-build-isolation -e python/" in sglang_text
+    assert "/usr/local/bin/pareton-install-sglang" in sglang_text
     assert 'ENTRYPOINT ["python3", "-m", "sglang.launch_server"]' in sglang_text
     assert "vllm" not in sglang_text
 
@@ -388,7 +400,7 @@ def test_dockerfile_sglang_empty_patch_skips_apply(monkeypatch):
         engine=preset("sglang"),
     )
     assert "git apply" not in text
-    assert "pip install --no-deps --no-build-isolation -e python/" in text
+    assert "/usr/local/bin/pareton-install-sglang" in text
     assert ",readonly" not in text
 
 
@@ -432,7 +444,8 @@ def test_build_engine_image_rejects_bad_engine(tmp_path):
 
 
 @pytest.mark.unit
-def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path):
+@pytest.mark.parametrize("stream_logs", [False, True])
+def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path, stream_logs):
     """`--engine sglang` must reach build_engine_image as the SGLang profile."""
     import builder.__main__ as cli
 
@@ -456,10 +469,12 @@ def test_cli_engine_flag_maps_to_preset(monkeypatch, tmp_path):
             "--empty-patch",
             "--engine",
             "sglang",
+            *(["--stream-build-logs"] if stream_logs else []),
         ]
     )
     assert rc == 0
     assert seen["engine"] == preset("sglang")
+    assert seen["stream_logs"] is stream_logs
 
     seen.clear()
     cli.main(
@@ -662,7 +677,10 @@ def test_build_vllm_rejects_base_inspect_failed(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_build_sglang_skips_arch_inspect(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("empty", [False, True])
+def test_build_sglang_is_offline_and_skips_arch_inspect(
+    tmp_path, monkeypatch, capsys, empty
+):
     import builder.hermetic as hermetic
 
     def boom(*_a, **_k):
@@ -670,20 +688,25 @@ def test_build_sglang_skips_arch_inspect(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(hermetic, "_base_image_torch_arch", boom)
     monkeypatch.setattr(hermetic.subprocess, "run", _ok_run)
-    monkeypatch.setattr(hermetic, "_run_logged", lambda *_a, **_k: 0)
+    commands = []
+    monkeypatch.setattr(
+        hermetic, "_run_logged", lambda cmd, **_k: commands.append(cmd) or 0
+    )
     result = build_engine_image(
         baseline_repo="https://example.invalid/repo.git",
         baseline_commit=COMMIT,
         base_image=_BASE,
-        patch_bytes=b"diff --git a/x b/x\n",
+        patch_bytes=b"" if empty else b"diff --git a/x b/x\n",
         patch_hash="sha256:" + ("c" * 64),
         work_root=tmp_path / "work",
         log_dir=tmp_path / "logs",
         push=False,
         engine=preset("sglang"),
+        allow_empty_patch=empty,
     )
     assert result.ok
     assert "(unset) (sglang)" in capsys.readouterr().err
+    assert "--network=none" in commands[0]
 
 
 @pytest.mark.unit

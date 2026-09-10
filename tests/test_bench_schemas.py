@@ -66,6 +66,21 @@ def test_candidates_must_be_a_non_empty_list():
         validate_bench_request_dict(raw)
 
 
+@pytest.mark.parametrize("name", ["unknown", None, [], {}])
+def test_invalid_engine_name_is_rejected(name):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["engines"]["baseline"]["name"] = name
+    with pytest.raises(RequestValidationError, match="engines.baseline.name"):
+        validate_bench_request_dict(raw)
+
+
+def test_legacy_bench_request_defaults_to_vllm():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req = validate_bench_request_dict(raw)
+    assert req.engines.baseline.name == "vllm"
+    assert req.engines.candidates[0].name == "vllm"
+
+
 def test_every_candidate_image_must_be_digest_pinned():
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     raw["engines"]["candidates"].append({"image": "ghcr.io/example/engine:latest"})

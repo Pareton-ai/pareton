@@ -1,0 +1,101 @@
+{
+  "baseline_repo": "https://github.com/sgl-project/sglang.git",
+  "baseline_commit": "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+  "gpu_skus": [
+    "H200"
+  ],
+  "sla": {
+    "p99_ttft_ms": 2000.0,
+    "p99_itl_ms": 50.0,
+    "quality_floor_spec": "greedy token-match >= 0.99 vs baseline"
+  },
+  "scoring_config_sha256": null,
+  "scoring_config_url": null,
+  "allowed_paths": [
+    "python/sglang/**",
+    "rust/**"
+  ],
+  "denied_paths": [
+    "tests/**",
+    "benchmarks/**",
+    ".github/**",
+    "docker/**",
+    "**/Dockerfile*",
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/requirements*.txt",
+    "test/**",
+    "benchmark/**",
+    "python/sglang/test/**",
+    "python/sglang/kernels/aot/tests/**",
+    "python/sglang/kernels/aot/python/sgl_kernel/test_utils.py",
+    "python/sglang/kernels/aot/python/sgl_kernel/testing/**",
+    "rust/**/tests/**",
+    "rust/**/benches/**"
+  ],
+  "status": "open",
+  "priority_metric": "gpu_hours",
+  "success_threshold": ">=10% GPU-hour reduction at SLA",
+  "bench": {
+    "model": {
+      "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+      "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "dtype": "bfloat16",
+      "quantization": "fp8",
+      "max_model_len": 8192
+    },
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+    "gpu_count": 1,
+    "serve_args": [
+      "--tp-size",
+      "1",
+      "--mem-fraction-static",
+      "0.80",
+      "--max-running-requests",
+      "32"
+    ],
+    "correctness": {
+      "thresholds": {
+        "min_mean_logprob": -4.0,
+        "min_token_logprob": -12.0,
+        "min_token_quantile": 0.001,
+        "min_coverage_ratio": 0.5,
+        "max_mean_logprob_drop": 1.5
+      },
+      "num_prompts": 32
+    }
+  },
+  "engine": {
+    "name": "sglang",
+    "install_cmd": "/usr/local/bin/pareton-install-sglang",
+    "entrypoint": [
+      "python3",
+      "-m",
+      "sglang.launch_server"
+    ],
+    "cache_dir": "/root/.cache/sglang"
+  },
+  "scoring_rule": {
+    "name": "median_e2e_speedup"
+  },
+  "emission_rule": {
+    "name": "linear_decay",
+    "start_weight": 0.0,
+    "floor_weight": 0.0,
+    "decay_blocks": 201600
+  },
+  "sampling_rule": {
+    "algo_version": 2,
+    "config": "default",
+    "dataset": "nebius/SWE-agent-trajectories",
+    "max_tokens": 5120,
+    "n_prompts": 32,
+    "n_rows": 80036,
+    "revision": "68195a1450865274106246d0d0296a1d6807b88e",
+    "seed_block_offset": 10,
+    "split": "train",
+    "type": "hf_rows"
+  }
+}

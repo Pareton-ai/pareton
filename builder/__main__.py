@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-push", action="store_true", default=False)
     p.add_argument("--work-root", type=Path, default=None)
     p.add_argument(
+        "--stream-build-logs",
+        action="store_true",
+        help="Stream Docker logs and verbose pip build progress (for ops and CI)",
+    )
+    p.add_argument(
         "--engine",
         choices=sorted(ENGINE_PRESETS),
         default=None,
@@ -86,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         image_ref_override=args.image_ref,
         engine=None if args.engine is None else preset(args.engine),
         torch_cuda_arch_list=args.torch_cuda_arch_list,
+        stream_logs=args.stream_build_logs,
     )
     if not result.ok:
         print(f"FAIL {result.reason}: {result.evidence}", file=sys.stderr)
