@@ -45,6 +45,30 @@ the diff to public storage and returns a permanent URL without an expiry.
 See [patch visibility](docs/patch-visibility.md) for the upload contract,
 deployment prerequisites, and a local patch-hash command.
 
+## Dev submission fee exemptions
+
+Validators can exempt specific dev hotkeys from the TAO submission fee in
+`/opt/pareton/.env`:
+
+```dotenv
+PARETON_SUBMISSION_FEE_EXEMPT_HOTKEYS=HOTKEY_SS58_1,HOTKEY_SS58_2
+```
+
+Use full, case-sensitive hotkey addresses, not coldkeys or wallet names.
+Whitespace around entries is ignored; an empty list exempts nobody. Restart
+`pareton-watcher` after changing it. Keep `PARETON_SUBMISSION_FEE_TAO` at the
+normal fee on the validator; all other submission checks still apply to devs.
+
+An allowlisted dev skips the miner CLI's transfer using its existing fee setting:
+
+```sh
+PARETON_SUBMISSION_FEE_TAO=0 python miner/commit_patch.py <your usual arguments>
+```
+
+This submits without a payment proof. Setting the miner's fee to zero does not
+grant an exemption: the validator checks its own configured list against the
+on-chain submitting hotkey. Exempt submissions do not consume payment references.
+
 ## Layout
 
 | Path                    | Role                                          |
