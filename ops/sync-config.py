@@ -476,10 +476,21 @@ def validate_candidates(
         if units_staged:
             if shutil.which("systemd-analyze") is None:
                 raise Fail(2, "systemd-analyze-unavailable")
-            result = run_cmd(["systemd-analyze", "verify", "--root", str(stage)])
-            if result.returncode != 0:
-                detail = (result.stderr or result.stdout).strip().splitlines()
-                raise Fail(2, "unit-validation-failed", validation=detail[:10])
+            # Per-file verify WITHOUT --root: --root would resolve ExecStart
+            # inside the staging tree and reject every unit for a missing
+            # binary. The bootstrap runbook installs /usr/local/bin/pareton-deploy
+            # and the pareton-ops helpers BEFORE apply, so every referenced
+            # path exists on the live filesystem at validation time.
+            staged_units = sorted(
+                unit
+                for unit in (stage / "etc/systemd/system").rglob("*")
+                if unit.is_file() and unit.name.endswith((".service", ".timer"))
+            )
+            for staged_unit in staged_units:
+                result = run_cmd(["systemd-analyze", "verify", str(staged_unit)])
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout).strip().splitlines()
+                    raise Fail(2, "unit-validation-failed", validation=detail[:10])
         if (stage / "vector.toml").exists():
             if shutil.which("vector") is None:
                 raise Fail(2, "vector-binary-unavailable")

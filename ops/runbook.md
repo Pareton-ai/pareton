@@ -13,6 +13,13 @@ touches business data, rounds, or GPU state.
 - The webhook for deploy alerts is `PARETON_DISCORD_DEPLOY_WEBHOOK` in
   `/opt/pareton/.env` (owner-placed). The Axiom token `PARETON_AXIOM_TOKEN`
   in the same file was verified by the owner via a direct ingest test.
+- Every managed live file was captured from the 2026-09-10 read-only audit
+  and matches the repo copy (worker main unit + both drop-ins recorded
+  verbatim; `vector.service`, round-worker, gpu-reap, api, watcher, weights,
+  deploy service/timer, builder-cleanup all byte-identical). The only
+  intentional live diffs at bootstrap: the two new drop-ins, the deploy unit's
+  `OnFailure=` line, the new `pareton-deploy-failed.service`, the ops
+  programs, and the Vector TOML (env-ref token + two added include_units).
 - State lives under `/var/lib/pareton-deploy/`: `last-run.env` (deploy
   progress), `alert-state.json` (alert dedup), `sync-pending.json` (owed
   reloads/restarts), `sync-backup/<ts>/` (pre-install copies for rollback).
@@ -58,11 +65,13 @@ as "not verified here", not as a fault; re-run as root on the box.
    /usr/local/lib/pareton-ops/sync-config.py apply --repo /opt/pareton
    ```
 
-   `apply` validates candidates first (`systemd-analyze verify`, `vector
-   validate` with the real env), installs atomically, runs one `daemon-reload`,
-   restarts Vector when its files changed, and re-checks. Rollback copies are
-   under `/var/lib/pareton-deploy/sync-backup/`. The old inline-token TOML is
-   the pre-install backup — keep it in the restricted location.
+   `apply` validates candidates first — `systemd-analyze verify` per staged
+   unit (resolving `ExecStart` against the live filesystem, which is why step 5
+   installs the ops programs before this step) and `vector validate` with the
+   real env — then installs atomically, runs one `daemon-reload`, restarts
+   Vector when its files changed, and re-checks. Rollback copies are under
+   `/var/lib/pareton-deploy/sync-backup/`. The old inline-token TOML is the
+   pre-install backup — keep it in the restricted location.
 7. Verify the OnFailure chain landed (content equality covers it):
 
    ```sh
