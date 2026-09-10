@@ -6,12 +6,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from builder import preflight
-from gpu.bootstrap import harness_command, local_code_sha
+from gpu.bootstrap import local_code_sha
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,55 +50,6 @@ def test_selected_builder_gc_checked(monkeypatch, tmp_path, driver):
 def test_source_revision_survives_gitless_image(monkeypatch, tmp_path):
     monkeypatch.setenv("PARETON_CODE_SHA", "abc12345")
     assert local_code_sha(tmp_path) == "abc12345"
-
-
-@pytest.mark.parametrize("user", ["root", "ubuntu"])
-def test_harness_socket_host_paths_and_failure_status(tmp_path, user):
-    stub = tmp_path / "bin"
-    stub.mkdir()
-    log = tmp_path / "argv.jsonl"
-    docker = stub / "docker"
-    docker.write_text(f"""#!{sys.executable}
-import json, os, sys
-with open(os.environ["TEST_LOG"], "a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")
-sys.exit(7 if sys.argv[1] == "run" else 0)
-""")
-    sudo = stub / "sudo"
-    sudo.write_text('#!/bin/sh\n[ "$1" = -E ] && shift\nexec "$@"\n')
-    docker.chmod(0o755)
-    sudo.chmod(0o755)
-    output = tmp_path / "evidence with spaces"
-    pod = SimpleNamespace(ssh=SimpleNamespace(user=user))
-    command = harness_command(
-        pod,
-        code_sha="deadbeef",
-        env_file="/opt/pareton/secret.env",
-        request="/opt/pareton/request.json",
-        output=str(output),
-        mock_engine=True,
-    )
-    result = subprocess.run(
-        ["bash", "-c", command],
-        env={
-            **os.environ,
-            "PATH": f"{stub}:{os.environ['PATH']}",
-            "TEST_LOG": str(log),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 7  # Cleanup never hides a failed benchmark.
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    argv = calls[0]
-    assert argv[argv.index("--network") + 1] == "host"
-    assert "/var/run/docker.sock:/var/run/docker.sock" in argv
-    assert "/workspace/hf-cache:/workspace/hf-cache" in argv
-    assert "/workspace/engine-cache:/workspace/engine-cache" in argv
-    assert "DOCKER_CONFIG=/opt/pareton/.docker" in argv
-    assert argv[-3:] == ["--output-dir", str(output), "--mock-engine"]
-    assert calls[1][:2] == ["rm", "-f"]
-    assert "secret.env" in command and "PARETON_GHCR_TOKEN" not in command
 
 
 def test_scheduler_drains_active_command_on_sigterm(tmp_path):

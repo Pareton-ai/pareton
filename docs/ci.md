@@ -76,6 +76,7 @@ and persistence across down/up. It never loads the production environment and
 removes only its randomly named test project's containers and volumes.
 
 Docker lifecycle/correctness tests also run inside the runtime image using the
-host socket and host networking, exercising the sibling-engine arrangement used
-by GPU harness containers. Real GPU/provider, S3, wallet and Axiom credentials are
-not exercised by this job.
+host socket and host networking to check the bundled Docker client. In production,
+the GPU harness runs in a virtualenv on the rented host; bootstrap and SSH
+orchestration have offline tests. Real GPU/provider, S3, wallet and Axiom
+credentials are not exercised by this job.

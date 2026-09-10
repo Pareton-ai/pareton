@@ -61,7 +61,7 @@ jobs:
             timberio/vector:0.51.1-debian test /etc/vector/vector.toml
       - name: Compose startup, logs and redeployment persistence
         run: python3 scripts/smoke_compose.py
-      - name: Harness controls sibling Docker engines
+      - name: Docker client and engine lifecycle
         run: |
           shared=$(mktemp -d)
           trap 'rm -rf "$shared"' EXIT

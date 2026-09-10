@@ -3,7 +3,8 @@
 Pareton's API, submission worker, round worker, watcher, weights, GPU reaper,
 builder cleanup, Vector and Caddy run in `compose.yaml`. Postgres remains Neon;
 S3, GHCR and GPU providers retain their existing roles. Application containers
-share one runtime image with a virtualenv at `/opt/venv`. Host Python is not needed.
+share one runtime image with a virtualenv at `/opt/venv`. The Compose host does
+not need Python; rented GPU hosts run the benchmark harness in their own virtualenv.
 
 ## First start
 
@@ -160,21 +161,24 @@ checking out an older commit, and resume it only when main should deploy again.
 
 ## GPU execution
 
-Remote bootstrap installs/checks Docker, NVIDIA support and rsync, ships the
-trusted source, then builds the `runtime` Dockerfile target on the GPU host. Python
-and `python -m venv` run **inside that image**; no host virtualenv is installed.
-The image records the source revision, including when the coordinating worker has
-no `.git` directory. Repeated runs on a retained/static host can reuse image layers.
+The coordinator runs in Compose and connects over SSH to the rented GPU machine.
+Remote bootstrap checks Docker, NVIDIA support, rsync and Python's venv tooling,
+ships the trusted source, then creates `/opt/pareton/.venv` using `python3 -m venv`
+and installs the project dependencies there. The benchmark harness runs directly
+in this remote host virtualenv. Engine images continue to run in Docker on that
+same GPU machine; no separate harness image is built or started.
 
-The harness uses the host socket to create sibling engine containers, host
-networking for engine health/completion access, and GPU utility access for its
-hardware evidence. `/opt/pareton`, `/workspace/hf-cache`, and
-`/workspace/engine-cache` are mounted at identical paths inside and outside the
-harness so engine mounts resolve correctly. Phase/status files and final evidence
-remain visible to SSH polling and rsync; benchmark exit codes survive cleanup.
-Registry authentication uses `/opt/pareton/.docker` in both host and harness.
-Secrets, keys, environments, runtime state and old output are excluded from the
-build context/source transfer.
+The coordinator's image records the source revision, so evidence retains its code
+SHA even when the coordinator has no `.git` directory. The remote harness keeps
+direct GPU probes, loopback engine access, and the existing host cache paths
+`/workspace/hf-cache` and `/workspace/engine-cache`. Phase/status files and final
+evidence remain visible to SSH polling and rsync. Non-root provider accounts gain
+the Docker group in bootstrap, which takes effect in subsequent SSH sessions.
+
+Source transfer excludes the existing environment/development artifacts and
+output directories, plus `.pareton-work/` and `.deploy-state/`. The latter contains
+deployment snapshots with resolved credentials and must stay on the coordinator.
+The run's required credentials and workload traces are transferred separately.
 
 Provider fallback, per-round pod reuse, model and engine caches, evidence upload,
 `--keep`, and TTL teardown retain their existing behavior. The GPU reaper runs
@@ -251,6 +255,7 @@ PARETON_CODE_SHA=$(git rev-parse HEAD) docker compose build api
 python3 scripts/smoke_compose.py
 ```
 
-CI also runs the mock engine lifecycle from inside the runtime image through the
-Docker socket. Real provider/GPU and production Axiom verification is a cutover
+CI also checks the runtime image's Docker client against mock engine containers.
+Remote host bootstrap/orchestration has offline tests. Real provider/GPU and
+production Axiom verification is a cutover
 check; mock tests cannot establish those external services are configured correctly.

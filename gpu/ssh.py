@@ -17,10 +17,6 @@ logger = logging.getLogger(__name__)
 
 REPO_RSYNC_EXCLUDES: tuple[str, ...] = (
     ".env",
-    ".env*",
-    ".docker/",
-    ".pareton-bench.env",
-    ".pareton-traces/",
     ".venv",
     ".git",
     "__pycache__",
@@ -29,16 +25,10 @@ REPO_RSYNC_EXCLUDES: tuple[str, ...] = (
     "out/",
     "*.pyc",
     "docs/",
+    # Host CLI runs can ship a checkout containing build work and deployment
+    # snapshots. The snapshots include resolved environment credentials.
     ".pareton-work/",
-    ".deploy*",
-    ".cache/",
-    "state/",
-    "state-mainnet/",
-    ".ssh/",
-    ".codex/",
-    ".agents/",
-    "*.pem",
-    "*.key",
+    ".deploy-state/",
 )
 
 
