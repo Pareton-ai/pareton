@@ -1,4 +1,4 @@
-"""Exercise fetch, prepare, drain, down/up, rollback and retry with fake Docker."""
+"""Exercise deployment lifecycle, rollback, and saved Compose configuration."""
 
 import os
 import subprocess
@@ -134,6 +134,74 @@ def test_local_deploy_does_not_fetch_or_merge(deploy):
     assert result.returncode == 0
     assert "git fetch" not in log and "git merge" not in log
     assert " down " in log and " up " in log
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize("args", [(), ("--local",)])
+def test_saved_release_retains_cli_without_enabling_it_at_startup(deploy, args):
+    """Use real Compose parsing; stubs cannot reproduce inactive-profile filtering."""
+    import json
+    import shutil
+
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose is unavailable")
+    if subprocess.run(
+        [docker, "compose", "version"], capture_output=True, timeout=15
+    ).returncode:
+        pytest.skip("Docker Compose is unavailable")
+
+    repo, run = deploy
+    (repo / "compose.yaml").write_text((ROOT / "compose.yaml").read_text())
+    stub = repo.parent / "bin/docker"
+    stub.write_text(
+        stub.read_text()
+        .replace(
+            "*\" config \"*) echo 'services: {}' ;;",
+            '*" config "*) exec "$TEST_REAL_DOCKER" "$@" ;;',
+        )
+        .replace(
+            '*" builder.preflight "*) exit "${TEST_PREFLIGHT_RC:-0}" ;;',
+            '*" builder.preflight "*)\n'
+            '        exec "$TEST_REAL_DOCKER" compose '
+            '--project-directory "$PARETON_REPO_DIR" '
+            '-f "$PARETON_REPO_DIR/.deploy-state/next.yaml" '
+            "config --quiet cli ;;",
+        )
+    )
+    result, _log = run(
+        *args,
+        TEST_REAL_DOCKER=docker,
+        PARETON_AXIOM_TOKEN="test",
+        COMPOSE_PROFILES="",
+    )
+    assert result.returncode == 0, result.stderr
+
+    command = [
+        docker,
+        "compose",
+        "--project-directory",
+        str(repo),
+        "--env-file",
+        str(repo / ".env"),
+        "-f",
+        str(repo / ".deploy-state/current.yaml"),
+    ]
+    env = {**os.environ, "COMPOSE_PROFILES": ""}
+    saved = json.loads(
+        subprocess.check_output(
+            [*command, "--profile", "*", "config", "--format", "json"],
+            env=env,
+            text=True,
+            timeout=15,
+        )
+    )
+    assert saved["services"]["cli"]["profiles"] == ["tools"]
+    active = subprocess.check_output(
+        [*command, "config", "--services"], env=env, text=True, timeout=15
+    ).splitlines()
+    assert "cli" not in active
+    assert set(active) == set(saved["services"]) - {"cli"}
 
 
 def test_failed_same_commit_redeploy_preserves_previous_release(deploy):

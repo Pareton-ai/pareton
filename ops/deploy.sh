@@ -63,7 +63,9 @@ redeploy() (
     export PARETON_VECTOR_CONFIG="$release/vector.toml"
     export PARETON_CADDY_CONFIG="$release/Caddyfile"
     next="$STATE/next.yaml"
-    compose config > "$next"
+    # Retain opt-in services such as cli in the saved release. Enable profiles
+    # only for rendering; their profile gates still apply to ordinary startup.
+    compose --profile '*' config > "$next"
     # Build before stopping production; use the same builder and storage lock
     # as miner builds, cleanup and ccache backup/restore.
     work=${PARETON_HOST_WORK_DIR:-$REPO/.pareton-work}
