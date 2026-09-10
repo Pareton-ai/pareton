@@ -1,17 +1,27 @@
 # Vector configuration for Pareton log shipping to Axiom.
-# Deploy to /etc/vector/vector.toml on the production droplet.
-# Token comes from /opt/pareton/.env (PARETON_AXIOM_TOKEN).
+# Run by Compose; token comes from .env (PARETON_AXIOM_TOKEN).
 #
 # Install: https://vector.dev/docs/setup/installation/
 # Axiom sink: https://vector.dev/docs/reference/configuration/sinks/axiom/
 
-[sources.journald]
-type = "journald"
-include_units = ["pareton-worker", "pareton-round-worker", "pareton-watcher", "pareton-api", "pareton-weights", "pareton-gpu-reap"]
+data_dir = "/var/lib/vector"
+
+[sources.docker]
+type = "docker_logs"
+include_labels = ["com.docker.compose.project=${PARETON_COMPOSE_PROJECT}"]
+
+[transforms.service_identity]
+type = "remap"
+inputs = ["docker"]
+source = '''
+  .service = .label."com.docker.compose.service"
+  unit = .label."ai.pareton.systemd-unit"
+  if is_string(unit) { ._SYSTEMD_UNIT = unit }
+'''
 
 [transforms.drop_noise]
 type = "filter"
-inputs = ["journald"]
+inputs = ["service_identity"]
 # Keep structured lifecycle JSON (always contains "event":). For other lines,
 # drop DEBUG-level noise (log format pads the level to 7 chars: " DEBUG  ").
 # Traceback lines survive: they carry failure details.
@@ -41,8 +51,67 @@ source = '''
 type = "axiom"
 inputs = ["parse_lifecycle"]
 token = "${PARETON_AXIOM_TOKEN}"
-dataset = "pareton-prod"
+dataset = "${PARETON_AXIOM_DATASET}"
 
 [sinks.axiom.buffer]
 type = "disk"
 max_size = 536870912
+when_full = "block"
+
+[[tests]]
+name = "worker heartbeat keeps existing alert identity"
+[[tests.inputs]]
+insert_at = "service_identity"
+type = "log"
+[tests.inputs.log_fields]
+message = 'INFO pareton.lifecycle: {"event":"heartbeat","queue_depth":3}'
+[tests.inputs.log_fields.label]
+"com.docker.compose.service" = "worker"
+"ai.pareton.systemd-unit" = "pareton-worker.service"
+[[tests.outputs]]
+extract_from = "parse_lifecycle"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = '''
+assert_eq!(.event, "heartbeat")
+assert_eq!(.queue_depth, 3)
+assert_eq!(._SYSTEMD_UNIT, "pareton-worker.service")
+'''
+
+[[tests]]
+name = "round heartbeat is a separate alert stream"
+[[tests.inputs]]
+insert_at = "service_identity"
+type = "log"
+[tests.inputs.log_fields]
+message = 'INFO pareton.lifecycle: {"event":"heartbeat"}'
+[tests.inputs.log_fields.label]
+"com.docker.compose.service" = "round-worker"
+"ai.pareton.systemd-unit" = "pareton-round-worker.service"
+[[tests.outputs]]
+extract_from = "parse_lifecycle"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = 'assert_eq!(._SYSTEMD_UNIT, "pareton-round-worker.service")'
+
+[[tests]]
+name = "traceback retained"
+[[tests.inputs]]
+insert_at = "service_identity"
+type = "log"
+[tests.inputs.log_fields]
+message = "Traceback (most recent call last):"
+[[tests.outputs]]
+extract_from = "parse_lifecycle"
+[[tests.outputs.conditions]]
+type = "vrl"
+source = 'assert_eq!(.message, "Traceback (most recent call last):")'
+
+[[tests]]
+name = "debug noise discarded"
+no_outputs_from = ["drop_noise"]
+[[tests.inputs]]
+insert_at = "service_identity"
+type = "log"
+[tests.inputs.log_fields]
+message = "2026-09-10 DEBUG   noisy.library: irrelevant"

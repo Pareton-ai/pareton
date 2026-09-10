@@ -35,3 +35,37 @@ jobs:
         # `-m unit` ran only 94/347; bench/ and gpu/ tests were silently
         # excluded. Everything except docker-marked runs without GPU/network.
         run: pytest -q -m "not docker"
+
+  container-tests:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime and deploy controller
+        run: |
+          docker build --target runtime --build-arg PARETON_CODE_SHA="$GITHUB_SHA" -t pareton-runtime:local .
+          docker build --target deployer -t pareton-deployer:local .
+      - name: Validate Compose and Vector alert compatibility
+        env:
+          PARETON_AXIOM_TOKEN: test
+          PARETON_ENV_FILE: .env.example
+        run: |
+          docker compose config --quiet
+          docker compose -f ops/compose.deploy.yaml config --quiet
+          PARETON_WALLET_NAME=test PARETON_WALLET_HOTKEY=test \
+            docker compose -f ops/compose.auditor.yaml config --quiet
+          docker run --rm -e PARETON_AXIOM_TOKEN=test -e PARETON_AXIOM_DATASET=pareton-prod \
+            -e PARETON_COMPOSE_PROJECT=pareton \
+            -v "$PWD/ops/vector/vector.toml:/etc/vector/vector.toml:ro" \
+            timberio/vector:0.51.1-debian test /etc/vector/vector.toml
+      - name: Compose startup, logs and redeployment persistence
+        run: python3 scripts/smoke_compose.py
+      - name: Harness controls sibling Docker engines
+        run: |
+          shared=$(mktemp -d)
+          trap 'rm -rf "$shared"' EXIT
+          docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$shared:$shared" -e TMPDIR="$shared" \
+            pareton-runtime:local python -m pytest -q -m docker \
+            tests/test_lifecycle_docker.py tests/test_correctness_docker.py tests/test_container_ops.py

@@ -1,110 +1,111 @@
 #!/usr/bin/env bash
-# Pull-based deploy for the Pareton VPS, run by pareton-deploy.timer.
-#
-# Behavior:
-#   - git pull --ff-only when origin/main has new commits.
-#   - pip install only when requirements.txt changed in the pull.
-#   - pareton-api, pareton-watcher, and pareton-weights restart on every new
-#     commit (stateless enough to be always safe). Watcher and weights restart
-#     is skipped if the unit is not installed yet so a first-ship tick cannot
-#     abort the deploy.
-#   - Execution workers have separate pending restart flags. The round worker
-#     waits only for rounds; the existing worker checks both queues to protect
-#     legacy combined processes during migration.
-#     A running job killed mid-bench is never requeued (claim_next_job only
-#     claims 'pending'), and its GPU pod burns money until the TTL reaper.
-#     When busy, a pending flag defers the restart to a later idle tick.
-#   - pareton-gpu-reap needs no restart: it is a oneshot timer that re-reads
-#     the code from disk on every 10-minute run.
-#
-# Installed live at /usr/local/bin/pareton-deploy (outside the repo, so a
-# pull can never rewrite the script mid-execution). Keep this repo copy as
-# the source of truth and re-install after changing it.
+# Run once on the host, or --watch in the independent deploy Compose project.
 set -euo pipefail
+umask 077
 
-REPO=/opt/pareton
-PENDING_FLAG="$REPO/.deploy-pending"
-ROUND_PENDING_FLAG="$REPO/.deploy-rounds-pending"
-DEPLOYED_FILE="$REPO/.deploy-done"
-LOCK=/run/pareton-deploy.lock
-
-exec 9>"$LOCK"
-flock -n 9 || exit 0
-
-cd "$REPO"
-
-worker_busy() {
-    set -a
-    # shellcheck disable=SC1091
-    source "$REPO/.env"
-    set +a
-    # Exit 0 = busy, 1 = idle, 2 = probe error. Callers must treat 2 as busy
-    # (fail closed) so a broken probe never restarts a worker mid-job.
-    "$REPO/.venv/bin/python" -c "
-import sys
-try:
-    from db.connection import db_connection
-    with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(\"SELECT 1 FROM rounds WHERE status = 'running' \"
-                    \"UNION ALL SELECT 1 FROM submission_jobs \"
-                    \"WHERE status = 'running' AND %s LIMIT 1\",
-                    (sys.argv[1] != 'rounds',))
-        sys.exit(0 if cur.fetchone() else 1)
-except Exception:
-    sys.exit(2)
-" "$1"
-}
-
-git fetch --quiet origin main
-REMOTE=$(git rev-parse origin/main)
-# Commit of the last deploy whose pull, pip and api restart all succeeded.
-# Gating on this rather than HEAD is what lets a tick that died mid-deploy
-# retry: git pull has already moved HEAD by then, so a HEAD-based check would
-# skip the unfinished pip/api steps forever. Absent on first run, in which
-# case HEAD is treated as already deployed.
-DEPLOYED=$(cat "$DEPLOYED_FILE" 2>/dev/null || git rev-parse HEAD)
-
-if [ "$DEPLOYED" != "$REMOTE" ]; then
-    # Mark the worker restart owed before the steps that can fail. If one does,
-    # set -e aborts here and the pending block below never runs, so the worker
-    # is not restarted onto a half-deployed tree.
-    touch "$PENDING_FLAG" "$ROUND_PENDING_FLAG"
-    git pull --ff-only --quiet origin main
-    if git diff --name-only "$DEPLOYED" HEAD | grep -qx requirements.txt; then
-        "$REPO/.venv/bin/pip" install --quiet -r requirements.txt
-        echo "deploy: requirements.txt changed, venv updated"
-    fi
-    systemctl restart pareton-api
-    restarted="pareton-api"
-    if systemctl cat pareton-watcher >/dev/null 2>&1; then
-        systemctl restart pareton-watcher
-        restarted="$restarted, pareton-watcher"
-    fi
-    if systemctl cat pareton-weights >/dev/null 2>&1; then
-        systemctl restart pareton-weights
-        restarted="$restarted, pareton-weights"
-    fi
-    echo "deploy: $DEPLOYED -> $(git rev-parse HEAD); $restarted restarted"
-    git rev-parse HEAD > "$DEPLOYED_FILE"
+# Snapshot a host invocation before fetch can replace the running script.
+if [[ ${PARETON_DEPLOY_SNAPSHOT:-0} != 1 ]]; then
+    deploy_copy=$(mktemp)
+    cp -- "$0" "$deploy_copy"
+    export PARETON_DEPLOY_SNAPSHOT=1
+    trap 'rm -f "$deploy_copy"' EXIT
+    bash "$deploy_copy" "$@"
+    exit $?
 fi
 
-for unit in pareton-round-worker pareton-worker; do
-    pending="$PENDING_FLAG"
-    queue=all
-    if [ "$unit" = pareton-round-worker ]; then
-        pending="$ROUND_PENDING_FLAG"
-        queue=rounds
+REPO=${PARETON_REPO_DIR:-/opt/pareton}
+cd "$REPO"
+ENV_FILE=${PARETON_ENV_FILE:-$REPO/.env}
+# Same shell-compatible environment file as the former deployment script.
+set -a
+source "$ENV_FILE"
+set +a
+if [[ ${COMPOSE_PROJECT_NAME:-pareton} == pareton-deploy ]]; then
+    echo 'pareton-deploy is reserved for the independent deployment controller' >&2
+    exit 2
+fi
+export PARETON_ENV_FILE="$ENV_FILE"
+STATE="$REPO/.deploy-state"
+mkdir -p "$STATE"
+chmod 700 "$STATE"
+
+compose() {
+    docker compose --project-directory "$REPO" -f "$REPO/compose.yaml" "$@"
+}
+
+redeploy() (
+    exec 9>"$STATE/lock"
+    flock -n 9 || exit 0
+    if [[ ${1:-} != --local ]]; then
+        git fetch --quiet origin main
+        remote=$(git rev-parse origin/main)
+        if [[ -f "$STATE/done" && $(cat "$STATE/done") == "$remote" ]]; then
+            exit 0
+        fi
+        # Never discard operator changes or diverged history.
+        test -z "$(git status --porcelain --untracked-files=no)"
+        git merge --ff-only --quiet "$remote"
     fi
-    [ -f "$pending" ] || continue
-    systemctl cat "$unit" >/dev/null 2>&1 || continue
-    worker_busy "$queue" && rc=0 || rc=$?
-    if [ "$rc" -eq 1 ]; then
-        systemctl restart "$unit"
-        rm -f "$pending"
-        echo "deploy: $unit restarted"
-    elif [ "$rc" -eq 0 ]; then
-        echo "deploy: $unit has running work; restart deferred"
+    export PARETON_CODE_SHA
+    PARETON_CODE_SHA=$(git rev-parse HEAD)
+    export PARETON_RUNTIME_IMAGE="pareton-runtime:$PARETON_CODE_SHA"
+    release="$STATE/releases/$PARETON_CODE_SHA"
+    mkdir -p "$release"
+    cp "$REPO/ops/vector/vector.toml" "$release/vector.toml"
+    cp "$REPO/ops/caddy/Caddyfile" "$release/Caddyfile"
+    export PARETON_VECTOR_CONFIG="$release/vector.toml"
+    export PARETON_CADDY_CONFIG="$release/Caddyfile"
+    next="$STATE/next.yaml"
+    compose config > "$next"
+    # Build before stopping production; use the same builder and storage lock
+    # as miner builds, cleanup and ccache backup/restore.
+    work=${PARETON_HOST_WORK_DIR:-$REPO/.pareton-work}
+    mkdir -p "$work"
+    flock "$work/builder-storage.lock" \
+        docker compose --project-directory "$REPO" -f "$next" build \
+        --builder "${PARETON_BUILDER_NAME:-default}" api
+    docker compose --project-directory "$REPO" -f "$next" pull vector caddy
+    docker compose --project-directory "$REPO" -f "$next" run --rm --no-deps \
+        --entrypoint vector vector validate --no-environment /etc/vector/vector.toml
+    docker compose --project-directory "$REPO" -f "$next" run --rm --no-deps \
+        --entrypoint python cli -m builder.preflight
+
+    previous="$STATE/current.yaml"
+    running="$next"
+    if [[ -f "$previous" ]]; then running="$previous"; fi
+    # Keep API/Vector available while the current work and weight cycle drain.
+    docker compose --project-directory "$REPO" -f "$running" stop watcher
+    docker compose --project-directory "$REPO" -f "$running" stop worker round-worker weights
+    docker compose --project-directory "$REPO" -f "$running" down --remove-orphans
+    if docker compose --project-directory "$REPO" -f "$next" up -d --no-build --wait --wait-timeout 180; then
+        # Normal `docker compose run cli` must use the deployed code too.
+        docker image tag "$PARETON_RUNTIME_IMAGE" pareton-runtime:local
+        mv "$next" "$previous"
+        printf '%s\n' "$PARETON_CODE_SHA" > "$STATE/done"
+        printf 'deploy: %s running\n' "$PARETON_CODE_SHA"
     else
-        echo "deploy: $unit probe failed (rc=$rc); treating as busy, restart deferred"
+        echo 'deploy: startup failed; restoring the previous Compose release' >&2
+        docker compose --project-directory "$REPO" -f "$next" down --remove-orphans
+        if [[ -f "$previous" ]]; then
+            docker compose --project-directory "$REPO" -f "$previous" up -d --no-build --wait --wait-timeout 180
+        fi
+        exit 1
     fi
-done
+)
+
+case ${1:-} in
+    --watch)
+        stopping=0
+        trap 'stopping=1' TERM INT
+        while [[ "$stopping" == 0 ]]; do
+            # Run a fresh oneshot shell: bash suppresses errexit throughout a
+            # function called in an if/|| condition, including its subshell.
+            if ! bash "$0"; then echo 'deploy: failed; retrying next tick' >&2; fi
+            [[ "$stopping" == 0 ]] || break
+            sleep "${PARETON_DEPLOY_INTERVAL_S:-60}" &
+            wait $! || true
+        done
+        ;;
+    --local|"") redeploy "${1:-}" ;;
+    *) echo 'usage: pareton-deploy [--watch|--local]' >&2; exit 2 ;;
+esac

@@ -335,12 +335,13 @@ def test_static_ssh_never_discovers_home_ssh(
     assert p._key_path == key.resolve()
 
 
-def test_reap_timer_unit_interval():
-    timer = (ROOT / "ops" / "gpu" / "pareton-gpu-reap.timer").read_text(
-        encoding="utf-8"
-    )
-    service = (ROOT / "ops" / "gpu" / "pareton-gpu-reap.service").read_text(
-        encoding="utf-8"
-    )
-    assert "OnUnitActiveSec=10min" in timer
-    assert "python -m gpu reap" in service
+def test_reap_compose_interval_and_shared_registry():
+    import yaml
+
+    services = yaml.safe_load((ROOT / "compose.yaml").read_text())["services"]
+    reaper = services["gpu-reap"]
+    command = reaper["command"]
+    assert command[command.index("--interval") + 1] == "600"
+    assert command[-4:] == ["python", "-m", "gpu", "reap"]
+    state = reaper["volumes"][0]
+    assert state in services["round-worker"]["volumes"]

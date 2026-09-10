@@ -11,6 +11,7 @@ import json
 import socket
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -95,7 +96,7 @@ def mock_image_digest() -> str:
 
 def _require_container_ip_reachable(mock_image_digest: str) -> None:
     """Skip when host cannot reach bridge IPs (Docker Desktop)."""
-    run_id = "itpre" + "0" * 7
+    run_id = "itpre" + uuid.uuid4().hex[:7]
     with BenchNetwork(
         run_id=run_id,
         internal=True,
@@ -175,12 +176,28 @@ def test_cli_round_via_lifecycle_baseline_vs_baseline(
         )
 
     monkeypatch.setattr("bench.main.stage_weights", fake_stage)
+    # Production requests require a GPU count. These disposable mock engines
+    # exercise the same Docker path on CPU-only CI hosts.
+    from bench.lifecycle import EngineContainer
+
+    def cpu_container(*args, **kwargs):
+        kwargs["gpu_count"] = 0
+        return EngineContainer(*args, **kwargs)
+
+    monkeypatch.setattr("bench.main.EngineContainer", cpu_container)
     _require_container_ip_reachable(mock_image_digest)
 
     req = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
     req["workload_trace"]["path"] = str(SAMPLE_TRACE)
     # Same local mock image everywhere (self-check through Docker).
-    engine = {"image": mock_image_digest, "serve_args": [], "env": {}}
+    engine = {
+        "image": mock_image_digest,
+        # Nonzero model time keeps VM/CI scheduling noise from dominating the
+        # reproducibility bar. This is a transport/round smoke, not a speed test.
+        "serve_args": ["--token-latency-s", "0.01"],
+        "env": {},
+        "cache_dir": "/root/.cache/mock",
+    }
     req["engines"] = {"baseline": dict(engine), "candidates": [dict(engine)]}
     req_path = tmp_path / "request.json"
     req_path.write_text(json.dumps(req, indent=2) + "\n", encoding="utf-8")
@@ -196,7 +213,7 @@ def test_cli_round_via_lifecycle_baseline_vs_baseline(
     validate_report_dict(report)
     assert report["verdict"] == "pass"
     assert len(report["entries"]) == 1
-    assert report["entries"][0]["status"] == "scored"
+    assert report["entries"][0]["status"] == "scored", report["entries"][0]
     assert report["entries"][0]["correctness"]["verdict"] == "pass"
     assert report["inputs_fingerprint"]["model_weights_sha256"] == (
         "sha256:" + ("d" * 64)

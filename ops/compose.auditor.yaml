@@ -1,0 +1,29 @@
+name: pareton-auditor
+
+services:
+  auditor:
+    image: ${PARETON_RUNTIME_IMAGE:-pareton-runtime:local}
+    build:
+      context: ..
+      target: runtime
+      args:
+        PARETON_CODE_SHA: ${PARETON_CODE_SHA:-unknown}
+    command: [python, scripts/auditor.py]
+    environment:
+      PARETON_WALLET_NAME: ${PARETON_WALLET_NAME:?Set the auditor coldkey name}
+      PARETON_WALLET_HOTKEY: ${PARETON_WALLET_HOTKEY:?Set the auditor hotkey name}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15m
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    volumes:
+      - type: bind
+        source: ${PARETON_WALLET_DIR:-${HOME}/.bittensor/wallets}
+        target: /root/.bittensor/wallets
+        read_only: true
+        bind:
+          create_host_path: false

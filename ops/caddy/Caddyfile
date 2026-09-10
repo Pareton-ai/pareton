@@ -1,3 +1,3 @@
-api.pareton.ai {
-    reverse_proxy 127.0.0.1:8000
+{$PARETON_API_DOMAIN:api.pareton.ai} {
+    reverse_proxy api:8000
 }

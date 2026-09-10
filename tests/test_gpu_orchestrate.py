@@ -1123,18 +1123,16 @@ def test_bootstrap_script_verify_first_no_token():
     script = bootstrap_script()
     assert "command -v docker" in script
     assert "nvidia-smi" in script
-    assert "import ensurepip" in script
-    assert "python${PYVER}-venv" in script or "python${PYVER}-venv" in script
+    assert "ensurepip" not in script
+    assert "venv" not in script.replace("virtualenv", "")
+    assert "command -v rsync" in script
     assert "ghp_" not in script
     assert "PARETON_GHCR_TOKEN" not in script
     # gpg must not prompt on existing keyring (no /dev/tty over ssh)
     assert "gpg --batch --yes --dearmor" in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
-    # sock ACL after toolkit restart so chmod hits the final socket
-    assert script.index("systemctl restart docker") < script.index(
-        "chmod 666 /var/run/docker.sock"
-    )
+    assert "chmod 666 /var/run/docker.sock" not in script
     assert "stable/deb/nvidia-container-toolkit.list" in script
     assert "$distribution/libnvidia-container.list" not in script
     assert "grep -q '^deb '" in script
@@ -1778,13 +1776,12 @@ def _pull_command(
 def test_pull_hands_docker_credentials_back_to_the_pod_user():
     """Non-root pods log in under sudo, so the config lands owned by root.
 
-    bench/lifecycle.py runs bare docker as the pod user and must be able to read
-    it, otherwise the pull falls back to anonymous and GHCR refuses the private
-    image. The chown has to sit between the login and the pulls.
+    The harness uses the same explicit DOCKER_CONFIG through its workspace
+    mount. The SSH user must retain access to these files across runs.
     """
     remote = _pull_command("shadeform")
     assert "sudo -E docker login" in remote
-    assert 'chown -R "$(id -u):$(id -g)" "$HOME/.docker"' in remote
+    assert 'chown -R "$(id -u):$(id -g)" "$DOCKER_CONFIG"' in remote
     assert (
         remote.index("login ghcr.io")
         < remote.index("chown -R")

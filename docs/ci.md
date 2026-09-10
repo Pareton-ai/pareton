@@ -64,3 +64,18 @@ workflow inputs or logs.
 A red run prints the ordered submission events and the last 200 API, worker, and
 patch-server log lines. Download the `testnet-smoke-logs-*` artifact for the
 complete process logs.
+
+## Container integration
+
+The Tests workflow also builds both Dockerfile targets and validates Compose and
+Vector's existing worker-alert identity. `scripts/smoke_compose.py` derives an
+isolated stack from the actual Compose service definitions, replaces external
+integrations with a disposable local Postgres, mock workers and a console log
+sink, then checks API readiness, both worker heartbeat streams, shared build logs,
+and persistence across down/up. It never loads the production environment and
+removes only its randomly named test project's containers and volumes.
+
+Docker lifecycle/correctness tests also run inside the runtime image using the
+host socket and host networking, exercising the sibling-engine arrangement used
+by GPU harness containers. Real GPU/provider, S3, wallet and Axiom credentials are
+not exercised by this job.

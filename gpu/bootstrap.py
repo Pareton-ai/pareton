@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -14,12 +15,15 @@ from gpu.types import Pod
 logger = logging.getLogger(__name__)
 
 REMOTE_REPO = "/opt/pareton"
-REMOTE_VENV = f"{REMOTE_REPO}/.venv"
 REMOTE_HF_CACHE = "/workspace/hf-cache"
 REMOTE_ENGINE_CACHE = "/workspace/engine-cache"
 
 
 def local_code_sha(repo_root: Path) -> str:
+    # Runtime images exclude .git; the image build records the source revision.
+    baked = os.environ.get("PARETON_CODE_SHA", "")
+    if baked and baked != "unknown":
+        return baked
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -76,26 +80,12 @@ nvidia-smi >/dev/null
 {toolkit}
 $SUDO docker info 2>/dev/null | grep -qi nvidia || echo "warning: nvidia runtime still not listed in docker info"
 
-# Non-root (e.g. Shadeform): allow bare docker for bench/lifecycle.
-# Must run AFTER any docker restart (toolkit install) so chmod hits the
-# final socket; usermod alone is best-effort and may not apply mid-session.
-if [ "$(id -u)" -ne 0 ]; then
-  $SUDO usermod -aG docker "$(id -un)" 2>/dev/null || true
-  $SUDO chmod 666 /var/run/docker.sock 2>/dev/null || true
-fi
-
-# Python venv tooling: ``import venv`` can succeed without ensurepip on
-# Debian/Ubuntu; probe ensurepip and install the matching pythonX.Y-venv.
-if ! python3 -c "import ensurepip" 2>/dev/null; then
+# The host only needs the SSH data plane; Python and its virtualenv are in
+# the harness image. Docker commands use sudo for non-root provider accounts.
+if ! command -v rsync >/dev/null; then
   $SUDO apt-get update -y
-  PYVER="$(python3 -c 'import sys; print("%d.%d" % (sys.version_info.major, sys.version_info.minor))')"
-  $SUDO apt-get install -y "python${{PYVER}}-venv" python3-pip \
-    || $SUDO apt-get install -y python3-venv python3-pip
+  $SUDO apt-get install -y rsync
 fi
-python3 -c "import ensurepip" || {{
-  echo "ensurepip still missing after apt install; cannot create venv"
-  exit 1
-}}
 
 $SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE}
 $SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE} || true
@@ -152,6 +142,84 @@ def remote_docker(pod: Pod) -> str:
     return "sudo -E docker"
 
 
+def harness_image(code_sha: str) -> str:
+    """A safe local image tag, also for development revisions such as unknown."""
+    import hashlib
+
+    return f"pareton-harness:{hashlib.sha256(code_sha.encode()).hexdigest()[:20]}"
+
+
+def harness_command(
+    pod: Pod,
+    *,
+    code_sha: str,
+    env_file: str,
+    request: str,
+    output: str,
+    mock_engine: bool = False,
+) -> str:
+    """Run beside the engine containers using the GPU host's Docker daemon.
+
+    Host networking preserves the loopback ports bench/lifecycle discovers.
+    Identical host/container paths let sibling engines mount staged weights
+    and caches. GPU utility access preserves the harness environment probes.
+    """
+    import uuid
+
+    name = "pareton-harness-" + uuid.uuid4().hex[:12]
+    args = [
+        "run",
+        "--rm",
+        "--init",
+        "--name",
+        name,
+        "--network",
+        "host",
+        "--uts",
+        "host",
+        "--cgroupns",
+        "host",
+        "--gpus",
+        "all",
+        "--env",
+        "NVIDIA_DRIVER_CAPABILITIES=utility",
+        "--volume",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "--volume",
+        f"{REMOTE_REPO}:{REMOTE_REPO}",
+        "--volume",
+        f"{REMOTE_HF_CACHE}:{REMOTE_HF_CACHE}",
+        "--volume",
+        f"{REMOTE_ENGINE_CACHE}:{REMOTE_ENGINE_CACHE}",
+        "--env-file",
+        env_file,
+        "--env",
+        f"PARETON_BENCH_CODE_SHA={code_sha}",
+        "--env",
+        f"DOCKER_CONFIG={REMOTE_REPO}/.docker",
+        harness_image(code_sha),
+        "python",
+        "-m",
+        "bench",
+        "--request",
+        request,
+        "--output-dir",
+        output,
+    ]
+    if mock_engine:
+        args.append("--mock-engine")
+    docker = remote_docker(pod)
+    # Root in the harness writes evidence; restore ownership even on a failing
+    # benchmark so rsync works for non-root SSH accounts.
+    return (
+        f"mkdir -p {shlex.quote(output)} && "
+        f"{docker} {' '.join(shlex.quote(arg) for arg in args)}; rc=$?; "
+        f"{docker} rm -f {shlex.quote(name)} >/dev/null 2>&1 || true; "
+        f'if [ "$(id -u)" -ne 0 ]; then sudo chown -R "$(id -u):$(id -g)" '
+        f"{shlex.quote(output)}; fi; exit $rc"
+    )
+
+
 def bootstrap_pod(
     pod: Pod,
     *,
@@ -160,7 +228,7 @@ def bootstrap_pod(
     runner: SshRunner | None = None,
     state_dir: Path | None = None,
 ) -> str:
-    """Bootstrap remote host and ship the repo. Returns local git SHA."""
+    """Bootstrap the GPU host and build its harness image. Returns source SHA."""
     del image_refs  # pulled later after env file is written (orchestrate)
     script = bootstrap_script()
     ssh_exec(
@@ -191,9 +259,9 @@ def bootstrap_pod(
     ssh_exec(
         pod,
         (
-            f"rm -rf {REMOTE_VENV} && "
-            f"python3 -m venv {REMOTE_VENV} && "
-            f"{REMOTE_VENV}/bin/pip install -q -r {REMOTE_REPO}/requirements.txt"
+            f"{remote_docker(pod)} build --target runtime "
+            f"--build-arg {shlex.quote('PARETON_CODE_SHA=' + code_sha)} "
+            f"-t {shlex.quote(harness_image(code_sha))} {REMOTE_REPO}"
         ),
         timeout_s=1800.0,
         runner=runner,
@@ -233,17 +301,14 @@ def pull_engine_images(
     env_q = shlex.quote(env_file)
     # Single shell so login sees vars from the env file; password via stdin.
     remote = (
+        f"export DOCKER_CONFIG={REMOTE_REPO}/.docker && "
         f"set -a && . {env_q} && set +a && "
         'if [ -n "${PARETON_GHCR_TOKEN:-}" ]; then '
         f'echo "$PARETON_GHCR_TOKEN" | {docker} login ghcr.io '
         '-u "${PARETON_GHCR_USER:-${PARETON_GHCR_USERNAME:-}}" --password-stdin && '
-        # On a non-root pod the login runs under sudo, so docker writes
-        # $HOME/.docker/config.json owned by root. bench/lifecycle.py then runs
-        # bare docker as the pod user, cannot read those credentials, and falls
-        # back to an anonymous pull that GHCR refuses. Hand the file back, the
-        # same way bootstrap_script does for the repo and cache dirs.
+        # The harness mounts REMOTE_REPO and uses the same credentials.
         'if [ "$(id -u)" -ne 0 ]; then '
-        'sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker" 2>/dev/null || true; '
+        'sudo chown -R "$(id -u):$(id -g)" "$DOCKER_CONFIG" 2>/dev/null || true; '
         "fi; "
         "fi && "
         f"{{ {pulls}; true; }}"

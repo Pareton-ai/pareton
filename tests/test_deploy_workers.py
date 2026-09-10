@@ -1,12 +1,12 @@
-"""Run the deploy script offline, including its actual SQL busy probes."""
+"""Exercise fetch, prepare, drain, down/up, rollback and retry with fake Docker."""
 
 import os
-import shlex
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -14,120 +14,122 @@ def deploy(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".env").write_text("")
-    (repo / ".deploy-done").write_text("old")
-    python = repo / ".venv/bin/python"
-    python.parent.mkdir(parents=True)
-    python.symlink_to(sys.executable)
-    db = repo / "db"
-    db.mkdir()
-    (db / "__init__.py").write_text("")
-    (db / "connection.py").write_text("""
-import os
-import sqlite3
-from contextlib import contextmanager
-
-@contextmanager
-def db_connection():
-    if os.environ['TEST_DB_ERROR'] == '1':
-        raise RuntimeError('database unavailable')
-    conn = sqlite3.connect(':memory:')
-    for table, setting in [('submission_jobs', 'TEST_JOB'), ('rounds', 'TEST_ROUND')]:
-        conn.execute(f'CREATE TABLE {table} (status TEXT)')
-        if os.environ[setting] == '1':
-            conn.execute(f"INSERT INTO {table} VALUES ('running')")
-    class Cursor:
-        def execute(self, sql, args):
-            self.result = conn.execute(sql.replace('%s', '?'), args)
-        def fetchone(self):
-            return self.result.fetchone()
-    class Connection:
-        @contextmanager
-        def cursor(self):
-            yield Cursor()
-    try:
-        yield Connection()
-    finally:
-        conn.close()
+    (repo / "compose.yaml").write_text("services: {}\n")
+    for name in ("ops/vector/vector.toml", "ops/caddy/Caddyfile"):
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("config")
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    (stub / "git").write_text("""#!/bin/sh
+printf 'git %s\n' "$*" >> "$TEST_LOG"
+case "$1" in
+    rev-parse) echo new ;;
+    merge) exit "${TEST_MERGE_RC:-0}" ;;
+esac
 """)
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    for name, body in {
-        "flock": "exit 0",
-        "git": 'if [ "$1" = rev-parse ]; then echo new; fi',
-        "systemctl": """if [ "$1" = cat ]; then
-    [ "$2" != "$TEST_MISSING_UNIT" ]
-else
-    echo "$2" >> restarts.log
-fi""",
-    }.items():
-        tool = bin_dir / name
-        tool.write_text("#!/bin/sh\n" + body + "\n")
-        tool.chmod(0o755)
-    script = tmp_path / "deploy.sh"
-    source = (Path(__file__).resolve().parents[1] / "ops/deploy.sh").read_text()
-    script.write_text(
-        source.replace("REPO=/opt/pareton", f"REPO={shlex.quote(str(repo))}").replace(
-            "LOCK=/run/pareton-deploy.lock",
-            f"LOCK={shlex.quote(str(tmp_path / 'lock'))}",
-        )
-    )
+    (stub / "flock").write_text("""#!/bin/sh
+[ "$1" = -n ] && exit 0
+shift
+exec "$@"
+""")
+    (stub / "docker").write_text("""#!/bin/sh
+printf 'docker %s\n' "$*" >> "$TEST_LOG"
+case " $* " in
+    *" config "*) echo 'services: {}' ;;
+    *" build "*) exit "${TEST_BUILD_RC:-0}" ;;
+    *" validate "*) exit "${TEST_VALIDATE_RC:-0}" ;;
+    *" builder.preflight "*) exit "${TEST_PREFLIGHT_RC:-0}" ;;
+    *" up "*)
+        case " $* " in
+            *"next.yaml"*) exit "${TEST_UP_RC:-0}" ;;
+        esac ;;
+esac
+""")
+    for p in stub.iterdir():
+        p.chmod(0o755)
+    log = tmp_path / "commands.log"
 
-    def run(job=False, round=False, error=False, missing=""):
-        log = repo / "restarts.log"
+    def run(*args, **settings):
         log.write_text("")
         result = subprocess.run(
-            ["bash", str(script)],
+            ["bash", str(ROOT / "ops/deploy.sh"), *args],
             env={
                 **os.environ,
-                "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                "PYTHONPATH": str(repo),
-                "PARETON_DATABASE_URL": "",
-                "PARETON_TEST_DATABASE_URL": "",
-                "TEST_JOB": str(int(job)),
-                "TEST_ROUND": str(int(round)),
-                "TEST_DB_ERROR": str(int(error)),
-                "TEST_MISSING_UNIT": missing,
+                "PATH": f"{stub}:{os.environ['PATH']}",
+                "PARETON_REPO_DIR": str(repo),
+                "PARETON_ENV_FILE": str(repo / ".env"),
+                "TEST_LOG": str(log),
+                **{k: str(v) for k, v in settings.items()},
             },
             capture_output=True,
             text=True,
             timeout=15,
             check=False,
         )
-        assert result.returncode == 0, result.stderr
-        return [unit for unit in log.read_text().splitlines() if "worker" in unit]
+        return result, log.read_text()
 
     return repo, run
 
 
+def test_prepare_before_drain_and_down_then_up(deploy):
+    repo, run = deploy
+    result, log = run()
+    assert result.returncode == 0, result.stderr
+    assert log.index(" build ") < log.index("stop watcher")
+    assert log.index("stop watcher") < log.index("stop worker round-worker weights")
+    assert (
+        log.index("stop worker round-worker weights")
+        < log.index(" down ")
+        < log.index(" up ")
+    )
+    assert "--builder default" in log
+    assert "--wait" in log
+    assert "image tag pareton-runtime:new pareton-runtime:local" in log
+    assert "--volumes" not in log and " down -v" not in log
+    assert (repo / ".deploy-state/done").read_text().strip() == "new"
+    assert (repo / ".deploy-state/current.yaml").stat().st_mode & 0o777 == 0o600
+    result, log = run()
+    assert result.returncode == 0
+    assert "docker" not in log  # An unchanged main does not recreate services.
+
+
 @pytest.mark.parametrize(
-    "job,round,error,expected",
-    [
-        (True, False, False, ["pareton-round-worker"]),
-        (False, True, False, []),  # Also protects a legacy combined worker's round.
-        (False, False, True, []),
-        (False, False, False, ["pareton-round-worker", "pareton-worker"]),
-    ],
+    "failure",
+    ["TEST_MERGE_RC", "TEST_BUILD_RC", "TEST_VALIDATE_RC", "TEST_PREFLIGHT_RC"],
 )
-def test_workers_restart_independently_and_retry_when_idle(
-    deploy, job, round, error, expected
-):
+def test_preparation_failure_leaves_running_services_alone(deploy, failure):
     repo, run = deploy
-    assert run(job=job, round=round, error=error) == expected
-    for unit, flag in [
-        ("pareton-worker", ".deploy-pending"),
-        ("pareton-round-worker", ".deploy-rounds-pending"),
-    ]:
-        assert (repo / flag).exists() == (unit not in expected)
-    # No new commit: only the still-owed restarts should happen on the next tick.
-    assert run() == [
-        unit
-        for unit in ["pareton-round-worker", "pareton-worker"]
-        if unit not in expected
-    ]
+    result, log = run(**{failure: 1})
+    assert result.returncode != 0
+    assert " stop " not in log and " down " not in log
+    assert not (repo / ".deploy-state/done").exists()
+    result, log = run()
+    assert result.returncode == 0
+    assert " up " in log  # Retry even though fetch already advanced HEAD.
 
 
-def test_round_restart_remains_pending_until_unit_installed(deploy):
+def test_failed_start_restores_previous_release_and_does_not_mark_done(deploy):
     repo, run = deploy
-    assert run(missing="pareton-round-worker") == ["pareton-worker"]
-    assert (repo / ".deploy-rounds-pending").exists()
-    assert run() == ["pareton-round-worker"]
+    state = repo / ".deploy-state"
+    state.mkdir()
+    (state / "current.yaml").write_text("old config")
+    (state / "done").write_text("old")
+    result, log = run(TEST_UP_RC=1)
+    assert result.returncode != 0
+    assert "image tag" not in log
+    assert "current.yaml stop worker" in log
+    assert "current.yaml up -d --no-build" in log
+    assert (state / "done").read_text() == "old"
+    assert (state / "current.yaml").read_text() == "old config"
+    result, log = run()
+    assert result.returncode == 0
+    assert (state / "done").read_text().strip() == "new"
+
+
+def test_local_deploy_does_not_fetch_or_merge(deploy):
+    _, run = deploy
+    result, log = run("--local")
+    assert result.returncode == 0
+    assert "git fetch" not in log and "git merge" not in log
+    assert " down " in log and " up " in log

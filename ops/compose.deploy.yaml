@@ -1,0 +1,30 @@
+# Separate project: an application `down` must not stop its deploy controller.
+name: pareton-deploy
+services:
+  deploy:
+    image: pareton-deployer:local
+    build:
+      context: ..
+      target: deployer
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 8h
+    environment:
+      PARETON_REPO_DIR: ${PARETON_REPO_DIR:-/opt/pareton}
+      PARETON_ENV_FILE: ${PARETON_REPO_DIR:-/opt/pareton}/.env
+      DOCKER_HOST: unix:///var/run/docker.sock
+      DOCKER_CONFIG: /root/.docker
+    working_dir: ${PARETON_REPO_DIR:-/opt/pareton}
+    volumes:
+      # Absolute paths must agree inside/outside: Compose bind sources are
+      # interpreted on the Docker host, not in this controller container.
+      - ${PARETON_REPO_DIR:-/opt/pareton}:${PARETON_REPO_DIR:-/opt/pareton}
+      - ${PARETON_HOST_WORK_DIR:-${PARETON_REPO_DIR:-/opt/pareton}/.pareton-work}:${PARETON_HOST_WORK_DIR:-${PARETON_REPO_DIR:-/opt/pareton}/.pareton-work}
+      - ${PARETON_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${PARETON_DOCKER_CONFIG_DIR:-/root/.docker}:/root/.docker
+      - ${PARETON_DEPLOY_SSH_DIR:-/root/.ssh}:/root/.ssh:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

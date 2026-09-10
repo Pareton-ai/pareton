@@ -31,8 +31,8 @@ from gpu.bootstrap import (
     REMOTE_ENGINE_CACHE,
     REMOTE_HF_CACHE,
     REMOTE_REPO,
-    REMOTE_VENV,
     bootstrap_pod,
+    harness_command,
     pull_engine_images,
 )
 from gpu.errors import DestroyError, GpuError, NoCapacityError, ProvisionError
@@ -831,7 +831,6 @@ def run_bench_on_pod(
                 state_dir=registry.state_dir,
             )
 
-        mock_flag = " --mock-engine" if mock_engine else ""
         for req_p, local_out, _req, trace_path in preflighted:
             local_out.mkdir(parents=True, exist_ok=True)
             if pool or repetitions > 1:
@@ -850,12 +849,13 @@ def run_bench_on_pod(
                 state_dir=registry.state_dir,
             )
 
-            bench_cmd = (
-                f"cd {REMOTE_REPO} && set -a && . {REMOTE_ENV} && set +a && "
-                f"export PARETON_BENCH_CODE_SHA={code_sha} && "
-                f"mkdir -p {remote_out} && "
-                f"{REMOTE_VENV}/bin/python -m bench "
-                f"--request {REMOTE_REQUEST} --output-dir {remote_out}{mock_flag}"
+            bench_cmd = harness_command(
+                pod,
+                code_sha=code_sha,
+                env_file=REMOTE_ENV,
+                request=REMOTE_REQUEST,
+                output=remote_out,
+                mock_engine=mock_engine,
             )
             # ssh exec does not stream; poll the harness marker while it blocks.
             poller = _PodPhasePoller(
