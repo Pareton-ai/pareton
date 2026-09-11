@@ -1,0 +1,12 @@
+# Started by OnFailure= from pareton-deploy.service; never enabled directly
+# and no OnFailure of its own (no recursive alerting). Independent of the
+# application venv, database, Vector, and Axiom.
+[Unit]
+Description=Notify the team that a pareton deploy failed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/pareton-ops/notify-deploy-failure.py notify-failure
+TimeoutStartSec=90s

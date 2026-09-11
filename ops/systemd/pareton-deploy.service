@@ -2,11 +2,14 @@
 Description=Pull-based deploy of /opt/pareton from origin/main
 After=network-online.target
 Wants=network-online.target
+# Direct team notification on failure; independent of the Vector/Axiom path.
+OnFailure=pareton-deploy-failed.service
 
 [Service]
 Type=oneshot
 # Runs the /usr/local/bin copy, not the repo copy, so a git pull cannot
-# rewrite the script while bash is executing it.
+# rewrite the script while bash is executing it. The deploy self-installs
+# this copy atomically on its success path (ops/deploy.sh install_ops).
 ExecStart=/usr/local/bin/pareton-deploy
 Nice=10
 
