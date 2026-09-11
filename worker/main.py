@@ -12,14 +12,20 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 
 import config
 from campaign.store import claim_next_job, count_pending_jobs
+from observability import probe as obs_probe
 from observability.events import heartbeat as _heartbeat
 from round.store import claim_pending_round
+from worker import coordination
 from worker.pipeline import process_submission
 from worker.round_job import process_round
 
@@ -28,17 +34,36 @@ logger = logging.getLogger(__name__)
 # Heartbeats must continue while a long gates/build/bench job blocks the main
 # loop, otherwise the 15-minute heartbeat-absent monitor pages on healthy work.
 HEARTBEAT_INTERVAL_S = 300.0
+# The heartbeat thread doubles as the deployment-probe poller (stage-2 spec
+# 7.2): it wakes every 5 seconds to check the probe file, while heartbeats
+# themselves stay on the 300-second cadence.
+PROBE_POLL_S = 5.0
+# A hung DB read must not stall the probe loop: bound the queue-depth fetch
+# and omit the field on timeout, same as on error (spec 7.2).
+QUEUE_DEPTH_TIMEOUT_S = 8.0
+
+# Single worker thread so a stuck query serializes instead of piling up.
+_depth_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hb-db")
+
+
+def worker_unit_name() -> str:
+    return os.environ.get("PARETON_UNIT_NAME", "pareton-worker")
 
 
 def _queue_depth() -> int | None:
-    """Pending job count, or None if the read fails.
+    """Pending job count, or None if the bounded read fails or hangs.
 
     A database hiccup must not stop the beat: losing one field is cheap,
     whereas a dead heartbeat thread pages heartbeat-absent as though the
     whole worker had died.
     """
     try:
-        return count_pending_jobs()
+        return _depth_executor.submit(count_pending_jobs).result(
+            timeout=QUEUE_DEPTH_TIMEOUT_S
+        )
+    except FutureTimeout:
+        logger.warning("queue depth timed out; heartbeat omits it")
+        return None
     except Exception:
         logger.warning("queue depth unavailable; heartbeat omits it", exc_info=True)
         return None
@@ -47,9 +72,18 @@ def _queue_depth() -> int | None:
 def _heartbeat_loop(
     stop: threading.Event, interval_s: float = HEARTBEAT_INTERVAL_S
 ) -> None:
+    unit = worker_unit_name()
+    next_beat = 0.0
+    last_probe: str | None = None
     while not stop.is_set():
-        _heartbeat(queue_depth=_queue_depth())
-        stop.wait(interval_s)
+        now = time.monotonic()
+        if now >= next_beat:
+            _heartbeat(queue_depth=_queue_depth())
+            next_beat = now + interval_s
+        last_probe = obs_probe.poll_once(unit, last_probe)
+        # Wake for whichever comes first: the next probe poll or the next
+        # beat (short test intervals must not be stretched to PROBE_POLL_S).
+        stop.wait(min(PROBE_POLL_S, max(0.001, next_beat - time.monotonic())))
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -182,16 +216,32 @@ def main(argv: list[str] | None = None) -> int:
     # claims a fresh one.
     drain = threading.Event()
 
-    def _cycle() -> bool:
+    def _guarded_cycle() -> bool:
         if drain.is_set():
             return False
-        return run_once(
-            mock_build=args.mock_build,
-            mock_bench=args.mock_bench,
-            mock_correctness_fail=args.mock_correctness_fail,
-            registered_hotkeys=registered_hotkeys,
-            queue=args.queue,
-        )
+        # The claim guard holds the shared activity lock for the whole
+        # claim+task cycle, so a deploy can never update the environment
+        # under live work (stage-2 spec 5.1). Without PARETON_COORDINATION=1
+        # (local runs) it is a no-op.
+        with coordination.claim_guard(should_abort=drain.is_set, once=args.once):
+            if drain.is_set():
+                return False
+            return run_once(
+                mock_build=args.mock_build,
+                mock_bench=args.mock_bench,
+                mock_correctness_fail=args.mock_correctness_fail,
+                registered_hotkeys=registered_hotkeys,
+                queue=args.queue,
+            )
+
+    def _cycle() -> bool:
+        try:
+            return _guarded_cycle()
+        except coordination.ClaimAborted as aborted:
+            if args.once and aborted.reason == "gate-closed":
+                raise
+            logger.info("claim aborted (%s); exiting", aborted.reason)
+            return False
 
     def _request_drain(signum, _frame):
         logger.info("signal %d received; finishing current job before exit", signum)
@@ -201,7 +251,13 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _request_drain)
 
     if args.once:
-        _cycle()
+        try:
+            _guarded_cycle()
+        except coordination.ClaimAborted as aborted:
+            if aborted.reason == "gate-closed":
+                logger.error("--once refused: claim gate closed")
+                return 3
+            logger.info("--once skipped: %s", aborted.reason)
         return 0
 
     _run_loop(_cycle, drain, config.POLL_INTERVAL_S)

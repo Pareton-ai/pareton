@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -39,6 +40,18 @@ from ops_common import (
     read_json,
     write_json_atomic,
 )
+
+_structured_logger = logging.getLogger("pareton.lifecycle")
+
+
+def emit_structured(event: str, **fields) -> None:
+    """Single-line JSON on stdout for journald/Vector (stage-2 spec 7.2).
+
+    No secrets: identifiers and outcome categories only.
+    """
+    payload = {"event": event, **fields}
+    print(json.dumps(payload, default=str, separators=(",", ":")), flush=True)
+
 
 BASE_ENV = "PARETON_NOTIFY_BASE"
 UID_ENV = "PARETON_NOTIFY_EXPECTED_UID"
@@ -246,6 +259,14 @@ def cmd_notify_failure(args: argparse.Namespace) -> int:
             # A full deploy already succeeded after this failure started; a
             # late OnFailure callback must not resurrect the fault (7.3).
             write_json_atomic(state_path(), state)
+            emit_structured(
+                "deploy_failure_notified",
+                invocation_id=facts["invocation_id"],
+                message_id="",
+                outcome="skipped-recovered",
+                step=facts["step"],
+                host=facts["host"],
+            )
             print("notify: failure already recovered by a later success; skipped")
             return 0
 
@@ -274,6 +295,15 @@ def cmd_notify_failure(args: argparse.Namespace) -> int:
         ):
             state["fault"] = fault
             write_json_atomic(state_path(), state)
+            emit_structured(
+                "deploy_failure_notified",
+                invocation_id=facts["invocation_id"],
+                message_id="",
+                outcome="suppressed",
+                step=facts["step"],
+                host=facts["host"],
+                count=fault["count"],
+            )
             print(f"notify: suppressed (same fault, count {fault['count']})")
             return 0
 
@@ -284,11 +314,27 @@ def cmd_notify_failure(args: argparse.Namespace) -> int:
             state["fault"] = fault
             state["last_processed_invocation"] = facts["invocation_id"]
             write_json_atomic(state_path(), state)
+            emit_structured(
+                "deploy_failure_notified",
+                invocation_id=facts["invocation_id"],
+                message_id=detail or "",
+                outcome="sent",
+                step=facts["step"],
+                host=facts["host"],
+            )
             print(f"notify: sent (message id {detail or 'n/a'})")
             return 0
         state["fault"] = fault  # Count grows, suppression window stays closed.
         state["send_failures"] = int(state.get("send_failures", 0)) + 1
         write_json_atomic(state_path(), state)
+        emit_structured(
+            "deploy_failure_notified",
+            invocation_id=facts["invocation_id"],
+            message_id="",
+            outcome=f"send-failed:{detail}",
+            step=facts["step"],
+            host=facts["host"],
+        )
         print(f"notify: send failed ({detail})", file=sys.stderr)
         return 1
 

@@ -15,6 +15,14 @@ Modes (see sections 5.1-5.3 of the spec):
                   refuse blocked states, retry owed follow-up actions
   owed-restarts   print app units that still owe a restart after apply
   clear-restarts  drop restart debts after the deploy script performed them
+  settle-debts    clear every owed action at once (stage-2 verified path:
+                  the release itself restarted the units it manages)
+  effectuate-restarts  run owed restarts for active units plus owed
+                  daemon-reload/vector actions, then clear the debts
+
+Stage-2 additions: `apply --install-only` installs files and daemon-reloads
+but skips restarting changed timers (the release coordinator restores them
+after verification), and ops/release.py is a managed ops program.
 
 Test/isolation usage: PARETON_SYNC_BASE remaps every absolute target path
 under a prefix and --source worktree reads the repo working tree instead of
@@ -106,6 +114,7 @@ def list_repo_ops_files(repo: Path, ref: str, use_git: bool) -> list[str] | None
         "ops/sync-config.py",
         "ops/notify-deploy-failure.py",
         "ops/ops_common.py",
+        "ops/release.py",
     )
     files: list[str] = []
     if use_git:
@@ -193,6 +202,7 @@ def build_mapping(
             "ops/sync-config.py",
             "ops/notify-deploy-failure.py",
             "ops/ops_common.py",
+            "ops/release.py",
         ):
             entries.append(Entry(rel, f"/usr/local/lib/pareton-ops/{name}", EXEC_MODE))
     targets: dict[str, str] = {}
@@ -642,7 +652,8 @@ def run_apply(args: argparse.Namespace) -> dict:
         if changed:
             reload_attempted = True
             daemon_reload()
-            restart_changed_timers(changed)
+            if not args.install_only:
+                restart_changed_timers(changed)
             pending = load_pending()
             pending["daemon_reload"] = False
 
@@ -748,7 +759,15 @@ def emit(payload: dict) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
-MODES = ("check", "apply", "deploy-hook", "owed-restarts", "clear-restarts")
+MODES = (
+    "check",
+    "apply",
+    "deploy-hook",
+    "owed-restarts",
+    "clear-restarts",
+    "settle-debts",
+    "effectuate-restarts",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -765,6 +784,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", default="/opt/pareton/.env")
     parser.add_argument("--notify-program", default=None)
     parser.add_argument("--skip-validation", action="store_true")
+    parser.add_argument(
+        "--install-only",
+        action="store_true",
+        help="apply: skip restarting changed timers (stage-2 release flow)",
+    )
     parser.add_argument("units", nargs="*", help="clear-restarts: units to drop")
     return parser
 
@@ -808,6 +832,37 @@ def main(argv: list[str] | None = None) -> int:
                     "owed_restart_units": pending["owed_restart_units"],
                 }
             )
+            return 0
+        if args.mode == "settle-debts":
+            pending = load_pending()
+            settled = {
+                "owed_restart_units": pending["owed_restart_units"],
+                "daemon_reload": pending["daemon_reload"],
+                "vector_restart": pending["vector_restart"],
+            }
+            pending.update(
+                {
+                    "owed_restart_units": [],
+                    "daemon_reload": False,
+                    "vector_restart": False,
+                }
+            )
+            save_pending(pending)
+            emit({"mode": "settle-debts", "settled": settled})
+            return 0
+        if args.mode == "effectuate-restarts":
+            performed = retry_owed(args)["performed"]
+            pending = load_pending()
+            for unit in list(pending["owed_restart_units"]):
+                active = run_cmd(["systemctl", "is-active", unit])
+                if active.returncode == 0 and active.stdout.strip() == "active":
+                    result = run_cmd(["systemctl", "restart", unit])
+                    if result.returncode != 0:
+                        raise Fail(4, f"owed-restart-failed:{unit}")
+                    performed.append(f"restart:{unit}")
+                pending["owed_restart_units"].remove(unit)
+            save_pending(pending)
+            emit({"mode": "effectuate-restarts", "performed": performed})
             return 0
     except Fail as failure:
         payload = {"mode": args.mode, "error": failure.reason, **failure.extra}

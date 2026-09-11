@@ -7,7 +7,10 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/pareton
 EnvironmentFile=-/opt/pareton/.env
-ExecStart=/opt/pareton/.venv/bin/python -m gpu reap
+# Stage-2 (spec 7.2): the dispatcher execs the real reap unless a valid,
+# unconsumed one-shot log-only probe request bound to the running deploy
+# exists. Expired/consumed/foreign requests never swallow a real reap.
+ExecStart=/usr/local/lib/pareton-ops/release.py gpu-reap-dispatch -- /opt/pareton/.venv/bin/python -m gpu reap
 Nice=10
 
 [Install]

@@ -12,6 +12,10 @@ Type=oneshot
 # this copy atomically on its success path (ops/deploy.sh install_ops).
 ExecStart=/usr/local/bin/pareton-deploy
 Nice=10
+# Stage-2 installs (venv copy, pip, 120s log acceptance) routinely exceed
+# the systemd default of 90s; being killed here would strand applying
+# (spec 4.5 fourth-round review, P1-1). Install waits are never force-cut.
+TimeoutStartSec=infinity
 
 [Install]
 WantedBy=multi-user.target

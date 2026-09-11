@@ -161,3 +161,136 @@ Live edits to managed files are reverted by the next tick. To hotfix:
   `systemctl daemon-reload` if a sync install ever misbehaves.
 - `daemon-reload`/Vector-restart debts survive ticks until completed
   (`sync-pending.json`); do not delete that file to "clear" them.
+
+---
+
+# Stage-2 runbook: release coordination, rollback, recovery
+
+Implements section 10 of `docs/第二阶段发布安全-spec.md`. The stage-2 entry
+`ops/deploy.sh` is a thin wrapper around `/usr/local/lib/pareton-ops/release.py
+tick`; the release state machine owns both coordination locks
+(`/run/pareton-deploy.lock` deploy mutex, `/run/pareton-activity.lock` worker
+activity lock) and every deployment write path. State lives in
+`/var/lib/pareton-deploy/release-state.json` (schema and gate matrix: spec
+section 4.5); `.deploy-done` is a compat alias rewritten from state.
+
+## S0. Read-only checks (no window needed)
+
+```sh
+/usr/local/lib/pareton-ops/release.py status
+systemctl show pareton-deploy.service -p TimeoutStartUSec   # infinity after stage-2
+journalctl -u pareton-deploy -n 50 --no-pager
+```
+
+`status` prints the release state, any registered request, the drill record,
+and the current probe file. Exit 2 means the state file is corrupt/missing.
+
+## S1. Requests (spec 6.3)
+
+Requests other than `hold` are registered under the deploy mutex and executed
+by a `pareton-deploy.service` run (start it manually, or wait for the timer):
+
+```sh
+R=/usr/local/lib/pareton-ops/release.py
+$R request hold   --reason "investigating" --operator NAME   # immediate + timer disable --now
+$R request unpause --main-commit <origin/main SHA> --operator NAME
+$R request reset  --baseline-commit <verified SHA> --confirm-evidence "<what was checked>" \
+                  [--recovery-copy /var/lib/pareton-deploy/recovery/<ts>] --operator NAME
+$R request resume --operator NAME
+$R request cancel --reason "wrong target" --operator NAME
+$R request verify --operator NAME
+$R request rollback --reason "target broken" --operator NAME
+$R request vector-repair --target <COMMIT> --operator NAME
+systemctl start pareton-deploy.service      # executes the registered request
+```
+
+Rules that matter operationally:
+
+- `hold` takes effect immediately (short state lock); a running install is
+  never killed and finishes first. It also runs
+  `systemctl disable --now pareton-deploy.timer` as a second layer.
+- `verify` never clears hold; `rollback`/`cancel` set hold themselves.
+  Only `unpause` clears it, and only when the phase is idle and the given
+  `--main-commit` still equals `origin/main`.
+- One request at a time; a failed request stays on disk as failed until the
+  next registration replaces it.
+- `reset` archives the corrupt state as `release-state.corrupt.<ts>` (a
+  `.missing` marker when absent) and requires operator evidence plus a
+  baseline commit; it rebuilds under hold and re-verifies like a release.
+
+## S2. Residual submission records (spec 5.1)
+
+A deploy tick exits non-zero with step `submission-record-unresolved` (or
+`round-record-unresolved` / `db-probe-error`) when the activity lock is free
+but database records remain. Rounds void automatically via the watcher's
+stale reaper once it runs; submissions have no reaper and need this CLI:
+
+```sh
+/opt/pareton/.venv/bin/python /opt/pareton/ops/recover_submission.py inspect --job <ID>
+/opt/pareton/.venv/bin/python /opt/pareton/ops/recover_submission.py recover \
+    --job <ID> --attempt <N> --outcome requeue --operator NAME --reason "..."
+```
+
+`recover` requires the deploy mutex, a closed gate (draining/quiescing) and
+the exclusive activity lock — run the deploy tick first so it reports the
+record. Outcomes: `requeue` (no durable evidence; job returns to pending and
+may rebuild) or `settle` (terminal reject evidence → failed; bench_queued/
+scored → done). Contradictory evidence refuses. The lock being free does
+not prove Docker builds or remote GPU resources ended — confirm externally.
+
+## S3. Failure drill and acceptance record (spec 7.4)
+
+After the first stage-2 install (and after any change to
+`ops/notify-deploy-failure.py`, `ops/deploy.sh`, `ops/release.py`,
+`ops/ops_common.py`, the deploy/deploy-failed units, `vector.service`, or
+non-exempt `vector.toml` fields), run a real failure drill in an authorized
+window with the timer disabled:
+
+1. Induce a real deploy failure (for example a corrupt state file — the B21
+   path — restored immediately afterwards).
+2. Confirm the Discord channel received the alert; note the message id.
+3. Register the evidence (queries Axiom for the deploy-failed event of that
+   invocation; refuses without it):
+
+   ```sh
+   $R record-notification-acceptance --invocation <INVOCATION_ID> \
+       --message-id <DISCORD_MESSAGE_ID> --confirmed-by NAME
+   ```
+
+4. `request verify` + one deploy run completes the release. Pure
+   `include_units` member additions (keeping `pareton-deploy-failed.service`)
+   are the single exemption and do not need a new drill.
+
+## S4. Manual escalation for a stuck stop (spec 5.2)
+
+API/watcher/weights have `TimeoutStopSec=infinity`; a genuinely hung stop is
+an authorized human decision, never a timer:
+
+1. `$R request hold` and `systemctl disable --now pareton-deploy.timer`;
+   confirm no in-flight install.
+2. Record the unit, `MainPID`, cgroup (`systemctl status <unit>`), recent
+   logs, and any associated tasks/resources.
+3. After confirming there is no in-flight work to protect — or the owner
+   explicitly accepts interrupting it — kill exactly that one unit:
+
+   ```sh
+   systemctl kill --signal=SIGKILL pareton-<unit>.service
+   ```
+
+   Never use wildcards; never kill the deploy/notifier chain to bypass state
+   checks.
+4. Handle residual records per S2, then restore services through the
+   coordination entries above.
+
+## S5. What looks like failure but is not
+
+- `drain-wait` non-zero ticks after 30 minutes: the deploy unit enters
+  failed on purpose while a long bench drains; the notifier rate-limits.
+  The state stays in draining and the next tick continues waiting.
+- ExecCondition skips during applying/quiescing: the unit is inactive and
+  NOT failed; services do not auto-start after a skip — the release starts
+  them explicitly at verify.
+- Heartbeat-absent pages during a maintenance window are real: the worker
+  parks (keeps heartbeating while only the claim gate closes, but the
+  process is stopped during applying/verifying). `maintenance_started`/
+  `maintenance_finished` events in Axiom correlate the window.
