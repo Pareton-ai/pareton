@@ -142,6 +142,15 @@ install -d /etc/systemd/system
 grep -v "^OnFailure=" "$REPO/ops/systemd/pareton-deploy.service" \
   > /etc/systemd/system/pareton-deploy.service
 chmod 0644 /etc/systemd/system/pareton-deploy.service
+# Regression (owner review): the repo's worker unit + drop-ins are byte-exact
+# with live, so bootstrap must NOT owe the worker a restart.
+install -d /etc/systemd/system/pareton-worker.service.d
+install -m 0644 "$REPO/ops/systemd/pareton-worker.service" \
+  /etc/systemd/system/pareton-worker.service
+install -m 0644 "$REPO/ops/systemd/pareton-worker.service.d/queue.conf" \
+  /etc/systemd/system/pareton-worker.service.d/queue.conf
+install -m 0644 "$REPO/ops/systemd/pareton-worker.service.d/timeout.conf" \
+  /etc/systemd/system/pareton-worker.service.d/timeout.conf
 install -d -m 0755 "$OPS"
 for f in ops_common.py sync-config.py notify-deploy-failure.py; do
   install -m 0755 "$REPO/ops/$f" "$OPS/$f"
@@ -172,6 +181,9 @@ grep -q "^OnFailure=pareton-deploy-failed.service" /etc/systemd/system/pareton-d
 [ "$(systemctl is-active vector)" = active ] && pass "A2 vector active" || fail "A2 vector not active"
 [ -x /usr/local/bin/pareton-deploy ] && pass "A2 deploy script installed executable" || fail "A2 deploy script missing"
 [ "$(stat -c %a /etc/vector/vector.toml)" = 600 ] && pass "A2 TOML mode 0600" || fail "A2 TOML mode $(stat -c %a /etc/vector/vector.toml)"
+[ ! -e "$REPO/.deploy-pending" ] && [ ! -e "$REPO/.deploy-rounds-pending" ] \
+  && pass "A2 no worker restart debt (byte-exact capture)" \
+  || fail "A2 bootstrap owed the worker a restart"
 
 echo "=== A19: vector restart continuity (checkpoint) ==="
 # Markers are real deploy-service runs: their stdout lands in the journal

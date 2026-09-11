@@ -94,11 +94,14 @@ while the timer is live means the timer may restart it underneath you.
 ## Known drift — needs a decision
 
 Resolved on 2026-09-10 by the stage-1 capture (files here now mirror the live
-box, verified against the read-only audit output of that day):
+box, verified against the read-only audit output of that day; made byte-exact
+on 2026-09-11 per owner review — provenance lives in this README, never as
+added comments inside the files, so the first sync sees zero diff on the
+worker and owes it no restart):
 
 1. ~~`pareton-worker.service` differs from the live unit~~ — the committed file
-   is now the captured live version; the queue split lives in the
-   `queue.conf` drop-in (also captured).
+   is the byte-exact live version; the queue split lives in the
+   `queue.conf` drop-in (byte-exact as well).
 2. ~~`TimeoutStopSec` drop-in drift~~ — `timeout.conf` (4h) is committed next
    to the unit; the effective value stays 4h. Revisit the value itself later.
 4. ~~`vector.toml` inline token~~ — the repo keeps the `${PARETON_AXIOM_TOKEN}`
