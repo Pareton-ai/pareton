@@ -42,6 +42,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ops_common import now_iso, parse_env_file, parse_iso, read_json, write_json_atomic
 
+# tomllib is stdlib from Python 3.11 (spec 2.3: the ops interpreter is a
+# production install prerequisite). Without it the TOML paths degrade
+# exactly as the spec review prescribed: the include_units exemption does
+# not engage (whole-file TOML comparison — any change requires a new
+# drill), and check-logs fails closed with a distinct error category
+# instead of silently waiving or crashing.
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch
+    tomllib = None
+
 SCHEMA_VERSION = 2
 PHASES = ("idle", "draining", "quiescing", "applying", "verifying", "verified")
 SCOPES = ("full", "vector-only")
@@ -595,8 +606,8 @@ def axiom_query_token() -> tuple[str | None, str | None]:
 
 
 def installed_include_units() -> tuple[list[str], str | None]:
-    import tomllib
-
+    if tomllib is None:
+        return [], "tomllib-unavailable"
     toml_path = p("/etc/vector/vector.toml")
     try:
         data = tomllib.loads(toml_path.read_text())
@@ -628,8 +639,8 @@ def run_log_check(probe: dict, *, skip_acceptance: bool = False) -> tuple[int, d
     token, token_problem = axiom_query_token()
     if token is None:
         return 2, {"error": "axiom-token", "detail": token_problem}
-    import tomllib
-
+    if tomllib is None:
+        return 2, {"error": "tomllib-unavailable"}
     dataset = tomllib.loads(p("/etc/vector/vector.toml").read_text())["sinks"]["axiom"][
         "dataset"
     ]
@@ -771,7 +782,16 @@ def acceptance_status(target_commit: str) -> tuple[str, dict]:
 
 def _vector_toml_drift(acceptance_commit: str, target_commit: str) -> str | None:
     """None when the TOML difference stays inside the single 7.4 exemption."""
-    import tomllib
+    if tomllib is None:
+        # Degraded mode (interpreter < 3.11, no managed interpreter yet):
+        # whole-file comparison only — any TOML difference requires a new
+        # drill. The exemption needs parsed field values; it does NOT
+        # silently engage or silently disappear from the rules.
+        if git_blob(acceptance_commit, "ops/vector/vector.toml") == git_blob(
+            target_commit, "ops/vector/vector.toml"
+        ):
+            return None
+        return "vector-toml-changed"
 
     def parsed(ref: str) -> dict | None:
         blob = git_blob(ref, "ops/vector/vector.toml")
@@ -2348,8 +2368,13 @@ def cmd_record_acceptance(argv: list[str]) -> int:
     if token is None:
         print(f"record-notification-acceptance: {token_problem}", file=sys.stderr)
         return 2
-    import tomllib
-
+    if tomllib is None:
+        print(
+            "record-notification-acceptance: tomllib-unavailable "
+            "(ops interpreter must be >= 3.11, spec 2.3)",
+            file=sys.stderr,
+        )
+        return 2
     dataset = tomllib.loads(p("/etc/vector/vector.toml").read_text())["sinks"]["axiom"][
         "dataset"
     ]

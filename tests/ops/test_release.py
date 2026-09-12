@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -29,6 +30,13 @@ def load_ops_module(name: str):
 
 
 release = load_ops_module("release")
+
+# The ops interpreter prerequisite is Python >= 3.11 for stdlib tomllib
+# (spec 2.3); on older interpreters the TOML paths degrade (whole-file
+# comparison, fail-closed check-logs) and these parsed-TOML tests skip.
+needs_tomllib = pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="ops interpreter prerequisite (spec 2.3)"
+)
 
 
 class FakeRunner:
@@ -280,6 +288,7 @@ def axiom(monkeypatch, base):
     return state
 
 
+@needs_tomllib
 def test_check_logs_complete(axiom, base):
     all_units = [
         "pareton-worker.service",
@@ -300,6 +309,7 @@ def test_check_logs_complete(axiom, base):
     assert report["missing"] == []
 
 
+@needs_tomllib
 def test_check_logs_missing_source_is_exit_1(axiom, base):
     axiom["response"] = axiom_response(
         [u for u in ["pareton-api.service", "pareton-deploy.service"]]
@@ -313,6 +323,7 @@ def test_check_logs_missing_source_is_exit_1(axiom, base):
     assert report["missing"]
 
 
+@needs_tomllib
 def test_check_logs_query_failure_is_exit_2(axiom, base):
     axiom["status"], axiom["response"], axiom["error"] = 401, None, "http-401"
     code, report = release.run_log_check(
@@ -322,6 +333,7 @@ def test_check_logs_query_failure_is_exit_2(axiom, base):
     assert code == 2
 
 
+@needs_tomllib
 def test_check_logs_partial_result_keeps_polling(axiom, base):
     responses = [
         (200, {"status": {"isPartial": True}, "tables": []}, None),
@@ -360,6 +372,7 @@ def test_check_logs_partial_result_keeps_polling(axiom, base):
     assert calls["n"] >= 2
 
 
+@needs_tomllib
 def test_check_logs_rejects_unknown_source(axiom, base):
     write_vector_toml(
         base,
@@ -493,6 +506,7 @@ def test_acceptance_chain_file_change_requires_drill(base, monkeypatch):
     assert "ops/deploy.sh" in detail["reason"]
 
 
+@needs_tomllib
 def test_acceptance_include_units_exemption(base, monkeypatch):
     blobs = make_blob(**BASELINE_FILES)
     blobs["cA"]["ops/vector/vector.toml"] = toml_blob(
@@ -507,6 +521,7 @@ def test_acceptance_include_units_exemption(base, monkeypatch):
     assert status == "ok"
 
 
+@needs_tomllib
 def test_acceptance_exemption_unit_removed_requires_drill(base, monkeypatch):
     blobs = make_blob(**BASELINE_FILES)
     blobs["cA"]["ops/vector/vector.toml"] = toml_blob(
@@ -1233,6 +1248,7 @@ def test_rollback_hold_anchors_to_target(base, monkeypatch):
 # PR-review (Bugbot) regressions
 
 
+@needs_tomllib
 def test_axiom_query_carries_bearer_token(axiom, base, monkeypatch):
     captured = {}
 
@@ -1446,3 +1462,35 @@ def test_vector_fast_path_log_failure_is_unaccepted_steady_state(base, monkeypat
     assert release.tick([]) == 0
     run_state = (base / "var/lib/pareton-deploy/last-run.env").read_text()
     assert "last_step=log-unaccepted" in run_state
+
+
+def test_degraded_mode_fails_closed_and_compares_whole_files(base, monkeypatch):
+    # Interpreter without tomllib (CI's 3.10 leg, or a <3.11 production
+    # system before a managed interpreter is arranged): check-logs fails
+    # closed with a distinct category, and the TOML drill rule degrades to
+    # whole-file comparison instead of silently waiving (spec 7.4).
+    write_vector_toml(base)
+    monkeypatch.setattr(release, "tomllib", None)
+    code, report = release.run_log_check(
+        {"probe_id": "p", "target_commit": "c", "issued_at": release.now_iso()},
+        skip_acceptance=True,
+    )
+    assert code == 2
+    assert report["error"] == "tomllib-unavailable"
+
+    blobs = make_blob(**BASELINE_FILES)
+    blobs["cA"]["ops/vector/vector.toml"] = toml_blob().encode()
+    blobs["cB"]["ops/vector/vector.toml"] = toml_blob().encode()
+    FakeGitBlobs(monkeypatch, blobs)
+    acceptance_record(base)
+    status, _ = release.acceptance_status("cB")
+    assert status == "ok"  # byte-identical TOML is still fine
+    blobs["cB"]["ops/vector/vector.toml"] = toml_blob(
+        ["pareton-worker", "pareton-round-worker", "pareton-deploy-failed"]
+    ).encode()
+    FakeGitBlobs(monkeypatch, blobs)
+    acceptance_record(base)
+    status, detail = release.acceptance_status("cB")
+    # In degraded mode even the include_units exemption does not engage.
+    assert status == "required"
+    assert detail["reason"] == "vector-toml-changed"
