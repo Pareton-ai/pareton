@@ -295,26 +295,38 @@ The old workers do not understand the claim gate; the first install is a
 one-time transition executed in a maintenance window by an operator with
 write access:
 
-1. Confirm the stage-2 PR is merged and `origin/main` is the commit to
-   install. `systemctl disable --now pareton-deploy.timer`; wait for any
+1. BEFORE merging the stage-2 PR to main (auto-deploy!), record the live
+   arrangement and stash recovery material:
+   `systemctl is-active/is-enabled` for every pareton unit and timer;
+   save the old installation set —
+   `mkdir -p /var/lib/pareton-deploy/bootstrap-backup && cp -a
+   /usr/local/lib/pareton-ops /usr/local/bin/pareton-deploy
+   /etc/systemd/system/pareton-*.service* /etc/vector /var/lib/pareton-deploy/bootstrap-backup/ &&
+   cp -a /opt/pareton/.venv /var/lib/pareton-deploy/bootstrap-backup/venv`.
+   Then `systemctl disable --now pareton-deploy.timer`; wait for any
    running `pareton-deploy.service` to finish. Record
    `systemctl --version`, each unit's effective `TimeoutStopUSec`/`KillMode`
-   and `shutdown.target` properties (read-only, for §8.1).
+   and `shutdown.target` properties (read-only, for §8.1). Do NOT stop the
+   gpu-reap/builder-cleanup timers here — the reset flow's own quiescing
+   stops them and restores them from its pre-stop snapshot.
 2. Old-worker drain transition: give both workers a temporary drop-in with
    `KillMode=mixed` and a stop budget at least the current effective value
    (worker 4h, round-worker 8h); `systemctl daemon-reload` and verify the
    EFFECTIVE properties, then `systemctl stop --no-block` both workers.
    The old code's signal drain finishes the in-flight job; wait for both
    units to go inactive before touching the environment.
-3. Quiesce the remaining shared-environment users (API, watcher, weights,
-   maintenance timers) with `systemctl stop`.
-4. Install the stage-2 set by hand, helpers before units:
-   `release.py`, `ops_common.py`, `sync-config.py`, `notify-deploy-failure.py`
-   into `/usr/local/lib/pareton-ops/`; `ops/deploy.sh` to
-   `/usr/local/bin/pareton-deploy`; then `sync-config apply` (no release
-   state exists yet, so the coordination gate sees a fresh bootstrap) and
-   `systemctl daemon-reload`. Remove the temporary worker drop-ins and
-   re-run `sync-config check`.
+3. Quiesce the remaining shared-environment users (API, watcher, weights)
+   with `systemctl stop --no-block` and wait for them to go inactive.
+4. Remove the temporary worker drop-ins FIRST (`rm
+   /etc/systemd/system/pareton-worker.service.d/<temp>.conf` — unmanaged
+   drop-ins make `apply` refuse with `unexpected`), `systemctl
+   daemon-reload`, then install the stage-2 set by hand, helpers before
+   units: `release.py`, `ops_common.py`, `sync-config.py`,
+   `notify-deploy-failure.py` into `/usr/local/lib/pareton-ops/`;
+   `ops/deploy.sh` to `/usr/local/bin/pareton-deploy`; then
+   `sync-config apply` (no release state exists yet, so the coordination
+   gate sees a fresh bootstrap) and `systemctl daemon-reload`; re-run
+   `sync-config check`.
 5. Initialize under hold and verify:
    `$R request reset --baseline-commit <SHA> --confirm-evidence "..." --operator NAME`
    then `systemctl start pareton-deploy.service` — the release drains,
@@ -324,10 +336,17 @@ write access:
    `$R request verify` + one deploy run, and finally `request unpause
    --main-commit <SHA>`.
 
-If any step cannot complete, restore the saved old installation (the old
-deploy script, units and the venv were untouched by the drain) — the old
+If any step cannot complete, restore from
+`/var/lib/pareton-deploy/bootstrap-backup/` (helpers, units, vector
+config, and the full pre-bootstrap venv captured in step 1) — the old
 deploy script does not understand the new state, so recovery is manual
-per the recorded backups.
+per those backups.
+
+After `request unpause`, verify the timers are really back:
+`systemctl is-active pareton-deploy.timer pareton-gpu-reap.timer
+pareton-builder-cleanup.timer` (unpause re-enables the deploy timer by
+design; the maintenance timers are restored by the verified release from
+its pre-stop snapshot).
 
 ## S5. What looks like failure but is not
 

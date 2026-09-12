@@ -93,3 +93,34 @@ def test_cli_help_runs_from_clean_env():
     )
     assert result.returncode == 0, result.stderr
     assert "inspect" in result.stdout
+
+
+def test_inspect_loads_env_file_database_config(tmp_path, monkeypatch):
+    # R2-4: a manual shell has no unit EnvironmentFile; the CLI must load
+    # /opt/pareton/.env itself or inspect dies with DatabaseNotConfigured
+    # before ever reaching the database.
+    import os
+    import subprocess
+    import sys
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("PARETON_DATABASE_URL=postgres://invalid.invalid/db\n")
+    clean = {
+        k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "PARETON"))
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "ops" / "recover_submission.py"),
+            "inspect",
+            "--job",
+            "1",
+        ],
+        capture_output=True,
+        text=True,
+        env={**clean, "PARETON_ENV_FILE": str(env_file)},
+        timeout=30,
+    )
+    # The URL is now seen: the failure moved past configuration into the
+    # (unreachable here) connection, exactly the reviewer's distinction.
+    assert "DatabaseNotConfigured" not in result.stderr

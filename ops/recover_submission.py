@@ -33,13 +33,28 @@ from pathlib import Path
 
 # Run as a file (runbook: .venv/bin/python ops/recover_submission.py),
 # sys.path[0] is ops/ and the repo root never enters it; there is no
-# installed db package. Add the root explicitly.
+# installed db package. Add the root explicitly, plus ops/ for ops_common.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from ops_common import parse_env_file  # noqa: E402
 
 from db.connection import db_connection  # noqa: E402
 
 TERMINAL_REJECT_STATES = ("rejected", "rejected_duplicate", "disqualified")
 PROGRESS_STATES = ("bench_queued", "scored")
+
+
+def _load_application_env() -> None:
+    """A manual shell has no unit EnvironmentFile; the database URL lives
+    in /opt/pareton/.env like everywhere else (review R2-4). Process
+    environment wins over the file.
+    """
+    env_file = Path(os.environ.get("PARETON_ENV_FILE", "/opt/pareton/.env"))
+    values, _problems = parse_env_file(env_file)
+    for key in ("PARETON_DATABASE_URL",):
+        if key in values and key not in os.environ:
+            os.environ[key] = values[key]
 
 
 def deploy_lock_path() -> Path:
@@ -302,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     recover.add_argument("--operator", required=True)
     recover.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
+    _load_application_env()
     if args.mode == "inspect":
         return cmd_inspect(args)
     return cmd_recover(args)

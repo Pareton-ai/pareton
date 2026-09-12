@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -45,6 +46,7 @@ class FakeRunner:
     def __init__(self, base: Path):
         self.base = base
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict] = []
         self.git_refs = {"origin/main": "c2", "HEAD": "c1"}
         self.git_diff = ""
         self.db = {"error": None, "rounds": [], "submissions": []}
@@ -58,6 +60,7 @@ class FakeRunner:
 
     def __call__(self, argv, env=None, timeout=300, cwd=None, pass_fds=()):
         self.calls.append(list(argv))
+        self.kwargs.append({"env": env or {}, "pass_fds": pass_fds})
         cmd = argv[0]
         out, rc = "", 0
 
@@ -1707,6 +1710,7 @@ def test_sync_write_modes_refuse_during_release(base, tmp_path, monkeypatch):
     monkeypatch.setenv("PARETON_SYNC_BASE", str(tmp_path / "base"))
     monkeypatch.setenv("PARETON_DEPLOY_LOCK", str(lock))
     monkeypatch.setenv("PARETON_RELEASE_STATE", str(state_file))
+    monkeypatch.setenv("PARETON_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
 
     import io
     from contextlib import redirect_stderr, redirect_stdout
@@ -1733,6 +1737,21 @@ def test_sync_write_modes_refuse_during_release(base, tmp_path, monkeypatch):
     # Lock free but the state is held.
     release.write_json_atomic(state_file, {"phase": "idle", "hold": {"r": 1}})
     assert run_apply() == 3
+    # Draining: a release is waiting out in-flight work (review R2-2).
+    release.write_json_atomic(state_file, {"phase": "draining"})
+    assert run_apply() == 3
+    # Idle but workers hold the activity lock: the mutex alone is not
+    # drain completion (review R2-2).
+    release.write_json_atomic(state_file, {"phase": "idle"})
+    activity = Path(os.environ["PARETON_ACTIVITY_LOCK"])
+    activity.parent.mkdir(parents=True, exist_ok=True)
+    activity_fd = os.open(str(activity), os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(activity_fd, fcntl.LOCK_EX)
+    try:
+        assert run_apply() == 3
+    finally:
+        fcntl.flock(activity_fd, fcntl.LOCK_UN)
+        os.close(activity_fd)
 
 
 def test_maintenance_services_carry_the_gate():
@@ -1802,3 +1821,202 @@ def test_vector_version_change_requires_new_drill(base, monkeypatch):
     release.run_cmd.vector_version = ""  # unobtainable
     status, detail = release.acceptance_status("cB")
     assert detail["reason"] == "vector-version-unknown"
+
+
+# ---------------------------------------------------------------------------
+# Review round-2 regressions (R2-1..R2-6)
+
+
+def test_vector_fast_path_hands_the_lock_to_sync(base, monkeypatch):
+    # R2-3: the fast path's sync subprocess must inherit the deploy lock;
+    # without it the coordination guard refuses with deploy-in-progress.
+    write_state(base)
+    release.run_cmd.git_refs = {"origin/main": "c2", "HEAD": "c1"}
+    release.run_cmd.git_diff = "ops/vector/vector.toml\n"
+    release.run_cmd.sync_exit = 1
+    release.run_cmd.sync_stdout = json.dumps(
+        {"findings": [{"category": "different", "target": "/etc/vector/vector.toml"}]}
+    )
+    monkeypatch.setattr(release, "gpu_probe_flow", lambda op_id, probe: None)
+    monkeypatch.setattr(
+        release, "run_log_check", lambda probe, **kw: (0, {"missing": []})
+    )
+    assert release.tick([]) == 0
+    apply_kwargs = [
+        release.run_cmd.kwargs[i]
+        for i, argv in enumerate(release.run_cmd.calls)
+        if any(str(a).endswith("sync-config.py") for a in argv) and "apply" in argv
+    ]
+    assert apply_kwargs, "fast path must call sync-config apply"
+    for kw in apply_kwargs:
+        assert kw["env"].get("PARETON_INHERIT_DEPLOY_LOCK_FD")
+        assert kw["pass_fds"]
+
+
+def test_sync_guard_accepts_inherited_lock_in_real_subprocess(tmp_path, monkeypatch):
+    # The fd-passing mechanics for real: a subprocess holding nothing
+    # refuses; the same subprocess launched with the parent's lock fd
+    # passes the guard (review R2-3 requirement: exercise the actual
+    # subprocess handoff, not a FakeRunner).
+    sync = load_ops_module("sync-config")
+    lock = tmp_path / "deploy.lock"
+    state = tmp_path / "release-state.json"
+    monkeypatch.setenv("PARETON_DEPLOY_LOCK", str(lock))
+    monkeypatch.setenv("PARETON_RELEASE_STATE", str(state))
+    monkeypatch.setenv("PARETON_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
+    release.write_json_atomic(state, {"phase": "draining"})  # hostile to manual
+
+    import fcntl
+    import subprocess
+
+    guard_script = tmp_path / "guard_probe.py"
+    guard_script.write_text(
+        "import importlib.util\n"
+        "import sys\n"
+        f"spec = importlib.util.spec_from_file_location('syncmod', {str(OPS)!r} + '/sync-config.py')\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(m)\n"
+        "try:\n"
+        "    m.guard_release_coordination()\n"
+        "    print('ok')\n"
+        "except m.Fail as f:\n"
+        "    print('refused', f.reason)\n"
+        "    sys.exit(3)\n"
+    )
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        # Without the handoff: the parent's lock makes it deploy-in-progress.
+        result = subprocess.run(
+            [sys.executable, str(guard_script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "deploy-in-progress" in result.stdout
+        # With the inherited fd: the guard accepts (same OFD re-flock).
+        result = subprocess.run(
+            [sys.executable, str(guard_script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PARETON_INHERIT_DEPLOY_LOCK_FD": str(fd)},
+            pass_fds=(fd,),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ok" in result.stdout
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_pip_timeout_frees_the_request(base, monkeypatch):
+    # R2-1: TimeoutExpired is not a Fail return; the tick-level net must
+    # finish the in-flight request so re-registration works.
+    write_state(
+        base,
+        phase="draining",
+        direction="forward",
+        target_commit="c2",
+        verified_commit="c1",
+        from_commit="c1",
+        op_id="op-t",
+        phase_since=release.now_iso(),
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "resume",
+            "status": "running",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    make_mini_venv(base)
+    release.run_cmd.git_refs = {"origin/main": "c2", "HEAD": "c1"}
+    release.run_cmd.git_diff = "requirements.txt\n"
+    release.run_cmd.db = {"error": None, "rounds": [], "submissions": []}
+
+    real_run_cmd = release.run_cmd
+
+    def exploding_run_cmd(argv, **kwargs):
+        if argv and str(argv[0]).endswith("/pip"):
+            raise subprocess.TimeoutExpired(argv, 3600)
+        return real_run_cmd(argv, **kwargs)
+
+    monkeypatch.setattr(release, "run_cmd", exploding_run_cmd)
+    assert release.tick([]) == 2  # drained, applied, pip timed out
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "failed"
+    assert request["result"]["step"] == "install-timeout"
+    assert release.cmd_request(["rollback", "--operator", "o"]) == 0
+
+
+def test_interrupted_applying_frees_request_slot(base):
+    # R2-1: a killed process cannot finish its request; the next tick must
+    # free the slot while keeping phase and materials for resume/rollback.
+    write_state(
+        base,
+        phase="applying",
+        direction="forward",
+        target_commit="c2",
+        verified_commit="c1",
+        from_commit="c1",
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "resume",
+            "status": "running",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    assert release.tick([]) == 2  # applying-interrupted
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "failed"
+    assert read_state(base)["phase"] == "applying"  # materials kept
+    assert release.cmd_request(["rollback", "--operator", "o"]) == 0
+
+
+def test_unpause_always_resumes_automatic_deploys(base):
+    # R2-6: the bootstrap snapshot records a deliberately disabled deploy
+    # timer; unpause must re-enable it regardless of that snapshot.
+    write_state(
+        base,
+        phase="idle",
+        hold={
+            "reason": "bootstrap",
+            "operator": "o",
+            "at": release.now_iso(),
+            "baseline_commit": "c1",
+        },
+        original_units={DEPLOY_TIMER_TEST: {"active": False, "enabled": False}},
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "unpause",
+            "status": "pending",
+            "operator": "o",
+            "main_commit": "c2",
+            "registered_at": release.now_iso(),
+        },
+    )
+    release.run_cmd.git_refs = {"origin/main": "c2", "HEAD": "c1"}
+    assert release.tick([]) == 0
+    enabled = [
+        argv
+        for argv, kw in zip(release.run_cmd.calls, release.run_cmd.kwargs)
+        if "enable" in argv and "--now" in argv
+    ]
+    assert any("pareton-deploy.timer" in argv for argv in enabled)
+    assert read_state(base)["hold"] is None
+
+
+DEPLOY_TIMER_TEST = "pareton-deploy.timer"

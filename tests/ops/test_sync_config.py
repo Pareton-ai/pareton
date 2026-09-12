@@ -80,6 +80,7 @@ def env(tmp_path, monkeypatch):
     # exercises for real without touching /run or /var.
     monkeypatch.setenv("PARETON_DEPLOY_LOCK", str(tmp_path / "deploy.lock"))
     monkeypatch.setenv("PARETON_RELEASE_STATE", str(tmp_path / "release-state.json"))
+    monkeypatch.setenv("PARETON_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
 
     env_file = base / "opt/pareton/.env"
     env_file.parent.mkdir(parents=True)

@@ -1013,6 +1013,13 @@ def tick(argv: list[str]) -> int:
         # recovery the error message calls for (PR-review P1-4).
         _finish_request("failed", {"step": failure.reason})
         raise
+    except subprocess.TimeoutExpired as exc:
+        # pip's 3600s budget raises instead of returning non-zero; without
+        # this net the request stays running and blocks re-registration
+        # (review R2-1).
+        _finish_request("failed", {"step": "install-timeout"})
+        record_step("install-timeout", {"detail": " ".join(exc.cmd)[:80]})
+        return 2
     finally:
         lock.release()
 
@@ -1060,6 +1067,10 @@ def tick_locked() -> int:
     if phase == "applying":
         # applying is only valid inside a single coordinated call that ends
         # with the re-exec; reaching here means that call died (spec 4.2).
+        # The dead process could not finish its request: free the slot so
+        # the operator can register resume/rollback; phase and recovery
+        # materials stay untouched (review R2-1).
+        _finish_request("failed", {"step": "applying-interrupted"})
         record_step("applying-interrupted")
         print(
             "release: applying was interrupted; use request resume or rollback",
@@ -1262,6 +1273,7 @@ def vector_fast_path(state: dict, target: str) -> int:
                 "worktree",
             ],
             timeout=600,
+            **_sync_coordination(),
         )
         if result.returncode != 0:
             raise Fail(
@@ -2169,9 +2181,10 @@ def _request_unpause(state: dict, request: dict) -> int:
         )
         return 1
     mutate_state(lambda s: s.update({"hold": None}))
-    snapshot = state.get("original_units") or {}
-    if snapshot.get(DEPLOY_TIMER, {}).get("enabled", True):
-        run_cmd(["systemctl", "enable", "--now", DEPLOY_TIMER], timeout=60)
+    # Unpause MEANS resuming automatic deploys (spec 6.3); the snapshot may
+    # record the deploy timer as disabled from the bootstrap's deliberate
+    # stop, which must not keep deploys off forever (review R2-6).
+    run_cmd(["systemctl", "enable", "--now", DEPLOY_TIMER], timeout=60)
     request["status"] = "done"
     request["result"] = {"unpaused_at": now_iso(), "main_commit": remote}
     request["finished_at"] = now_iso()
