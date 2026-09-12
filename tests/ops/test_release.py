@@ -1512,6 +1512,7 @@ def test_degraded_mode_fails_closed_and_compares_whole_files(base, monkeypatch):
 # Independent PR-review regressions (six P1 + four P2)
 
 
+@needs_tomllib
 def test_axiom_official_shape_parses_and_empty_is_valid(axiom, base):
     # Official tabular: fields[] names + column-major columns[]. Empty
     # result = zero-height columns, not a missing "rows" key (P1-1).
@@ -1555,6 +1556,7 @@ def test_axiom_official_shape_parses_and_empty_is_valid(axiom, base):
     assert code == 1  # missing sources, not a query/parse failure
 
 
+@needs_tomllib
 def test_drill_evidence_requires_sent_matching_notification(axiom, base, monkeypatch):
     # A suppressed or mismatched notification is not drill evidence (P1-1).
     write_vector_toml(base)
