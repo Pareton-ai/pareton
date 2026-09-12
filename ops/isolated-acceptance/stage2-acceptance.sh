@@ -573,6 +573,37 @@ pkill -f mock-axiom.py 2>/dev/null || true
 sleep 1
 nohup python3 /root/mock-axiom.py >/tmp/mock-axiom3.log 2>&1 &
 
+echo "=== S8: rollback with a real recovery copy (B12/B23 slice) ==="
+# The pip stand-in changes nothing, so simulate B-era venv drift with a
+# marker only the live .venv has; a correct rollback must remove it by
+# restoring the recovery copy (not by re-resolving deps).
+touch "$REPO/.venv/bin/stage2-b-only-marker"
+chmod 0755 "$REPO/.venv/bin/stage2-b-only-marker"
+"$OPS/release.py" request rollback --reason "isolated B12 drill" --operator isolated \
+  && pass "S8 rollback registered" || fail "S8 rollback refused"
+systemctl start pareton-deploy.service
+RC=$?
+[ "$RC" = 0 ] && pass "S8 rollback completed (rc=0)" \
+  || fail "S8 rollback rc=$RC: $(journalctl -u pareton-deploy -n 40 --no-pager | tail -8)"
+STANDIN_SHA="$STANDIN_SHA" python3 - <<'PY' && pass "S8 state verified back at A, hold kept" || fail "S8 state wrong after rollback"
+import json
+import os
+
+state = json.load(open("/var/lib/pareton-deploy/release-state.json"))
+assert state["phase"] == "idle", state
+assert state["verified_commit"] == os.environ["STANDIN_SHA"], state
+assert state["hold"] is not None, state  # rollback keeps the pause
+PY
+[ "$(git -C "$REPO" rev-parse HEAD)" = "$STANDIN_SHA" ] \
+  && pass "S8 checkout back at A" || fail "S8 checkout not at A"
+[ "$(cat "$REPO/.deploy-done")" = "$STANDIN_SHA" ] \
+  && pass "S8 alias back at A" || fail "S8 alias != A"
+[ ! -e "$REPO/.venv/bin/stage2-b-only-marker" ] \
+  && pass "S8 venv restored from recovery copy (B-era marker gone)" \
+  || fail "S8 venv not restored (B-era marker still present)"
+[ ! -e "$REPO/stage2_marker.py" ] \
+  && pass "S8 B-era file gone from checkout" || fail "S8 B-era file still in checkout"
+
 echo
 if [ "$FAILED" = 0 ]; then
   echo "ALL-STAGE2-ISOLATED-ACCEPTANCE-PASSED"

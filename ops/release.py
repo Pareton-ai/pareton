@@ -1070,7 +1070,11 @@ def tick_idle(state: dict) -> int:
                 "phase": "draining",
                 "scope": "full",
                 "direction": "forward",
-                "from_commit": head,
+                # from is the last verified baseline — the environment the
+                # recovery copy will capture and a later rollback returns
+                # to. HEAD is not it: tooling (or a crashed prior attempt)
+                # may already have moved the checkout.
+                "from_commit": state["verified_commit"],
                 "target_commit": target,
                 "startup_complete": False,
                 "log_accepted": False,
@@ -1374,7 +1378,19 @@ def tick_applying(state: dict) -> int:
         restore_recovery_venv(Path(state["recovery_copy"]))
     elif direction == "forward" and state.get("recovery_copy") is None:
         copy_dir = save_recovery_copy(state)
-        mutate_state(lambda s: s.update({"recovery_copy": copy_dir}))
+        mutate_state(
+            lambda s: s.update(
+                {
+                    "recovery_copy": copy_dir,
+                    # The copy captures the from_commit environment; a later
+                    # rollback must return to THIS commit, not verified_commit
+                    # (which equals the current commit once the release
+                    # succeeds — resetting there would pair old deps with
+                    # new code).
+                    "recovery_commit": state["from_commit"],
+                }
+            )
+        )
     # reset without a copy: the operator's evidence vouches for the env.
 
     status = git("status", "--porcelain", "--untracked-files=no")
@@ -1858,7 +1874,7 @@ def _request_rollback(state: dict, request: dict) -> int:
 
         mutate_state(set_hold)
     run_cmd(["systemctl", "disable", "--now", DEPLOY_TIMER], timeout=60)
-    target = state["verified_commit"]
+    target = state.get("recovery_commit") or state["verified_commit"]
     if not state.get("recovery_copy"):
         _refuse(request, "rollback-no-copy")
         print(
@@ -2102,6 +2118,7 @@ def execute_reset(request: dict) -> int:
         },
         "original_units": snapshot_units(),
         "recovery_copy": request.get("recovery_copy"),
+        "recovery_commit": baseline,
         "startup_complete": False,
         "log_accepted": False,
         "failure_step": None,

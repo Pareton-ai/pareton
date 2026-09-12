@@ -46,3 +46,26 @@ Local unit suites the same day: `pytest -q -m "not docker and not e2e"` →
 1378 passed / 0 failed / 44 deselected. Not covered here (production-only
 per spec §9): B1 real bench, B12 real rollback on the VPS, B14 real Discord
 reception, B20 production bootstrap, §8.1 VM reboot drills (T1–T6).
+
+## S8 rollback round (same day, third run)
+
+Reviewer follow-up: the 40/40 did not exercise `restore_recovery_venv` or a
+real recovery copy. Added S8 (rollback after a verified A->B release, with a
+B-era marker planted in the live venv). Building it exposed and fixed two
+real gaps:
+
+- A rollback after a SUCCESSFUL release targeted `verified_commit` — which
+  by then equals the current commit — so it would have restored the
+  previous release's venv onto unchanged code (old deps, new code). The
+  state now records `recovery_commit` (the commit the copy captures) and
+  rollback targets it.
+- `from_commit` at release start was taken from HEAD, which tooling or a
+  crashed attempt may already have moved; it is now the last verified
+  baseline (the original deploy.sh's `DEPLOYED` semantics).
+
+Result: **47/47 assertions PASS** (40 + S8's 7), exit 0, no drop-ins. S8
+observed: rollback registered and completed rc=0; state idle with
+verified_commit back at A and hold kept; checkout and `.deploy-done` back
+at A; the B-era venv marker gone (recovery copy restored, not pip);
+B-era file gone from the checkout. Unit suite same day: 1396 passed /
+0 failed (new: rollback-target and missing-venv regressions).

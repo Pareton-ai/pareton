@@ -60,8 +60,12 @@ record + `request verify`, `request unpause` and a full A→B release
 probes, in-process probe threads, one-shot GPU reap dispatch, per-unit Axiom
 checks), the ExecCondition gate matrix (apply-block=skip, corrupt=255/failed
 + `release_gate_error`), a live activity-lock holder holding the tick at
-`active-work`, GPU dispatch consumption semantics, and a missing-source
-fault injection (B15). Verified 2026-09-12: 40/40 assertions pass.
+`active-work`, GPU dispatch consumption semantics, a missing-source
+fault injection (B15), and — S8 — a real rollback: after a verified A→B
+release (with a B-era marker planted in the live venv), `request rollback`
+must restore the venv from the recovery copy (marker gone), move the
+checkout and `.deploy-done` back to A, and keep the hold. Verified
+2026-09-12: 47/47 assertions pass.
 
 ```sh
 docker run --privileged --cgroupns=host -d --name pareton-s2 pareton-systemd-verify
