@@ -400,7 +400,10 @@ DRILL_INV=$(systemctl show pareton-deploy -p InvocationID --value)
 sleep 3
 journalctl -u pareton-deploy-failed.service --no-pager | grep -q "notify" \
   && pass "S2 OnFailure notifier ran" || fail "S2 notifier never ran"
-wait_for 30 "$SHIPPED" "deploy_failure_notified" \
+# Wait for THIS drill's event: matching any deploy_failure_notified would
+# pass on S1's older notification while the drill's is still in flight,
+# and the registrar would then rightly refuse on missing evidence.
+wait_for 30 "$SHIPPED" "\"invocation_id\":\"$DRILL_INV\"" \
   && pass "S2 structured notify event reached sink" \
   || fail "S2 structured notify event never shipped"
 cp /tmp/state.s2 "$STATE"

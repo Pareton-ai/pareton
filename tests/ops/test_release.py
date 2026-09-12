@@ -1721,37 +1721,29 @@ def test_sync_write_modes_refuse_during_release(base, tmp_path, monkeypatch):
             code = sync.main(["apply", "--repo", str(repo), "--source", "worktree"])
         return code
 
-    # Another process holds the deploy mutex.
+    # ANY stage-2 state — even idle with no work in flight — makes writes
+    # coordinator-owned: probing locks and releasing them is a TOCTOU
+    # window during validation/install (review R3-1).
+    for state in (
+        {"phase": "applying"},
+        {"phase": "quiescing"},
+        {"phase": "draining"},
+        {"phase": "idle", "hold": {"reason": "r"}},
+        {"phase": "idle"},
+    ):
+        release.write_json_atomic(state_file, state)
+        assert run_apply() == 3
+    # Fresh bootstrap (no state yet): only the deploy-mutex race remains.
+    state_file.unlink()
     import fcntl
 
     fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        assert run_apply() == 3
+        assert run_apply() == 3  # deploy-in-progress
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-    # Lock free but an apply was interrupted.
-    release.write_json_atomic(state_file, {"phase": "applying"})
-    assert run_apply() == 3
-    # Lock free but the state is held.
-    release.write_json_atomic(state_file, {"phase": "idle", "hold": {"r": 1}})
-    assert run_apply() == 3
-    # Draining: a release is waiting out in-flight work (review R2-2).
-    release.write_json_atomic(state_file, {"phase": "draining"})
-    assert run_apply() == 3
-    # Idle but workers hold the activity lock: the mutex alone is not
-    # drain completion (review R2-2).
-    release.write_json_atomic(state_file, {"phase": "idle"})
-    activity = Path(os.environ["PARETON_ACTIVITY_LOCK"])
-    activity.parent.mkdir(parents=True, exist_ok=True)
-    activity_fd = os.open(str(activity), os.O_RDWR | os.O_CREAT, 0o644)
-    fcntl.flock(activity_fd, fcntl.LOCK_EX)
-    try:
-        assert run_apply() == 3
-    finally:
-        fcntl.flock(activity_fd, fcntl.LOCK_UN)
-        os.close(activity_fd)
 
 
 def test_maintenance_services_carry_the_gate():
@@ -1861,6 +1853,7 @@ def test_sync_guard_accepts_inherited_lock_in_real_subprocess(tmp_path, monkeypa
     sync = load_ops_module("sync-config")
     lock = tmp_path / "deploy.lock"
     state = tmp_path / "release-state.json"
+    state_file = state  # the guard probe below uses this name
     monkeypatch.setenv("PARETON_DEPLOY_LOCK", str(lock))
     monkeypatch.setenv("PARETON_RELEASE_STATE", str(state))
     monkeypatch.setenv("PARETON_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
@@ -1886,7 +1879,9 @@ def test_sync_guard_accepts_inherited_lock_in_real_subprocess(tmp_path, monkeypa
     fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        # Without the handoff: the parent's lock makes it deploy-in-progress.
+        # Fresh bootstrap (no state) + the parent's lock, no handoff:
+        # refused as a concurrent deploy.
+        state_file.unlink()
         result = subprocess.run(
             [sys.executable, str(guard_script)],
             capture_output=True,
@@ -1895,6 +1890,19 @@ def test_sync_guard_accepts_inherited_lock_in_real_subprocess(tmp_path, monkeypa
         )
         assert result.returncode == 3, result.stdout + result.stderr
         assert "deploy-in-progress" in result.stdout
+
+        # With stage-2 state and no handoff: writes are coordinator-owned
+        # regardless of the lock (review R3-1).
+        release.write_json_atomic(state_file, {"phase": "draining"})
+        result = subprocess.run(
+            [sys.executable, str(guard_script)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "coordinator-owned" in result.stdout
+
         # With the inherited fd: the guard accepts (same OFD re-flock).
         result = subprocess.run(
             [sys.executable, str(guard_script)],

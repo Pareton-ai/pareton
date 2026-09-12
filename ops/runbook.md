@@ -209,6 +209,11 @@ Rules that matter operationally:
 - `hold` takes effect immediately (short state lock); a running install is
   never killed and finishes first. It also runs
   `systemctl disable --now pareton-deploy.timer` as a second layer.
+- Once a stage-2 release state exists, `sync-config apply` / `deploy-hook` /
+  `effectuate-restarts` refuse standalone use (`coordinator-owned`): all
+  writes go through `pareton-deploy.service` (a tick or a registered
+  request). Standalone apply is only the fresh-bootstrap path (no state
+  yet); `check` stays read-only.
 - `verify` never clears hold; `rollback`/`cancel` set hold themselves.
   Only `unpause` clears it, and only when the phase is idle and the given
   `--main-commit` still equals `origin/main`.
@@ -295,20 +300,24 @@ The old workers do not understand the claim gate; the first install is a
 one-time transition executed in a maintenance window by an operator with
 write access:
 
-1. BEFORE merging the stage-2 PR to main (auto-deploy!), record the live
-   arrangement and stash recovery material:
-   `systemctl is-active/is-enabled` for every pareton unit and timer;
-   save the old installation set —
-   `mkdir -p /var/lib/pareton-deploy/bootstrap-backup && cp -a
-   /usr/local/lib/pareton-ops /usr/local/bin/pareton-deploy
-   /etc/systemd/system/pareton-*.service* /etc/vector /var/lib/pareton-deploy/bootstrap-backup/ &&
-   cp -a /opt/pareton/.venv /var/lib/pareton-deploy/bootstrap-backup/venv`.
-   Then `systemctl disable --now pareton-deploy.timer`; wait for any
-   running `pareton-deploy.service` to finish. Record
-   `systemctl --version`, each unit's effective `TimeoutStopUSec`/`KillMode`
-   and `shutdown.target` properties (read-only, for §8.1). Do NOT stop the
-   gpu-reap/builder-cleanup timers here — the reset flow's own quiescing
-   stops them and restores them from its pre-stop snapshot.
+1. BEFORE merging the stage-2 PR to main (auto-deploy!):
+   a. Record the live arrangement read-only:
+      `systemctl is-active/is-enabled` for every pareton unit and timer;
+      `systemctl --version`, each unit's effective
+      `TimeoutStopUSec`/`KillMode` and `shutdown.target` properties (§8.1).
+   b. `systemctl disable --now pareton-deploy.timer`, then WAIT for any
+      running `pareton-deploy.service` to finish (`systemctl status`) —
+      the old deploy is the only writer of the ops files and the venv, so
+      the backup below must not race it (review R3-2).
+   c. Only now stash the recovery material:
+      `mkdir -p /var/lib/pareton-deploy/bootstrap-backup && cp -a
+      /usr/local/lib/pareton-ops /usr/local/bin/pareton-deploy
+      /etc/systemd/system/pareton-*.service* /etc/vector
+      /var/lib/pareton-deploy/bootstrap-backup/ &&
+      cp -a /opt/pareton/.venv /var/lib/pareton-deploy/bootstrap-backup/venv`.
+      Do NOT stop the gpu-reap/builder-cleanup timers here — the reset
+      flow's own quiescing stops them and restores them from its pre-stop
+      snapshot.
 2. Old-worker drain transition: give both workers a temporary drop-in with
    `KillMode=mixed` and a stop budget at least the current effective value
    (worker 4h, round-worker 8h); `systemctl daemon-reload` and verify the

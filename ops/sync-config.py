@@ -93,10 +93,16 @@ def guard_release_coordination() -> None:
 
     The release coordinator passes its already-held deploy lock fd via
     PARETON_INHERIT_DEPLOY_LOCK_FD (flock on the inherited open-file
-    description is idempotent). Independent invocations take the mutex
-    non-blockingly and refuse while a release is mid-install or the state
-    is held — the documented emergency path is to fix main and unpause, not
-    to apply around a held release. Read-only check stays ungated.
+    description is idempotent) — that path owns the drain/scope decisions.
+
+    Independent invocations: once a stage-2 release state exists, ALL
+    writes belong to the coordinator — refuse and point at the coordinator
+    entry (run pareton-deploy.service / register a request; the emergency
+    path is to fix main and unpause). Probing locks and releasing them is
+    a TOCTOU: claims can start during validation/install and residents
+    never enter a stop protocol (review R3-1). The only manual path is the
+    fresh bootstrap (no state yet), which still takes the deploy mutex so
+    two manual installs cannot race. Read-only check stays ungated.
     """
     global _COORDINATION_FD
     inherited = os.environ.get("PARETON_INHERIT_DEPLOY_LOCK_FD", "")
@@ -104,57 +110,30 @@ def guard_release_coordination() -> None:
         fd = int(inherited)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # same OFD: no-op
         return
-    if _COORDINATION_FD is None:
-        # Re-entrant calls within one process already hold the mutex
+    if _COORDINATION_FD is not None:
+        # Re-entrant call within one process already holds the mutex
         # (production runs one process per invocation; flock is per open
         # file description, so a second fd would conflict with ourselves).
-        lock_path = Path(
-            os.environ.get("PARETON_DEPLOY_LOCK", "/run/pareton-deploy.lock")
-        )
-        try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
-        except OSError as exc:
-            raise Fail(2, "deploy-lock-open", detail=type(exc).__name__) from exc
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            raise Fail(3, "deploy-in-progress") from None
-        _COORDINATION_FD = fd
+        return
     state_path = Path(
         os.environ.get(
             "PARETON_RELEASE_STATE", "/var/lib/pareton-deploy/release-state.json"
         )
     )
-    state = read_json(state_path)
-    if isinstance(state, dict):
-        phase = state.get("phase")
-        if phase in ("applying", "quiescing"):
-            raise Fail(3, f"release-{phase}")
-        if phase == "draining":
-            raise Fail(3, "release-draining")
-        if state.get("hold"):
-            raise Fail(3, "release-held")
-        # Taking the deploy mutex is not drain completion: an independent
-        # write must also stay out from under in-flight work (review R2-2).
-        # The coordinator's inherited-fd path returns above and keeps the
-        # spec-permitted vector-only scope while work is active.
-        activity_path = Path(
-            os.environ.get("PARETON_ACTIVITY_LOCK", "/run/pareton-activity.lock")
-        )
-        try:
-            activity_fd = os.open(str(activity_path), os.O_RDWR | os.O_CREAT, 0o644)
-        except OSError as exc:
-            raise Fail(2, "activity-lock-open", detail=type(exc).__name__) from exc
-        try:
-            fcntl.flock(activity_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(activity_fd)
-            raise Fail(3, "active-work") from None
-        else:
-            fcntl.flock(activity_fd, fcntl.LOCK_UN)
-            os.close(activity_fd)
+    if isinstance(read_json(state_path), dict):
+        raise Fail(3, "coordinator-owned")
+    lock_path = Path(os.environ.get("PARETON_DEPLOY_LOCK", "/run/pareton-deploy.lock"))
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        raise Fail(2, "deploy-lock-open", detail=type(exc).__name__) from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise Fail(3, "deploy-in-progress") from None
+    _COORDINATION_FD = fd
 
 
 def expected_uid() -> int:
