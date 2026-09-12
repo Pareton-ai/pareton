@@ -1332,6 +1332,63 @@ def test_worker_start_failure_parks_in_partial_startup(base, monkeypatch):
     assert "verifying-partial-startup" in run_state
 
 
+def test_start_failure_restores_timers_and_finishes_request(base, monkeypatch):
+    # The start-failure park must not strand maintenance timers or a
+    # running request: GPU TTL reaping resumes, and the operator can
+    # register the resume the error message calls for (Bugbot High).
+    import fcntl
+
+    state = write_state(
+        base,
+        phase="applying",
+        direction="rollback",
+        target_commit="c2",
+        op_id="op-ver",
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "rollback",
+            "status": "running",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    monkeypatch.setattr(release, "api_healthy", lambda: True)
+    monkeypatch.setattr(release, "API_HEALTH_TIMEOUT_S", 0)
+    # Residents healthy, workers never come up.
+    release.run_cmd.active_units = {
+        "pareton-api",
+        "pareton-watcher",
+        "pareton-weights",
+    }
+    started = []
+    real_start = release.start_unit
+    monkeypatch.setattr(
+        release, "start_unit", lambda u: (started.append(u), real_start(u))
+    )
+    fd = os.open(str(base / "run/pareton-deploy.lock"), os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    monkeypatch.setenv("PARETON_INHERIT_DEPLOY_LOCK_FD", str(fd))
+    assert release.tick(["--continue-op", "op-ver"]) == 2
+    # Maintenance timers restored.
+    assert "pareton-gpu-reap.timer" in started
+    assert "pareton-builder-cleanup.timer" in started
+    # The in-flight request reached a terminal state...
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "failed"
+    assert request["result"]["step"] == "start-failed"
+    # ...so the operator can register the recovery request right away.
+    assert release.cmd_request(["resume", "--operator", "o"]) == 0
+    registered = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert registered["type"] == "resume"
+    assert registered["status"] == "pending"
+
+
 def test_unpause_not_idle_refusal_is_terminal(base):
     write_state(
         base,

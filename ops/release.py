@@ -1563,6 +1563,15 @@ def _wait_unit_healthy(unit: str, budget_s: int) -> bool:
 
 def _mark_start_failed(unit: str) -> None:
     mutate_state(lambda s: s.update({"failure_step": "start-failed"}))
+    # The release ended in a failure, so its end-of-verify cleanup applies
+    # here too: maintenance timers stopped at quiescing come back (GPU TTL
+    # reaping must not halt while the operator recovers), the in-flight
+    # request reaches a terminal failed state (a stuck running request
+    # blocks registering the very `request resume` the error message calls
+    # for), and stale coordination files are cleared (Bugbot).
+    _restore_maint_timers(load_state())
+    _finish_request("failed", {"step": "start-failed", "unit": unit})
+    clear_coordination_files()
     record_step("start-failed", {"detail": unit})
     print(f"release: {unit} failed to start/health", file=sys.stderr)
 
