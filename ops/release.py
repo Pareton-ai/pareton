@@ -867,6 +867,23 @@ def restore_recovery_venv(copy_dir: Path) -> None:
     stage = repo() / f".venv.restore.{os.getpid()}"
     shutil.copytree(source, stage, symlinks=True)
     displaced = repo() / f".venv.displaced.{os.getpid()}"
+    if not target.exists():
+        # A previous swap died between the two renames: prefer the leftover
+        # displaced copy as the thing to keep, and place the stage directly.
+        leftovers = sorted(repo().glob(".venv.displaced.*"))
+        for leftover in leftovers:
+            try:
+                os.rename(leftover, displaced)
+                break
+            except OSError:
+                continue
+        try:
+            os.rename(stage, target)
+        except OSError as exc:
+            raise Fail(2, "venv-restore-failed", detail=type(exc).__name__) from exc
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        return
     os.rename(target, displaced)
     try:
         os.rename(stage, target)

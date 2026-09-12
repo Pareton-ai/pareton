@@ -1117,3 +1117,18 @@ def test_venv_swap_failure_keeps_original(base, monkeypatch):
     # The original venv survived the failed swap (CR P3).
     assert (base / "opt/pareton/.venv/pyvenv.cfg").is_file()
     assert (base / "opt/pareton/.venv/bin/python").exists()
+
+
+def test_venv_restore_with_missing_target(base):
+    # A swap that died between the two renames leaves no .venv: the restore
+    # must place the copy instead of crashing on the missing target.
+    make_mini_venv(base)
+    copy_dir = base / "var/lib/pareton-deploy/recovery/1"
+    shutil.copytree(base / "opt/pareton/.venv", copy_dir, symlinks=True)
+    (base / "opt/pareton/.venv/bin/marker").write_text("old\n")
+    leftover = base / "opt/pareton/.venv.displaced.999"
+    shutil.copytree(base / "opt/pareton/.venv", leftover, symlinks=True)
+    shutil.rmtree(base / "opt/pareton/.venv")
+    release.restore_recovery_venv(copy_dir)
+    assert (base / "opt/pareton/.venv/pyvenv.cfg").is_file()
+    assert not (base / "opt/pareton/.venv/bin/marker").exists()

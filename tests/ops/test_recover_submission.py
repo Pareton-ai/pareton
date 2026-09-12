@@ -60,3 +60,13 @@ def test_evidence_class_ordering():
     assert module.evidence_class(["bench_queued"]) == "progressed"
     assert module.evidence_class(["rejected"]) == "terminal-reject"
     assert module.evidence_class(["scored", "rejected"]) == "contradictory"
+
+
+def test_no_submission_event_writes():
+    # The recovery audit must never touch submission_events: its state
+    # vocabulary is miner-visible (latest_state / by_latest_state), and
+    # 'recovered' is not a SubmissionState member. Source-level guard for
+    # the fix that once failed to land while its commit claimed otherwise.
+    source = (REPO_ROOT / "ops" / "recover_submission.py").read_text()
+    assert "INSERT INTO submission_events" not in source
+    assert "submission_recovered" in source  # audit goes to stdout/journald

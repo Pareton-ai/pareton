@@ -294,3 +294,11 @@ an authorized human decision, never a timer:
   parks (keeps heartbeating while only the claim gate closes, but the
   process is stopped during applying/verifying). `maintenance_started`/
   `maintenance_finished` events in Axiom correlate the window.
+- A target that runs but failed log acceptance ("running, unaccepted") is a
+  steady state: business keeps serving (gate open), the tick reports
+  `last_step=log-unaccepted` and returns 0, so nothing re-alerts. Inspect it
+  with `release.py status` (phase=verifying, `failure_step`,
+  `log_accepted=false`) or `grep last_step /var/lib/pareton-deploy/last-run.env`;
+  close it with an explicit `request verify` (after fixing the cause /
+  registering drill evidence) or `request rollback` / `request
+  vector-repair`.

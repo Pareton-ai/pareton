@@ -236,27 +236,27 @@ def cmd_recover(args: argparse.Namespace) -> int:
                 f"(rowcount {cur.rowcount}); not recovered"
             )
             return 1
-        cur.execute(
-            """
-                    INSERT INTO submission_events (submission_id, state, detail)
-                    VALUES (%s, 'recovered', %s)
-                    """,
-            (
-                str(submission_id),
-                json.dumps(
-                    {
-                        "job_id": job_id,
-                        "attempt": args.attempt,
-                        "outcome": args.outcome,
-                        "job_status": target,
-                        "operator": args.operator,
-                        "reason": args.reason,
-                        "gate_phase": phase,
-                        "at": now_iso(),
-                    }
-                ),
-            ),
+    # Audit trail goes to stdout/journald only. submission_events.state is
+    # the miner-visible state vocabulary (gate.types.SubmissionState is its
+    # single source, and latest_state/by_latest_state derive from it), so a
+    # 'recovered' row would surface out-of-vocabulary to miners and fall
+    # out of the stats buckets. The job's last_error keeps the reason.
+    print(
+        json.dumps(
+            {
+                "event": "submission_recovered",
+                "job_id": job_id,
+                "submission_id": str(submission_id),
+                "attempt": args.attempt,
+                "outcome": args.outcome,
+                "job_status": target,
+                "operator": args.operator,
+                "reason": args.reason,
+                "gate_phase": phase,
+                "at": now_iso(),
+            }
         )
+    )
     print(
         f"recover: job {args.job} attempt {args.attempt} -> {target} "
         f"({args.outcome}); repeat runs will not re-enqueue"
