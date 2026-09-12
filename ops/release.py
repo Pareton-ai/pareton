@@ -190,13 +190,17 @@ def run_cmd(
 
 
 def http_post_json(
-    url: str, payload: dict, timeout: int
+    url: str, payload: dict, timeout: int, token: str = ""
 ) -> tuple[int, dict | None, str | None]:
     """POST JSON; returns (status_code, parsed_body_or_None, error_category)."""
+    headers = {"Content-Type": "application/json"}
+    if token:
+        # The token value never appears in output or errors (spec 7.1).
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -653,7 +657,7 @@ def run_log_check(probe: dict, *, skip_acceptance: bool = False) -> tuple[int, d
         remaining = max(1, int(deadline - time.monotonic()))
         request_timeout = min(10, remaining)
         body["endTime"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        status, data, error = http_post_json(url, body, request_timeout)
+        status, data, error = http_post_json(url, body, request_timeout, token=token)
         if status == 200 and data is not None:
             if _query_is_partial(data):
                 last_error = {"error": "partial-result"}
@@ -1190,11 +1194,15 @@ def vector_fast_path(state: dict, target: str) -> int:
         return code or 2
     _restore_maint_timers(load_state())
     if code != 0:
+        # The TOML is installed and business kept running; the target is
+        # "running, unaccepted" (spec 4.4), NOT idle: the worktree already
+        # moved, so an idle tick would see a commit gap with no remaining
+        # drift and start a FULL drain for a TOML-only change.
         mutate_state(
             lambda s: s.update(
                 {
-                    "phase": "idle",
-                    "scope": "full",
+                    "phase": "verifying",
+                    "startup_complete": True,
                     "log_accepted": False,
                     "failure_step": "log-ingestion" if code == 1 else "axiom-query",
                 }
@@ -1553,6 +1561,12 @@ def _wait_unit_healthy(unit: str, budget_s: int) -> bool:
     return api_healthy() if unit == "pareton-api" else unit_is_active(unit)
 
 
+def _mark_start_failed(unit: str) -> None:
+    mutate_state(lambda s: s.update({"failure_step": "start-failed"}))
+    record_step("start-failed", {"detail": unit})
+    print(f"release: {unit} failed to start/health", file=sys.stderr)
+
+
 def verify_flow(state: dict, *, fresh_start: bool) -> int:
     global _ACTIVITY_STASH
     target = state["target_commit"]
@@ -1562,10 +1576,8 @@ def verify_flow(state: dict, *, fresh_start: bool) -> int:
             start_unit(f"{unit}.service")
         for unit in RESIDENT_UNITS:
             if not _wait_unit_healthy(unit, API_HEALTH_TIMEOUT_S):
-                record_step("start-failed", {"detail": unit})
-                print(f"release: {unit} failed to start/health", file=sys.stderr)
+                _mark_start_failed(unit)
                 return 2
-        mutate_state(lambda s: s.update({"startup_complete": True}))
         # The activity lock guards claims; workers may start once released.
         if _ACTIVITY_STASH is not None:
             _ACTIVITY_STASH.release()
@@ -1574,9 +1586,12 @@ def verify_flow(state: dict, *, fresh_start: bool) -> int:
             start_unit(f"{unit}.service")
         for unit in WORKER_UNITS:
             if not _wait_unit_healthy(unit, API_HEALTH_TIMEOUT_S):
-                record_step("start-failed", {"detail": unit})
-                print(f"release: {unit} failed to start", file=sys.stderr)
+                _mark_start_failed(unit)
                 return 2
+        # Only a fully started target counts as startup-complete: a worker
+        # failure must leave the claim gate closed and the next tick
+        # reporting "partial startup" instead of resuming past it (Bugbot).
+        mutate_state(lambda s: s.update({"startup_complete": True}))
     else:
         probe = write_probe(str(uuid.uuid4()), target)
 
@@ -1606,16 +1621,26 @@ def finish_verification(state: dict, code: int, report: dict) -> int:
             )
         )
         alias_path().write_text(target + "\n")
-        run_cmd(
+        # The release itself started every unit it manages, so restart
+        # debts are settled (cleared), not re-executed — effectuating them
+        # would bounce just-started units again. A settle failure only
+        # warns: lingering debts are visible via sync-config check.
+        settled = run_cmd(
             [
                 sys.executable,
                 str(repo() / "ops" / "sync-config.py"),
-                "effectuate-restarts",
+                "settle-debts",
                 "--repo",
                 str(repo()),
             ],
-            timeout=300,
+            timeout=120,
         )
+        if settled.returncode != 0:
+            print(
+                f"release: settle-debts failed (rc={settled.returncode}); "
+                "owed restart debts left in place",
+                file=sys.stderr,
+            )
         _restore_maint_timers(state)
         prune_recovery_copies()
         _notify_success(state)
@@ -1940,12 +1965,18 @@ def _request_cancel(state: dict, request: dict) -> int:
     run_cmd(["systemctl", "disable", "--now", DEPLOY_TIMER], timeout=60)
     if request.get("status") != "running":
         _mark_request_running(request)
-    stopping = [f"{u}.service" for u in ALL_RESIDENT if unit_is_active(f"{u}.service")]
-    if stopping:
-        pending = _wait_units_inactive(stopping, budget_s=60, step="cancel-wait")
-        if pending:
-            record_step("cancel-wait", {"detail": ",".join(pending)})
-            return 0  # next tick continues the cancel
+    if state["phase"] == "quiescing":
+        # Only quiescing has stop signals in flight; waiting for units that
+        # are merely serving (draining) can never succeed, and the disabled
+        # timer means no next tick would come (Bugbot).
+        stopping = [
+            f"{u}.service" for u in ALL_RESIDENT if unit_is_active(f"{u}.service")
+        ]
+        if stopping:
+            pending = _wait_units_inactive(stopping, budget_s=60, step="cancel-wait")
+            if pending:
+                record_step("cancel-wait", {"detail": ",".join(pending)})
+                return 0  # continue by starting pareton-deploy.service
 
     # Phase goes back to idle BEFORE any start: ExecCondition re-reads the
     # state file when systemd starts the unit, and quiescing denies startup
@@ -2003,7 +2034,7 @@ def _request_verify(state: dict, request: dict) -> int:
 
 def _request_unpause(state: dict, request: dict) -> int:
     if state["phase"] != "idle":
-        record_step("unpause-not-idle")
+        _refuse(request, "unpause-not-idle")
         print(f"request unpause: phase is {state['phase']}", file=sys.stderr)
         return 1
     try:
@@ -2326,7 +2357,7 @@ def cmd_record_acceptance(argv: list[str]) -> int:
         "endTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     status, data, error = http_post_json(
-        f"{base_url}/v1/datasets/_apl?format=tabular", body, 30
+        f"{base_url}/v1/datasets/_apl?format=tabular", body, 30, token=token
     )
     if status != 200 or data is None:
         print(

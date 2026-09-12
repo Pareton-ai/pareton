@@ -252,6 +252,13 @@ UNIT_KEYS = ("_SYSTEMD_UNIT", "systemd.unit", "_systemd_unit", "unit")
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            # The checker must authenticate: a missing token is exactly the
+            # class of bug the mock exists to catch.
+            self.send_response(401)
+            self.end_headers()
+            return
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         match = re.search(r"probe_id == '([^']+)'", body.get("apl", ""))

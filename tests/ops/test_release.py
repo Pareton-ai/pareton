@@ -346,7 +346,7 @@ def test_check_logs_partial_result_keeps_polling(axiom, base):
     ]
     calls = {"n": 0}
 
-    def fake(url, payload, timeout):
+    def fake(url, payload, timeout, **kwargs):
         result = responses[min(calls["n"], len(responses) - 1)]
         calls["n"] += 1
         return result
@@ -1227,3 +1227,165 @@ def test_rollback_hold_anchors_to_target(base, monkeypatch):
     state = read_state(base)
     assert state["hold"]["baseline_commit"] == "A"
     assert state["target_commit"] == "A"
+
+
+# ---------------------------------------------------------------------------
+# PR-review (Bugbot) regressions
+
+
+def test_axiom_query_carries_bearer_token(axiom, base, monkeypatch):
+    captured = {}
+
+    def fake(url, payload, timeout, token=""):
+        captured["token"] = token
+        return (
+            200,
+            axiom_response(
+                [
+                    f"pareton-{u}.service"
+                    for u in (
+                        "worker",
+                        "round-worker",
+                        "watcher",
+                        "api",
+                        "weights",
+                        "gpu-reap",
+                        "deploy",
+                    )
+                ]
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(release, "http_post_json", fake)
+    code, _ = release.run_log_check(
+        {"probe_id": "p", "target_commit": "c", "issued_at": release.now_iso()},
+        skip_acceptance=True,
+    )
+    assert code == 0
+    assert captured["token"] == "t"  # from the fixture .env
+
+
+def test_cancel_in_draining_completes_without_waiting(base):
+    # Draining sent no stop signals; cancel must finish in one tick instead
+    # of waiting for units that are merely serving (Bugbot High 2).
+    write_state(
+        base, phase="draining", original_units={"pareton-api": {"active": True}}
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "cancel",
+            "status": "pending",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    release.run_cmd.active_units = {"pareton-api.service"}  # still serving
+    assert release.tick([]) == 0
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "done"
+    assert read_state(base)["phase"] == "idle"
+
+
+def test_worker_start_failure_parks_in_partial_startup(base, monkeypatch):
+    # A worker that fails to start must leave startup_complete False so the
+    # next tick reports partial startup; the old code set it True after the
+    # residents and then resumed past the dead workers (Bugbot High 3).
+    import fcntl
+
+    write_state(base)
+    make_mini_venv(base)
+    release.run_cmd.git_refs = {"origin/main": "c2", "HEAD": "c1"}
+    release.run_cmd.git_diff = ""
+    release.run_cmd.db = {"error": None, "rounds": [], "submissions": []}
+    execve = {}
+    monkeypatch.setattr(
+        release.os, "execve", lambda path, args, env: execve.update(args=args)
+    )
+    monkeypatch.setattr(release, "api_healthy", lambda: True)
+    monkeypatch.setattr(release, "API_HEALTH_TIMEOUT_S", 0)
+    # All units stay inactive through quiescing/apply; residents come up
+    # for verify while the workers never do.
+    assert release.tick([]) == 0  # apply done, re-exec stubbed
+    state = read_state(base)
+    assert state["phase"] == "applying"
+    release.run_cmd.active_units = {
+        "pareton-api",
+        "pareton-watcher",
+        "pareton-weights",
+    }
+    # Drive the verify stage exactly as the re-exec would, with a real
+    # inherited deploy-lock fd (tick_continue releases and closes it).
+    fd = os.open(str(base / "run/pareton-deploy.lock"), os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    monkeypatch.setenv("PARETON_INHERIT_DEPLOY_LOCK_FD", str(fd))
+    assert release.tick(["--continue-op", state["op_id"]]) == 2
+    state = read_state(base)
+    assert state["startup_complete"] is False
+    assert state["failure_step"] == "start-failed"
+    # Next tick reports the partial startup instead of skipping it.
+    assert release.tick([]) == 2
+    run_state = (base / "var/lib/pareton-deploy/last-run.env").read_text()
+    assert "verifying-partial-startup" in run_state
+
+
+def test_unpause_not_idle_refusal_is_terminal(base):
+    write_state(
+        base,
+        phase="verifying",
+        startup_complete=True,
+        hold={
+            "reason": "r",
+            "operator": "o",
+            "at": release.now_iso(),
+            "baseline_commit": "c1",
+        },
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "unpause",
+            "status": "pending",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    assert release.tick([]) == 1
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "failed"
+    assert request["result"]["step"] == "unpause-not-idle"
+
+
+def test_vector_fast_path_log_failure_is_unaccepted_steady_state(base, monkeypatch):
+    # The worktree already moved; idling would make the next tick a FULL
+    # drain for a TOML-only change. The failure must park in verifying with
+    # log_accepted=False (Bugbot Medium 6).
+    write_state(base)
+    release.run_cmd.git_refs = {"origin/main": "c2", "HEAD": "c1"}
+    release.run_cmd.git_diff = "ops/vector/vector.toml\n"
+    release.run_cmd.sync_exit = 1
+    release.run_cmd.sync_stdout = json.dumps(
+        {"findings": [{"category": "different", "target": "/etc/vector/vector.toml"}]}
+    )
+    monkeypatch.setattr(release, "gpu_probe_flow", lambda op_id, probe: None)
+    monkeypatch.setattr(
+        release,
+        "run_log_check",
+        lambda probe, **kw: (1, {"missing": ["pareton-api.service"]}),
+    )
+    assert release.tick([]) == 1
+    state = read_state(base)
+    assert state["phase"] == "verifying"
+    assert state["scope"] == "vector-only"
+    assert state["log_accepted"] is False
+    assert state["failure_step"] == "log-ingestion"
+    assert state["verified_commit"] == "c1"  # not advanced
+    # Steady state: no auto re-verify.
+    assert release.tick([]) == 0
+    run_state = (base / "var/lib/pareton-deploy/last-run.env").read_text()
+    assert "last_step=log-unaccepted" in run_state
