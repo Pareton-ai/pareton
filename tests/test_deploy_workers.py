@@ -44,9 +44,7 @@ def test_wrapper_passes_extra_args(tmp_path):
     ops = tmp_path / "ops"
     ops.mkdir()
     stub = ops / "release.py"
-    stub.write_text(
-        "#!/usr/bin/env python3\nimport sys\nprint(sys.argv[1:])\n"
-    )
+    stub.write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv[1:])\n")
     stub.chmod(0o755)
     env = {**os.environ, "PARETON_OPS_DIR": str(ops)}
     result = subprocess.run(

@@ -17,8 +17,6 @@ import signal
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 
 import config
 from campaign.store import claim_next_job, count_pending_jobs
@@ -39,11 +37,10 @@ HEARTBEAT_INTERVAL_S = 300.0
 # themselves stay on the 300-second cadence.
 PROBE_POLL_S = 5.0
 # A hung DB read must not stall the probe loop: bound the queue-depth fetch
-# and omit the field on timeout, same as on error (spec 7.2).
+# and omit the field on timeout, same as on error (spec 7.2). The fetch runs
+# on a daemon thread so a permanently stuck query never blocks process exit
+# either (CR P2-6) — systemd's stop budget would otherwise wait it out.
 QUEUE_DEPTH_TIMEOUT_S = 8.0
-
-# Single worker thread so a stuck query serializes instead of piling up.
-_depth_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hb-db")
 
 
 def worker_unit_name() -> str:
@@ -57,16 +54,25 @@ def _queue_depth() -> int | None:
     whereas a dead heartbeat thread pages heartbeat-absent as though the
     whole worker had died.
     """
-    try:
-        return _depth_executor.submit(count_pending_jobs).result(
-            timeout=QUEUE_DEPTH_TIMEOUT_S
-        )
-    except FutureTimeout:
+    done = threading.Event()
+    holder: dict[str, int] = {}
+
+    def _fetch() -> None:
+        try:
+            holder["depth"] = count_pending_jobs()
+        except Exception:
+            holder["depth"] = -1
+        finally:
+            done.set()
+
+    threading.Thread(target=_fetch, daemon=True, name="hb-db").start()
+    if not done.wait(QUEUE_DEPTH_TIMEOUT_S):
         logger.warning("queue depth timed out; heartbeat omits it")
         return None
-    except Exception:
-        logger.warning("queue depth unavailable; heartbeat omits it", exc_info=True)
+    if holder.get("depth") == -1:
+        logger.warning("queue depth unavailable; heartbeat omits it")
         return None
+    return holder.get("depth")
 
 
 def _heartbeat_loop(

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import platform
 import subprocess
@@ -40,8 +39,6 @@ from ops_common import (
     read_json,
     write_json_atomic,
 )
-
-_structured_logger = logging.getLogger("pareton.lifecycle")
 
 
 def emit_structured(event: str, **fields) -> None:

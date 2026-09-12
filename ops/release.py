@@ -260,12 +260,20 @@ def mutate_state(mutator, *, required: bool = True) -> dict:
         return state
 
 
+_TICK_STARTED_AT: str | None = None
+
+
 def record_step(step: str, extra: dict | None = None) -> None:
-    """Progress lines for the failure notifier (same env-file format)."""
+    """Progress lines for the failure notifier (same env-file format).
+
+    started_at is this tick's own start time: the notifier treats
+    last_success > started_at as "already recovered" and stays silent, so a
+    state-derived timestamp would swallow early-tick failures (CR P1-5).
+    """
     state = read_json(state_path()) or {}
     lines = {
         "invocation_id": os.environ.get("INVOCATION_ID", "manual"),
-        "started_at": state.get("updated_at") or now_iso(),
+        "started_at": _TICK_STARTED_AT or now_iso(),
         "from_commit": state.get("from_commit", "unknown"),
         "target_commit": state.get("target_commit", "unknown"),
         "last_step": step,
@@ -320,9 +328,21 @@ def exec_allow(state: dict | None) -> tuple[bool, str]:
 # systemctl / git / venv helpers
 
 
-def unit_is_active(unit: str) -> bool:
+_STOPPED_IS_ACTIVE = ("inactive", "failed")
+
+
+def unit_is_stopped(unit: str) -> bool:
+    """systemctl is-active says stopped only for inactive/failed.
+
+    "deactivating"/"activating"/"reloading" are still running: treating them
+    as stopped let applies start while a stop was mid-flight (CR P1-3).
+    """
     result = run_cmd(["systemctl", "is-active", unit], timeout=30)
-    return result.stdout.strip() == "active"
+    return result.stdout.strip() in _STOPPED_IS_ACTIVE
+
+
+def unit_is_active(unit: str) -> bool:
+    return not unit_is_stopped(unit)
 
 
 def unit_is_enabled(unit: str) -> bool:
@@ -384,7 +404,12 @@ def db_running_records() -> dict:
         "print(json.dumps(out))\n"
     )
     try:
-        result = run_cmd([str(venv_python()), "-c", probe], timeout=DB_PROBE_TIMEOUT_S)
+        result = run_cmd(
+            [str(venv_python()), "-c", probe],
+            timeout=DB_PROBE_TIMEOUT_S,
+            cwd=repo(),
+            env={"PYTHONPATH": str(repo())},
+        )
     except subprocess.TimeoutExpired:
         return {"error": "db-probe-timeout"}
     if result.returncode != 0:
@@ -501,13 +526,27 @@ def emit_deploy_probe(probe: dict) -> None:
     )
 
 
+def gpu_reap_wait_s() -> int:
+    return int(os.environ.get("PARETON_GPU_REAP_WAIT_S", "1800"))
+
+
 def gpu_probe_flow(op_id: str, probe: dict) -> None:
-    """One-shot GPU reap probe: pause timer, request, run, consume (7.2)."""
+    """One-shot GPU reap probe: pause timer, request, run, consume (7.2).
+
+    Waiting for an in-flight reap is capped at 30 minutes (spec 4.4): on
+    timeout the verification fails with a preparation-step report, the
+    timer is restored, the target stays unaccepted, and business continues.
+    """
     # The timer was stopped at quiescing for full releases; the vector-only
     # path stops it here.
     if unit_is_active("pareton-gpu-reap.timer"):
         stop_unit("pareton-gpu-reap.timer")
-    _wait_units_inactive(ONESHOT_UNITS[:1], budget_s=120, step="gpu-reap-wait")
+    pending = _wait_units_inactive(
+        ONESHOT_UNITS[:1], budget_s=gpu_reap_wait_s(), step="gpu-reap-wait"
+    )
+    if pending:
+        _restore_maint_timers(load_state())
+        raise Fail(1, "gpu-reap-wait-timeout", units=pending)
     request = {
         "invocation_id": os.environ.get("INVOCATION_ID", "manual"),
         "op_id": op_id,
@@ -598,7 +637,9 @@ def run_log_check(probe: dict, *, skip_acceptance: bool = False) -> tuple[int, d
     )
     start = parse_iso(probe["issued_at"]) or parse_iso(now_iso())
     # Clock-skew margin on the query window (spec 7.3).
-    start_epoch = time.mktime(start.timetuple()) - 300
+    import calendar
+
+    start_epoch = calendar.timegm(start.utctimetuple()) - 300
     body = {
         "apl": apl,
         "startTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start_epoch)),
@@ -826,14 +867,16 @@ def restore_recovery_venv(copy_dir: Path) -> None:
     stage = repo() / f".venv.restore.{os.getpid()}"
     shutil.copytree(source, stage, symlinks=True)
     displaced = repo() / f".venv.displaced.{os.getpid()}"
+    os.rename(target, displaced)
     try:
-        os.rename(target, displaced)
         os.rename(stage, target)
     except OSError as exc:
+        # Put the original back before raising: deleting the displaced copy
+        # here would destroy the only good venv (CR P3).
+        os.rename(displaced, target)
         shutil.rmtree(stage, ignore_errors=True)
         raise Fail(2, "venv-restore-failed", detail=type(exc).__name__) from exc
-    finally:
-        shutil.rmtree(displaced, ignore_errors=True)
+    shutil.rmtree(displaced, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -845,6 +888,8 @@ def tick(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="release.py tick")
     parser.add_argument("--continue-op", default=None)
     args = parser.parse_args(argv)
+    global _TICK_STARTED_AT
+    _TICK_STARTED_AT = now_iso()
     if args.continue_op:
         return tick_continue(args.continue_op)
 
@@ -877,10 +922,18 @@ def tick_locked() -> int:
         )
         return 2
 
-    if active and (active.get("status") == "pending" or active.get("type") == "cancel"):
-        return execute_request(state, active)
+    if active:
+        if active.get("status") == "pending":
+            return execute_request(state, active)
+        kind = active["type"]
+        # Running requests: cancel re-enters its stop-wait loop; verify
+        # re-runs idempotently from idle; drain-first recovery (rollback/
+        # reset/resume) continues through the normal phase dispatch below
+        # so a busy worker cannot strand the operation (CR P1-4).
+        if kind == "cancel" or (kind == "verify" and state["phase"] == "idle"):
+            return execute_request(state, active)
 
-    if state.get("hold"):
+    if state.get("hold") and active is None:
         return tick_held(state)
 
     phase = state["phase"]
@@ -983,7 +1036,7 @@ def tick_idle(state: dict) -> int:
     # Classify the change set (spec 4.3): the only fast path is a complete
     # change set touching nothing but ops/vector/vector.toml with no owed
     # restart debt.
-    changed_files = _changed_managed_files(state["verified_commit"], target)
+    changed_files = _changed_files(state["verified_commit"], target)
     vector_only = (
         all(f == "ops/vector/vector.toml" for f in changed_files)
         and drift_exit == 1
@@ -1015,13 +1068,23 @@ def tick_idle(state: dict) -> int:
     return tick_draining(mutate_state(lambda s: None))
 
 
-def _changed_managed_files(from_commit: str, target: str) -> list[str]:
+def _changed_files(from_commit: str, target: str) -> list[str]:
+    """Full-tree diff: release-scope decisions must see business commits too.
+
+    An ops/-only listing made the vector-only classification vacuously true
+    for business commits (CR P1-2) and hid requirements.txt changes from the
+    pip decision (CR P1-1).
+    """
     if from_commit == target:
         return []
-    result = git("diff", "--name-only", from_commit, target, "--", "ops/")
+    result = git("diff", "--name-only", from_commit, target)
     if result.returncode != 0:
         return ["<diff-error>"]
     return [line for line in result.stdout.splitlines() if line]
+
+
+def _requirements_changed(changed: list[str]) -> bool:
+    return any(f in ("requirements.txt", "api/requirements.txt") for f in changed)
 
 
 def _drift_only_vector() -> bool:
@@ -1065,6 +1128,9 @@ def vector_fast_path(state: dict, target: str) -> int:
         )
     )
     try:
+        dirty = git("status", "--porcelain", "--untracked-files=no")
+        if dirty.stdout.strip():
+            raise Fail(2, "worktree-dirty")
         git_out("reset", "--hard", target)
         result = run_cmd(
             [
@@ -1085,6 +1151,10 @@ def vector_fast_path(state: dict, target: str) -> int:
                 "vector-install-failed",
                 detail=result.stdout.strip()[:400],
             )
+        probe = write_probe(str(uuid.uuid4()), target)
+        gpu_probe_flow(op_id, probe)
+        emit_deploy_probe(probe)
+        code, report = run_log_check(probe)
     except Fail as failure:
         reason, code = failure.reason, failure.code
         mutate_state(
@@ -1092,14 +1162,11 @@ def vector_fast_path(state: dict, target: str) -> int:
                 {"phase": "idle", "scope": "full", "failure_step": reason}
             )
         )
+        _restore_maint_timers(load_state())
         record_step(reason)
         print(f"release: {reason}", file=sys.stderr)
+        clear_coordination_files()
         return code or 2
-
-    probe = write_probe(str(uuid.uuid4()), target)
-    gpu_probe_flow(op_id, probe)
-    emit_deploy_probe(probe)
-    code, report = run_log_check(probe)
     _restore_maint_timers(load_state())
     if code != 0:
         mutate_state(
@@ -1304,8 +1371,10 @@ def tick_applying(state: dict) -> int:
         record_step(failure.reason)
         return failure.code
 
-    changed = _changed_managed_files(state["from_commit"], state["target_commit"])
-    if "requirements.txt" in changed or direction == "rollback":
+    # Rollback never re-resolves dependencies: the restored venv copy IS
+    # the environment (spec 6.2; un-pinned requirements make pip a mutation).
+    changed = _changed_files(state["from_commit"], state["target_commit"])
+    if _requirements_changed(changed) and direction == "forward":
         result = run_cmd(
             [
                 str(venv_python().parent / "pip"),
@@ -1365,7 +1434,8 @@ def tick_applying(state: dict) -> int:
 
 
 def tick_continue(op_id: str) -> int:
-    global _DEPLOY_LOCK_FD
+    global _DEPLOY_LOCK_FD, _TICK_STARTED_AT
+    _TICK_STARTED_AT = _TICK_STARTED_AT or now_iso()
     try:
         deploy_fd = int(os.environ.get("PARETON_INHERIT_DEPLOY_LOCK_FD", "0"))
         activity_fd = int(os.environ.get("PARETON_INHERIT_ACTIVITY_LOCK_FD", "0"))
@@ -1403,7 +1473,7 @@ def tick_continue(op_id: str) -> int:
 
 
 def tick_verifying_resume(state: dict) -> int:
-    """A tick found phase=verifying: log check was interrupted or failed."""
+    """A tick found phase=verifying with startup complete."""
     if state.get("startup_complete") is not True:
         record_step("verifying-partial-startup")
         print(
@@ -1411,7 +1481,18 @@ def tick_verifying_resume(state: dict) -> int:
             file=sys.stderr,
         )
         return 2
-    # The deploy mutex is already held by this tick.
+    if state.get("failure_step") in (
+        "log-ingestion",
+        "axiom-query",
+        "notification-acceptance-required",
+    ):
+        # A finished-but-failed verification is the "running, unaccepted"
+        # steady state (spec 4.2): business continues, automatic re-verify
+        # would re-run the GPU probe and Axiom loop every tick; wait for the
+        # explicit verify / rollback / vector-repair instead.
+        record_step("log-unaccepted", {"detail": state["failure_step"]})
+        return 0
+    # The verification was interrupted mid-flight; continue it.
     return verify_flow(load_state(), fresh_start=False)
 
 
@@ -1496,11 +1577,11 @@ def finish_verification(state: dict, code: int, report: dict) -> int:
             [
                 sys.executable,
                 str(repo() / "ops" / "sync-config.py"),
-                "settle-debts",
+                "effectuate-restarts",
                 "--repo",
                 str(repo()),
             ],
-            timeout=120,
+            timeout=300,
         )
         _restore_maint_timers(state)
         prune_recovery_copies()
@@ -1532,6 +1613,7 @@ def finish_verification(state: dict, code: int, report: dict) -> int:
     print(
         f"release: log verification failed: {json.dumps(report)[:400]}", file=sys.stderr
     )
+    _restore_maint_timers(state)
     clear_coordination_files()
     _finish_request("failed", {"step": step})
     return 1 if code == 1 else 2
@@ -1704,6 +1786,13 @@ def execute_request(state: dict, request: dict) -> int:
     return handler(state, request)
 
 
+def _refuse(request: dict, step: str) -> None:
+    """Refused requests end as failed instead of retrying every tick
+    and blocking new registrations (spec 6.3, CR P1-4)."""
+    record_step(step)
+    _finish_request("failed", {"step": step})
+
+
 def _mark_request_running(request: dict) -> None:
     request["status"] = "running"
     with state_lock():
@@ -1754,7 +1843,7 @@ def _request_rollback(state: dict, request: dict) -> int:
     run_cmd(["systemctl", "disable", "--now", DEPLOY_TIMER], timeout=60)
     target = state["verified_commit"]
     if not state.get("recovery_copy"):
-        record_step("rollback-no-copy")
+        _refuse(request, "rollback-no-copy")
         print(
             "request rollback: no recovery copy for the current op; "
             "venv restores only from a saved copy",
@@ -1766,7 +1855,7 @@ def _request_rollback(state: dict, request: dict) -> int:
 
 def _request_resume(state: dict, request: dict) -> int:
     if state["phase"] not in ("applying", "verifying"):
-        record_step("resume-not-applicable")
+        _refuse(request, "resume-not-applicable")
         print(
             f"request resume: phase is {state['phase']}, not interrupted work",
             file=sys.stderr,
@@ -1779,7 +1868,7 @@ def _request_resume(state: dict, request: dict) -> int:
 
 def _request_cancel(state: dict, request: dict) -> int:
     if state["phase"] not in ("draining", "quiescing"):
-        record_step("cancel-not-applicable")
+        _refuse(request, "cancel-not-applicable")
         print(
             f"request cancel: phase is {state['phase']}; only pre-write phases",
             file=sys.stderr,
@@ -1805,13 +1894,10 @@ def _request_cancel(state: dict, request: dict) -> int:
             record_step("cancel-wait", {"detail": ",".join(pending)})
             return 0  # next tick continues the cancel
 
+    # Phase goes back to idle BEFORE any start: ExecCondition re-reads the
+    # state file when systemd starts the unit, and quiescing denies startup
+    # (CR P1-6). Snapshot keys are bare unit names, not FQNs.
     snapshot = state.get("original_units") or {}
-    for unit in ALL_RESIDENT:
-        if snapshot.get(f"{unit}.service", {}).get("active", True):
-            start_unit(f"{unit}.service")
-    for timer in MAINT_TIMERS:
-        if snapshot.get(timer, {}).get("active", True):
-            start_unit(timer)
     mutate_state(
         lambda s: s.update(
             {
@@ -1822,6 +1908,12 @@ def _request_cancel(state: dict, request: dict) -> int:
             }
         )
     )
+    for unit in ALL_RESIDENT:
+        if snapshot.get(unit, {}).get("active", True):
+            start_unit(f"{unit}.service")
+    for timer in MAINT_TIMERS:
+        if snapshot.get(timer, {}).get("active", True):
+            start_unit(timer)
     request["status"] = "done"
     request["result"] = {"cancelled_target": state["target_commit"]}
     request["finished_at"] = now_iso()
@@ -1834,12 +1926,24 @@ def _request_cancel(state: dict, request: dict) -> int:
 
 def _request_verify(state: dict, request: dict) -> int:
     if state["phase"] not in ("verifying", "idle"):
-        record_step("verify-not-applicable")
+        _refuse(request, "verify-not-applicable")
         print(f"request verify: phase is {state['phase']}", file=sys.stderr)
         return 1
     if state["phase"] == "verifying" and state.get("startup_complete") is not True:
-        record_step("verify-partial-startup")
+        _refuse(request, "verify-partial-startup")
         return 1
+    if state["phase"] == "idle":
+        # The GPU dispatch only consumes one-shot probe requests while the
+        # phase is verifying (spec 7.2); enter it before checking logs.
+        mutate_state(
+            lambda s: s.update(
+                {
+                    "phase": "verifying",
+                    "startup_complete": True,
+                    "phase_since": now_iso(),
+                }
+            )
+        )
     _mark_request_running(request)
     return verify_flow(load_state(), fresh_start=False)
 
@@ -1856,7 +1960,7 @@ def _request_unpause(state: dict, request: dict) -> int:
         record_step(failure.reason)
         return failure.code
     if request.get("main_commit") and remote != request["main_commit"]:
-        record_step("unpause-main-moved")
+        _refuse(request, "unpause-main-moved")
         print(
             f"request unpause: origin/main moved to {remote[:12]}; "
             "re-register with the new commit",
@@ -1880,23 +1984,31 @@ def _request_unpause(state: dict, request: dict) -> int:
 def _request_vector_repair(state: dict, request: dict) -> int:
     repair_target = request.get("target")
     if state["phase"] != "verifying" or state.get("startup_complete") is not True:
-        record_step("vector-repair-not-applicable")
+        _refuse(request, "vector-repair-not-applicable")
         print(
             "request vector-repair: only for a healthy target with failed logs",
             file=sys.stderr,
         )
         return 1
+    dirty = git("status", "--porcelain", "--untracked-files=no")
+    if dirty.stdout.strip():
+        _refuse(request, "vector-repair-worktree-dirty")
+        print(
+            "request vector-repair: tracked worktree modifications present",
+            file=sys.stderr,
+        )
+        return 1
     head = git_out("rev-parse", "HEAD")
     if head != state["target_commit"]:
-        record_step("vector-repair-head-moved")
+        _refuse(request, "vector-repair-head-moved")
         print(
             "request vector-repair: HEAD no longer the recorded target B",
             file=sys.stderr,
         )
         return 1
-    changed = _changed_managed_files(state["target_commit"], repair_target)
+    changed = _changed_files(state["target_commit"], repair_target)
     if changed != ["ops/vector/vector.toml"]:
-        record_step("vector-repair-scope")
+        _refuse(request, "vector-repair-scope")
         print(
             f"request vector-repair: B..C diff is {changed}, must be TOML-only",
             file=sys.stderr,
@@ -1904,7 +2016,7 @@ def _request_vector_repair(state: dict, request: dict) -> int:
         return 1
     drift_exit = sync_check_exit()
     if drift_exit == 1 and not _drift_only_vector():
-        record_step("vector-repair-drift")
+        _refuse(request, "vector-repair-drift")
         print(
             "request vector-repair: unmanaged drift beyond vector.toml", file=sys.stderr
         )
@@ -1952,6 +2064,10 @@ def execute_reset(request: dict) -> int:
         )
     baseline = request["baseline_commit"]
     op_id = str(uuid.uuid4())
+    # verified_commit carries the operator-declared recovery anchor from the
+    # start (the schema requires it, and a rollback during the reset must
+    # have a target); "verified" in the acceptance sense is gated by
+    # phase/log_accepted, which only a completed verify sets.
     fresh = {
         "schema_version": SCHEMA_VERSION,
         "op_id": op_id,
@@ -2200,7 +2316,6 @@ def cmd_check_logs(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="release.py check-logs")
     parser.add_argument("--probe-id", default=None)
     parser.add_argument("--target", default=None)
-    parser.add_argument("--skip-acceptance", action="store_true")
     args = parser.parse_args(argv)
     probe = read_json(probe_path())
     if args.probe_id:
@@ -2215,7 +2330,7 @@ def cmd_check_logs(argv: list[str]) -> int:
         return 2
     if args.target:
         probe["target_commit"] = args.target
-    code, report = run_log_check(probe, skip_acceptance=args.skip_acceptance)
+    code, report = run_log_check(probe)
     print(json.dumps(report, default=str))
     return code
 

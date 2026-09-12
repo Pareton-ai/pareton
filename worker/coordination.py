@@ -30,8 +30,8 @@ from observability.events import _emit
 GATE_POLL_S = 5.0
 PARK_EVENT_INTERVAL_S = 30.0
 
-# Keep in sync with ops/release.py evaluate_gate(); tests parametrize over
-# the same spec 4.5 matrix.
+# Keep in sync with ops/release.py gate_open(); tests parametrize over the
+# same spec 4.5 matrix.
 _PHASES = (
     "idle",
     "draining",
@@ -66,6 +66,20 @@ def state_path() -> Path:
     )
 
 
+def _key_fields_valid(state: dict) -> bool:
+    """Mirror release.validate_state's critical-field checks: a state file
+    missing op_id/commits/direction is corrupt here too, not 'open' (CR P3)."""
+    return (
+        isinstance(state.get("op_id"), str)
+        and bool(state["op_id"])
+        and all(
+            isinstance(state.get(key), str) and bool(state[key])
+            for key in ("from_commit", "target_commit", "verified_commit")
+        )
+        and state.get("direction", "forward") in ("forward", "rollback", "reset")
+    )
+
+
 def gate_open() -> tuple[bool, str]:
     """Evaluate the claim gate against the spec 4.5 matrix."""
     try:
@@ -73,6 +87,8 @@ def gate_open() -> tuple[bool, str]:
     except (OSError, ValueError):
         return False, "state-corrupt"
     if not isinstance(state, dict) or state.get("schema_version") != 2:
+        return False, "state-corrupt"
+    if not _key_fields_valid(state):
         return False, "state-corrupt"
     phase = state.get("phase")
     if phase not in _PHASES or state.get("scope") not in ("full", "vector-only"):

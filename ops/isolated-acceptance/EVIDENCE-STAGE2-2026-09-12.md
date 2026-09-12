@@ -7,8 +7,17 @@ Environment: macOS host, Docker Desktop, image `pareton-systemd-verify`
 fresh repo inside the container. Script:
 `ops/isolated-acceptance/stage2-acceptance.sh` (unmodified run).
 
-Result: **40/40 assertions PASS**, final line `ALL-STAGE2-ISOLATED-ACCEPTANCE-PASSED`,
-exit 0. Key observed behaviors:
+Result (first run, pre-CR commit 2887328): 40/40 with an os.chdir-side effect
+that a later commit removed — invalid as evidence for the committed tree (see
+the 2026-09-12 CR, P0-2).
+
+**Re-run after the CR fixes (same day, no drop-ins, committed units):**
+40/40 assertions PASS, final line `ALL-STAGE2-ISOLATED-ACCEPTANCE-PASSED`,
+exit 0 — including the deploy unit's own WorkingDirectory/EnvironmentFile
+driving the DB probe, finite TimeoutStartSec=4h, full-tree release-scope
+classification, stopped-state semantics, request lifecycle (refusals end as
+failed; busy rollback continues), started_at at tick entry, verify-from-idle
+entering verifying, and maintenance-timer restore on log failure. Key observed behaviors:
 
 - S1 bootstrap: `request reset` + one deploy run created state under hold,
   drained, applied, re-exec'd to the installed entrypoint, started all five
