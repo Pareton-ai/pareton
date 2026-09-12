@@ -52,10 +52,11 @@ class FakeRunner:
         self.sync_exit = 0
         self.sync_stdout = ""
         self.sync_apply_exit = 0
+        self.vector_version = "vector 0.57.0"
         self.pip_exit = 0
         self.deploy_invocation = "inv-1"
 
-    def __call__(self, argv, env=None, timeout=300, cwd=None):
+    def __call__(self, argv, env=None, timeout=300, cwd=None, pass_fds=()):
         self.calls.append(list(argv))
         cmd = argv[0]
         out, rc = "", 0
@@ -97,6 +98,8 @@ class FakeRunner:
         elif cmd.endswith("python"):
             if "-c" in argv:
                 out = json.dumps(self.db)
+        elif cmd == "vector" and "--version" in argv:
+            out = self.vector_version
         elif cmd.endswith("pip"):
             rc = self.pip_exit
         else:
@@ -265,11 +268,19 @@ def test_corrupt_state_fails_closed(base):
 
 
 def axiom_response(units):
-    columns = [{"name": "_SYSTEMD_UNIT"}, {"name": "probe_id"}]
-    rows = [[u, "probe-x"] for u in units]
+    """Official tabular shape: fields[] names align with column-major
+    columns[] arrays (Axiom docs, endpoints/queryApl; PR-review P1-1)."""
     return {
         "status": {"isPartial": False},
-        "tables": [{"columns": columns, "rows": rows}],
+        "tables": [
+            {
+                "fields": [
+                    {"name": "_SYSTEMD_UNIT", "type": "string"},
+                    {"name": "probe_id", "type": "string"},
+                ],
+                "columns": [list(units), ["probe-x"] * len(units)],
+            }
+        ],
     }
 
 
@@ -439,6 +450,7 @@ def acceptance_record(base: Path, commit="cA"):
         {
             "host": release.platform.node(),
             "commit": commit,
+            "vector_version": "vector 0.57.0",
             "vector_version": "vector 0.57.0",
             "drilled_at": "2026-09-12T00:00:00Z",
             "failure_invocation": "i",
@@ -1494,3 +1506,297 @@ def test_degraded_mode_fails_closed_and_compares_whole_files(base, monkeypatch):
     # In degraded mode even the include_units exemption does not engage.
     assert status == "required"
     assert detail["reason"] == "vector-toml-changed"
+
+
+# ---------------------------------------------------------------------------
+# Independent PR-review regressions (six P1 + four P2)
+
+
+def test_axiom_official_shape_parses_and_empty_is_valid(axiom, base):
+    # Official tabular: fields[] names + column-major columns[]. Empty
+    # result = zero-height columns, not a missing "rows" key (P1-1).
+    axiom["response"] = {
+        "status": {"isPartial": False},
+        "tables": [
+            {
+                "fields": [{"name": "probe_id"}, {"name": "_SYSTEMD_UNIT"}],
+                "columns": [
+                    ["p"] * 7,
+                    [
+                        f"pareton-{u}.service"
+                        for u in (
+                            "worker",
+                            "round-worker",
+                            "watcher",
+                            "api",
+                            "weights",
+                            "gpu-reap",
+                            "deploy",
+                        )
+                    ],
+                ],
+            }
+        ],
+    }
+    code, report = release.run_log_check(
+        {"probe_id": "p", "target_commit": "c", "issued_at": release.now_iso()},
+        skip_acceptance=True,
+    )
+    assert code == 0
+    # An empty table is a valid "no events yet" answer, not a parse error.
+    axiom["response"] = {
+        "status": {"isPartial": False},
+        "tables": [{"fields": [{"name": "_SYSTEMD_UNIT"}], "columns": [[]]}],
+    }
+    code, report = release.run_log_check(
+        {"probe_id": "p", "target_commit": "c", "issued_at": release.now_iso()},
+        skip_acceptance=True,
+    )
+    assert code == 1  # missing sources, not a query/parse failure
+
+
+def test_drill_evidence_requires_sent_matching_notification(axiom, base, monkeypatch):
+    # A suppressed or mismatched notification is not drill evidence (P1-1).
+    write_vector_toml(base)
+    monkeypatch.setenv("PARETON_AXIOM_QUERY_TOKEN", "t")
+    (base / "opt/pareton/.env").write_text("PARETON_AXIOM_TOKEN=t\n")
+    monkeypatch.setattr(
+        release,
+        "http_post_json",
+        lambda *a, **k: (
+            200,
+            {
+                "status": {"isPartial": False},
+                "tables": [
+                    {
+                        "fields": [
+                            {"name": "invocation_id"},
+                            {"name": "outcome"},
+                            {"name": "message_id"},
+                            {"name": "host"},
+                        ],
+                        "columns": [
+                            ["inv-1"],
+                            ["suppressed"],
+                            ["m-1"],
+                            [release.platform.node()],
+                        ],
+                    }
+                ],
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(release, "git_out", lambda *a: "cA")
+    assert (
+        release.cmd_record_acceptance(
+            ["--invocation", "inv-1", "--message-id", "m-1", "--confirmed-by", "o"]
+        )
+        == 1
+    )
+
+
+def test_activating_auto_restart_is_not_healthy(base, monkeypatch):
+    # A crash-looping worker shows "activating"; startup acceptance must
+    # require exactly "active" (P1-2).
+    states = {"pareton-worker.service": "activating"}
+
+    def fake_run(argv, env=None, timeout=300, cwd=None, pass_fds=()):
+        class Result:
+            pass
+
+        result = Result()
+        result.returncode = 0
+        result.stdout = states.get(argv[-1], "inactive")
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(release, "run_cmd", fake_run)
+    assert release.unit_strictly_active("pareton-worker.service") is False
+    assert release.unit_is_active("pareton-worker.service") is True  # stop-wait view
+
+
+def test_cancel_resets_target_to_installed_version(base, monkeypatch):
+    # A cancelled A->B release leaves A installed; the abandoned target
+    # must not survive for a later verify to certify (P1-3).
+    write_state(base, phase="quiescing", verified_commit="A", target_commit="B")
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "cancel",
+            "status": "pending",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    assert release.tick([]) == 0
+    state = read_state(base)
+    assert state["phase"] == "idle"
+    assert state["target_commit"] == "A"
+    assert state["from_commit"] == "A"
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "done"
+
+
+def test_applying_install_failure_fails_running_resume(base, monkeypatch):
+    # A resume whose pip fails again must free the request slot — a stuck
+    # running request blocks the next explicit recovery (P1-4).
+    import fcntl
+
+    state = write_state(
+        base,
+        phase="applying",
+        direction="forward",
+        target_commit="c2",
+        verified_commit="c1",
+        from_commit="c1",
+        op_id="op-a",
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "resume",
+            "status": "running",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    make_mini_venv(base)
+    release.run_cmd.git_refs = {"origin/main": "c2", "HEAD": "c1"}
+    release.run_cmd.git_diff = "requirements.txt\n"
+    release.run_cmd.pip_exit = 1  # the re-install fails
+    release.run_cmd.db = {"error": None, "rounds": [], "submissions": []}
+    execve = {}
+    monkeypatch.setattr(
+        release.os, "execve", lambda path, args, env: execve.update(args=args)
+    )
+    # _request_resume requires apply/verify; drive the continuation via the
+    # phase machine exactly as a resumed tick would.
+    lock_fd = os.open(str(base / "run/pareton-deploy.lock"), os.O_RDWR | os.O_CREAT)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    monkeypatch.setattr(release, "_DEPLOY_LOCK_FD", lock_fd)
+    try:
+        assert release.tick_applying(read_state(base)) == 2
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "failed"
+    assert request["result"]["step"] == "deps-failed"
+    # The slot is free: the next recovery registers immediately.
+    assert release.cmd_request(["rollback", "--operator", "o"]) == 0
+
+
+def test_sync_write_modes_refuse_during_release(base, tmp_path, monkeypatch):
+    # Manual apply must not bypass the deploy mutex, an interrupted apply,
+    # or a held state (P1-5).
+    sync = load_ops_module("sync-config")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copytree(OPS, repo / "ops")
+    for sub in ("systemd", "gpu", "vector"):
+        (repo / "ops" / sub).mkdir(exist_ok=True)
+    lock = tmp_path / "deploy.lock"
+    state_file = tmp_path / "release-state.json"
+    monkeypatch.setenv("PARETON_SYNC_BASE", str(tmp_path / "base"))
+    monkeypatch.setenv("PARETON_DEPLOY_LOCK", str(lock))
+    monkeypatch.setenv("PARETON_RELEASE_STATE", str(state_file))
+
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def run_apply():
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = sync.main(["apply", "--repo", str(repo), "--source", "worktree"])
+        return code
+
+    # Another process holds the deploy mutex.
+    import fcntl
+
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        assert run_apply() == 3
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    # Lock free but an apply was interrupted.
+    release.write_json_atomic(state_file, {"phase": "applying"})
+    assert run_apply() == 3
+    # Lock free but the state is held.
+    release.write_json_atomic(state_file, {"phase": "idle", "hold": {"r": 1}})
+    assert run_apply() == 3
+
+
+def test_maintenance_services_carry_the_gate():
+    # P1-6: both maintenance services gate on release state before any
+    # venv-dependent step.
+    gpu = (OPS / "gpu" / "pareton-gpu-reap.service").read_text()
+    assert "ExecCondition=/usr/local/lib/pareton-ops/release.py gate" in gpu
+    assert gpu.index("ExecCondition=") < gpu.index("ExecStart=")
+    cleanup = (OPS / "systemd" / "pareton-builder-cleanup.service").read_text()
+    assert "ExecCondition=/usr/local/lib/pareton-ops/release.py gate" in cleanup
+    assert cleanup.index("ExecCondition=") < cleanup.index("ExecStartPre=")
+
+
+def test_cancel_waits_only_deactivating_units(base):
+    # Early-quiescing cancel: never-signalled residents keep running; only
+    # in-flight stops are waited on (P2-1).
+    write_state(
+        base, phase="quiescing", original_units={"pareton-api": {"active": True}}
+    )
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "cancel",
+            "status": "pending",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    # Residents are active (serving) but NOT deactivating.
+    release.run_cmd.active_units = {"pareton-api", "pareton-watcher", "pareton-weights"}
+    assert release.tick([]) == 0
+    request = json.loads(
+        (base / "var/lib/pareton-deploy/release-request.json").read_text()
+    )
+    assert request["status"] == "done"
+    assert read_state(base)["phase"] == "idle"
+
+
+def test_query_token_prefers_env_then_envfile_query_token(base, monkeypatch):
+    # P2-3: manual registrations read the dedicated query credential from
+    # .env, not only from the unit-injected environment.
+    monkeypatch.delenv("PARETON_AXIOM_QUERY_TOKEN", raising=False)
+    (base / "opt/pareton/.env").write_text(
+        "PARETON_AXIOM_TOKEN=ingest\nPARETON_AXIOM_QUERY_TOKEN=query\n"
+    )
+    assert release.axiom_query_token() == ("query", None)
+    monkeypatch.setenv("PARETON_AXIOM_QUERY_TOKEN", "env")
+    assert release.axiom_query_token() == ("env", None)
+    monkeypatch.delenv("PARETON_AXIOM_QUERY_TOKEN")
+    (base / "opt/pareton/.env").write_text("PARETON_AXIOM_TOKEN=ingest\n")
+    assert release.axiom_query_token() == ("ingest", None)
+
+
+def test_vector_version_change_requires_new_drill(base, monkeypatch):
+    # P2-4: the stored version is actually compared; unknown current
+    # version also requires a re-drill.
+    blobs = make_blob(**BASELINE_FILES)
+    blobs["cA"]["ops/vector/vector.toml"] = toml_blob().encode()
+    blobs["cB"]["ops/vector/vector.toml"] = toml_blob().encode()
+    FakeGitBlobs(monkeypatch, blobs)
+    acceptance_record(base)
+    assert release.acceptance_status("cB")[0] == "ok"
+    release.run_cmd.vector_version = "vector 0.58.0"
+    status, detail = release.acceptance_status("cB")
+    assert status == "required"
+    assert detail["reason"] == "vector-version-changed"
+    release.run_cmd.vector_version = ""  # unobtainable
+    status, detail = release.acceptance_status("cB")
+    assert detail["reason"] == "vector-version-unknown"

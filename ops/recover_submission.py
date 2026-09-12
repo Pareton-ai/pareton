@@ -31,7 +31,12 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from db.connection import db_connection
+# Run as a file (runbook: .venv/bin/python ops/recover_submission.py),
+# sys.path[0] is ops/ and the repo root never enters it; there is no
+# installed db package. Add the root explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from db.connection import db_connection  # noqa: E402
 
 TERMINAL_REJECT_STATES = ("rejected", "rejected_duplicate", "disqualified")
 PROGRESS_STATES = ("bench_queued", "scored")

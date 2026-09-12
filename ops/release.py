@@ -157,6 +157,16 @@ def venv_python() -> Path:
     return repo() / ".venv" / "bin" / "python"
 
 
+def _sync_coordination() -> dict:
+    """Env + fd for sync-config write modes the coordinator invokes itself."""
+    if _DEPLOY_LOCK_FD:
+        return {
+            "env": {"PARETON_INHERIT_DEPLOY_LOCK_FD": str(_DEPLOY_LOCK_FD)},
+            "pass_fds": (_DEPLOY_LOCK_FD,),
+        }
+    return {"env": {}, "pass_fds": ()}
+
+
 def drain_wait_s() -> int:
     return int(os.environ.get("PARETON_DRAIN_WAIT_S", "1800"))
 
@@ -188,6 +198,7 @@ def run_cmd(
     env: dict | None = None,
     timeout: int = 300,
     cwd: Path | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         argv,
@@ -197,6 +208,7 @@ def run_cmd(
         env={**os.environ, **(env or {})},
         timeout=timeout,
         cwd=str(cwd) if cwd else None,
+        pass_fds=pass_fds,
     )
 
 
@@ -358,6 +370,20 @@ def unit_is_stopped(unit: str) -> bool:
 
 def unit_is_active(unit: str) -> bool:
     return not unit_is_stopped(unit)
+
+
+def _is_deactivating(unit: str) -> bool:
+    result = run_cmd(["systemctl", "is-active", unit], timeout=30)
+    return result.stdout.strip() == "deactivating"
+
+
+def unit_strictly_active(unit: str) -> bool:
+    """Startup acceptance: exactly "active". An "activating (auto-restart)"
+    unit is a crash loop, not a healthy start (PR-review P1-2); the loose
+    is-active semantics stays reserved for stop-waiting.
+    """
+    result = run_cmd(["systemctl", "is-active", unit], timeout=30)
+    return result.stdout.strip() == "active"
 
 
 def unit_is_enabled(unit: str) -> bool:
@@ -593,13 +619,19 @@ def _wait_units_inactive(units, budget_s: int, step: str) -> list[str]:
 
 
 def axiom_query_token() -> tuple[str | None, str | None]:
+    """Query credential priority: process env, then a dedicated query token
+    in .env, then the ingest token (PR-review P2-3: manual registrations
+    have no unit EnvironmentFile, so .env must carry the query token too).
+    """
     explicit = os.environ.get("PARETON_AXIOM_QUERY_TOKEN")
     if explicit:
         return explicit, None
     values, problems = parse_env_file(p("/opt/pareton/.env"))
     if problems:
         return None, ",".join(problems)
-    token = values.get("PARETON_AXIOM_TOKEN", "")
+    token = values.get("PARETON_AXIOM_QUERY_TOKEN", "") or values.get(
+        "PARETON_AXIOM_TOKEN", ""
+    )
     if not token:
         return None, "token-missing"
     return token, None
@@ -708,23 +740,42 @@ def _query_is_partial(data: dict) -> bool:
     return bool(isinstance(status, dict) and status.get("isPartial"))
 
 
+def _table_rows(table: dict) -> list[dict]:
+    """Rows from the official tabular shape: ``fields`` lists the field
+    names in order, ``columns`` is column-major (columns[j] holds every
+    value of fields[j]) — there is no ``rows`` member (Axiom docs,
+    endpoints/queryApl; PR-review P1-1).
+    """
+    fields = [
+        field.get("name")
+        for field in table.get("fields", [])
+        if isinstance(field, dict)
+    ]
+    columns = [list(column) for column in table.get("columns", [])]
+    height = max((len(column) for column in columns), default=0)
+    # Guard j: a malformed table with fewer columns than fields must yield
+    # partial rows, not a crash — parse failures report as query errors.
+    return [
+        {
+            name: columns[j][i]
+            for j, name in enumerate(fields)
+            if j < len(columns) and i < len(columns[j])
+        }
+        for i in range(height)
+    ]
+
+
+_UNIT_FIELD_NAMES = ("_SYSTEMD_UNIT", "systemd.unit", "_systemd_unit")
+
+
 def _units_in_response(data: dict) -> list[str]:
     units: list[str] = []
     for table in data.get("tables", []):
-        columns = [c.get("name") for c in table.get("columns", [])]
-        unit_idx = next(
-            (
-                i
-                for i, name in enumerate(columns)
-                if name in ("_SYSTEMD_UNIT", "systemd.unit", "_systemd_unit")
-            ),
-            None,
-        )
-        if unit_idx is None:
-            continue
-        for row in table.get("rows", []):
-            if unit_idx < len(row) and row[unit_idx]:
-                units.append(str(row[unit_idx]))
+        for row in _table_rows(table):
+            for name in _UNIT_FIELD_NAMES:
+                if row.get(name):
+                    units.append(str(row[name]))
+                    break
     return units
 
 
@@ -755,6 +806,13 @@ def _drill_unit_files(unit: str) -> list[str]:
     return files
 
 
+def current_vector_version() -> str | None:
+    result = run_cmd(["vector", "--version"], timeout=30)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 def acceptance_status(target_commit: str) -> tuple[str, dict]:
     """Evaluate the spec 7.4 drill-evidence validity for this target."""
     record = read_json(acceptance_path())
@@ -762,6 +820,15 @@ def acceptance_status(target_commit: str) -> tuple[str, dict]:
         return "required", {"reason": "record-missing"}
     if record.get("host") != platform.node():
         return "required", {"reason": "host-changed"}
+    running_vector = current_vector_version()
+    if running_vector is None:
+        return "required", {"reason": "vector-version-unknown"}
+    if record.get("vector_version") != running_vector:
+        return "required", {
+            "reason": "vector-version-changed",
+            "recorded": record.get("vector_version"),
+            "current": running_vector,
+        }
     detail = {"acceptance_commit": record["commit"]}
     if not target_commit:
         return "required", {**detail, "reason": "target-unknown"}
@@ -940,6 +1007,12 @@ def tick(argv: list[str]) -> int:
     _DEPLOY_LOCK_FD = lock.fd
     try:
         return tick_locked()
+    except Fail as failure:
+        # A raised failure (recovery copy, GPU wait timeout, ...) ends the
+        # in-flight request too: a stranded running request blocks the very
+        # recovery the error message calls for (PR-review P1-4).
+        _finish_request("failed", {"step": failure.reason})
+        raise
     finally:
         lock.release()
 
@@ -1424,12 +1497,14 @@ def tick_applying(state: dict) -> int:
     status = git("status", "--porcelain", "--untracked-files=no")
     if status.stdout.strip():
         record_step("worktree-dirty")
+        _finish_request("failed", {"step": "worktree-dirty"})
         print("release: tracked worktree modifications present", file=sys.stderr)
         return 2
     try:
         git_out("reset", "--hard", state["target_commit"])
     except Fail as failure:
         record_step(failure.reason)
+        _finish_request("failed", {"step": failure.reason})
         return failure.code
 
     # Rollback never re-resolves dependencies: the restored venv copy IS
@@ -1448,6 +1523,7 @@ def tick_applying(state: dict) -> int:
         )
         if result.returncode != 0:
             record_step("deps-failed")
+            _finish_request("failed", {"step": "deps-failed"})
             print("release: pip install failed", file=sys.stderr)
             return 2
 
@@ -1463,9 +1539,11 @@ def tick_applying(state: dict) -> int:
             "worktree",
         ],
         timeout=600,
+        **_sync_coordination(),
     )
     if result.returncode != 0:
         record_step("install-failed", {"detail": result.stdout.strip()[:400]})
+        _finish_request("failed", {"step": "install-failed"})
         print(
             f"release: sync-config apply failed ({result.returncode})", file=sys.stderr
         )
@@ -1575,10 +1653,10 @@ def _wait_unit_healthy(unit: str, budget_s: int) -> bool:
         if unit == "pareton-api":
             if api_healthy():
                 return True
-        elif unit_is_active(unit):
+        elif unit_strictly_active(unit):
             return True
         time.sleep(2)
-    return api_healthy() if unit == "pareton-api" else unit_is_active(unit)
+    return api_healthy() if unit == "pareton-api" else unit_strictly_active(unit)
 
 
 def _mark_start_failed(unit: str) -> None:
@@ -1663,6 +1741,7 @@ def finish_verification(state: dict, code: int, report: dict) -> int:
                 str(repo()),
             ],
             timeout=120,
+            **_sync_coordination(),
         )
         if settled.returncode != 0:
             print(
@@ -1995,14 +2074,17 @@ def _request_cancel(state: dict, request: dict) -> int:
     if request.get("status") != "running":
         _mark_request_running(request)
     if state["phase"] == "quiescing":
-        # Only quiescing has stop signals in flight; waiting for units that
-        # are merely serving (draining) can never succeed, and the disabled
-        # timer means no next tick would come (Bugbot).
-        stopping = [
-            f"{u}.service" for u in ALL_RESIDENT if unit_is_active(f"{u}.service")
+        # Wait ONLY for units whose stop is actually in flight ("deactivating").
+        # Early-quiescing cancellation can arrive before residents were ever
+        # signalled; those are still serving the unchanged environment and
+        # must simply keep running (PR-review P2-1).
+        deactivating = [
+            f"{u}.service" for u in ALL_RESIDENT if _is_deactivating(f"{u}.service")
         ]
-        if stopping:
-            pending = _wait_units_inactive(stopping, budget_s=60, step="cancel-wait")
+        if deactivating:
+            pending = _wait_units_inactive(
+                deactivating, budget_s=60, step="cancel-wait"
+            )
             if pending:
                 record_step("cancel-wait", {"detail": ",".join(pending)})
                 return 0  # continue by starting pareton-deploy.service
@@ -2018,6 +2100,12 @@ def _request_cancel(state: dict, request: dict) -> int:
                 "scope": "full",
                 "failure_step": None,
                 "recovery_copy": None,
+                # Nothing was written, so the environment is still the
+                # verified baseline; the abandoned target must not survive
+                # here — a later `request verify` would otherwise certify a
+                # commit that was never installed (PR-review P1-3).
+                "target_commit": s["verified_commit"],
+                "from_commit": s["verified_commit"],
             }
         )
     )
@@ -2153,6 +2241,7 @@ def _request_vector_repair(state: dict, request: dict) -> int:
             "worktree",
         ],
         timeout=600,
+        **_sync_coordination(),
     )
     if result.returncode != 0:
         mutate_state(retarget)
@@ -2399,18 +2488,29 @@ def cmd_record_acceptance(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 2
-    events = [row for table in data.get("tables", []) for row in table.get("rows", [])]
-    if not events:
+    events = [row for table in data.get("tables", []) for row in _table_rows(table)]
+    problems = []
+    matching = []
+    for event in events:
+        if event.get("outcome") != "sent":
+            problems.append(f"outcome-{event.get('outcome', 'missing')}")
+            continue
+        if event.get("host") != platform.node():
+            problems.append("host-mismatch")
+            continue
+        if not event.get("message_id") or str(event["message_id"]) != args.message_id:
+            problems.append("message-id-mismatch")
+            continue
+        matching.append(event)
+    if not matching:
         print(
-            "record-notification-acceptance: no deploy-failed Axiom evidence for "
-            "this invocation; refusing to record (spec 7.4)",
+            "record-notification-acceptance: no sent deploy-failed notification "
+            f"matching invocation/host/message ({sorted(set(problems)) or 'no events'}); "
+            "refusing to record (spec 7.4)",
             file=sys.stderr,
         )
         return 1
-    vector_version = ""
-    result = run_cmd(["vector", "--version"], timeout=30)
-    if result.returncode == 0:
-        vector_version = result.stdout.strip()
+    vector_version = current_vector_version() or "unknown"
     record = {
         "host": platform.node(),
         "commit": head,

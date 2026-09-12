@@ -7,6 +7,11 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/pareton
 EnvironmentFile=-/opt/pareton/.env
+# Same release gate as the residents: an interrupted apply plus a host
+# reboot must not run maintenance from a half-installed environment
+# (spec 5.4 / B10). Verifying and vector-only windows stay allowed so the
+# one-shot probe dispatch keeps working.
+ExecCondition=/usr/local/lib/pareton-ops/release.py gate --unit pareton-gpu-reap
 # Stage-2 (spec 7.2): the dispatcher execs the real reap unless a valid,
 # unconsumed one-shot log-only probe request bound to the running deploy
 # exists. Expired/consumed/foreign requests never swallow a real reap.

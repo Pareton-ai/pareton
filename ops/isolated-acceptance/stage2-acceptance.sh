@@ -243,6 +243,7 @@ CONF
 cat > /root/mock-axiom.py <<'PY'
 import json
 import os
+import platform
 import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -286,17 +287,45 @@ class Handler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             pass
         units.discard("")
-        if drop:
-            units.discard(drop)
-        payload = {
-            "status": {"isPartial": False},
-            "tables": [
-                {
-                    "columns": [{"name": "_SYSTEMD_UNIT"}],
-                    "rows": [[u] for u in sorted(units)],
-                }
-            ],
-        }
+        if invocation:
+            # Official tabular shape. Deviation: the .invalid webhook fails
+            # by design in isolation, so a REAL deploy_failure_notified
+            # event for this invocation (the scan above) is projected as
+            # the sent receipt the production flow would have produced;
+            # with no real event the answer stays empty.
+            if units:
+                fields = [
+                    {"name": "invocation_id"},
+                    {"name": "outcome"},
+                    {"name": "message_id"},
+                    {"name": "host"},
+                    {"name": "_SYSTEMD_UNIT"},
+                ]
+                columns = [
+                    [invocation.group(1)],
+                    ["sent"],
+                    ["iso-drill-0001"],
+                    [platform.node()],
+                    ["pareton-deploy-failed.service"],
+                ]
+            else:
+                fields, columns = [{"name": "_SYSTEMD_UNIT"}], [[]]
+            payload = {
+                "status": {"isPartial": False},
+                "tables": [{"fields": fields, "columns": columns}],
+            }
+        else:
+            if drop:
+                units.discard(drop)
+            payload = {
+                "status": {"isPartial": False},
+                "tables": [
+                    {
+                        "fields": [{"name": "_SYSTEMD_UNIT"}],
+                        "columns": [sorted(units)],
+                    }
+                ],
+            }
         data = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

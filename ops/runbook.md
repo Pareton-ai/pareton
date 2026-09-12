@@ -178,7 +178,7 @@ section 4.5); `.deploy-done` is a compat alias rewritten from state.
 
 ```sh
 /usr/local/lib/pareton-ops/release.py status
-systemctl show pareton-deploy.service -p TimeoutStartUSec   # infinity after stage-2
+systemctl show pareton-deploy.service -p TimeoutStartUSec   # 4h after stage-2
 journalctl -u pareton-deploy -n 50 --no-pager
 ```
 
@@ -288,6 +288,46 @@ an authorized human decision, never a timer:
    checks.
 4. Handle residual records per S2, then restore services through the
    coordination entries above.
+
+## S4b. Stage-2 bootstrap (first install, spec section 8)
+
+The old workers do not understand the claim gate; the first install is a
+one-time transition executed in a maintenance window by an operator with
+write access:
+
+1. Confirm the stage-2 PR is merged and `origin/main` is the commit to
+   install. `systemctl disable --now pareton-deploy.timer`; wait for any
+   running `pareton-deploy.service` to finish. Record
+   `systemctl --version`, each unit's effective `TimeoutStopUSec`/`KillMode`
+   and `shutdown.target` properties (read-only, for §8.1).
+2. Old-worker drain transition: give both workers a temporary drop-in with
+   `KillMode=mixed` and a stop budget at least the current effective value
+   (worker 4h, round-worker 8h); `systemctl daemon-reload` and verify the
+   EFFECTIVE properties, then `systemctl stop --no-block` both workers.
+   The old code's signal drain finishes the in-flight job; wait for both
+   units to go inactive before touching the environment.
+3. Quiesce the remaining shared-environment users (API, watcher, weights,
+   maintenance timers) with `systemctl stop`.
+4. Install the stage-2 set by hand, helpers before units:
+   `release.py`, `ops_common.py`, `sync-config.py`, `notify-deploy-failure.py`
+   into `/usr/local/lib/pareton-ops/`; `ops/deploy.sh` to
+   `/usr/local/bin/pareton-deploy`; then `sync-config apply` (no release
+   state exists yet, so the coordination gate sees a fresh bootstrap) and
+   `systemctl daemon-reload`. Remove the temporary worker drop-ins and
+   re-run `sync-config check`.
+5. Initialize under hold and verify:
+   `$R request reset --baseline-commit <SHA> --confirm-evidence "..." --operator NAME`
+   then `systemctl start pareton-deploy.service` — the release drains,
+   applies, re-execs, and verifies; the first verify fails exactly on
+   `notification-acceptance-required`.
+6. Run the failure drill and register it (S3 below), then
+   `$R request verify` + one deploy run, and finally `request unpause
+   --main-commit <SHA>`.
+
+If any step cannot complete, restore the saved old installation (the old
+deploy script, units and the venv were untouched by the drain) — the old
+deploy script does not understand the new state, so recovery is manual
+per the recorded backups.
 
 ## S5. What looks like failure but is not
 

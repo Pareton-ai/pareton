@@ -32,6 +32,7 @@ a Git commit.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -80,6 +81,59 @@ def p(absolute: str) -> Path:
     """Remap an absolute target path under the test base when set."""
     base = os.environ.get("PARETON_SYNC_BASE", "")
     return Path(base + absolute) if base else Path(absolute)
+
+
+# Held for the process lifetime so a manual apply keeps the deploy mutex
+# for as long as it writes.
+_COORDINATION_FD: int | None = None
+
+
+def guard_release_coordination() -> None:
+    """Every install entry point goes through release coordination (spec 4.1).
+
+    The release coordinator passes its already-held deploy lock fd via
+    PARETON_INHERIT_DEPLOY_LOCK_FD (flock on the inherited open-file
+    description is idempotent). Independent invocations take the mutex
+    non-blockingly and refuse while a release is mid-install or the state
+    is held — the documented emergency path is to fix main and unpause, not
+    to apply around a held release. Read-only check stays ungated.
+    """
+    global _COORDINATION_FD
+    inherited = os.environ.get("PARETON_INHERIT_DEPLOY_LOCK_FD", "")
+    if inherited:
+        fd = int(inherited)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # same OFD: no-op
+        return
+    if _COORDINATION_FD is None:
+        # Re-entrant calls within one process already hold the mutex
+        # (production runs one process per invocation; flock is per open
+        # file description, so a second fd would conflict with ourselves).
+        lock_path = Path(
+            os.environ.get("PARETON_DEPLOY_LOCK", "/run/pareton-deploy.lock")
+        )
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as exc:
+            raise Fail(2, "deploy-lock-open", detail=type(exc).__name__) from exc
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise Fail(3, "deploy-in-progress") from None
+        _COORDINATION_FD = fd
+    state_path = Path(
+        os.environ.get(
+            "PARETON_RELEASE_STATE", "/var/lib/pareton-deploy/release-state.json"
+        )
+    )
+    state = read_json(state_path)
+    if isinstance(state, dict):
+        phase = state.get("phase")
+        if phase in ("applying", "quiescing"):
+            raise Fail(3, f"release-{phase}")
+        if state.get("hold"):
+            raise Fail(3, "release-held")
 
 
 def expected_uid() -> int:
@@ -811,9 +865,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return exit_code_for(findings)
         if args.mode == "apply":
+            guard_release_coordination()
             emit({"mode": "apply", **run_apply(args)})
             return 0
         if args.mode == "deploy-hook":
+            guard_release_coordination()
             emit({"mode": "deploy-hook", **run_deploy_hook(args)})
             return 0
         if args.mode == "owed-restarts":
@@ -851,6 +907,7 @@ def main(argv: list[str] | None = None) -> int:
             emit({"mode": "settle-debts", "settled": settled})
             return 0
         if args.mode == "effectuate-restarts":
+            guard_release_coordination()
             performed = retry_owed(args)["performed"]
             pending = load_pending()
             for unit in list(pending["owed_restart_units"]):
