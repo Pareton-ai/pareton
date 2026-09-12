@@ -10,11 +10,15 @@ Type=simple
 User=root
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
+ExecCondition=/usr/local/lib/pareton-ops/release.py gate --unit pareton-watcher
+ExecStartPre=/usr/local/lib/pareton-ops/release.py emit-probe --unit pareton-watcher
 ExecStart=/opt/pareton/.venv/bin/python -m worker.watcher
 Restart=always
 RestartSec=10
-# No job drain; a scan finishes in seconds.
-TimeoutStopSec=30
+KillMode=mixed
+# infinity: the current scan must finish during a release stop (spec 5.2);
+# normal scans are seconds, a hang is handled by human escalation.
+TimeoutStopSec=infinity
 
 [Install]
 WantedBy=multi-user.target

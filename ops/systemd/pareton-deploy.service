@@ -11,7 +11,18 @@ Type=oneshot
 # rewrite the script while bash is executing it. The deploy self-installs
 # this copy atomically on its success path (ops/deploy.sh install_ops).
 ExecStart=/usr/local/bin/pareton-deploy
+# System services default to WorkingDirectory=/ and an empty environment;
+# the release coordinator's DB probe imports the app package and reads
+# PARETON_DATABASE_URL from the env file (same convention as the workers).
+WorkingDirectory=/opt/pareton
+EnvironmentFile=-/opt/pareton/.env
 Nice=10
+# Stage-2 installs routinely exceed the systemd default of 90s. The bound is
+# finite, not infinity: a legal worst case is pip (3600s) + in-flight GPU
+# reap wait (1800s) + startup/log budgets (~10min); 4h gives >2x margin and
+# a timeout kill is recoverable as an applying interruption via
+# `request resume`, unlike a business-service kill.
+TimeoutStartSec=4h
 
 [Install]
 WantedBy=multi-user.target

@@ -15,6 +15,14 @@ Modes (see sections 5.1-5.3 of the spec):
                   refuse blocked states, retry owed follow-up actions
   owed-restarts   print app units that still owe a restart after apply
   clear-restarts  drop restart debts after the deploy script performed them
+  settle-debts    clear every owed action at once (stage-2 verified path:
+                  the release itself restarted the units it manages)
+  effectuate-restarts  run owed restarts for active units plus owed
+                  daemon-reload/vector actions, then clear the debts
+
+Stage-2 additions: `apply --install-only` installs files and daemon-reloads
+but skips restarting changed timers (the release coordinator restores them
+after verification), and ops/release.py is a managed ops program.
 
 Test/isolation usage: PARETON_SYNC_BASE remaps every absolute target path
 under a prefix and --source worktree reads the repo working tree instead of
@@ -24,6 +32,7 @@ a Git commit.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -74,6 +83,62 @@ def p(absolute: str) -> Path:
     return Path(base + absolute) if base else Path(absolute)
 
 
+# Held for the process lifetime so a manual apply keeps the deploy mutex
+# for as long as it writes.
+_COORDINATION_FD: int | None = None
+
+
+def guard_release_coordination() -> None:
+    """Every install entry point goes through release coordination (spec 4.1).
+
+    The release coordinator passes its already-held deploy lock fd via
+    PARETON_INHERIT_DEPLOY_LOCK_FD (flock on the inherited open-file
+    description is idempotent) — that path owns the drain/scope decisions.
+
+    Independent invocations: when the release-state FILE exists — valid,
+    corrupt, anything — ALL writes belong to the coordinator — refuse and point at the coordinator
+    entry (run pareton-deploy.service / register a request; the emergency
+    path is to fix main and unpause). Probing locks and releasing them is
+    a TOCTOU: claims can start during validation/install and residents
+    never enter a stop protocol (review R3-1). The only manual path is the
+    fresh bootstrap (no state yet), which still takes the deploy mutex so
+    two manual installs cannot race. Read-only check stays ungated.
+    """
+    global _COORDINATION_FD
+    inherited = os.environ.get("PARETON_INHERIT_DEPLOY_LOCK_FD", "")
+    if inherited:
+        fd = int(inherited)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # same OFD: no-op
+        return
+    if _COORDINATION_FD is not None:
+        # Re-entrant call within one process already holds the mutex
+        # (production runs one process per invocation; flock is per open
+        # file description, so a second fd would conflict with ourselves).
+        return
+    state_path = Path(
+        os.environ.get(
+            "PARETON_RELEASE_STATE", "/var/lib/pareton-deploy/release-state.json"
+        )
+    )
+    # File EXISTENCE decides bootstrap: read_json collapses corrupt JSON to
+    # None, which must not turn an existing (broken) state into a fresh
+    # install — that is the reset recovery path, not bootstrap (review R4-1).
+    if state_path.exists():
+        raise Fail(3, "coordinator-owned")
+    lock_path = Path(os.environ.get("PARETON_DEPLOY_LOCK", "/run/pareton-deploy.lock"))
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        raise Fail(2, "deploy-lock-open", detail=type(exc).__name__) from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        raise Fail(3, "deploy-in-progress") from None
+    _COORDINATION_FD = fd
+
+
 def expected_uid() -> int:
     return int(os.environ.get("PARETON_SYNC_EXPECTED_UID", "0"))
 
@@ -106,6 +171,7 @@ def list_repo_ops_files(repo: Path, ref: str, use_git: bool) -> list[str] | None
         "ops/sync-config.py",
         "ops/notify-deploy-failure.py",
         "ops/ops_common.py",
+        "ops/release.py",
     )
     files: list[str] = []
     if use_git:
@@ -193,6 +259,7 @@ def build_mapping(
             "ops/sync-config.py",
             "ops/notify-deploy-failure.py",
             "ops/ops_common.py",
+            "ops/release.py",
         ):
             entries.append(Entry(rel, f"/usr/local/lib/pareton-ops/{name}", EXEC_MODE))
     targets: dict[str, str] = {}
@@ -642,7 +709,8 @@ def run_apply(args: argparse.Namespace) -> dict:
         if changed:
             reload_attempted = True
             daemon_reload()
-            restart_changed_timers(changed)
+            if not args.install_only:
+                restart_changed_timers(changed)
             pending = load_pending()
             pending["daemon_reload"] = False
 
@@ -748,7 +816,15 @@ def emit(payload: dict) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
-MODES = ("check", "apply", "deploy-hook", "owed-restarts", "clear-restarts")
+MODES = (
+    "check",
+    "apply",
+    "deploy-hook",
+    "owed-restarts",
+    "clear-restarts",
+    "settle-debts",
+    "effectuate-restarts",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -765,6 +841,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", default="/opt/pareton/.env")
     parser.add_argument("--notify-program", default=None)
     parser.add_argument("--skip-validation", action="store_true")
+    parser.add_argument(
+        "--install-only",
+        action="store_true",
+        help="apply: skip restarting changed timers (stage-2 release flow)",
+    )
     parser.add_argument("units", nargs="*", help="clear-restarts: units to drop")
     return parser
 
@@ -787,9 +868,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return exit_code_for(findings)
         if args.mode == "apply":
+            guard_release_coordination()
             emit({"mode": "apply", **run_apply(args)})
             return 0
         if args.mode == "deploy-hook":
+            guard_release_coordination()
             emit({"mode": "deploy-hook", **run_deploy_hook(args)})
             return 0
         if args.mode == "owed-restarts":
@@ -808,6 +891,38 @@ def main(argv: list[str] | None = None) -> int:
                     "owed_restart_units": pending["owed_restart_units"],
                 }
             )
+            return 0
+        if args.mode == "settle-debts":
+            pending = load_pending()
+            settled = {
+                "owed_restart_units": pending["owed_restart_units"],
+                "daemon_reload": pending["daemon_reload"],
+                "vector_restart": pending["vector_restart"],
+            }
+            pending.update(
+                {
+                    "owed_restart_units": [],
+                    "daemon_reload": False,
+                    "vector_restart": False,
+                }
+            )
+            save_pending(pending)
+            emit({"mode": "settle-debts", "settled": settled})
+            return 0
+        if args.mode == "effectuate-restarts":
+            guard_release_coordination()
+            performed = retry_owed(args)["performed"]
+            pending = load_pending()
+            for unit in list(pending["owed_restart_units"]):
+                active = run_cmd(["systemctl", "is-active", unit])
+                if active.returncode == 0 and active.stdout.strip() == "active":
+                    result = run_cmd(["systemctl", "restart", unit])
+                    if result.returncode != 0:
+                        raise Fail(4, f"owed-restart-failed:{unit}")
+                    performed.append(f"restart:{unit}")
+                pending["owed_restart_units"].remove(unit)
+            save_pending(pending)
+            emit({"mode": "effectuate-restarts", "performed": performed})
             return 0
     except Fail as failure:
         payload = {"mode": args.mode, "error": failure.reason, **failure.extra}

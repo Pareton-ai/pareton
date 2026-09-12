@@ -1,6 +1,12 @@
 [Service]
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
+ExecCondition=/usr/local/lib/pareton-ops/release.py gate --unit pareton-api
+ExecStartPre=/usr/local/lib/pareton-ops/release.py emit-probe --unit pareton-api
+KillMode=mixed
+# infinity protects in-flight requests during a release stop (spec 5.2); a
+# genuinely hung server is an authorized human escalation, not a timer.
+TimeoutStopSec=infinity
 ExecStart=/opt/pareton/.venv/bin/python -m api
 Restart=always
 [Install]

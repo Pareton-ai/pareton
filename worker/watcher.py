@@ -14,6 +14,7 @@ import threading
 import config
 from chain.watcher import scan_chain
 from observability import events as obs
+from observability import probe as obs_probe
 from round.create import create_due_rounds
 from round.store import VOID_HEARTBEAT_STALE, reap_stale_rounds
 from worker.main import _configure_logging, _run_loop
@@ -101,6 +102,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
     _configure_logging(args.verbose)
+
+    # Read-only deployment-probe poller (stage-2 spec 7.2): a daemon thread
+    # so a re-verify against the running watcher never restarts it.
+    threading.Thread(
+        target=obs_probe.run_probe_loop, args=("pareton-watcher",), daemon=True
+    ).start()
 
     drain = threading.Event()
 

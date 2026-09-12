@@ -75,6 +75,12 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("PARETON_SYNC_EXPECTED_UID", str(os.getuid()))
     monkeypatch.setenv("PARETON_NOTIFY_BASE", str(base))
     monkeypatch.setenv("PARETON_NOTIFY_EXPECTED_UID", str(os.getuid()))
+    # Stage-2 release coordination: write modes take the deploy mutex and
+    # read the release state — remap both into the sandbox so the gate
+    # exercises for real without touching /run or /var.
+    monkeypatch.setenv("PARETON_DEPLOY_LOCK", str(tmp_path / "deploy.lock"))
+    monkeypatch.setenv("PARETON_RELEASE_STATE", str(tmp_path / "release-state.json"))
+    monkeypatch.setenv("PARETON_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
 
     env_file = base / "opt/pareton/.env"
     env_file.parent.mkdir(parents=True)
