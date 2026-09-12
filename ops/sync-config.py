@@ -95,8 +95,8 @@ def guard_release_coordination() -> None:
     PARETON_INHERIT_DEPLOY_LOCK_FD (flock on the inherited open-file
     description is idempotent) — that path owns the drain/scope decisions.
 
-    Independent invocations: once a stage-2 release state exists, ALL
-    writes belong to the coordinator — refuse and point at the coordinator
+    Independent invocations: when the release-state FILE exists — valid,
+    corrupt, anything — ALL writes belong to the coordinator — refuse and point at the coordinator
     entry (run pareton-deploy.service / register a request; the emergency
     path is to fix main and unpause). Probing locks and releasing them is
     a TOCTOU: claims can start during validation/install and residents
@@ -120,7 +120,10 @@ def guard_release_coordination() -> None:
             "PARETON_RELEASE_STATE", "/var/lib/pareton-deploy/release-state.json"
         )
     )
-    if isinstance(read_json(state_path), dict):
+    # File EXISTENCE decides bootstrap: read_json collapses corrupt JSON to
+    # None, which must not turn an existing (broken) state into a fresh
+    # install — that is the reset recovery path, not bootstrap (review R4-1).
+    if state_path.exists():
         raise Fail(3, "coordinator-owned")
     lock_path = Path(os.environ.get("PARETON_DEPLOY_LOCK", "/run/pareton-deploy.lock"))
     try:

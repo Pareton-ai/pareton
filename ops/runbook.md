@@ -309,7 +309,17 @@ write access:
       running `pareton-deploy.service` to finish (`systemctl status`) —
       the old deploy is the only writer of the ops files and the venv, so
       the backup below must not race it (review R3-2).
-   c. Only now stash the recovery material:
+   c. Take the deploy lock for the whole manual window (spec 8 — a
+      disabled timer does not stop a HUMAN `systemctl start
+      pareton-deploy`): keep this shell session open and run
+      `exec 9>/run/pareton-deploy.lock && flock 9`.
+      HOLD fd 9 through the backup and the manual installs of step 4.
+      Release it (`flock -u 9 && exec 9>&-`) BEFORE `sync-config apply`,
+      the `request reset`, and any `systemctl start pareton-deploy.service`
+      — all of them take this lock themselves, and a tick finding it held
+      exits silently (looking like a no-op) while apply refuses with
+      deploy-in-progress.
+   d. Only now stash the recovery material:
       `mkdir -p /var/lib/pareton-deploy/bootstrap-backup && cp -a
       /usr/local/lib/pareton-ops /usr/local/bin/pareton-deploy
       /etc/systemd/system/pareton-*.service* /etc/vector
@@ -328,14 +338,15 @@ write access:
    with `systemctl stop --no-block` and wait for them to go inactive.
 4. Remove the temporary worker drop-ins FIRST (`rm
    /etc/systemd/system/pareton-worker.service.d/<temp>.conf` — unmanaged
-   drop-ins make `apply` refuse with `unexpected`), `systemctl
-   daemon-reload`, then install the stage-2 set by hand, helpers before
-   units: `release.py`, `ops_common.py`, `sync-config.py`,
-   `notify-deploy-failure.py` into `/usr/local/lib/pareton-ops/`;
-   `ops/deploy.sh` to `/usr/local/bin/pareton-deploy`; then
-   `sync-config apply` (no release state exists yet, so the coordination
-   gate sees a fresh bootstrap) and `systemctl daemon-reload`; re-run
-   `sync-config check`.
+   drop-ins make `apply` refuse with `unexpected`) and `systemctl
+   daemon-reload`. Still holding the deploy lock from step 1c, install the
+   stage-2 set by hand, helpers before units: `release.py`,
+   `ops_common.py`, `sync-config.py`, `notify-deploy-failure.py` into
+   `/usr/local/lib/pareton-ops/`; `ops/deploy.sh` to
+   `/usr/local/bin/pareton-deploy`. Then RELEASE the manual lock
+   (`flock -u 9 && exec 9>&-`) and run `sync-config apply` (it takes the
+   lock itself; no release state exists yet, so the gate sees a fresh
+   bootstrap) and `systemctl daemon-reload`; re-run `sync-config check`.
 5. Initialize under hold and verify:
    `$R request reset --baseline-commit <SHA> --confirm-evidence "..." --operator NAME`
    then `systemctl start pareton-deploy.service` — the release drains,

@@ -1733,6 +1733,12 @@ def test_sync_write_modes_refuse_during_release(base, tmp_path, monkeypatch):
     ):
         release.write_json_atomic(state_file, state)
         assert run_apply() == 3
+    # A CORRUPT state file is a reset-recovery case, not a fresh bootstrap:
+    # existence decides, parseability must not (review R4-1).
+    state_file.write_text("{broken json")
+    assert run_apply() == 3
+    state_file.write_text("[]")  # non-dict JSON likewise
+    assert run_apply() == 3
     # Fresh bootstrap (no state yet): only the deploy-mutex race remains.
     state_file.unlink()
     import fcntl
