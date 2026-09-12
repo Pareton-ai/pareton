@@ -1861,20 +1861,25 @@ def _start_recovery_operation(
     return tick_draining(mutate_state(lambda s: None))
 
 
+def rollback_target(state: dict) -> str:
+    """The commit the recovery copy captures.
+
+    Prefers recovery_commit (written alongside the copy); falls back to the
+    copy's own recovery-meta.json for states written before that field
+    existed; only then verified_commit — noting that after a successful
+    release verified_commit is the CURRENT commit, so that last fallback is
+    wrong for anything but a never-succeeded install (review obs 2).
+    """
+    target = state.get("recovery_commit")
+    if not target and state.get("recovery_copy"):
+        meta = read_json(Path(state["recovery_copy"]) / "recovery-meta.json")
+        if isinstance(meta, dict):
+            target = meta.get("from_commit")
+    return target or state["verified_commit"]
+
+
 def _request_rollback(state: dict, request: dict) -> int:
-    if state.get("hold") is None:
-
-        def set_hold(s: dict) -> None:
-            s["hold"] = {
-                "reason": request.get("reason") or "rollback",
-                "operator": request.get("operator", "unknown"),
-                "at": now_iso(),
-                "baseline_commit": s.get("verified_commit"),
-            }
-
-        mutate_state(set_hold)
-    run_cmd(["systemctl", "disable", "--now", DEPLOY_TIMER], timeout=60)
-    target = state.get("recovery_commit") or state["verified_commit"]
+    target = rollback_target(state)
     if not state.get("recovery_copy"):
         _refuse(request, "rollback-no-copy")
         print(
@@ -1883,6 +1888,21 @@ def _request_rollback(state: dict, request: dict) -> int:
             file=sys.stderr,
         )
         return 2
+    if state.get("hold") is None:
+
+        def set_hold(s: dict) -> None:
+            s["hold"] = {
+                "reason": request.get("reason") or "rollback",
+                "operator": request.get("operator", "unknown"),
+                "at": now_iso(),
+                # Anchor the pause to where the environment is heading, so
+                # `status` cannot read as "rollback did nothing" while
+                # verified_commit is still the old target (review obs 1).
+                "baseline_commit": target,
+            }
+
+        mutate_state(set_hold)
+    run_cmd(["systemctl", "disable", "--now", DEPLOY_TIMER], timeout=60)
     return _start_recovery_operation(state, request, "rollback", target)
 
 

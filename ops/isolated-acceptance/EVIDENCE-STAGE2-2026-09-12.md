@@ -69,3 +69,22 @@ verified_commit back at A and hold kept; checkout and `.deploy-done` back
 at A; the B-era venv marker gone (recovery copy restored, not pip);
 B-era file gone from the checkout. Unit suite same day: 1396 passed /
 0 failed (new: rollback-target and missing-venv regressions).
+
+## Fourth-round follow-up (same day, fourth run)
+
+Reviewer observations 1-4 (all non-blocking) implemented:
+
+- hold.baseline_commit now anchors to the rollback target (read from the
+  recovery copy's own recovery-meta.json when recovery_commit is absent —
+  the pre-field state shape), so `status` can no longer read as a no-op;
+  observed in-run: hold.baseline == verified == A after the rollback.
+- S8 gained positive evidence: an A-era marker planted before the A->B
+  release rides into the recovery copy and must survive the rollback
+  (proving the venv contents came from the copy, not "nothing changed").
+- Runbook and spec 6.3 document the anchor semantics, including that a
+  vector-only fast path does not refresh the recovery anchor (a rollback
+  after it returns to the previous FULL release's baseline; undoing a TOML
+  change means publishing the reverse edit or vector-repair).
+
+Result: **48/48 assertions PASS**, exit 0, no drop-ins. Unit suite same
+day: 1397 passed / 0 failed (new: hold-anchor + meta-fallback regression).

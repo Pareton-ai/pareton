@@ -212,6 +212,13 @@ Rules that matter operationally:
 - `verify` never clears hold; `rollback`/`cancel` set hold themselves.
   Only `unpause` clears it, and only when the phase is idle and the given
   `--main-commit` still equals `origin/main`.
+- Rollback returns to the commit the recovery copy captures
+  (`recovery_commit`; `hold.baseline_commit` is anchored to that target, not
+  to the pre-rollback verified commit). A vector-only fast path does NOT
+  refresh the copy: a rollback after it returns to the previous FULL
+  release's baseline (the running code is already there — self-consistent);
+  it does not "undo" the TOML change — revert that by publishing the
+  reverse TOML edit or via `request vector-repair`.
 - One request at a time; a failed request stays on disk as failed until the
   next registration replaces it.
 - `reset` archives the corrupt state as `release-state.corrupt.<ts>` (a

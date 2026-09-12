@@ -1180,3 +1180,50 @@ def test_rollback_after_success_targets_recovery_commit(base, monkeypatch):
     # The venv came from the recovery copy, not pip.
     pip_calls = [c for c in release.run_cmd.calls if c and c[0].endswith("/pip")]
     assert not pip_calls
+
+
+def test_rollback_hold_anchors_to_target(base, monkeypatch):
+    # hold.baseline_commit must say where the environment is heading, not
+    # the pre-rollback verified commit, or `status` reads as a no-op (obs 1).
+    write_state(
+        base,
+        phase="idle",
+        verified_commit="B",
+        from_commit="A",
+        target_commit="B",
+        recovery_copy=None,
+    )
+    copy_dir = base / "var/lib/pareton-deploy/recovery/1"
+    make_mini_venv(base)
+    shutil.copytree(base / "opt/pareton/.venv", copy_dir, symlinks=True)
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/recovery/1/recovery-meta.json",
+        {"from_commit": "A", "target_commit": "B"},
+    )
+    write_state(
+        base,
+        phase="idle",
+        verified_commit="B",
+        recovery_copy=str(copy_dir),
+        # No recovery_commit: the pre-field state shape (obs 2) — the copy's
+        # own meta must supply the target.
+    )
+    assert release.rollback_target(read_state(base)) == "A"
+    release.write_json_atomic(
+        base / "var/lib/pareton-deploy/release-request.json",
+        {
+            "type": "rollback",
+            "status": "pending",
+            "operator": "o",
+            "registered_at": release.now_iso(),
+        },
+    )
+    release.run_cmd.db = {"error": None, "rounds": [], "submissions": []}
+    execve = {}
+    monkeypatch.setattr(
+        release.os, "execve", lambda path, args, env: execve.update(args=args)
+    )
+    assert release.tick([]) == 0
+    state = read_state(base)
+    assert state["hold"]["baseline_commit"] == "A"
+    assert state["target_commit"] == "A"

@@ -393,6 +393,10 @@ git -C "$REPO" -c user.email=isolated@test -c user.name=isolated \
   commit -qam "isolated: stage2 target B"
 git -C "$REPO" push -q origin HEAD:refs/heads/main
 TARGET_B=$(git -C "$REPO" rev-parse HEAD)
+# A-era venv marker: it must ride INTO the recovery copy the release saves,
+# so S8 can prove the rollback restored the copy's contents (not "nothing").
+touch "$REPO/.venv/bin/stage2-a-era-marker"
+chmod 0755 "$REPO/.venv/bin/stage2-a-era-marker"
 "$OPS/release.py" request unpause --main-commit "$TARGET_B" \
   --operator isolated >/dev/null && pass "S3 unpause registered" || fail "S3 unpause refused"
 systemctl start pareton-deploy.service
@@ -601,6 +605,9 @@ PY
 [ ! -e "$REPO/.venv/bin/stage2-b-only-marker" ] \
   && pass "S8 venv restored from recovery copy (B-era marker gone)" \
   || fail "S8 venv not restored (B-era marker still present)"
+[ -e "$REPO/.venv/bin/stage2-a-era-marker" ] \
+  && pass "S8 venv contents came from the copy (A-era marker present)" \
+  || fail "S8 A-era marker missing: copy not actually restored"
 [ ! -e "$REPO/stage2_marker.py" ] \
   && pass "S8 B-era file gone from checkout" || fail "S8 B-era file still in checkout"
 
