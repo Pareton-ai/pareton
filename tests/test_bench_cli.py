@@ -272,7 +272,9 @@ def test_scorer_baseline_abort_streams_no_candidate_verdict(
 
     layout = OutputLayout(tmp_path / "out")
     layout.prepare()
-    trace = types.SimpleNamespace(requests=[])
+    trace = types.SimpleNamespace(
+        requests=[], meta=types.SimpleNamespace(sampling=None)
+    )
 
     with pytest.raises(bm.EngineError, match="scorer could not grade the baseline"):
         bm.run_round(
@@ -334,7 +336,9 @@ def test_leader_crash_short_circuits_and_streams_infra_failed(
 
     layout = OutputLayout(tmp_path / "out")
     layout.prepare()
-    trace = types.SimpleNamespace(requests=[])
+    trace = types.SimpleNamespace(
+        requests=[], meta=types.SimpleNamespace(sampling=None)
+    )
 
     bm.run_round(
         req=req, provider=_FakeProvider(), prompts=[], trace=trace, layout=layout

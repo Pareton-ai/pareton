@@ -1039,6 +1039,70 @@ def test_entry_report_serves_the_per_prompt_breakdown(monkeypatch, client: TestC
     assert "evidence_s3_url" not in body
 
 
+def test_entry_report_exposes_reliability_and_the_rounds_frozen_workload(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    row = _score_report_row()
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 3,
+        "request_interval_ms": 0,
+        "enable_thinking": True,
+        "context": {"max_model_len": 8192},
+        "requests": [
+            {
+                "request_id": "req-0",
+                "input_tokens": 7680,
+                "max_tokens": 510,
+                "input_length_group": "near_limit",
+            }
+        ],
+    }
+    detail = {
+        "median_speedup": 0.7194,
+        "failure_rate": 0.5,
+        "failure_penalty": 0.1,
+        "penalty": 0.05,
+        "scheduled_requests": 2,
+        "failed_requests": 1,
+    }
+    row["score"] = 0.6694
+    row["report"]["score_report"]["score_breakdown"] = detail
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["score_breakdown"] == detail
+    assert body["score"] == pytest.approx(detail["median_speedup"] - detail["penalty"])
+    assert body["workload"]["request_interval_ms"] == 0
+    assert body["workload"]["enable_thinking"] is True
+    assert body["prompts"][0]["input_tokens"] == 7680
+    assert body["prompts"][0]["max_tokens"] == 510
+    assert "input_tokens" not in row["report"]["score_report"]["prompts"][0]
+
+
+def test_baseline_report_exposes_input_lengths_without_inventing_scores(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    row = _score_report_row(role="baseline", score=None)
+    row["report"] = {"metrics": {}, "timings": {"req-0": {"completion_tokens": 10}}}
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 3,
+        "request_interval_ms": 2,
+        "enable_thinking": False,
+        "requests": [{"request_id": "req-0", "input_tokens": 2048, "max_tokens": 5120}],
+    }
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    assert body["prompts"] == []
+    assert body["score_breakdown"] is None
+    assert body["sla"]["timings"]["req-0"]["input_tokens"] == 2048
+
+
 def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestClient):
     from api import server
 

@@ -16,6 +16,7 @@ import config
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
     CHAT_TEMPLATE_ALGO_VERSION,
+    TRAJECTORY_ALGO_VERSION,
     PromptFormatter,
     SamplerError,
     build_prompt_formatter,
@@ -160,12 +161,17 @@ def materialize_round_trace(
                     "ignore_eos": receipt.get("ignore_eos"),
                     "algo_version": receipt.get("algo_version"),
                     "seed_block_offset": receipt.get("seed_block_offset"),
+                    **{
+                        key: receipt[key]
+                        for key in ("request_interval_ms", "enable_thinking")
+                        if key in receipt
+                    },
                 }
             )
             formatter = None
-            if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+            if rule["algo_version"] >= CHAT_TEMPLATE_ALGO_VERSION:
                 formatter = prompt_formatter
-            if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION and formatter is None:
+            if rule["algo_version"] >= CHAT_TEMPLATE_ALGO_VERSION and formatter is None:
                 template = receipt.get("chat_template")
                 if isinstance(template, dict):
                     bench = (
@@ -205,8 +211,15 @@ def materialize_round_trace(
                     )
                 else:
                     raise SamplerError(
-                        "algo_version 2 receipt requires chat template metadata"
+                        "chat sampling receipt requires chat template metadata"
                     )
+            sampling_context = None
+            if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
+                from bench.trajectory import sampling_context_for_campaign
+
+                sampling_context = sampling_context_for_campaign(
+                    campaign.bench, getattr(campaign, "engine", None)
+                )
             sampled = generate_trace(
                 rule=rule,
                 seed_hex=str(
@@ -216,6 +229,10 @@ def materialize_round_trace(
                 prompt_formatter=formatter,
                 sample_seed_block=int(receipt.get("sample_seed_block") or 0),
                 sample_seed_block_hash=str(receipt.get("sample_seed_block_hash") or ""),
+                sampling_context=sampling_context,
+                sampling_receipt=receipt
+                if rule["algo_version"] == TRAJECTORY_ALGO_VERSION
+                else None,
             )
         except (SamplerError, TypeError, ValueError, KeyError) as exc:
             raise RoundInfraError(VOID_TRACE_UNAVAILABLE, str(exc)) from exc

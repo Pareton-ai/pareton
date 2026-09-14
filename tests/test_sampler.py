@@ -122,7 +122,7 @@ def test_sampler_accepts_legacy_and_current_algorithm_versions():
 
 def test_sampler_rejects_an_unreleased_algorithm_version():
     with pytest.raises(SamplerError, match="unsupported algo_version"):
-        parse_sampling_rule(_rule(algo_version=3))
+        parse_sampling_rule(_rule(algo_version=4))
 
 
 def _chat_rule() -> dict:
@@ -231,6 +231,23 @@ def test_fixed_seed_identical_trace_sha256_twice():
     assert a.row_indices == b.row_indices
     assert a.body == b.body
     assert hashlib.sha256(a.body).hexdigest() == a.sha256.split(":", 1)[1]
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        (1, "sha256:f8a56bf766c6b491e8cb1ff782ba5373c073320a89df1edd729ff5780c9e057a"),
+        (2, "sha256:a512ec24fdeadd516eb9b30ec58ffada91fbc5d08b0d0a5094cf0dc5ad135fc0"),
+    ],
+)
+def test_historical_trace_hashes_remain_unchanged(version, expected):
+    sampled = generate_trace(
+        rule=_rule(algo_version=version),
+        seed_hex="aa" * 32,
+        row_fetcher=_fetcher([_user_row(f"prompt-{i}") for i in range(8)]),
+        prompt_formatter=_chat_formatter() if version == 2 else None,
+    )
+    assert sampled.sha256 == expected
 
 
 def test_two_seeds_different_row_sets():

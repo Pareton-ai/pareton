@@ -339,6 +339,26 @@ class PromptScoreModel(BaseModel):
     baseline_e2e_s: float | None = None
     candidate_e2e_s: float | None = None
     reason: str | None = None
+    candidate_failed: bool | None = None
+    input_tokens: int | None = None
+    max_tokens: int | None = None
+    input_length_group: str | None = None
+
+
+class ScoreBreakdownModel(BaseModel):
+    median_speedup: float
+    scheduled_requests: int
+    failed_requests: int
+    failure_rate: float
+    failure_penalty: float
+    penalty: float
+
+
+class ReportWorkloadModel(BaseModel):
+    algo_version: int
+    request_interval_ms: int
+    enable_thinking: bool | None = None
+    max_model_len: int | None = None
 
 
 class PromptSummaryModel(BaseModel):
@@ -374,6 +394,8 @@ class RoundEntryReportModel(BaseModel):
     engine_crashed: bool = False
     scoring_rule: dict[str, Any]
     prompt_summary: PromptSummaryModel
+    score_breakdown: ScoreBreakdownModel | None = None
+    workload: ReportWorkloadModel | None = None
     prompts: list[PromptScoreModel]
     sla: dict[str, Any] | None = None
     correctness: dict[str, Any] | None = None
@@ -607,6 +629,43 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         # The baseline row stores the SLA replay itself, not an entry report.
         sla = raw
 
+    receipt = row.get("sampling_receipt") or {}
+    workload = None
+    if isinstance(receipt, dict) and receipt.get("type") == "hf_rows":
+        version = receipt.get("algo_version", 1)
+        template = receipt.get("chat_template") or {}
+        context = receipt.get("context") or {}
+        workload = {
+            "algo_version": version,
+            "request_interval_ms": receipt.get("request_interval_ms", 200),
+            "enable_thinking": receipt.get(
+                "enable_thinking", template.get("enable_thinking")
+            ),
+            "max_model_len": context.get("max_model_len"),
+        }
+        metadata = {
+            request["request_id"]: {
+                key: request.get(key)
+                for key in ("input_tokens", "max_tokens", "input_length_group")
+            }
+            for request in receipt.get("requests", [])
+            if isinstance(request, dict) and "request_id" in request
+        }
+        prompts = [
+            {**prompt, **metadata.get(prompt.get("request_id"), {})}
+            for prompt in prompts
+            if isinstance(prompt, dict)
+        ]
+        if isinstance(sla, dict) and isinstance(sla.get("timings"), dict):
+            sla = {
+                **sla,
+                "timings": {
+                    rid: {**timing, **metadata.get(rid, {})}
+                    for rid, timing in sla["timings"].items()
+                    if isinstance(timing, dict)
+                },
+            }
+
     return {
         "round_id": str(row["round_id"]),
         "round_ordinal": row["round_ordinal"],
@@ -627,6 +686,8 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         "engine_crashed": bool(raw.get("engine_crashed", False)),
         "scoring_rule": row["scoring_rule"] or {},
         "prompt_summary": summarize_prompt_scores(prompts),
+        "score_breakdown": score_report.get("score_breakdown") or None,
+        "workload": workload,
         "prompts": prompts,
         "sla": sla,
         "correctness": raw.get("correctness"),

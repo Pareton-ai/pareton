@@ -66,6 +66,11 @@ def test_stream_requests_include_usage(monkeypatch: pytest.MonkeyPatch):
     assert captured["body"]["stream"] is True
     assert captured["body"]["stream_options"] == {"include_usage": True}
     assert res.completion_tokens == 1
+    assert res.prompt_tokens == 1
+    assert res.dispatch_monotonic_s is not None
+    assert res.completion_monotonic_s is not None
+    assert res.completion_monotonic_s >= res.dispatch_monotonic_s
+    assert res.e2e_s == res.completion_monotonic_s - res.dispatch_monotonic_s
     assert res.text == "hi"
     assert res.finish_reason == "length"
     assert len(res.itl_s) == 0  # usage-only chunk must not add an ITL sample

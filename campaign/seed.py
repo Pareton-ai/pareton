@@ -15,7 +15,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
-from bench.sampler import parse_sampling_rule
+from bench.sampler import TRAJECTORY_ALGO_VERSION, parse_sampling_rule
+from bench.trajectory import (
+    preflight_trajectory_campaign,
+    sampling_context_for_campaign,
+)
 from campaign.engine import ENGINE_PRESETS
 from campaign.engine import preset as engine_preset
 from campaign.manifest import build_manifest
@@ -309,20 +313,6 @@ def seed_synthetic_campaign(
             print(f"open campaign already exists: {cid}")
             return str(cid)
 
-    profile_id = insert_profile(
-        name="pareton-synthetic-v0",
-        data={
-            "model": bench_model_repo,
-            "quantization": bench_quantization,
-            "serving_stack": engine_name,
-            "gpu_count": bench_gpu_count,
-            "hardware": list(skus),
-            "priority_metric": priority_metric,
-            "success_threshold": success_threshold,
-            "fixture": True,
-        },
-    )
-
     campaign_id = uuid4()
     now = datetime.now(timezone.utc)
     # no_bench: intake/build e2e tests must not auto-enqueue real GPU bench jobs.
@@ -351,6 +341,29 @@ def seed_synthetic_campaign(
 
     pool = list(workload_pool) if workload_pool is not None else None
     scoring = validate_scoring_rule(scoring_rule)
+
+    if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
+        sampling_context_for_campaign(bench, engine_profile)
+        if status == "open":
+            preview = preflight_trajectory_campaign(rule, bench, engine_profile)
+            print(
+                "Verified trajectory coverage: "
+                + json.dumps(preview.receipt["length_groups"])
+            )
+
+    profile_id = insert_profile(
+        name="pareton-synthetic-v0",
+        data={
+            "model": bench_model_repo,
+            "quantization": bench_quantization,
+            "serving_stack": engine_name,
+            "gpu_count": bench_gpu_count,
+            "hardware": list(skus),
+            "priority_metric": priority_metric,
+            "success_threshold": success_threshold,
+            "fixture": True,
+        },
+    )
 
     fields_manifest = build_manifest(
         campaign_id=campaign_id,

@@ -38,6 +38,9 @@ class TraceRequest:
     sampling: TraceSampling
     prompt: str | None = None
     prompt_token_ids: list[int] | None = None
+    input_tokens: int | None = None
+    input_ids_sha256: str | None = None
+    input_length_group: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceRequest:
@@ -56,6 +59,9 @@ class TraceRequest:
             prompt_token_ids=None
             if prompt_token_ids is None
             else list(prompt_token_ids),
+            input_tokens=d.get("input_tokens"),
+            input_ids_sha256=d.get("input_ids_sha256"),
+            input_length_group=d.get("input_length_group"),
         )
 
 
@@ -63,11 +69,14 @@ class TraceRequest:
 class TraceMeta:
     name: str
     description: str = ""
+    sampling: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceMeta:
         return cls(
-            name=str(d.get("name", "")), description=str(d.get("description", ""))
+            name=str(d.get("name", "")),
+            description=str(d.get("description", "")),
+            sampling=d.get("sampling"),
         )
 
 

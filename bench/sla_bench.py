@@ -180,6 +180,7 @@ def _fire(
     delay = req.arrival_offset_ms / 1000.0 - (time.monotonic() - t0)
     if delay > 0:
         time.sleep(delay)
+    dispatch = time.monotonic()
     try:
         res = post_completion_stream(
             base_url,
@@ -191,6 +192,20 @@ def _fire(
             ignore_eos=req.sampling.ignore_eos,
             timeout=timeout_s,
         )
+        if req.input_tokens is not None and res.prompt_tokens != req.input_tokens:
+            raise EngineError(
+                f"request {req.id}: engine input token count {res.prompt_tokens} differs from trace {req.input_tokens}"
+            )
+        if (
+            req.input_tokens is not None
+            and res.finish_reason == "length"
+            and res.completion_tokens != req.max_tokens
+        ):
+            raise EngineError(
+                f"request {req.id}: engine shortened the pinned output allowance"
+            )
+        dispatch = res.dispatch_monotonic_s or dispatch
+        completed = res.completion_monotonic_s or time.monotonic()
         row = {
             "rep": rep,
             "engine_role": role,
@@ -206,6 +221,7 @@ def _fire(
             "error": None,
         }
     except EngineError as exc:
+        completed = time.monotonic()
         row = {
             "rep": rep,
             "engine_role": role,
@@ -222,6 +238,12 @@ def _fire(
         }
         if not is_warmup:
             errs.append(f"{role}/rep{rep}/{req.id}: {exc}")
+    row.update(
+        dispatch_offset_ms=round((dispatch - t0) * 1000, 3),
+        completion_offset_ms=round((completed - t0) * 1000, 3),
+        input_tokens=req.input_tokens,
+        max_tokens=req.max_tokens,
+    )
     with lock:
         out.append(row)
 

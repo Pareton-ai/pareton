@@ -84,6 +84,20 @@ def post_json(
     return payload
 
 
+def get_json(base_url: str, path: str, *, timeout: float = 60.0) -> dict[str, Any]:
+    url = base_url.rstrip("/") + path
+    try:
+        with urlopen(Request(url, method="GET"), timeout=timeout) as response:
+            payload = json.load(response)
+    except (URLError, TimeoutError, UnicodeDecodeError, ValueError) as exc:
+        raise EngineError(
+            f"cannot read engine metadata at {url}: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise EngineError(f"engine metadata at {url} must be an object")
+    return payload
+
+
 @dataclass
 class StreamResult:
     """Aggregated result of one streaming completion."""
@@ -94,6 +108,9 @@ class StreamResult:
     ttft_s: float
     itl_s: list[float] = field(default_factory=list)
     e2e_s: float = 0.0
+    prompt_tokens: int | None = None
+    dispatch_monotonic_s: float | None = None
+    completion_monotonic_s: float | None = None
 
 
 def post_completion_stream(
@@ -146,6 +163,7 @@ def post_completion_stream(
     itl_s: list[float] = []
     finish_reason: str | None = None
     completion_tokens: int | None = None
+    prompt_tokens: int | None = None
     ttft_s = 0.0
     last_chunk: float | None = None
     saw_done = False
@@ -173,6 +191,8 @@ def post_completion_stream(
             usage = chunk.get("usage")
             if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
                 completion_tokens = int(usage["completion_tokens"])
+            if isinstance(usage, dict) and usage.get("prompt_tokens") is not None:
+                prompt_tokens = int(usage["prompt_tokens"])
             choices = chunk.get("choices")
             # vLLM/OpenAI may emit a final usage-only chunk with choices=[].
             if not choices:
@@ -228,4 +248,7 @@ def post_completion_stream(
         ttft_s=ttft_s,
         itl_s=itl_s,
         e2e_s=e2e_s,
+        prompt_tokens=prompt_tokens,
+        dispatch_monotonic_s=send,
+        completion_monotonic_s=last_chunk,
     )

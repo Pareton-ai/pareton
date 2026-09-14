@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from bench.lifecycle import EngineError
+from bench.http import StreamResult
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.schemas import (
     SlaBenchConfig,
@@ -20,6 +23,7 @@ from bench.schemas import (
 )
 from bench.score import PromptTiming
 from bench.sla_bench import (
+    _fire,
     _engine_metrics_from_reps,
     _median_rep_row,
     aggregate_rep_metrics,
@@ -359,6 +363,73 @@ def test_arrival_offsets_respected(tmp_path: Path):
         elapsed = time.monotonic() - t0
     # The 80ms-offset request means the rep takes >= ~80ms.
     assert elapsed >= 0.08
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "baseline" / "rep_1" / "requests.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    late = next(row for row in rows if row.get("request_id") == "late")
+    assert late["dispatch_offset_ms"] >= 80
+    assert late["completion_offset_ms"] > late["dispatch_offset_ms"]
+
+
+@pytest.mark.parametrize(
+    "input_count,output_count,finish,error",
+    [
+        (30, 2, "length", None),
+        (29, 2, "length", "input token count"),
+        (30, 1, "length", "output allowance"),
+        (30, 1, "stop", None),
+    ],
+)
+def test_replay_rejects_silent_context_clamping(
+    monkeypatch, input_count, output_count, finish, error
+):
+    request = TraceRequest(
+        id="long",
+        arrival_offset_ms=0,
+        max_tokens=2,
+        sampling=TraceSampling(0.0, 1.0),
+        prompt="history",
+        input_tokens=30,
+    )
+    started = time.monotonic()
+    monkeypatch.setattr(
+        "bench.sla_bench.post_completion_stream",
+        lambda *args, **kwargs: StreamResult(
+            text="answer",
+            finish_reason=finish,
+            completion_tokens=output_count,
+            prompt_tokens=input_count,
+            ttft_s=0.1,
+            itl_s=[0.1],
+            e2e_s=0.2,
+            dispatch_monotonic_s=started,
+            completion_monotonic_s=started + 0.2,
+        ),
+    )
+    rows, errors = [], []
+    _fire(
+        "http://unused",
+        request,
+        t0=started,
+        rep=1,
+        role="candidate-0",
+        is_warmup=False,
+        timeout_s=1,
+        out=rows,
+        errs=errors,
+        lock=threading.Lock(),
+    )
+    if error:
+        assert error in errors[0]
+        assert error in rows[0]["error"]
+    else:
+        assert not errors
+        assert rows[0]["completion_offset_ms"] == pytest.approx(200)
+    assert rows[0]["input_tokens"] == 30
+    assert rows[0]["max_tokens"] == 2
 
 
 def test_median_rep_row_keeps_one_real_repetition():

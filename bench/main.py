@@ -550,6 +550,18 @@ def run_round(
         entry_statuses[key] = {"status": status, "reason": reason}
         layout.write_entry_statuses(entry_statuses)
 
+    def preflight(url: str, start: EngineStart) -> None:
+        from bench.workload_preflight import validate_engine_workload
+
+        validate_engine_workload(
+            url,
+            trace,
+            engine_name=start.spec.name,
+            max_model_len=req.model.max_model_len,
+            evidence_dir=layout.sla_bench_dir / start.role,
+            verify_tokenizer=start.kind == "baseline",
+        )
+
     for start in plan:
         if leader_failed and start.kind == "candidate":
             # A leader infra failure voids the round at ranking time, so
@@ -570,6 +582,7 @@ def run_round(
             phase = BenchPhase.SLA_BENCH
             try:
                 with provider.start(start, phase=phase) as url:
+                    preflight(url, start)
                     replay = run_sla_engine(
                         url,
                         role=start.role,
@@ -623,6 +636,7 @@ def run_round(
             note(str(index), "running")
             try:
                 with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
+                    preflight(url, start)
                     replay = run_sla_engine(
                         url,
                         role=start.role,
@@ -847,11 +861,16 @@ def baseline_drift(
     Drift is ``last_baseline_score - first_baseline_score``. The opening
     baseline scores 0.0 against itself under any speedup rule, so the
     difference is exactly the closing run's score. Positive means the pod got
-    faster while the round ran; negative, slower. A round whose drift is too
+    faster while the round ran; negative, slower. The miner reliability
+    deduction does not alter this hardware-drift diagnostic. A round whose drift is too
     large was not measuring the candidates.
     """
     return score_candidate(
-        req.scoring_rule,
+        {
+            key: value
+            for key, value in req.scoring_rule.items()
+            if key != "failure_penalty"
+        },
         baseline=baseline.result.timings,
         candidate=drift.result.timings,
     ).score

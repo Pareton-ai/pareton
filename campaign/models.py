@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from bench.score import failure_penalty
 
 # Priority metrics a campaign can optimize for (BD memo vocabulary).
 PRIORITY_METRICS = frozenset(
@@ -43,6 +44,7 @@ def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             f"scoring_rule.name must be one of {sorted(SCORING_RULE_NAMES)}, "
             f"got {rule.get('name')!r}"
         )
+    failure_penalty(rule)
     out = {k: rule[k] for k in sorted(rule) if k != "name"}
     return {"name": name, **out}
 

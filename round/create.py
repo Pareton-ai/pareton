@@ -16,6 +16,7 @@ from typing import Any
 import config
 from bench.sampler import (
     CHAT_TEMPLATE_ALGO_VERSION,
+    TRAJECTORY_ALGO_VERSION,
     PromptFormatter,
     build_prompt_formatter,
     compute_sample_seed,
@@ -124,7 +125,7 @@ def try_create_round(
     # the defaults a minimal rule omits.
     rule = parse_sampling_rule(campaign.sampling_rule)
     formatter = None
-    if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+    if rule["algo_version"] >= CHAT_TEMPLATE_ALGO_VERSION:
         formatter = prompt_formatter
         if formatter is None:
             model = bench.get("model")
@@ -137,6 +138,13 @@ def try_create_round(
                 model_repo=str(model.get("hf_repo") or ""),
                 model_revision=str(model.get("hf_revision") or ""),
             )
+    sampling_context = None
+    if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
+        from bench.trajectory import sampling_context_for_campaign
+
+        sampling_context = sampling_context_for_campaign(
+            bench, getattr(campaign, "engine", None)
+        )
     sampled = generate_trace(
         rule=rule,
         seed_hex=seed_hex,
@@ -144,6 +152,7 @@ def try_create_round(
         prompt_formatter=formatter,
         sample_seed_block=seed_block,
         sample_seed_block_hash=seed_block_hash,
+        sampling_context=sampling_context,
     )
     sampled_trace_sha256 = sampled.sha256
     sampling_receipt = sampled.receipt

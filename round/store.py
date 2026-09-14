@@ -1567,7 +1567,7 @@ def get_round_entry_report(
                        e.started_at, e.completed_at,
                        s.patch_hash, s.hotkey,
                        r.status AS round_status, r.ordinal AS round_ordinal,
-                       r.scoring_rule
+                       r.scoring_rule, r.sampling_receipt
                 FROM round_entries e
                 JOIN rounds r ON r.id = e.round_id
                 LEFT JOIN submissions s ON s.id = e.submission_id

@@ -65,6 +65,40 @@ def test_default_seed_pins_hf_rows_and_stores_no_trace(
     assert public["sampling_rule"]["type"] == "hf_rows"
 
 
+def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeypatch):
+    from bench.sampler import SamplerError
+
+    captured = _patch_store(monkeypatch)
+    rule = json.loads(FIXTURE_SAMPLING_RULE.read_text())
+    rule.update(
+        algo_version=3,
+        request_interval_ms=0,
+        enable_thinking=True,
+        n_prompts=4,
+        n_rows=32,
+        revision="a" * 40,
+    )
+
+    def unavailable(*args):
+        raise SamplerError("trajectory input-length coverage unavailable")
+
+    monkeypatch.setattr(seed, "preflight_trajectory_campaign", unavailable)
+    with pytest.raises(SamplerError, match="coverage unavailable"):
+        seed_synthetic_campaign(
+            allow_placeholders=True,
+            status="open",
+            sampling_rule=rule,
+            emission_rule={
+                "name": "linear_decay",
+                "start_weight": 0,
+                "floor_weight": 0,
+                "decay_blocks": 1,
+            },
+        )
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
 def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monkeypatch):
     from types import SimpleNamespace
 

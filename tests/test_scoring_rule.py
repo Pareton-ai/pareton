@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -63,9 +64,28 @@ def test_a_twice_as_fast_candidate_scores_one_half():
     assert score.aligned_tokens == 10
 
 
+def test_baseline_drift_retains_latency_metric_without_miner_penalty():
+    from bench.main import baseline_drift
+
+    base = {f"r{i}": timing(0.2, 0.02, 10) for i in range(4)}
+    drift = {key: timing(0.1, 0.01, 10) for key in list(base)[:3]}
+    rule = {**RULE, "failure_penalty": 0.1}
+    score = baseline_drift(
+        SimpleNamespace(scoring_rule=rule),
+        SimpleNamespace(result=SimpleNamespace(timings=base)),
+        SimpleNamespace(result=SimpleNamespace(timings=drift)),
+    )
+    assert score == pytest.approx(0.5)
+    assert score_candidate(rule, baseline=base, candidate=drift).score == pytest.approx(
+        0.475
+    )
+    assert rule["failure_penalty"] == 0.1
+
+
 def test_a_slower_candidate_scores_below_zero():
     score = prompt_speedup("p1", timing(0.1, 0.01, 10), timing(0.2, 0.02, 10))
     assert score.speedup == pytest.approx(-1.0)
+    assert score.candidate_failed is False
 
 
 def test_speed_is_compared_at_the_same_token_count():
@@ -84,6 +104,7 @@ def test_output_below_the_tolerance_gate_earns_no_credit():
     score = prompt_speedup("p1", base, truncated, tolerance=DEFAULT_SPEED_TOLERANCE)
     assert score.speedup == 0.0
     assert score.reason == "candidate output below tolerance"
+    assert score.candidate_failed is True
 
 
 def test_a_prompt_the_candidate_never_answered_earns_no_credit():
@@ -316,3 +337,68 @@ def test_summary_matches_what_the_scorer_actually_wrote():
     assert summary["total"] == 2
     assert summary["scored"] == 1
     assert summary["below_tolerance"] == 1
+
+
+def test_six_failed_requests_receive_a_modest_deduction_once_each():
+    baseline = {str(i): timing(0.2, 0.02, 100) for i in range(32)}
+    candidate = {str(i): timing(0.1, 0.01, 89 if i < 6 else 100) for i in range(32)}
+    legacy = score_candidate(RULE, baseline=baseline, candidate=candidate)
+    unchanged = score_candidate(
+        {**RULE, "failure_penalty": 0}, baseline=baseline, candidate=candidate
+    )
+    result = score_candidate(
+        {**RULE, "failure_penalty": 0.1}, baseline=baseline, candidate=candidate
+    )
+    assert unchanged.score == legacy.score == 0.5
+    assert result.score == pytest.approx(0.5 - 0.01875)
+    detail = result.to_report()["score_breakdown"]
+    assert detail["failed_requests"] == 6
+    assert detail["scheduled_requests"] == 32
+    assert detail["failure_rate"] == 6 / 32
+    assert detail["median_speedup"] - detail["penalty"] == result.score
+    assert sum(p.candidate_failed for p in result.per_prompt) == 6
+
+
+def test_reliability_distinguishes_candidate_failures_from_invalid_baselines():
+    base = {
+        key: timing(0.2, 0.02, 100)
+        for key in ("89", "90", "missing", "gap", "zero", "slower", "bad_base")
+    }
+    base["bad_base"] = PromptTiming(ttft_s=0.2, completion_tokens=100)
+    candidates = {
+        "89": timing(0.1, 0.01, 89),
+        "90": timing(0.1, 0.01, 90),
+        "gap": PromptTiming(ttft_s=0.1, completion_tokens=100),
+        "zero": base["zero"],
+        "slower": timing(0.4, 0.04, 100),
+    }
+    result = score_candidate(
+        {**RULE, "failure_penalty": 0.1}, baseline=base, candidate=candidates
+    )
+    assert {p.request_id for p in result.per_prompt if p.candidate_failed} == {
+        "89",
+        "missing",
+        "gap",
+    }
+    assert result.breakdown["failure_rate"] == 3 / 7
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), True, "0.1", None])
+def test_failure_penalty_validation_is_shared_by_campaign_and_harness(value):
+    from campaign.models import validate_scoring_rule
+
+    invalid = {**RULE, "failure_penalty": value}
+    with pytest.raises(ValueError, match="failure_penalty"):
+        validate_scoring_rule(invalid)
+    with pytest.raises(ValueError, match="failure_penalty"):
+        score_candidate(invalid, baseline={}, candidate={})
+
+
+def test_invalid_baseline_does_not_create_a_penalty_even_if_candidate_is_missing():
+    result = score_candidate(
+        {**RULE, "failure_penalty": 0.1},
+        baseline={"p": timing(float("nan"), 0.01, 5)},
+        candidate={},
+    )
+    assert result.breakdown["failed_requests"] == 0
+    assert result.score == 0
