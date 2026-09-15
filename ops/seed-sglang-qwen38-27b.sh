@@ -5,6 +5,8 @@
 # lmsysorg/sglang runtime image lacks the trusted offline miner-build installer.
 # The harness mounts pinned weights at /model and manages Docker networking,
 # listen address, port and GPU allocation separately from these serving flags.
+# NVIDIA's NVFP4 checkpoint uses mixed NVFP4/FP8 layers; SGLang loads it with
+# modelopt_mixed (MLP and lm_head: NVFP4; attention: FP8).
 set -euo pipefail
 engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF}
 if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
@@ -19,9 +21,9 @@ python -m campaign.seed \
   --base-image-digest "$engine_ref" \
   --baseline-engine-image-digest "$engine_ref" \
   --gpu-skus RTX5090 --bench-gpu-count 4 \
-  --bench-model-repo Qwen/Qwen3.8-27B-FP8 \
-  --bench-model-revision 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a \
-  --bench-dtype bfloat16 --bench-quantization fp8 --bench-max-model-len 262144 \
+  --bench-model-repo nvidia/Qwen3.8-27B-NVFP4 \
+  --bench-model-revision dbb8f445b3145f8a4c18ddc769f032d57d32867c \
+  --bench-dtype bfloat16 --bench-quantization modelopt_mixed --bench-max-model-len 262144 \
   --bench-serve-args=--trust-remote-code \
   --bench-serve-args=--served-model-name --bench-serve-args=qwen3.8-27b \
   --bench-serve-args=--tp-size --bench-serve-args=4 \
@@ -41,5 +43,5 @@ python -m campaign.seed \
   --bench-correctness-max-mean-logprob-drop=1.5 \
   --sampling-rule-json fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json \
   --scoring-rule-json fixtures/campaigns/sglang_qwen38_27b/scoring_rule.json \
-  --status open --emission-start-weight 0.10 --emission-floor-weight 0 \
+  --status open --emission-start-weight 0.20 --emission-floor-weight 0 \
   --emission-decay-blocks 201600 --force

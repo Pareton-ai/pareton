@@ -40,10 +40,10 @@
   "success_threshold": ">=10% GPU-hour reduction at SLA",
   "bench": {
     "model": {
-      "hf_repo": "Qwen/Qwen3.8-27B-FP8",
-      "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "hf_repo": "nvidia/Qwen3.8-27B-NVFP4",
+      "hf_revision": "dbb8f445b3145f8a4c18ddc769f032d57d32867c",
       "dtype": "bfloat16",
-      "quantization": "fp8",
+      "quantization": "modelopt_mixed",
       "max_model_len": 262144
     },
     "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
@@ -97,7 +97,7 @@
   },
   "emission_rule": {
     "name": "linear_decay",
-    "start_weight": 0.1,
+    "start_weight": 0.2,
     "floor_weight": 0.0,
     "decay_blocks": 201600
   },

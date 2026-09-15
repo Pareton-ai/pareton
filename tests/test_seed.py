@@ -201,7 +201,7 @@ def test_sglang_requires_source_pin_before_writing(monkeypatch):
     assert captured["profile_data"] is None
 
 
-def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path):
+def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     from bench.trajectory import length_groups
@@ -259,16 +259,16 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     assert manifest.status == "open"
     assert manifest.emission_rule == {
         "name": "linear_decay",
-        "start_weight": 0.1,
+        "start_weight": 0.2,
         "floor_weight": 0.0,
         "decay_blocks": 201600,
     }
     assert manifest.allowed_paths == ["python/sglang/**", "rust/**"]
     assert "**/CMakeLists.txt" not in manifest.denied_paths
     assert manifest.engine["install_cmd"] == "/usr/local/bin/pareton-install-sglang"
-    assert request["model"]["hf_repo"] == "Qwen/Qwen3.8-27B-FP8"
-    assert request["model"]["hf_revision"] == "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
-    assert request["model"]["quantization"] == "fp8"
+    assert request["model"]["hf_repo"] == "nvidia/Qwen3.8-27B-NVFP4"
+    assert request["model"]["hf_revision"] == "dbb8f445b3145f8a4c18ddc769f032d57d32867c"
+    assert request["model"]["quantization"] == "modelopt_mixed"
     assert request["model"]["max_model_len"] == 262144
     assert request["hardware"]["gpu_count"] == 4
     assert request["hardware"]["gpu_sku_expected"] == "RTX5090"
@@ -310,7 +310,7 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
         "--dtype",
         "bfloat16",
         "--quantization",
-        "fp8",
+        "modelopt_mixed",
         "--trust-remote-code",
         "--served-model-name",
         "qwen3.8-27b",
