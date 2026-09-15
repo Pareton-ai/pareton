@@ -1,6 +1,6 @@
 ---
 name: campaign-launch
-description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with zero emissions."
+description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with pinned emissions."
 version: 3.1.0
 category: ops
 metadata:
@@ -325,7 +325,7 @@ scorer. For SGLang, tune `--mem-fraction-static`; vLLM uses
 `--gpu-memory-utilization`. Set the required timeout in the running worker's
 configuration before opening, using the normal deployment process.
 
-## 4. Open the zero-emission Qwen campaign
+## 4. Open the Qwen campaign
 
 The launch helper targets four RTX 5090 GPUs, `Qwen/Qwen3.8-27B-FP8`, context length
 262144, 32 requests spaced 2 ms apart and up to 5120 output tokens. Sampler
@@ -373,7 +373,7 @@ Sample campaign entries, in addition to the source and image pins:
   },
   "emission_rule": {
     "name": "linear_decay",
-    "start_weight": 0,
+    "start_weight": 0.1,
     "floor_weight": 0,
     "decay_blocks": 201600
   },
@@ -423,17 +423,18 @@ After successful image and GPU checks, run this once with the published engine r
 bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF"
 ```
 
-It uses `--status open --emission-start-weight 0 --emission-floor-weight 0 --force`.
-Both zero weights are required. `--force` creates the new campaign alongside the
-existing open campaign. Omit `--no-bench`: submissions must still be evaluated.
+It uses `--status open --emission-start-weight 0.10 --emission-floor-weight 0 --force`.
+A fresh leader starts at 10% of subnet emissions, declining linearly to the
+existing zero floor over 201600 blocks held. `--force` creates the new campaign
+alongside the existing open campaign. Omit `--no-bench`: submissions must still
+be evaluated.
 
-A draft cannot accept normal uploads or chain commitments. Zero emissions do not
-remove GPU costs or limit submissions to the operator. Seed creates a new row on
-every forced invocation; seeding draft and then seeding open creates two rows, so
-that sequence does not promote a draft.
+A draft cannot accept normal uploads or chain commitments. Seed creates a new
+row on every forced invocation; seeding draft and then seeding open creates two
+rows, so that sequence does not promote a draft.
 
 Verify the returned ID through `GET /v1/campaigns/<id>`. Check the source and model
 revisions, both image digests, engine, patch surface, sampling rule, correctness
-bars, status, zero weights and customer signoff. Keep the existing campaign and
-its manifest unchanged. Do not claim the new campaign is live until that readback
+bars, status, the 10% starting emission rule and customer signoff. Keep the
+existing campaign and its manifest unchanged. Do not claim the new campaign is live until that readback
 succeeds and the deployed worker supports its engine request fields.

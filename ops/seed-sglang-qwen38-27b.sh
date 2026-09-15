@@ -41,5 +41,5 @@ python -m campaign.seed \
   --bench-correctness-max-mean-logprob-drop=1.5 \
   --sampling-rule-json fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json \
   --scoring-rule-json fixtures/campaigns/sglang_qwen38_27b/scoring_rule.json \
-  --status open --emission-start-weight 0 --emission-floor-weight 0 \
+  --status open --emission-start-weight 0.10 --emission-floor-weight 0 \
   --emission-decay-blocks 201600 --force

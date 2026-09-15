@@ -256,11 +256,12 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     )
     assert captured["inserts"] == 1
     assert manifest.status == "open"
-    assert (
-        manifest.emission_rule["start_weight"]
-        == manifest.emission_rule["floor_weight"]
-        == 0
-    )
+    assert manifest.emission_rule == {
+        "name": "linear_decay",
+        "start_weight": 0.1,
+        "floor_weight": 0.0,
+        "decay_blocks": 201600,
+    }
     assert manifest.allowed_paths == ["python/sglang/**", "rust/**"]
     assert "**/CMakeLists.txt" not in manifest.denied_paths
     assert manifest.engine["install_cmd"] == "/usr/local/bin/pareton-install-sglang"
@@ -289,6 +290,7 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
         assert example["bench"][key] == manifest.bench[key]
     assert example["sampling_rule"] == manifest.sampling_rule
     assert example["scoring_rule"] == manifest.scoring_rule
+    assert example["emission_rule"] == manifest.emission_rule
     assert example["gpu_skus"] == manifest.gpu_skus
     groups = length_groups(262144, 32)
     assert [g["name"] for g in groups] == ["short", "medium", "long", "near_limit"]

@@ -97,7 +97,7 @@
   },
   "emission_rule": {
     "name": "linear_decay",
-    "start_weight": 0.0,
+    "start_weight": 0.1,
     "floor_weight": 0.0,
     "decay_blocks": 201600
   },

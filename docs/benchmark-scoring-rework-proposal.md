@@ -157,6 +157,8 @@ This configuration fragment selects trajectory sampling, thinking-enabled genera
 
 **Qwen3.8-27B seed profile**
 
+The campaign allocates 10% of subnet emissions to a fresh leader through `emission_rule.start_weight: 0.1`. The existing linear decay reaches `floor_weight: 0` after 201600 blocks held; the starting allocation resets when a new leader takes over.
+
 [The seed script](../ops/seed-sglang-qwen38-27b.sh) selects four RTX 5090 GPUs with tensor parallelism 4, a 262,144-token context, the sampling settings above, and the reliability coefficient 0.1. It pins memory fraction 0.85, FlashInfer attention, chunked prefill 8,192, Mamba radix caching `extra_buffer`, a 40-request serving limit, the Qwen reasoning/tool parsers, and cache reporting.
 
 | Input group and target | Accepted rendered input tokens | Requests | Output ceiling |
