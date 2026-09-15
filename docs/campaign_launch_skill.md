@@ -407,6 +407,7 @@ Sample campaign entries, in addition to the source and image pins:
     "serve_args": [
       "--trust-remote-code", "--served-model-name", "qwen3.8-27b",
       "--tp-size", "4", "--mem-fraction-static", "0.85",
+      "--kv-cache-dtype", "bfloat16",
       "--attention-backend", "flashinfer", "--chunked-prefill-size", "8192",
       "--mamba-radix-cache-strategy", "extra_buffer", "--max-running-requests", "40",
       "--reasoning-parser", "qwen3", "--tool-call-parser", "qwen3_coder",

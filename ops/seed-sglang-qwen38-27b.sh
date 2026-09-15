@@ -27,6 +27,7 @@ python -m campaign.seed \
   --bench-serve-args=--trust-remote-code \
   --bench-serve-args=--served-model-name --bench-serve-args=qwen3.8-27b \
   --bench-serve-args=--tp-size --bench-serve-args=4 \
+  --bench-serve-args=--kv-cache-dtype --bench-serve-args=bfloat16 \
   --bench-serve-args=--mem-fraction-static --bench-serve-args=0.85 \
   --bench-serve-args=--attention-backend --bench-serve-args=flashinfer \
   --bench-serve-args=--chunked-prefill-size --bench-serve-args=8192 \

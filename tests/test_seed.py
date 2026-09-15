@@ -316,6 +316,8 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
         "qwen3.8-27b",
         "--tp-size",
         "4",
+        "--kv-cache-dtype",
+        "bfloat16",
         "--mem-fraction-static",
         "0.85",
         "--attention-backend",

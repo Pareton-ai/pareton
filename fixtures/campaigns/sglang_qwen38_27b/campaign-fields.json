@@ -54,6 +54,8 @@
       "qwen3.8-27b",
       "--tp-size",
       "4",
+      "--kv-cache-dtype",
+      "bfloat16",
       "--mem-fraction-static",
       "0.85",
       "--attention-backend",

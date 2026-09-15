@@ -125,10 +125,14 @@ def test_sample_request_matches_production_launch_and_scorer(
             ("--model-path", "/model"),
             ("--context-length", "262144"),
             ("--dtype", "bfloat16"),
+            ("--kv-cache-dtype", "bfloat16"),
         ):
             assert args[args.index(flag) + 1] == value
         assert args[args.index("--quantization") + 1] == "modelopt_mixed"
     scorer = scorer_engine_spec(EngineSpec.from_dict(request["engines"]["baseline"]))
+    assert (
+        scorer.serve_args[scorer.serve_args.index("--kv-cache-dtype") + 1] == "bfloat16"
+    )
     assert (
         scorer.serve_args[scorer.serve_args.index("--quantization") + 1]
         == "modelopt_mixed"
