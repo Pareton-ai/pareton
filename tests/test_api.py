@@ -1050,13 +1050,13 @@ def test_entry_report_exposes_reliability_and_the_rounds_frozen_workload(
         "algo_version": 3,
         "request_interval_ms": 0,
         "enable_thinking": True,
-        "context": {"max_model_len": 8192},
+        "context": {"max_model_len": 262144},
         "requests": [
             {
                 "request_id": "req-0",
                 "input_tokens": 7680,
-                "max_tokens": 510,
-                "input_length_group": "near_limit",
+                "max_tokens": 5120,
+                "input_length_group": "8k",
             }
         ],
     }
@@ -1078,7 +1078,8 @@ def test_entry_report_exposes_reliability_and_the_rounds_frozen_workload(
     assert body["workload"]["request_interval_ms"] == 0
     assert body["workload"]["enable_thinking"] is True
     assert body["prompts"][0]["input_tokens"] == 7680
-    assert body["prompts"][0]["max_tokens"] == 510
+    assert body["prompts"][0]["max_tokens"] == 5120
+    assert body["prompts"][0]["input_length_group"] == "8k"
     assert "input_tokens" not in row["report"]["score_report"]["prompts"][0]
 
 

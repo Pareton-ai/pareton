@@ -5,7 +5,7 @@ import pytest
 from bench.lifecycle import EngineError
 from bench.validate import validate_workload_trace_dict
 from bench.workload_preflight import validate_engine_workload
-from test_trajectory_sampling import context, formatter, sample
+from test_trajectory_sampling import TEST_CONTEXT, context, formatter, sample
 import json
 
 
@@ -14,11 +14,11 @@ def run_check(monkeypatch, tmp_path, engine="sglang", **changes):
         json.loads(sample(sampling_context=context(engine)).body)
     )
     metadata = {
-        "context_length": 128,
-        "max_req_input_len": 122,
-        "max_total_num_tokens": 1024,
+        "context_length": TEST_CONTEXT,
+        "max_req_input_len": TEST_CONTEXT - 6,
+        "max_total_num_tokens": 65536,
         "page_size": 16,
-        "data": [{"max_model_len": 128}],
+        "data": [{"max_model_len": TEST_CONTEXT}],
         **changes,
     }
     monkeypatch.setattr("bench.workload_preflight.get_json", lambda *_: metadata)
@@ -31,7 +31,7 @@ def run_check(monkeypatch, tmp_path, engine="sglang", **changes):
         "http://engine",
         trace,
         engine_name=engine,
-        max_model_len=128,
+        max_model_len=TEST_CONTEXT,
         evidence_dir=tmp_path,
         verify_tokenizer=True,
     )
@@ -53,9 +53,9 @@ def test_pinned_tokenization_and_capacity_pass_before_measurement(
 @pytest.mark.parametrize(
     "changes",
     [
-        {"max_req_input_len": 121},
-        {"max_total_num_tokens": 140},
-        {"context_length": 256},
+        {"max_req_input_len": 32768},
+        {"max_total_num_tokens": 32780},
+        {"context_length": TEST_CONTEXT * 2},
         {"page_size": None},
         {
             "speculative_algorithm": "EAGLE",
@@ -76,7 +76,7 @@ def test_trusted_token_ids_must_match_not_just_the_token_count(monkeypatch, tmp_
     trace = validate_workload_trace_dict(json.loads(sample().body))
     monkeypatch.setattr(
         "bench.workload_preflight.get_json",
-        lambda *_: {"data": [{"max_model_len": 128}]},
+        lambda *_: {"data": [{"max_model_len": TEST_CONTEXT}]},
     )
     monkeypatch.setattr(
         "bench.workload_preflight.post_json",
@@ -89,7 +89,7 @@ def test_trusted_token_ids_must_match_not_just_the_token_count(monkeypatch, tmp_
             "http://engine",
             trace,
             engine_name="vllm",
-            max_model_len=128,
+            max_model_len=TEST_CONTEXT,
             evidence_dir=tmp_path,
             verify_tokenizer=True,
         )

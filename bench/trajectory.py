@@ -17,7 +17,7 @@ from bench.sampler import (
     encode_trace,
 )
 
-GROUPS = ("short", "medium", "long", "near_limit")
+GROUPS = ("4k", "8k", "16k", "32k")
 
 
 def sampling_context_for_campaign(
@@ -34,12 +34,15 @@ def sampling_context_for_campaign(
         raise SamplerError(f"unsupported trajectory engine: {name!r}")
     # SGLang: max_req_len <= context - 1; output <= max_req_len - input - 1;
     # input < max_req_len - 5. Actual capacity is checked before baseline replay.
-    return {
+    limits = {
         "engine_name": name,
         "max_model_len": context,
         "engine_reserve": 2 if name == "sglang" else 0,
         "max_input_tokens": context - (7 if name == "sglang" else 1),
     }
+    if limits["max_input_tokens"] < length_groups(4)[-1]["min_tokens"]:
+        raise SamplerError("campaign context is too small for the fixed 32K input tier")
+    return limits
 
 
 def _validate_context(context: dict[str, Any] | None) -> None:
@@ -55,13 +58,8 @@ def _validate_context(context: dict[str, Any] | None) -> None:
         )
 
 
-def length_groups(context: int, n_prompts: int) -> list[dict[str, Any]]:
-    targets = [
-        context // 4,
-        context // 2,
-        context * 3 // 4,
-        context * 95 // 100,
-    ]
+def length_groups(n_prompts: int) -> list[dict[str, Any]]:
+    targets = (4096, 8192, 16384, 32768)
     return [
         {
             "name": name,
@@ -94,9 +92,7 @@ def validate_trajectory_trace(
         raise SamplerError(
             "trajectory trace requires at least 4 requests for context coverage"
         )
-    groups = {
-        g["name"]: g for g in length_groups(context["max_model_len"], len(requests))
-    }
+    groups = {g["name"]: g for g in length_groups(len(requests))}
     counts = dict.fromkeys(GROUPS, 0)
     for i, request in enumerate(requests):
         size = request.get("input_tokens")
@@ -312,7 +308,7 @@ def generate_trajectory_trace(
         raise SamplerError("formatter thinking mode does not match sampling_rule")
     if not formatter.receipt.get("tokenizer"):
         raise SamplerError("algo_version 3 requires tokenizer receipt metadata")
-    groups = length_groups(context["max_model_len"], rule["n_prompts"])
+    groups = length_groups(rule["n_prompts"])
     if receipt is None:
         selected = _select(rule, seed, row_fetcher, formatter, context, groups)
     else:

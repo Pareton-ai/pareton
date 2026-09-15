@@ -330,9 +330,11 @@ configuration before opening, using the normal deployment process.
 The launch helper targets four RTX 5090 GPUs, `Qwen/Qwen3.8-27B-FP8`, context length
 262144, 32 requests spaced 2 ms apart and up to 5120 output tokens. Sampler
 version 3 uses complete conversation prefixes across four groups with eight
-requests each. Targets are 25%, 50%, 75% and 95% of context; the short target is
-65536 tokens at this context limit. Thinking is enabled and the failure
-coefficient is 0.1.
+requests each. Targets are fixed at 4096, 8192, 16384 and 32768 input tokens,
+accepting complete prefixes within 90–100% of each target. All four tiers leave
+room for the full output ceiling. This workload covers inputs up to 32K while
+retaining the 262144-token model limit. Source preflight must fill every tier
+before opening. Thinking is enabled and the failure coefficient is 0.1.
 The model revision is
 `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`. Its
 [model configuration](https://huggingface.co/Qwen/Qwen3.8-27B-FP8/blob/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a/config.json)

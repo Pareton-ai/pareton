@@ -88,6 +88,7 @@ def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeyp
             allow_placeholders=True,
             status="open",
             sampling_rule=rule,
+            bench_max_model_len=262144,
             emission_rule={
                 "name": "linear_decay",
                 "start_weight": 0,
@@ -212,7 +213,7 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
 
     def preview(*args):
         preflight.append(args)
-        return SimpleNamespace(receipt={"length_groups": length_groups(262144, 32)})
+        return SimpleNamespace(receipt={"length_groups": length_groups(32)})
 
     monkeypatch.setattr(seed, "preflight_trajectory_campaign", preview)
     engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
@@ -292,10 +293,10 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     assert example["scoring_rule"] == manifest.scoring_rule
     assert example["emission_rule"] == manifest.emission_rule
     assert example["gpu_skus"] == manifest.gpu_skus
-    groups = length_groups(262144, 32)
-    assert [g["name"] for g in groups] == ["short", "medium", "long", "near_limit"]
-    assert [g["max_tokens"] for g in groups] == [65536, 131072, 196608, 249036]
-    assert groups[0]["min_tokens"] == 58983
+    groups = length_groups(32)
+    assert [g["name"] for g in groups] == ["4k", "8k", "16k", "32k"]
+    assert [g["max_tokens"] for g in groups] == [4096, 8192, 16384, 32768]
+    assert [g["min_tokens"] for g in groups] == [3687, 7373, 14746, 29492]
     assert [g["count"] for g in groups] == [8, 8, 8, 8]
     assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]

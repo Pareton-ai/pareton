@@ -28,6 +28,8 @@ from worker.round_job import RoundInfraError, materialize_round_trace
 
 pytestmark = pytest.mark.unit
 
+TEST_CONTEXT = 32775
+
 
 def rule(**overrides):
     return {
@@ -36,7 +38,7 @@ def rule(**overrides):
         "revision": "a" * 40,
         "n_rows": 12,
         "n_prompts": 8,
-        "max_tokens": 80,
+        "max_tokens": 5120,
         "algo_version": 3,
         **overrides,
     }
@@ -63,11 +65,11 @@ def formatter(thinking=False, template_prefix=""):
 
 
 def row(thinking=False, long_characters=False):
-    # Complete user prefixes render to 32, 64, 96 and 121 tokens, including
+    # Complete user prefixes render to 4096, 8192, 16384 and 32768 tokens, including
     # role markers, generation prefix and the optional template instruction.
-    first = 28 - (3 if thinking else 0)
+    first = 4092 - (3 if thinking else 0)
     messages = [{"role": "system", "system_prompt": "DATASET_SYSTEM_SECRET"}]
-    for i, words in enumerate((first, 27, 27, 20)):
+    for i, words in enumerate((first, 4091, 8187, 16379)):
         content = " ".join(["data"] * words)
         if i == 0 and long_characters:
             content = "x" * 9000 + content[4:]
@@ -79,9 +81,9 @@ def row(thinking=False, long_characters=False):
     }
 
 
-def context(engine="vllm"):
+def context(engine="vllm", max_model_len=TEST_CONTEXT):
     return sampling_context_for_campaign(
-        {"model": {"max_model_len": 128}}, {"name": engine}
+        {"model": {"max_model_len": max_model_len}}, {"name": engine}
     )
 
 
@@ -110,13 +112,13 @@ def test_trace_covers_lengths_with_one_frozen_arrival_schedule(interval, n_promp
     counts = {4: [1, 1, 1, 1], 10: [3, 3, 2, 2], 32: [8, 8, 8, 8]}
     assert [
         sum(r.input_tokens == target for r in trace.requests)
-        for target in (32, 64, 96, 121)
+        for target in (4096, 8192, 16384, 32768)
     ] == counts[n_prompts]
     assert {r.input_tokens: r.max_tokens for r in trace.requests} == {
-        32: 80,
-        64: 64,
-        96: 32,
-        121: 7,
+        4096: 5120,
+        8192: 5120,
+        16384: 5120,
+        32768: 7,
     }
     assert len(set(sampled.row_indices)) == n_prompts
     assert [r.input_tokens for r in trace.requests] != sorted(
@@ -129,25 +131,46 @@ def test_sglang_headroom_is_resolved_before_any_candidate_runs():
     sampled = sample(sampling_context=context("sglang"))
     trace = validate_workload_trace_dict(json.loads(sampled.body))
     assert {r.input_tokens: r.max_tokens for r in trace.requests} == {
-        32: 80,
-        64: 62,
-        96: 30,
-        121: 5,
+        4096: 5120,
+        8192: 5120,
+        16384: 5120,
+        32768: 5,
     }
 
 
-@pytest.mark.parametrize("group", ["medium", "long", "near_limit"])
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_262k_context_keeps_fixed_inputs_and_full_output_allowances(engine):
+    sampled = sample(sampling_context=context(engine, max_model_len=262144))
+    requests = json.loads(sampled.body)["requests"]
+    assert {r["input_length_group"]: r["input_tokens"] for r in requests} == {
+        "4k": 4096,
+        "8k": 8192,
+        "16k": 16384,
+        "32k": 32768,
+    }
+    assert all(r["max_tokens"] == 5120 for r in requests)
+
+
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_context_too_small_for_fixed_tiers_is_rejected(engine):
+    with pytest.raises(SamplerError, match="too small for the fixed 32K input tier"):
+        context(engine, max_model_len=8192)
+
+
+@pytest.mark.parametrize("group", ["8k", "16k", "32k"])
 def test_vllm_can_grade_outputs_that_fill_the_sampled_context(monkeypatch, group):
-    trace = validate_workload_trace_dict(json.loads(sample().body))
+    trace = validate_workload_trace_dict(
+        json.loads(sample(rule=rule(max_tokens=TEST_CONTEXT)).body)
+    )
     request = next(r for r in trace.requests if r.input_length_group == group)
     tokenizer = formatter().encode
     output = " " + " ".join(f"word{i}" for i in range(request.max_tokens))
-    assert len(tokenizer(request.prompt + output)) == 128
-    assert request.input_tokens + request.max_tokens == 128
+    assert len(tokenizer(request.prompt + output)) == TEST_CONTEXT
+    assert request.input_tokens + request.max_tokens == TEST_CONTEXT
     scorer = scorer_engine_spec(
         EngineSpec(
             image="sha256:" + "a" * 64,
-            serve_args=["--max-model-len", "128"],
+            serve_args=["--max-model-len", str(TEST_CONTEXT)],
             name="vllm",
         )
     )
@@ -213,14 +236,14 @@ def test_thinking_instruction_counts_toward_each_input():
     for request in json.loads(sampled.body)["requests"]:
         assert request["prompt"].startswith("system reason end user")
     assert sorted(r["input_tokens"] for r in sampled.receipt["requests"]) == [
-        32,
-        32,
-        64,
-        64,
-        96,
-        96,
-        121,
-        121,
+        4096,
+        4096,
+        8192,
+        8192,
+        16384,
+        16384,
+        32768,
+        32768,
     ]
 
 
@@ -405,7 +428,7 @@ def test_round_creation_and_worker_materialization_share_the_v3_contract(
             "model": {
                 "hf_repo": "test/model",
                 "hf_revision": "b" * 40,
-                "max_model_len": 128,
+                "max_model_len": TEST_CONTEXT,
             },
             "baseline_engine_image_digest": "sha256:" + "e" * 64,
         },
@@ -436,8 +459,8 @@ def test_round_creation_and_worker_materialization_share_the_v3_contract(
     trace = validate_workload_trace_dict(json.loads(path.read_bytes()))
     assert trace.meta.sampling["enable_thinking"] is True
     assert trace.requests[-1].arrival_offset_ms == 14
-    campaign.bench["model"]["max_model_len"] = 256
-    with pytest.raises(RoundInfraError, match="context"):
+    campaign.bench["model"]["max_model_len"] = TEST_CONTEXT * 2
+    with pytest.raises(RoundInfraError, match="sampling receipt"):
         materialize_round_trace(
             result,
             campaign,
@@ -450,8 +473,8 @@ def test_round_creation_and_worker_materialization_share_the_v3_contract(
 @pytest.mark.parametrize(
     "key,value",
     [
-        ("max_tokens", 129),
-        ("input_tokens", 129),
+        ("max_tokens", TEST_CONTEXT + 1),
+        ("input_tokens", TEST_CONTEXT + 1),
         ("arrival_offset_ms", -1),
         ("input_ids_sha256", "unverified"),
         ("max_tokens", "7"),
