@@ -327,8 +327,10 @@ configuration before opening, using the normal deployment process.
 
 ## 4. Open the zero-emission Qwen campaign
 
-The launch helper targets one H200, `Qwen/Qwen3.8-27B-FP8`, context length 8192,
-32 requests and up to 5120 output tokens. The model revision is
+The launch helper targets four H200 GPUs, `Qwen/Qwen3.8-27B-FP8`, context length
+262144, 32 requests spaced 10 ms apart and up to 5120 output tokens. Sampler
+version 3 uses complete conversation prefixes at 10%, 25%, 50%, 75% and 95%
+context targets, enables thinking and applies failure coefficient 0.1. The model revision is
 `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`. Its
 [model configuration](https://huggingface.co/Qwen/Qwen3.8-27B-FP8/blob/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a/config.json)
 declares the Qwen3.5 architecture, BF16 activation dtype and dynamic FP8 E4M3
@@ -337,7 +339,8 @@ and `bench.model.dtype: "bfloat16"`. Its safetensors weights total about 28.75 G
 before KV cache and workspace. The workload pin is in
 `fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json`.
 
-The native images and this FP8 configuration passed H200 validation on 2026-09-09
+The native images and the earlier one-H200, 8192-context FP8 configuration
+passed validation on 2026-09-09
 with harness commit `bd5aae39fce676d69daee80ee6e3e4e42e663826`. The mutation
 candidate passed correctness at full coverage and received score 0.0. Its p99 E2E
 relative range was 2.78%, below the unchanged 33.5% reproducibility bar. Baseline
@@ -346,7 +349,12 @@ exact 8192-token scorer probe also passed. All validation pods and volumes were
 deleted, with provider API readback. See the
 [validation record](../fixtures/campaigns/sglang_qwen38_27b/validation-evidence.json)
 and [full round report](../fixtures/campaigns/sglang_qwen38_27b/validation/bench_report.json).
-The earlier BF16/Python-only measurements remain historical evidence in `HANDOFF.md`.
+Those checks do not validate the updated four-GPU, 262K workload. Run source
+coverage preflight and GPU calibration with the new sampling, thinking and
+serving settings before opening. The earlier BF16/Python-only measurements
+remain historical evidence in `HANDOFF.md`. See the
+[workload proposal](benchmark-scoring-rework-proposal.md) for target ranges and
+the Docker settings managed by the harness.
 
 Sample campaign entries, in addition to the source and image pins:
 
@@ -373,10 +381,17 @@ Sample campaign entries, in addition to the source and image pins:
       "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
       "dtype": "bfloat16",
       "quantization": "fp8",
-      "max_model_len": 8192
+      "max_model_len": 262144
     },
-    "gpu_count": 1,
-    "serve_args": ["--tp-size", "1", "--mem-fraction-static", "0.80", "--max-running-requests", "32"],
+    "gpu_count": 4,
+    "serve_args": [
+      "--trust-remote-code", "--served-model-name", "qwen3.8-27b",
+      "--tp-size", "4", "--mem-fraction-static", "0.85",
+      "--attention-backend", "flashinfer", "--chunked-prefill-size", "8192",
+      "--mamba-radix-cache-strategy", "extra_buffer", "--max-running-requests", "40",
+      "--reasoning-parser", "qwen3", "--tool-call-parser", "qwen3_coder",
+      "--enable-cache-report"
+    ],
     "correctness": {
       "num_prompts": 32,
       "thresholds": {
@@ -391,10 +406,11 @@ Sample campaign entries, in addition to the source and image pins:
 }
 ```
 
-The seed command supplies both image fields and signs the completed manifest.
+The seed command supplies both image fields, loads `sampling_rule.json` and
+`scoring_rule.json`, checks source coverage and signs the completed manifest.
 Sample fields are in `fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json`.
-The companion `image-pins.json` records the validated native serving and mutation
-image digests. The sample uses FP8 weights, the native installer, Rust/CMake
+The companion `image-pins.json` records the native serving and mutation image
+digests validated under the earlier 8K workload. The sample uses FP8 weights, the native installer, Rust/CMake
 allowances and the nested AOT test exclusions. It contains no campaign ID and
 does not represent a created row. Use its `engine_image` for both campaign image
 fields. The dependency build base and mutation image have separate roles.

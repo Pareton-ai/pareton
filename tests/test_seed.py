@@ -74,7 +74,7 @@ def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeyp
         algo_version=3,
         request_interval_ms=0,
         enable_thinking=True,
-        n_prompts=4,
+        n_prompts=5,
         n_rows=32,
         revision="a" * 40,
     )
@@ -201,10 +201,20 @@ def test_sglang_requires_source_pin_before_writing(monkeypatch):
 
 
 def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from bench.trajectory import length_groups
     from bench.validate import sha256_file
     from worker.round_job import build_round_request
 
     captured = _patch_store(monkeypatch)
+    preflight = []
+
+    def preview(*args):
+        preflight.append(args)
+        return SimpleNamespace(receipt={"length_groups": length_groups(262144, 32)})
+
+    monkeypatch.setattr(seed, "preflight_trajectory_campaign", preview)
     engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
     helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
     # Expand the executable launch helper with Bash, intercepting its final CLI.
@@ -257,23 +267,62 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     assert request["model"]["hf_repo"] == "Qwen/Qwen3.8-27B-FP8"
     assert request["model"]["hf_revision"] == "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a"
     assert request["model"]["quantization"] == "fp8"
+    assert request["model"]["max_model_len"] == 262144
+    assert request["hardware"]["gpu_count"] == 4
+    assert manifest.sampling_rule["algo_version"] == 3
+    assert manifest.sampling_rule["n_prompts"] == 32
+    assert manifest.sampling_rule["max_tokens"] == 5120
+    assert manifest.sampling_rule["request_interval_ms"] == 10
+    assert manifest.sampling_rule["enable_thinking"] is True
+    assert manifest.scoring_rule["failure_penalty"] == 0.1
+    assert request["scoring_rule"] == manifest.scoring_rule
+    assert preflight == [(manifest.sampling_rule, manifest.bench, manifest.engine)]
+    example = json.loads(
+        (
+            helper.parent.parent
+            / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json"
+        ).read_text()
+    )
+    for key in ("model", "gpu_count", "serve_args"):
+        assert example["bench"][key] == manifest.bench[key]
+    assert example["sampling_rule"] == manifest.sampling_rule
+    assert example["scoring_rule"] == manifest.scoring_rule
+    groups = length_groups(262144, 32)
+    assert [g["max_tokens"] for g in groups] == [26214, 65536, 131072, 196608, 249036]
+    assert [g["count"] for g in groups] == [7, 7, 6, 6, 6]
+    assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]
     assert baseline["name"] == "sglang"
+    assert request["engines"]["candidates"][0]["serve_args"] == baseline["serve_args"]
     assert baseline["serve_args"] == [
         "--model-path",
         "/model",
         "--context-length",
-        "8192",
+        "262144",
         "--dtype",
         "bfloat16",
         "--quantization",
         "fp8",
+        "--trust-remote-code",
+        "--served-model-name",
+        "qwen3.8-27b",
         "--tp-size",
-        "1",
+        "4",
         "--mem-fraction-static",
-        "0.80",
+        "0.85",
+        "--attention-backend",
+        "flashinfer",
+        "--chunked-prefill-size",
+        "8192",
+        "--mamba-radix-cache-strategy",
+        "extra_buffer",
         "--max-running-requests",
-        "32",
+        "40",
+        "--reasoning-parser",
+        "qwen3",
+        "--tool-call-parser",
+        "qwen3_coder",
+        "--enable-cache-report",
     ]
 
 

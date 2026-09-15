@@ -130,9 +130,9 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
                 raise SamplerError(f"{name} is below its allowed minimum")
         if type(rule.get("algo_version")) is not int:
             raise SamplerError("algo_version must be an integer")
-        if n_prompts < 4:
+        if n_prompts < 5:
             raise SamplerError(
-                "algo_version 3 requires at least 4 prompts for context coverage"
+                "algo_version 3 requires at least 5 prompts for context coverage"
             )
         if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
             raise SamplerError("algo_version 3 requires a full dataset commit revision")

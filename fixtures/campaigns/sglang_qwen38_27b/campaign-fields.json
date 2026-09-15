@@ -44,17 +44,31 @@
       "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
       "dtype": "bfloat16",
       "quantization": "fp8",
-      "max_model_len": 8192
+      "max_model_len": 262144
     },
     "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
-    "gpu_count": 1,
+    "gpu_count": 4,
     "serve_args": [
+      "--trust-remote-code",
+      "--served-model-name",
+      "qwen3.8-27b",
       "--tp-size",
-      "1",
+      "4",
       "--mem-fraction-static",
-      "0.80",
+      "0.85",
+      "--attention-backend",
+      "flashinfer",
+      "--chunked-prefill-size",
+      "8192",
+      "--mamba-radix-cache-strategy",
+      "extra_buffer",
       "--max-running-requests",
-      "32"
+      "40",
+      "--reasoning-parser",
+      "qwen3",
+      "--tool-call-parser",
+      "qwen3_coder",
+      "--enable-cache-report"
     ],
     "correctness": {
       "thresholds": {
@@ -78,7 +92,8 @@
     "cache_dir": "/root/.cache/sglang"
   },
   "scoring_rule": {
-    "name": "median_e2e_speedup"
+    "name": "median_e2e_speedup",
+    "failure_penalty": 0.1
   },
   "emission_rule": {
     "name": "linear_decay",
@@ -87,12 +102,14 @@
     "decay_blocks": 201600
   },
   "sampling_rule": {
-    "algo_version": 2,
+    "algo_version": 3,
     "config": "default",
     "dataset": "nebius/SWE-agent-trajectories",
+    "enable_thinking": true,
     "max_tokens": 5120,
     "n_prompts": 32,
     "n_rows": 80036,
+    "request_interval_ms": 10,
     "revision": "68195a1450865274106246d0d0296a1d6807b88e",
     "seed_block_offset": 10,
     "split": "train",

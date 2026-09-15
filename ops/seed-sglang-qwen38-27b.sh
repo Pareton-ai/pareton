@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Run once, after image publication, miner build verification and GPU smoke.
+# Run once, after image publication, miner build verification and GPU calibration.
 # PARETON_DATABASE_URL must be configured. This creates a public open campaign.
+# Use the Pareton engine from ops/build-sglang-baseline.sh. The upstream
+# lmsysorg/sglang runtime image lacks the trusted offline miner-build installer.
+# The harness mounts pinned weights at /model and manages Docker networking,
+# listen address, port and GPU allocation separately from these serving flags.
 set -euo pipefail
 engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF}
 if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
@@ -14,13 +18,21 @@ python -m campaign.seed \
   --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
   --base-image-digest "$engine_ref" \
   --baseline-engine-image-digest "$engine_ref" \
-  --gpu-skus H200 --bench-gpu-count 1 \
+  --gpu-skus H200 --bench-gpu-count 4 \
   --bench-model-repo Qwen/Qwen3.8-27B-FP8 \
   --bench-model-revision 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a \
-  --bench-dtype bfloat16 --bench-quantization fp8 --bench-max-model-len 8192 \
-  --bench-serve-args=--tp-size --bench-serve-args=1 \
-  --bench-serve-args=--mem-fraction-static --bench-serve-args=0.80 \
-  --bench-serve-args=--max-running-requests --bench-serve-args=32 \
+  --bench-dtype bfloat16 --bench-quantization fp8 --bench-max-model-len 262144 \
+  --bench-serve-args=--trust-remote-code \
+  --bench-serve-args=--served-model-name --bench-serve-args=qwen3.8-27b \
+  --bench-serve-args=--tp-size --bench-serve-args=4 \
+  --bench-serve-args=--mem-fraction-static --bench-serve-args=0.85 \
+  --bench-serve-args=--attention-backend --bench-serve-args=flashinfer \
+  --bench-serve-args=--chunked-prefill-size --bench-serve-args=8192 \
+  --bench-serve-args=--mamba-radix-cache-strategy --bench-serve-args=extra_buffer \
+  --bench-serve-args=--max-running-requests --bench-serve-args=40 \
+  --bench-serve-args=--reasoning-parser --bench-serve-args=qwen3 \
+  --bench-serve-args=--tool-call-parser --bench-serve-args=qwen3_coder \
+  --bench-serve-args=--enable-cache-report \
   --bench-correctness-num-prompts 32 \
   --bench-correctness-min-mean-logprob=-4 \
   --bench-correctness-min-token-logprob=-12 \
@@ -28,5 +40,6 @@ python -m campaign.seed \
   --bench-correctness-min-coverage-ratio=0.5 \
   --bench-correctness-max-mean-logprob-drop=1.5 \
   --sampling-rule-json fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json \
+  --scoring-rule-json fixtures/campaigns/sglang_qwen38_27b/scoring_rule.json \
   --status open --emission-start-weight 0 --emission-floor-weight 0 \
   --emission-decay-blocks 201600 --force

@@ -1,6 +1,6 @@
 **Campaign workload coverage and reliability scoring**
 
-Approved design · Implemented locally on 14 September 2026 · GPU calibration pending
+Approved design · Implementation updated on 15 September 2026 · GPU calibration pending
 
 Pareton compares miner patches with a pinned baseline using the same sampled requests within each round. This proposal makes request arrival spacing configurable, samples conversation histories across input lengths, exposes thinking mode, and adds a modest reliability deduction to the existing median E2E speedup score. It retains one workload trace and the current prompt count, repetitions, and engine startup structure.
 
@@ -25,7 +25,7 @@ For 32 requests:
 | Interval | Final scheduled arrival | Intended workload effect |
 | ---: | ---: | --- |
 | 200 ms | 6.2 seconds | Limited overlap for responses completing in roughly 100 ms |
-| 2 ms | 62 ms | Encourage requests to accumulate before earlier responses finish |
+| 10 ms | 310 ms | Encourage requests to accumulate before earlier responses finish |
 | 0 ms | 0 ms | Release all 32 requests as one burst |
 
 Lower spacing implicitly emphasizes performance under concurrent load. Client dispatch spread, response duration, memory capacity, and engine scheduling determine actual overlap and internal GPU batches. A serving limit of 32 sequences is an upper bound, not a measured batch size.
@@ -89,7 +89,7 @@ Store the rendered string in the existing trace prompt and continue using `/v1/c
 
 Replace the 8,000-character acceptance check in the new sampler path with this final token-count check. Raising `MAX_PROMPT_CHARS` to another fixed character count would still mismeasure context use. Keep the old ceiling for historical sampler versions. Do not reject a whole trajectory for its character length before selecting a valid prefix, or cut serialized text through a message or template marker.
 
-Use the existing 32 requests to cover short, medium, long, and near-limit inputs, with eight requests per group. A proposed default targets 25%, 50%, 75%, and 95% of the context limit, capping the short target at 2,048 tokens. Select a complete prefix within 90–100% of its target; skip rows that cannot supply one. Use distinct rows and deterministically shuffle the final requests so input length is not tied to arrival order. These construction rules belong to sampler version 3 and do not add scoring weights or separate benchmark runs.
+Use the existing 32 requests across five targets: 10%, 25%, 50%, 75%, and 95% of the context limit. Assign 7, 7, 6, 6, and 6 requests respectively; the shortest target scales with context without a fixed token cap. Select a complete prefix within 90–100% of its target; skip rows that cannot supply one. Use distinct rows and deterministically shuffle the final requests so input length is not tied to arrival order. These construction rules belong to sampler version 3 and do not add scoring weights or separate benchmark runs.
 
 Profile eligible prefix lengths in the pinned dataset before opening a campaign. The dataset's published average lengths use a different tokenizer and do not establish 262K coverage. If a group cannot be filled, report the missing coverage and require a suitable pinned source or an explicitly revised workload. Do not silently substitute short prompts, repeat text, or join unrelated trajectories to claim long-context coverage.
 
@@ -105,6 +105,7 @@ For an 8,192-token context and a 5,120-token output ceiling, the illustrative ta
 
 | Rendered input tokens | Output allowance before engine reserve |
 | ---: | ---: |
+| 819 | 5,120 |
 | 2,048 | 5,120 |
 | 4,096 | 4,096 |
 | 6,144 | 2,048 |
@@ -132,7 +133,7 @@ The longer history inputs and chosen thinking mode also apply to warmup. This ex
 
 **Example configuration**
 
-This configuration fragment selects trajectory sampling, thinking-enabled generation, a 32-request burst, and a modest reliability deduction while retaining median E2E scoring. Merge it into the existing campaign configuration, preserving the dataset, revision, row count, and model pins. Input-length groups derive from the sampler version and context limit; output allowances derive from the existing output ceiling. These settings are implemented; opening a new campaign also requires successful source-coverage preflight and GPU calibration.
+This configuration fragment selects trajectory sampling, thinking-enabled generation, 32 requests spaced 10 ms apart, a 262,144-token context, and a modest reliability deduction while retaining median E2E scoring. Merge it into the existing campaign configuration, preserving the dataset, revision, row count, and model pins. Input-length groups derive from the sampler version and context limit; output allowances derive from the existing output ceiling. These settings are implemented; opening a new campaign also requires successful source-coverage preflight and GPU calibration.
 
 ```json
 {
@@ -140,12 +141,12 @@ This configuration fragment selects trajectory sampling, thinking-enabled genera
     "algo_version": 3,
     "n_prompts": 32,
     "max_tokens": 5120,
-    "request_interval_ms": 0,
+    "request_interval_ms": 10,
     "enable_thinking": true
   },
   "bench": {
     "model": {
-      "max_model_len": 8192
+      "max_model_len": 262144
     }
   },
   "scoring_rule": {
@@ -154,6 +155,22 @@ This configuration fragment selects trajectory sampling, thinking-enabled genera
   }
 }
 ```
+
+**Qwen3.8-27B seed profile**
+
+[The seed script](../ops/seed-sglang-qwen38-27b.sh) selects four H200 GPUs with tensor parallelism 4, a 262,144-token context, the sampling settings above, and the reliability coefficient 0.1. It pins memory fraction 0.85, FlashInfer attention, chunked prefill 8,192, Mamba radix caching `extra_buffer`, a 40-request serving limit, the Qwen reasoning/tool parsers, and cache reporting.
+
+| Input target | Accepted rendered input tokens | Requests | Output ceiling |
+| ---: | ---: | ---: | ---: |
+| 10% | 23,593–26,214 | 7 | 5,120 |
+| 25% | 58,983–65,536 | 7 | 5,120 |
+| 50% | 117,965–131,072 | 6 | 5,120 |
+| 75% | 176,948–196,608 | 6 | 5,120 |
+| 95% | 224,133–249,036 | 6 | 5,120 |
+
+All tiers leave room for the full output ceiling, including SGLang's two-token reserve. Complete message boundaries determine actual input length within each range. EOS may still end output early. `enable_thinking: true` controls template rendering; the server's reasoning parser alone does not enable thinking in these pre-rendered completion prompts.
+
+The script requires a published Pareton engine digest matching its source pin. The upstream `lmsysorg/sglang:v0.5.19` runtime image is a serving reference and cannot replace that build image without the trusted offline miner-build installer. The harness stages pinned weights at `/model` and controls networking, listen address, port, and GPU allocation. `OMP_NUM_THREADS=8` and Docker `--shm-size=32g` are not campaign controls in this change; the current harness uses host IPC and a `16g` shared-memory argument. Validate the actual harness configuration during GPU calibration.
 
 **Reporting and implementation**
 
@@ -171,9 +188,9 @@ Each measured repetition still executes 32 requests under the example configurat
 
 The backend now supports explicit `algo_version: 3`; the default remains version 2. Version 3 requires full dataset and model commit revisions, uses the pinned `tokenizers` library, and records token IDs by hash alongside the rendered input count. Round creation selects distinct rows and complete cut points; workers reconstruct those exact selections from the receipt and verify the trace hash. Versions 1 and 2 retain their existing trace bytes and 8,000-character ceiling, and reject the new spacing and thinking fields rather than ignoring them.
 
-The version 3 input targets are fixed at 25%, 50%, 75%, and 95% of context, with the short target capped at 2,048 tokens. Each group accepts 90–100% of its target. The seeding CLI checks that the pinned source can fill all groups before inserting an open campaign. This check renders and tokenizes source histories without starting an engine. Missing coverage prevents opening; it does not silently reduce context coverage. Campaigns with other prompt counts divide requests across the same four groups and require at least four requests.
+The version 3 input targets are fixed at 10%, 25%, 50%, 75%, and 95% of context. Each group accepts 90–100% of its target. The seeding CLI checks that the pinned source can fill all groups before inserting an open campaign. This check renders and tokenizes source histories without starting an engine. Missing coverage prevents opening; it does not silently reduce context coverage. Campaigns with other prompt counts divide requests across the same five groups and require at least five requests. Remainders go to the shortest groups first; requests are shuffled after selection.
 
-For the current engine contracts, vLLM reserves no additional output tokens and SGLang reserves two. At the 8K target inputs in the table, SGLang output allowances are therefore 5,120, 4,094, 2,046, and 408. Before warmup, the harness checks each running engine's resolved context and capacity limits. The trusted baseline also verifies the sampled token IDs through its tokenization endpoint. A mismatch or a capacity limit that would shorten the workload fails validation; it does not alter the frozen requests. Live limits are recorded in `workload_preflight.json` within the engine's evidence directory because they become available after startup. The sampling receipt records the context and engine reservation contract used to construct the trace.
+For the current engine contracts, vLLM reserves no additional output tokens and SGLang reserves two. At the 8K target inputs in the table, SGLang output allowances are therefore 5,120, 5,120, 4,094, 2,046, and 408. Before warmup, the harness checks each running engine's resolved context and capacity limits. The trusted baseline also verifies the sampled token IDs through its tokenization endpoint. A mismatch or a capacity limit that would shorten the workload fails validation; it does not alter the frozen requests. Live limits are recorded in `workload_preflight.json` within the engine's evidence directory because they become available after startup. The sampling receipt records the context and engine reservation contract used to construct the trace.
 
 The score report now includes `score_breakdown` with the median, scheduled and failed request counts, failure rate, coefficient, and deduction. Each scored request records whether its failure was attributable to the candidate, classified alongside its gate reason. The existing report route adds workload settings and per-request input tokens, output allowance, and length group. Baseline timing rows receive the same input details without an invented candidate score. The dashboard shows input lengths and output allowances once in the request trace table, for both baseline and candidate reports; historical reports leave missing details absent. Baseline drift remains the existing median latency metric without the miner reliability deduction.
 
@@ -183,6 +200,6 @@ One version 3 validator checks context bounds, token metadata, scheduled arrival
 
 Implementation verification covers role normalization and system exclusion, both thinking modes, inputs longer than 8,000 characters, context headroom, missing source coverage, exact receipt reconstruction, historical trace hashes, zero and nonzero intervals, runtime capacity failures, reliability arithmetic, report parsing, and the dashboard.
 
-Local verification passed 1,376 backend tests, with 39 skipped and five Docker tests deselected, and 196 frontend tests, with two live-contract tests skipped. Formatting, lint, TypeScript, and the frontend production build passed. The production-built report was checked in the browser using mock campaign data. The frontend implementation is in [frontend PR #79](https://github.com/Pareton-ai/pareton-frontend/pull/79).
+Local verification passed 1,382 backend tests, with 39 skipped and five Docker tests deselected, and 196 frontend tests, with two live-contract tests skipped. Formatting, lint, TypeScript, and the frontend production build passed. The production-built report was checked in the browser using mock campaign data. The frontend implementation is in [frontend PR #79](https://github.com/Pareton-ai/pareton-frontend/pull/79).
 
 Before activating a campaign, run GPU calibration on its pinned engine and hardware with the intended interval, context, and thinking mode. Inspect actual overlap, output lengths, cache behavior, and correctness, then review promotion and drift thresholds. Local tests and a tokenizer smoke check do not establish full pinned-dataset 262K coverage or production performance. No campaign or production service was changed by this implementation.
