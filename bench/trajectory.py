@@ -51,7 +51,7 @@ def _validate_context(context: dict[str, Any] | None) -> None:
 
 def length_groups(context: int, n_prompts: int) -> list[dict[str, Any]]:
     targets = [
-        min(2048, context // 4),
+        context // 4,
         context // 2,
         context * 3 // 4,
         context * 95 // 100,

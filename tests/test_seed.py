@@ -294,7 +294,8 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     assert example["gpu_skus"] == manifest.gpu_skus
     groups = length_groups(262144, 32)
     assert [g["name"] for g in groups] == ["short", "medium", "long", "near_limit"]
-    assert [g["max_tokens"] for g in groups] == [2048, 131072, 196608, 249036]
+    assert [g["max_tokens"] for g in groups] == [65536, 131072, 196608, 249036]
+    assert groups[0]["min_tokens"] == 58983
     assert [g["count"] for g in groups] == [8, 8, 8, 8]
     assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]

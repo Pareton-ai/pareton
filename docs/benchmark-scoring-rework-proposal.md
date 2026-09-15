@@ -89,7 +89,7 @@ Store the rendered string in the existing trace prompt and continue using `/v1/c
 
 Replace the 8,000-character acceptance check in the new sampler path with this final token-count check. Raising `MAX_PROMPT_CHARS` to another fixed character count would still mismeasure context use. Keep the old ceiling for historical sampler versions. Do not reject a whole trajectory for its character length before selecting a valid prefix, or cut serialized text through a message or template marker.
 
-Use the existing 32 requests across four groups: short, medium, long, and near-limit, with eight requests each. Target 25%, 50%, 75%, and 95% of the context limit, capping the short target at 2,048 tokens. Select a complete prefix within 90–100% of its target; skip rows that cannot supply one. Use distinct rows and deterministically shuffle the final requests so input length is not tied to arrival order. These construction rules belong to sampler version 3 and do not add scoring weights or separate benchmark runs.
+Use the existing 32 requests across four groups: short, medium, long, and near-limit, with eight requests each. Target 25%, 50%, 75%, and 95% of the context limit. All four targets scale with context. Select a complete prefix within 90–100% of its target; skip rows that cannot supply one. Use distinct rows and deterministically shuffle the final requests so input length is not tied to arrival order. These construction rules belong to sampler version 3 and do not add scoring weights or separate benchmark runs.
 
 Profile eligible prefix lengths in the pinned dataset before opening a campaign. The dataset's published average lengths use a different tokenizer and do not establish 262K coverage. If a group cannot be filled, report the missing coverage and require a suitable pinned source or an explicitly revised workload. Do not silently substitute short prompts, repeat text, or join unrelated trajectories to claim long-context coverage.
 
@@ -163,7 +163,7 @@ The campaign allocates 10% of subnet emissions to a fresh leader through `emissi
 
 | Input group and target | Accepted rendered input tokens | Requests | Output ceiling |
 | ---: | ---: | ---: | ---: |
-| Short, capped at 2,048 | 1,844–2,048 | 8 | 5,120 |
+| Short, 25% | 58,983–65,536 | 8 | 5,120 |
 | Medium, 50% | 117,965–131,072 | 8 | 5,120 |
 | Long, 75% | 176,948–196,608 | 8 | 5,120 |
 | Near-limit, 95% | 224,133–249,036 | 8 | 5,120 |
@@ -188,7 +188,7 @@ Each measured repetition still executes 32 requests under the example configurat
 
 The backend now supports explicit `algo_version: 3`; the default remains version 2. Version 3 requires full dataset and model commit revisions, uses the pinned `tokenizers` library, and records token IDs by hash alongside the rendered input count. Round creation selects distinct rows and complete cut points; workers reconstruct those exact selections from the receipt and verify the trace hash. Versions 1 and 2 retain their existing trace bytes and 8,000-character ceiling, and reject the new spacing and thinking fields rather than ignoring them.
 
-The version 3 input targets are fixed at 25%, 50%, 75%, and 95% of context, with the short target capped at 2,048 tokens. Each group accepts 90–100% of its target. The seeding CLI checks that the pinned source can fill all groups before inserting an open campaign. This check renders and tokenizes source histories without starting an engine. Missing coverage prevents opening; it does not silently reduce context coverage. Campaigns with other prompt counts divide requests across the same four groups and require at least four requests. Remainders go to the shortest groups first; requests are shuffled after selection.
+The version 3 input targets are fixed at 25%, 50%, 75%, and 95% of context, with no fixed token cap on the short target. Each group accepts 90–100% of its target. The seeding CLI checks that the pinned source can fill all groups before inserting an open campaign. This check renders and tokenizes source histories without starting an engine. Missing coverage prevents opening; it does not silently reduce context coverage. Campaigns with other prompt counts divide requests across the same four groups and require at least four requests. Remainders go to the shortest groups first; requests are shuffled after selection.
 
 For the current engine contracts, vLLM reserves no additional output tokens and SGLang reserves two. At the 8K target inputs in the table, SGLang output allowances are therefore 5,120, 4,094, 2,046, and 408. Before warmup, the harness checks each running engine's resolved context and capacity limits. The trusted baseline also verifies the sampled token IDs through its tokenization endpoint. A mismatch or a capacity limit that would shorten the workload fails validation; it does not alter the frozen requests. Live limits are recorded in `workload_preflight.json` within the engine's evidence directory because they become available after startup. The sampling receipt records the context and engine reservation contract used to construct the trace.
 
