@@ -705,7 +705,7 @@ def test_write_remote_env_does_not_put_secrets_in_ssh_argv(tmp_path: Path, monke
     assert all(secret not in r for r in ssh_remotes)
 
 
-def test_write_remote_env_forwards_bench_settings(tmp_path: Path, monkeypatch):
+def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     from gpu.orchestrate import _write_remote_env
     from gpu.types import Pod, SshTarget
 
