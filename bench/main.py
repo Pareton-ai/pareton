@@ -99,6 +99,9 @@ CORRECTNESS_EXTRA_SERVE_ARGS = [
     "--no-enable-prefix-caching",
     "--no-enable-flashinfer-autotune",
 ]
+# The pinned vLLM generation runner requires an output slot even for echo-only
+# scoring. Reserve it beyond the replay context for a full-length forced input.
+VLLM_SCORER_CONTEXT_HEADROOM = 1
 # At the pinned SGLang commit, max_req_input_len is context_length - 6
 # and inputs must be strictly shorter. Reserve seven slots for a scorer
 # input that fills the replay context, including room for the clamp token.
@@ -133,23 +136,26 @@ def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
     args = list(spec.serve_args)
     env = dict(spec.env)
     if spec.name == "sglang":
-        # The worker pins a numeric --context-length. Cover argparse's = form
-        # too, and preserve duplicate flags' last-value-wins behavior.
-        for i, arg in enumerate(spec.serve_args):
-            if arg == "--context-length":
-                args[i + 1] = str(
-                    int(spec.serve_args[i + 1]) + SGLANG_SCORER_CONTEXT_HEADROOM
-                )
-            elif arg.startswith("--context-length="):
-                args[i] = "--context-length=" + str(
-                    int(arg.partition("=")[2]) + SGLANG_SCORER_CONTEXT_HEADROOM
-                )
-            else:
-                continue
-            # Only the scorer allocates beyond a model's declared context.
-            # Forced input positions still fit the original replay window;
-            # the one sampled token is excluded and never fed back to the model.
-            env["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
+        context_flag = "--context-length"
+        headroom = SGLANG_SCORER_CONTEXT_HEADROOM
+        override_env = "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"
+    else:
+        context_flag = "--max-model-len"
+        headroom = VLLM_SCORER_CONTEXT_HEADROOM
+        override_env = "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
+    # The worker pins a numeric context limit. Cover argparse's = form too,
+    # and preserve duplicate flags' last-value-wins behavior.
+    for i, arg in enumerate(spec.serve_args):
+        if arg == context_flag:
+            args[i + 1] = str(int(spec.serve_args[i + 1]) + headroom)
+        elif arg.startswith(context_flag + "="):
+            args[i] = context_flag + "=" + str(int(arg.partition("=")[2]) + headroom)
+        else:
+            continue
+        # Only the scorer allocates beyond a model's declared context.
+        # Forced input positions still fit the original replay window;
+        # the one sampled token is excluded and never fed back to the model.
+        env[override_env] = "1"
     return EngineSpec(
         image=spec.image,
         serve_args=args + extra,

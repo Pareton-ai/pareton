@@ -60,43 +60,47 @@ def test_sglang_serve_args_skip_vllm_correctness_extras(tp_args):
 
 
 @pytest.mark.parametrize(
-    "context_args,scorer_context_args",
+    "engine_name,context_flag,headroom,override_env",
     [
-        (["--context-length", "8192"], ["--context-length", "8199"]),
-        (["--context-length=8192"], ["--context-length=8199"]),
-        (
-            ["--context-length", "4096", "--context-length=8192"],
-            ["--context-length", "4103", "--context-length=8199"],
-        ),
+        ("sglang", "--context-length", 7, "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"),
+        ("vllm", "--max-model-len", 1, "VLLM_ALLOW_LONG_MAX_MODEL_LEN"),
     ],
 )
-def test_sglang_context_headroom_is_only_applied_to_scorer(
-    context_args, scorer_context_args
+@pytest.mark.parametrize("style", ["separate", "equals", "duplicate"])
+def test_context_headroom_is_only_applied_to_scorer(
+    style, engine_name, context_flag, headroom, override_env
 ):
-    args = ["--model-path", "/model", *context_args, "--tp-size", "1"]
+    context_args, scorer_context_args = {
+        "separate": ([context_flag, "8192"], [context_flag, str(8192 + headroom)]),
+        "equals": ([f"{context_flag}=8192"], [f"{context_flag}={8192 + headroom}"]),
+        "duplicate": (
+            [context_flag, "4096", f"{context_flag}=8192"],
+            [context_flag, str(4096 + headroom), f"{context_flag}={8192 + headroom}"],
+        ),
+    }[style]
+    args = [*context_args, "--dtype", "bfloat16"]
     spec = EngineSpec(
         image="sha256:" + ("a" * 64),
         serve_args=list(args),
-        env={"FOO": "1", "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "0"},
-        name="sglang",
+        env={"FOO": "1", override_env: "0"},
+        name=engine_name,
     )
     plan = plan_round_starts(EnginesSpec(baseline=spec, candidates=[spec]))
     for start in plan:
         if start.kind == "scorer":
             assert start.spec.serve_args == [
-                "--model-path",
-                "/model",
                 *scorer_context_args,
-                "--tp-size",
-                "1",
+                "--dtype",
+                "bfloat16",
+                *correctness_extra_serve_args(engine_name),
             ]
             assert start.spec.env == {
                 "FOO": "1",
-                "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
+                override_env: "1",
             }
         else:
             assert start.spec.serve_args == args
             assert start.spec.env == {
                 "FOO": "1",
-                "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "0",
+                override_env: "0",
             }

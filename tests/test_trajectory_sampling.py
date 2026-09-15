@@ -1,19 +1,25 @@
 """Offline coverage of versioned history construction and round reconstruction."""
 
 import copy
+import io
 import json
 from types import SimpleNamespace
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 
+from bench.correctness import CapturedOutput, score_captured_output
+from bench.main import scorer_engine_spec
+from bench.mock_engine import MockEngineConfig, build_completion_response
 from bench.sampler import (
     SamplerError,
     build_prompt_formatter,
     generate_trace,
     parse_sampling_rule,
 )
+from bench.schemas import EngineSpec
 from bench.trajectory import normalize_trajectory, sampling_context_for_campaign
 from bench.validate import RequestValidationError, validate_workload_trace_dict
 from round.create import try_create_round
@@ -126,6 +132,50 @@ def test_sglang_headroom_is_resolved_before_any_candidate_runs():
         96: 30,
         121: 5,
     }
+
+
+@pytest.mark.parametrize("group", ["medium", "long", "near_limit"])
+def test_vllm_can_grade_outputs_that_fill_the_sampled_context(monkeypatch, group):
+    trace = validate_workload_trace_dict(json.loads(sample().body))
+    request = next(r for r in trace.requests if r.input_length_group == group)
+    tokenizer = formatter().encode
+    output = " " + " ".join(f"word{i}" for i in range(request.max_tokens))
+    assert len(tokenizer(request.prompt + output)) == 128
+    assert request.input_tokens + request.max_tokens == 128
+    scorer = scorer_engine_spec(
+        EngineSpec(
+            image="sha256:" + "a" * 64,
+            serve_args=["--max-model-len", "128"],
+            name="vllm",
+        )
+    )
+    limit = int(scorer.serve_args[scorer.serve_args.index("--max-model-len") + 1])
+
+    def urlopen(req, timeout):
+        body = json.loads(req.data)
+        input_tokens = len(tokenizer(body["prompt"]))
+        # The pinned vLLM input processor also rejects a full-context prompt
+        # with max_tokens=0: its generation runner still requires one slot.
+        if input_tokens >= limit or input_tokens + body["max_tokens"] > limit:
+            raise HTTPError(req.full_url, 400, "context limit exceeded", {}, None)
+        response = build_completion_response(
+            cfg=MockEngineConfig(logprobs=[-0.1]),
+            prompt=body["prompt"],
+            max_tokens=body["max_tokens"],
+            echo=body["echo"],
+            temperature=body["temperature"],
+            logprobs_requested=body["logprobs"],
+        )
+        return io.BytesIO(json.dumps(response).encode())
+
+    monkeypatch.setattr("bench.http.urlopen", urlopen)
+    scores, span, prefix = score_captured_output(
+        "http://scorer",
+        CapturedOutput(request.id, request.prompt, output, request.max_tokens),
+    )
+    assert len(scores) == span == request.max_tokens
+    assert [p.logprob for p in scores] == [-0.1] * request.max_tokens
+    assert prefix == output
 
 
 def test_normalized_history_excludes_system_and_future_messages():
