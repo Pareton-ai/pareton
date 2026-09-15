@@ -751,7 +751,8 @@ def test_remaining_budget_voids_when_the_clock_has_run_out():
     assert leftover > 0
 
 
-def test_process_round_defers_on_empty_market(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reason", ["no 1x H200", "static GPU host is busy"])
+def test_process_round_defers_on_unavailable_capacity(tmp_path, monkeypatch, reason):
     """NoCapacityError must reclaim the round, not void it, at a flat delay."""
     from pathlib import Path
 
@@ -788,7 +789,7 @@ def test_process_round_defers_on_empty_market(tmp_path, monkeypatch):
     )
 
     def empty_market(*_a, **_k):
-        raise NoCapacityError("no 1x H200")
+        raise NoCapacityError(reason)
 
     outcome = round_job.process_round(
         _round_row(),

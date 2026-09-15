@@ -389,6 +389,7 @@ def test_engine_container_command_construction(tmp_path: Path):
     logs_idx = next(i for i, o in enumerate(ops) if o == ["docker", "logs"])
     rm_idx = next(i for i, o in enumerate(ops) if o == ["docker", "rm"])
     assert logs_idx < rm_idx
+    assert "-v" in fake.calls[rm_idx][0]  # Reclaim anonymous container volumes too.
     log_files = list(logs.glob("*.log"))
     assert len(log_files) == 1
     assert "started" in log_files[0].read_text(encoding="utf-8")

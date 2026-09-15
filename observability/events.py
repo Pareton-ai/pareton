@@ -362,6 +362,13 @@ def round_voided(
     )
 
 
+def static_host_cleanup_failed(*, pod: str, error: str) -> dict[str, Any]:
+    """Static host cleanup needs attention even if the round produced a verdict."""
+    return _emit(
+        "static_host_cleanup_failed", pod=pod, provider="static_ssh", error=error
+    )
+
+
 # -- Provider balance --------------------------------------------------------
 
 

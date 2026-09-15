@@ -599,7 +599,7 @@ class EngineContainer:
                         )
                 try:
                     rm = self.runner(
-                        ["docker", "rm", "-f", cid],
+                        ["docker", "rm", "-f", "-v", cid],
                         timeout=self.cmd_timeout_s,
                     )
                     if rm.returncode != 0:

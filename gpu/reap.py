@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -11,6 +12,7 @@ from gpu.errors import DestroyError
 from gpu.providers import configured_providers, get_provider
 from gpu.registry import NAME_PREFIX, PodRegistry, is_expired
 from gpu.types import Pod, SshTarget
+from gpu.ssh import exec as ssh_exec
 from observability import events as obs
 
 logger = logging.getLogger(__name__)
@@ -18,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ReapAction:
-    kind: str  # workload | volume | registry_retry
+    kind: str  # workload | volume | registry_retry | static_containers
     name: str
     id: str
     provider: str
@@ -58,9 +60,15 @@ def reap(
     provider_factory: Callable[..., Any] | None = None,
     clock=None,
 ) -> list[ReapAction]:
-    """Destroy expired pt-* workloads/volumes; retry destroy_failed."""
+    """Destroy expired rentals, retry failed destroys, and reap idle static containers."""
     registry = registry or PodRegistry(state_dir)
     actions: list[ReapAction] = []
+    if "static_ssh" in configured_providers():
+        action = _reap_static_host(
+            registry=registry, dry_run=dry_run, provider_factory=provider_factory
+        )
+        if action is not None:
+            actions.append(action)
     providers = _configured_cloud_providers(
         state_dir=registry.state_dir, factory=provider_factory
     )
@@ -214,3 +222,43 @@ def reap(
             logger.error("retry destroy_failed failed for %s: %s", entry.name, exc)
 
     return actions
+
+
+def _reap_static_host(*, registry: PodRegistry, dry_run: bool, provider_factory):
+    action = ReapAction(
+        kind="static_containers",
+        name="static-host",
+        id="static-host",
+        provider="static_ssh",
+        dry_run=dry_run,
+        destroyed=False,
+        detail="remove idle Pareton containers and check remaining GPU processes",
+    )
+    if dry_run:
+        return action
+    try:
+        provider = (provider_factory or get_provider)(
+            "static_ssh", state_dir=registry.state_dir
+        )
+        pod = provider.maintenance_pod()
+        action.id = pod.pod_id
+        result = ssh_exec(
+            pod,
+            "cd /opt/pareton && python3 -m gpu.static_host --idle-containers",
+            timeout_s=600,
+            state_dir=registry.state_dir,
+        )
+        report = json.loads(result.stdout)
+        if report.get("status") == "busy":
+            return None
+        if report.get("status") != "cleaned":
+            raise RuntimeError(
+                f"unexpected static cleanup response: {result.stdout[:200]}"
+            )
+        action.destroyed = True
+        action.detail = f"removed {int(report['containers_removed'])} container(s); no GPU compute processes remain"
+    except Exception as exc:  # noqa: BLE001 - other provider cleanup must still run
+        action.detail = str(exc)
+        obs.static_host_cleanup_failed(pod=action.id, error=str(exc))
+        logger.exception("periodic static host cleanup failed")
+    return action
