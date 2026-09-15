@@ -1,6 +1,21 @@
 [Service]
+User=pareton-api
+DynamicUser=yes
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
+# PID 1 reads the root-only env file before applying the service sandbox.
+# The API needs DB/S3 credentials, but not build, GPU, or alert credentials.
+UnsetEnvironment=PARETON_GHCR_TOKEN PARETON_TARGON_API_KEY PARETON_SHADEFORM_API_KEY PARETON_LIUM_API_KEY PARETON_RUNPOD_API_KEY PARETON_AXIOM_TOKEN PARETON_DISCORD_DEPLOY_WEBHOOK HF_TOKEN PARETON_HF_TOKEN
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+InaccessiblePaths=/opt/pareton/.env -/run/docker.sock -/run/containerd
 ExecStart=/opt/pareton/.venv/bin/python -m api
 Restart=always
 [Install]

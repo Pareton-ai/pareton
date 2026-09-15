@@ -8,7 +8,7 @@ re-install it on the box, so the two never drift.
 
 | Path                              | Installed to                    | Notes                                                            |
 | --------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
-| `systemd/pareton-api.service`     | `/etc/systemd/system/`          | uvicorn on `0.0.0.0:8000`                                        |
+| `systemd/pareton-api.service`     | `/etc/systemd/system/`          | Sandboxed dynamic user; uvicorn on `127.0.0.1:8000`              |
 | `systemd/pareton-worker.service`  | `/etc/systemd/system/`          | Submission gates and builds (queue via drop-in)                  |
 | `systemd/pareton-worker.service.d/queue.conf` | `/etc/systemd/system/pareton-worker.service.d/` | Clears `ExecStart`, re-sets it with `--queue submissions` |
 | `systemd/pareton-worker.service.d/timeout.conf` | `/etc/systemd/system/pareton-worker.service.d/` | `TimeoutStopSec=4h`, overrides the unit's `8h` |
