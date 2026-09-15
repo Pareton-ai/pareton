@@ -144,18 +144,25 @@ def normalize_trajectory(row: dict[str, Any]) -> list[tuple[int, dict[str, str]]
         if not isinstance(message, dict):
             return []
         role = message.get("role")
-        if role == "system":
-            continue
         role = "assistant" if role == "ai" else role
-        if role != expected_role:
+        # Dataset system entries use system_prompt instead of text. Keep them
+        # before the user/assistant history so rendering and token counting see
+        # the same full input that will be sent to the engine.
+        if role == "system":
+            if any(m["role"] != "system" for _, m in messages):
+                return []
+        elif role != expected_role:
             return []
-        content = message.get("text")
+        content = message.get("system_prompt") if role == "system" else None
+        if not isinstance(content, str) or not content.strip():
+            content = message.get("text")
         if not isinstance(content, str) or not content.strip():
             content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             return []
         messages.append((index, {"role": role, "content": content}))
-        expected_role = "assistant" if role == "user" else "user"
+        if role != "system":
+            expected_role = "assistant" if role == "user" else "user"
     return messages
 
 

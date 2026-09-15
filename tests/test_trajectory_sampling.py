@@ -66,9 +66,9 @@ def formatter(thinking=False, template_prefix=""):
 
 def row(thinking=False, long_characters=False):
     # Complete user prefixes render to 4096, 8192, 16384 and 32768 tokens, including
-    # role markers, generation prefix and the optional template instruction.
-    first = 4092 - (3 if thinking else 0)
-    messages = [{"role": "system", "system_prompt": "DATASET_SYSTEM_SECRET"}]
+    # dataset system prompt, role markers, generation prefix and template instruction.
+    first = 4089 - (3 if thinking else 0)
+    messages = [{"role": "system", "system_prompt": "DATASET_SYSTEM_PROMPT"}]
     for i, words in enumerate((first, 4091, 8187, 16379)):
         content = " ".join(["data"] * words)
         if i == 0 and long_characters:
@@ -203,7 +203,7 @@ def test_vllm_can_grade_outputs_that_fill_the_sampled_context(monkeypatch, group
     assert prefix == output
 
 
-def test_normalized_history_excludes_system_and_future_messages():
+def test_normalized_history_includes_system_and_excludes_future_messages():
     source = row()
     source["trajectory"][2]["text"] = "RECORDED_COMMAND"
     source["trajectory"][-1]["text"] = "HELD_OUT_RESPONSE"
@@ -212,7 +212,8 @@ def test_normalized_history_excludes_system_and_future_messages():
     prompts = [r["prompt"] for r in json.loads(sampled.body)["requests"]]
     assert any("assistant RECORDED_COMMAND" in prompt for prompt in prompts)
     assert all(
-        "DATASET_SYSTEM_SECRET" not in p
+        p.startswith("system DATASET_SYSTEM_PROMPT end user ")
+        and p.count("DATASET_SYSTEM_PROMPT") == 1
         and "FUTURE_PATCH" not in p
         and "FUTURE_TEST_RESULTS" not in p
         and "HELD_OUT_RESPONSE" not in p
@@ -226,6 +227,72 @@ def test_more_than_8000_characters_is_accepted_when_rendered_tokens_fit():
     assert all(len(r["prompt"]) > 8000 for r in json.loads(sampled.body)["requests"])
 
 
+@pytest.mark.parametrize("target", [4096, 8192, 16384, 32768])
+def test_system_prompt_counts_toward_tier_boundaries(target):
+    sources = []
+    for size in (4096, 8192, 16384, 32768):
+        sources.append(
+            {
+                "trajectory": [
+                    {"role": "system", "system_prompt": "data " * 3500},
+                    {"role": "user", "text": "data " * (size - 3506)},
+                    {"role": "ai", "text": "held out"},
+                ]
+            }
+        )
+    kwargs = {"rule": rule(n_rows=4, n_prompts=4), "row_fetcher": sources.__getitem__}
+    sampled = sample(**kwargs)
+    encoder = formatter().encode
+    for request in json.loads(sampled.body)["requests"]:
+        assert request["input_tokens"] == len(encoder(request["prompt"]))
+    assert sorted(r["input_tokens"] for r in sampled.receipt["requests"]) == [
+        4096,
+        8192,
+        16384,
+        32768,
+    ]
+    assert all(r["end_message_index"] == 1 for r in sampled.receipt["requests"])
+
+    # One extra system token pushes this row above its tier's upper bound.
+    index = (4096, 8192, 16384, 32768).index(target)
+    sources[index]["trajectory"][0]["system_prompt"] += "data"
+    with pytest.raises(SamplerError, match="coverage unavailable"):
+        sample(**kwargs)
+
+
+def test_changed_system_prompt_cannot_reconstruct_a_receipt():
+    sampled = sample()
+    source = row()
+    source["trajectory"][0]["system_prompt"] = "CHANGED_SYSTEM_PROMPT"
+    with pytest.raises(SamplerError, match="does not reproduce"):
+        sample(row_fetcher=lambda _: source, sampling_receipt=sampled.receipt)
+
+
+@pytest.mark.parametrize(
+    "system_message",
+    [
+        {"system_prompt": "instruction", "text": "unused", "content": "unused"},
+        {"system_prompt": None, "text": "instruction"},
+        {"system_prompt": " ", "text": None, "content": "instruction"},
+    ],
+)
+def test_system_content_fields_preserve_source_indices(system_message):
+    messages = normalize_trajectory(
+        {
+            "trajectory": [
+                {"role": "system", **system_message},
+                {"role": "user", "text": "question"},
+                {"role": "ai", "text": "answer"},
+            ]
+        }
+    )
+    assert messages == [
+        (0, {"role": "system", "content": "instruction"}),
+        (1, {"role": "user", "content": "question"}),
+        (2, {"role": "assistant", "content": "answer"}),
+    ]
+
+
 def test_thinking_instruction_counts_toward_each_input():
     sampled = sample(
         rule=rule(enable_thinking=True),
@@ -234,7 +301,9 @@ def test_thinking_instruction_counts_toward_each_input():
     )
     assert sampled.receipt["enable_thinking"] is True
     for request in json.loads(sampled.body)["requests"]:
-        assert request["prompt"].startswith("system reason end user")
+        assert request["prompt"].startswith(
+            "system reason end system DATASET_SYSTEM_PROMPT end user"
+        )
     assert sorted(r["input_tokens"] for r in sampled.receipt["requests"]) == [
         4096,
         4096,
@@ -255,6 +324,9 @@ def test_thinking_instruction_counts_toward_each_input():
         [{"role": "ai", "text": "answer"}],
         [{"role": "user", "text": {"unexpected": "object"}}],
         [{"role": "user", "text": "a"}, {"role": "user", "text": "b"}],
+        [{"role": "system", "system_prompt": " "}],
+        [{"role": "system", "system_prompt": {"unexpected": "object"}}],
+        [{"role": "user", "text": "a"}, {"role": "system", "text": "late"}],
     ],
 )
 def test_malformed_histories_are_ineligible(trajectory):
