@@ -74,7 +74,7 @@ def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeyp
         algo_version=3,
         request_interval_ms=0,
         enable_thinking=True,
-        n_prompts=5,
+        n_prompts=4,
         n_rows=32,
         revision="a" * 40,
     )
@@ -242,7 +242,7 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     )
     request = build_round_request(
         {
-            "gpu_sku": "H200",
+            "gpu_sku": "RTX5090",
             "sampled_trace_sha256": sha256_file(tmp_path / "trace.json"),
             "scoring_rule": manifest.scoring_rule,
         },
@@ -269,10 +269,12 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
     assert request["model"]["quantization"] == "fp8"
     assert request["model"]["max_model_len"] == 262144
     assert request["hardware"]["gpu_count"] == 4
+    assert request["hardware"]["gpu_sku_expected"] == "RTX5090"
+    assert manifest.gpu_skus == ["RTX5090"]
     assert manifest.sampling_rule["algo_version"] == 3
     assert manifest.sampling_rule["n_prompts"] == 32
     assert manifest.sampling_rule["max_tokens"] == 5120
-    assert manifest.sampling_rule["request_interval_ms"] == 10
+    assert manifest.sampling_rule["request_interval_ms"] == 2
     assert manifest.sampling_rule["enable_thinking"] is True
     assert manifest.scoring_rule["failure_penalty"] == 0.1
     assert request["scoring_rule"] == manifest.scoring_rule
@@ -287,9 +289,11 @@ def test_sglang_launch_helper_produces_fp8_worker_request(monkeypatch, tmp_path)
         assert example["bench"][key] == manifest.bench[key]
     assert example["sampling_rule"] == manifest.sampling_rule
     assert example["scoring_rule"] == manifest.scoring_rule
+    assert example["gpu_skus"] == manifest.gpu_skus
     groups = length_groups(262144, 32)
-    assert [g["max_tokens"] for g in groups] == [26214, 65536, 131072, 196608, 249036]
-    assert [g["count"] for g in groups] == [7, 7, 6, 6, 6]
+    assert [g["name"] for g in groups] == ["short", "medium", "long", "near_limit"]
+    assert [g["max_tokens"] for g in groups] == [2048, 131072, 196608, 249036]
+    assert [g["count"] for g in groups] == [8, 8, 8, 8]
     assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]
     assert baseline["name"] == "sglang"

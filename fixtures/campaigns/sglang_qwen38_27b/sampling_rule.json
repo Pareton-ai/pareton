@@ -6,7 +6,7 @@
   "max_tokens": 5120,
   "n_prompts": 32,
   "n_rows": 80036,
-  "request_interval_ms": 10,
+  "request_interval_ms": 2,
   "revision": "68195a1450865274106246d0d0296a1d6807b88e",
   "seed_block_offset": 10,
   "split": "train",

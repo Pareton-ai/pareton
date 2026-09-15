@@ -19,7 +19,7 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 
 The [campaign launch guide](docs/campaign_launch_skill.md) covers framework-specific
 patch paths, image builds and launch arguments, including a zero-emission
-SGLang campaign for Qwen/Qwen3.8-27B-FP8 on four H200 GPUs with 262K context.
+SGLang campaign for Qwen/Qwen3.8-27B-FP8 on four RTX 5090 GPUs with 262K context.
 The updated workload still requires GPU calibration before launch.
 
 ## How It Works

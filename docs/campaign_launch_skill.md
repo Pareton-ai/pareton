@@ -327,10 +327,12 @@ configuration before opening, using the normal deployment process.
 
 ## 4. Open the zero-emission Qwen campaign
 
-The launch helper targets four H200 GPUs, `Qwen/Qwen3.8-27B-FP8`, context length
-262144, 32 requests spaced 10 ms apart and up to 5120 output tokens. Sampler
-version 3 uses complete conversation prefixes at 10%, 25%, 50%, 75% and 95%
-context targets, enables thinking and applies failure coefficient 0.1. The model revision is
+The launch helper targets four RTX 5090 GPUs, `Qwen/Qwen3.8-27B-FP8`, context length
+262144, 32 requests spaced 2 ms apart and up to 5120 output tokens. Sampler
+version 3 uses complete conversation prefixes across four groups with eight
+requests each. Targets are 25%, 50%, 75% and 95% of context, with the short target
+capped at 2048 tokens. Thinking is enabled and the failure coefficient is 0.1.
+The model revision is
 `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`. Its
 [model configuration](https://huggingface.co/Qwen/Qwen3.8-27B-FP8/blob/017b9c7af6b5689d5dd426a76e0bc077eb5ca20a/config.json)
 declares the Qwen3.5 architecture, BF16 activation dtype and dynamic FP8 E4M3
@@ -349,8 +351,8 @@ exact 8192-token scorer probe also passed. All validation pods and volumes were
 deleted, with provider API readback. See the
 [validation record](../fixtures/campaigns/sglang_qwen38_27b/validation-evidence.json)
 and [full round report](../fixtures/campaigns/sglang_qwen38_27b/validation/bench_report.json).
-Those checks do not validate the updated four-GPU, 262K workload. Run source
-coverage preflight and GPU calibration with the new sampling, thinking and
+Those checks do not validate the updated 262K workload on four RTX 5090 GPUs.
+Run source coverage preflight and GPU calibration with the new sampling, thinking and
 serving settings before opening. The earlier BF16/Python-only measurements
 remain historical evidence in `HANDOFF.md`. See the
 [workload proposal](benchmark-scoring-rework-proposal.md) for target ranges and
@@ -361,7 +363,7 @@ Sample campaign entries, in addition to the source and image pins:
 ```json
 {
   "status": "open",
-  "gpu_skus": ["H200"],
+  "gpu_skus": ["RTX5090"],
   "allowed_paths": ["python/sglang/**", "rust/**"],
   "engine": {
     "name": "sglang",

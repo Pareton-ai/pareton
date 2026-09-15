@@ -18,7 +18,7 @@ python -m campaign.seed \
   --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
   --base-image-digest "$engine_ref" \
   --baseline-engine-image-digest "$engine_ref" \
-  --gpu-skus H200 --bench-gpu-count 4 \
+  --gpu-skus RTX5090 --bench-gpu-count 4 \
   --bench-model-repo Qwen/Qwen3.8-27B-FP8 \
   --bench-model-revision 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a \
   --bench-dtype bfloat16 --bench-quantization fp8 --bench-max-model-len 262144 \

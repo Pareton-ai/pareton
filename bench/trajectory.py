@@ -11,7 +11,7 @@ from typing import Any
 
 from bench.sampler import PromptFormatter, SampledTrace, SamplerError, encode_trace
 
-GROUPS = ("short", "quarter", "medium", "long", "near_limit")
+GROUPS = ("short", "medium", "long", "near_limit")
 
 
 def sampling_context_for_campaign(
@@ -51,8 +51,7 @@ def _validate_context(context: dict[str, Any] | None) -> None:
 
 def length_groups(context: int, n_prompts: int) -> list[dict[str, Any]]:
     targets = [
-        context // 10,
-        context // 4,
+        min(2048, context // 4),
         context // 2,
         context * 3 // 4,
         context * 95 // 100,
@@ -87,7 +86,7 @@ def validate_trajectory_trace(
         )
     if len(requests) < len(GROUPS):
         raise SamplerError(
-            "trajectory trace requires at least 5 requests for context coverage"
+            "trajectory trace requires at least 4 requests for context coverage"
         )
     groups = {
         g["name"]: g for g in length_groups(context["max_model_len"], len(requests))
