@@ -163,7 +163,6 @@ def _write_remote_env(
         # worker-side value so large models get the same health window.
         f"PARETON_BENCH_HEALTH_TIMEOUT_S={config.BENCH_HEALTH_TIMEOUT_S}",
         # Keep scorer TP and Docker GPU allocation in sync on the remote host.
-        f"PARETON_BENCH_SGLANG_SCORER_TP_SIZE={config.BENCH_SGLANG_SCORER_TP_SIZE}",
         # GPU pods have the RAM/bandwidth for Xet HP mode (>=64 GB). Hub >=0.32
         # already uses hf_xet; this only raises concurrency/buffers. Do not set
         # on laptops (can be slower with less RAM).

@@ -73,6 +73,12 @@
       "--enable-cache-report"
     ],
     "correctness": {
+      "serve_args": [
+        "--mem-fraction-static",
+        "0.4",
+        "--tp-size",
+        "8"
+      ],
       "thresholds": {
         "min_mean_logprob": -4.0,
         "min_token_logprob": -12.0,

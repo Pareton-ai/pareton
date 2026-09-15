@@ -200,6 +200,10 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     if not isinstance(corr, dict):
         raise RequestValidationError("correctness must be an object")
     _require_keys(corr, ["num_prompts", "thresholds"], ctx="correctness")
+    if not isinstance(corr.get("serve_args", []), list) or not all(
+        isinstance(arg, str) for arg in corr.get("serve_args", [])
+    ):
+        raise RequestValidationError("correctness.serve_args must be a list of strings")
     if int(corr["num_prompts"]) < 1:
         raise RequestValidationError("correctness.num_prompts must be >= 1")
     thr = corr["thresholds"]

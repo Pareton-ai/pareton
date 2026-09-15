@@ -143,13 +143,6 @@ BENCH_HEALTH_TIMEOUT_S: float = float(
 )
 BENCH_HEALTH_POLL_S: float = float(os.environ.get("PARETON_BENCH_HEALTH_POLL_S", "2"))
 BENCH_ENGINE_PORT: int = int(os.environ.get("PARETON_BENCH_ENGINE_PORT", "8000"))
-# Zero inherits the campaign's TP and GPU allocation. Set on a benchmark host
-# with spare GPUs to give only the SGLang correctness scorer a larger TP group.
-BENCH_SGLANG_SCORER_TP_SIZE: int = int(
-    os.environ.get("PARETON_BENCH_SGLANG_SCORER_TP_SIZE", "0")
-)
-if BENCH_SGLANG_SCORER_TP_SIZE < 0:
-    raise ValueError("PARETON_BENCH_SGLANG_SCORER_TP_SIZE must be nonnegative")
 BENCH_DOCKER_PULL_TIMEOUT_S: float = float(
     os.environ.get("PARETON_BENCH_DOCKER_PULL_TIMEOUT_S", "1800")
 )

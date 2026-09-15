@@ -66,6 +66,14 @@ def test_candidates_must_be_a_non_empty_list():
         validate_bench_request_dict(raw)
 
 
+@pytest.mark.parametrize("serve_args", [None, "--mem-fraction-static=0.4", [0.4]])
+def test_correctness_serve_args_must_be_strings_in_a_list(serve_args):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["serve_args"] = serve_args
+    with pytest.raises(RequestValidationError, match=r"correctness\.serve_args"):
+        validate_bench_request_dict(raw)
+
+
 @pytest.mark.parametrize("name", ["unknown", None, [], {}])
 def test_invalid_engine_name_is_rejected(name):
     raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))

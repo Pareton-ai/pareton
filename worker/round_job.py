@@ -353,6 +353,8 @@ def build_round_request(
             ),
         },
     }
+    if "serve_args" in corr_cfg:
+        correctness["serve_args"] = list(corr_cfg["serve_args"])
     # The relative model-quality bar is campaign policy and is forwarded only
     # when the manifest carries it. Repeat-loop rejection is mandatory harness
     # policy in bench/correctness.py and is intentionally absent here.

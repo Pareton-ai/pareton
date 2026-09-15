@@ -250,12 +250,14 @@ class CorrectnessConfig:
 
     num_prompts: int
     thresholds: CorrectnessThresholds
+    serve_args: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessConfig:
         return cls(
             num_prompts=int(d["num_prompts"]),
             thresholds=CorrectnessThresholds.from_dict(d["thresholds"]),
+            serve_args=list(d.get("serve_args", [])),
         )
 
 

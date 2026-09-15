@@ -204,8 +204,9 @@ def test_sglang_requires_source_pin_before_writing(monkeypatch):
 def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
+    from bench.main import plan_round_starts
     from bench.trajectory import length_groups
-    from bench.validate import sha256_file
+    from bench.validate import sha256_file, validate_bench_request_dict
     from worker.round_job import build_round_request
 
     captured = _patch_store(monkeypatch)
@@ -287,7 +288,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json"
         ).read_text()
     )
-    for key in ("model", "gpu_count", "serve_args"):
+    for key in ("model", "gpu_count", "serve_args", "correctness"):
         assert example["bench"][key] == manifest.bench[key]
     assert example["sampling_rule"] == manifest.sampling_rule
     assert example["scoring_rule"] == manifest.scoring_rule
@@ -300,6 +301,33 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert [g["count"] for g in groups] == [8, 8, 8, 8]
     assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]
+    parsed = validate_bench_request_dict(request)
+    assert parsed.correctness.serve_args == [
+        "--mem-fraction-static",
+        "0.4",
+        "--tp-size",
+        "8",
+    ]
+    plan = plan_round_starts(
+        parsed.engines, correctness_serve_args=parsed.correctness.serve_args
+    )
+    assert [start.kind for start in plan] == [
+        "baseline",
+        "candidate",
+        "scorer",
+        "drift",
+    ]
+    for start in plan:
+        if start.kind == "scorer":
+            assert start.spec.serve_args[-4:] == [
+                "--mem-fraction-static",
+                "0.4",
+                "--tp-size",
+                "8",
+            ]
+            assert start.gpu_count == 8
+        else:
+            assert start.spec.serve_args == baseline["serve_args"]
     assert baseline["name"] == "sglang"
     assert request["engines"]["candidates"][0]["serve_args"] == baseline["serve_args"]
     assert baseline["serve_args"] == [

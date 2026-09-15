@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-import config
 from bench import __version__
 from bench.correctness import (
     BASELINE_INDEX,
@@ -126,30 +125,19 @@ EXIT_ENGINE = 3
 logger = logging.getLogger("bench")
 
 
-def scorer_engine_spec(spec: EngineSpec, *, sglang_tp_size: int = 0) -> EngineSpec:
+def scorer_engine_spec(
+    spec: EngineSpec, *, serve_args: list[str] | None = None
+) -> EngineSpec:
     """The scorer: the campaign's own baseline image plus the scorer flags.
 
     The scorer is per campaign rather than per candidate, and it is derived
     from the pinned baseline rather than named separately, so a campaign
-    manifest carries no scorer field of its own.
+    manifest carries no scorer image of its own. Campaign correctness serving
+    arguments override baseline arguments only for this derived spec.
     """
     extra = correctness_extra_serve_args(spec.name)
     args = list(spec.serve_args)
     env = dict(spec.env)
-    if sglang_tp_size < 0:
-        raise ValueError("SGLang scorer TP size must be nonnegative")
-    if spec.name == "sglang" and sglang_tp_size:
-        tp_flags = ("--tp-size", "--tensor-parallel-size", "--tp")
-        found = False
-        for i, arg in enumerate(args):
-            if arg in tp_flags:
-                args[i + 1] = str(sglang_tp_size)
-                found = True
-            elif any(arg.startswith(flag + "=") for flag in tp_flags):
-                args[i] = arg.partition("=")[0] + "=" + str(sglang_tp_size)
-                found = True
-        if not found:
-            args.extend(["--tp-size", str(sglang_tp_size)])
     if spec.name == "sglang":
         context_flag = "--context-length"
         headroom = SGLANG_SCORER_CONTEXT_HEADROOM
@@ -173,7 +161,7 @@ def scorer_engine_spec(spec: EngineSpec, *, sglang_tp_size: int = 0) -> EngineSp
         env[override_env] = "1"
     return EngineSpec(
         image=spec.image,
-        serve_args=args + extra,
+        serve_args=args + list(serve_args or []) + extra,
         env=env,
         cache_dir=spec.cache_dir,
         name=spec.name,
@@ -208,8 +196,29 @@ class EngineStart:
     gpu_count: int | None = None
 
 
+def _sglang_scorer_gpu_count(serve_args: list[str]) -> int | None:
+    """Match SGLang's last TP argument so Docker exposes the scorer's GPUs."""
+    count = None
+    for i, arg in enumerate(serve_args):
+        flag, sep, value = arg.partition("=")
+        if flag not in {"--tp-size", "--tensor-parallel-size", "--tp"}:
+            continue
+        try:
+            count = int(value if sep else serve_args[i + 1])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(
+                "SGLang scorer TP size must be a positive integer"
+            ) from exc
+        if count < 1:
+            raise ValueError("SGLang scorer TP size must be a positive integer")
+    return count
+
+
 def plan_round_starts(
-    engines: EnginesSpec, *, mode: str = "all", sglang_scorer_tp_size: int = 0
+    engines: EnginesSpec,
+    *,
+    mode: str = "all",
+    correctness_serve_args: list[str] | None = None,
 ) -> list[EngineStart]:
     """Every container this round will start, in order.
 
@@ -247,11 +256,11 @@ def plan_round_starts(
                 role="scorer",
                 kind="scorer",
                 spec=scorer_engine_spec(
-                    engines.baseline, sglang_tp_size=sglang_scorer_tp_size
+                    engines.baseline, serve_args=correctness_serve_args
                 ),
                 mount_engine_cache=False,
                 gpu_count=(
-                    sglang_scorer_tp_size or None
+                    _sglang_scorer_gpu_count(correctness_serve_args or [])
                     if engines.baseline.name == "sglang"
                     else None
                 ),
@@ -565,7 +574,7 @@ def run_round(
     plan = plan_round_starts(
         req.engines,
         mode=req.mode,
-        sglang_scorer_tp_size=config.BENCH_SGLANG_SCORER_TP_SIZE,
+        correctness_serve_args=req.correctness.serve_args,
     )
     layout.append_log(
         {

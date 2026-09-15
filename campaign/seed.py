@@ -201,6 +201,7 @@ def build_seed_bench_spec(
     gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     serve_args: list[str] | None = None,
     correctness_num_prompts: int | None = None,
+    correctness_serve_args: list[str] | None = None,
     correctness_thresholds: dict | None = None,
 ) -> dict:
     # Every campaign pins its own correctness thresholds. The values default
@@ -210,6 +211,8 @@ def build_seed_bench_spec(
     correctness: dict = {"thresholds": _correctness_thresholds(correctness_thresholds)}
     if correctness_num_prompts is not None:
         correctness["num_prompts"] = int(correctness_num_prompts)
+    if correctness_serve_args is not None:
+        correctness["serve_args"] = list(correctness_serve_args)
     return {
         "model": {
             "hf_repo": model_repo,
@@ -240,6 +243,7 @@ def seed_synthetic_campaign(
     bench_gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     bench_serve_args: list[str] | None = None,
     bench_correctness_num_prompts: int | None = None,
+    bench_correctness_serve_args: list[str] | None = None,
     bench_correctness_thresholds: dict | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
@@ -329,6 +333,7 @@ def seed_synthetic_campaign(
             gpu_count=bench_gpu_count,
             serve_args=bench_serve_args,
             correctness_num_prompts=bench_correctness_num_prompts,
+            correctness_serve_args=bench_correctness_serve_args,
             correctness_thresholds=bench_correctness_thresholds,
         )
     )
@@ -472,6 +477,12 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-quantization",
         default=None,
         help="Model quantization passed to the engine (example: fp8)",
+    )
+    p.add_argument(
+        "--bench-correctness-serve-args",
+        action="append",
+        default=None,
+        help="Scorer-only serving argument, appended after baseline args (repeatable; use = for flags)",
     )
     p.add_argument(
         "--bench-correctness-num-prompts",
@@ -651,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_gpu_count=args.bench_gpu_count,
             bench_serve_args=args.bench_serve_args,
             bench_correctness_num_prompts=args.bench_correctness_num_prompts,
+            bench_correctness_serve_args=args.bench_correctness_serve_args,
             bench_correctness_thresholds=correctness_thresholds,
             workload_pool=pool,
             sampling_rule=rule,

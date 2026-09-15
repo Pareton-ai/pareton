@@ -7,6 +7,8 @@
 # listen address, port and GPU allocation separately from these serving flags.
 # RadixArk's checkpoint uses mixed NVFP4/FP8 layers with a BF16 lm_head.
 # SGLang loads its per-layer quantization with modelopt_mixed.
+# Reserve scorer memory for full-input logprobs (logprob_start_len=0).
+# The correctness scorer needs an eight-GPU target; timed runs use four GPUs.
 set -euo pipefail
 engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF}
 if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
@@ -37,6 +39,8 @@ python -m campaign.seed \
   --bench-serve-args=--tool-call-parser --bench-serve-args=qwen3_coder \
   --bench-serve-args=--enable-cache-report \
   --bench-correctness-num-prompts 32 \
+  --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.4 \
+  --bench-correctness-serve-args=--tp-size --bench-correctness-serve-args=8 \
   --bench-correctness-min-mean-logprob=-4 \
   --bench-correctness-min-token-logprob=-12 \
   --bench-correctness-min-token-quantile=0.001 \

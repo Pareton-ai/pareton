@@ -42,32 +42,34 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ### Optional eight-GPU SGLang correctness scorer
 
-On a validator whose GPU target has eight available GPUs, set
-`PARETON_BENCH_SGLANG_SCORER_TP_SIZE=8` in `/opt/pareton/.env` to use TP8 for the
-correctness scorer. The round worker forwards the setting to the remote harness.
-The baseline, candidates, and final drift replay retain the campaign's TP and
-GPU allocation. Zero (the default) inherits the campaign configuration.
+Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
 
-This setting does not change GPU provisioning or reserve additional GPUs.
-Enable it only when every SGLang target reachable by that worker has enough
-available GPUs, such as a dedicated eight-GPU static SSH host. A worker that can
-receive four-GPU rentals must leave it at zero unless its provisioning is
-separately arranged to guarantee eight GPUs. Keep the campaign GPU count at four
-when the timed workload is a four-GPU benchmark.
+```json
+["--mem-fraction-static", "0.4", "--tp-size", "8"]
+```
 
-Deploy the code before enabling the setting, then let active rounds finish and
-restart `pareton-round-worker.service` to reload its environment. Legacy combined
-workers need `pareton-worker.service` restarted instead. Follow the maintenance
-and deploy-timer procedure below when doing manual work. The next round's
-bootstrap uploads the harness and writes the updated remote environment; engine
-images, pinned weights, and database schemas need no changes.
+The Qwen seed helper supplies these through repeatable
+`--bench-correctness-serve-args` options. The round request carries them to the
+remote harness, so no scorer TP environment variable is required. The harness
+appends them only to the trusted scorer's serving arguments and exposes eight
+GPUs to that container. Baseline, candidate and drift runs retain the campaign's
+timed TP and GPU allocation. Without a correctness TP argument, GPU allocation
+inherits `bench.gpu_count`. SGLang's `--tp-size`, `--tensor-parallel-size` and
+`--tp` aliases accept separate values or `=`, with the last value taking effect.
 
-Verify `gpu_counts` in the `round_plan` harness event: the scorer should use eight
-GPUs and the timed stages should retain four. Check the scorer's Docker launch
-for `--gpus 8` and TP8, and require successful baseline and candidate correctness
-reports before accepting the result. To roll back, set the variable to zero and
-reload the idle execution worker. Changing TP can change numerical logprobs;
-both baseline and candidate outputs are graded by the same scorer.
+These arguments do not change GPU provisioning or reserve additional GPUs.
+The Qwen helper requires a target with eight available GPUs, such as a dedicated
+static SSH host. For a four-GPU target, omit the correctness TP override or set
+it to four. Keep `bench.gpu_count` at four for the timed workload.
+
+Deploy the harness before seeding a campaign with these arguments. Existing
+campaigns need a manifest update; worker environment changes do not alter their
+pinned scorer configuration. Verify `gpu_counts` in the `round_plan` event and
+the scorer's Docker launch: the Qwen scorer should use `--gpus 8`, TP8 and
+`--mem-fraction-static 0.4`, while timed stages retain four GPUs and `0.85`.
+Require successful baseline and candidate correctness reports before accepting
+the result. Changing TP can change numerical logprobs; both baseline and
+candidate outputs are graded by the same scorer.
 
 ### Deployment lifecycle
 

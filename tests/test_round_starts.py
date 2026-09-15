@@ -161,6 +161,9 @@ def test_scorer_tp_override_reaches_docker_gpu_allocation(
     raw["hardware"]["gpu_count"] = 4
     for spec in [raw["engines"]["baseline"], *raw["engines"]["candidates"]]:
         spec["serve_args"] = ["--model-path", "/model", "--tp-size", "4"]
+    raw["correctness"]["serve_args"] = (
+        ["--tp-size", str(scorer_tp_size)] if scorer_tp_size else []
+    )
     req = validate_bench_request_dict(raw)
     fake = FakeDocker()
     for spec in [req.engines.baseline, *req.engines.candidates]:
@@ -170,7 +173,9 @@ def test_scorer_tp_override_reaches_docker_gpu_allocation(
     provider = _EngineProvider(
         req=req, mock=False, logs_dir=tmp_path, docker_runner=fake
     )
-    for start in plan_round_starts(req.engines, sglang_scorer_tp_size=scorer_tp_size):
+    for start in plan_round_starts(
+        req.engines, correctness_serve_args=req.correctness.serve_args
+    ):
         with provider.start(start, phase=BenchPhase.SLA_BENCH):
             pass
     runs = [argv for argv, _ in fake.calls if argv[:2] == ["docker", "run"]]
@@ -179,16 +184,40 @@ def test_scorer_tp_override_reaches_docker_gpu_allocation(
         scorer = argv[argv.index("--name") + 1].endswith("-scorer")
         expected = str(scorer_tp_size if scorer and scorer_tp_size else 4)
         assert argv[argv.index("--gpus") + 1] == expected
-        assert argv[argv.index("--tp-size") + 1] == expected
+        tp_index = len(argv) - 1 - argv[::-1].index("--tp-size")
+        assert argv[tp_index + 1] == expected
 
 
-def test_the_runner_performs_exactly_the_planned_starts(tmp_path: Path):
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_the_runner_performs_exactly_the_planned_starts(
+    tmp_path: Path, monkeypatch, engine
+):
     """The runner starts what the plan lists, and nothing else."""
-    req = validate_bench_request_dict(_request(VLLM_SERVE_ARGS, candidates=2))
+    raw = _request(
+        SGLANG_SERVE_ARGS if engine == "sglang" else VLLM_SERVE_ARGS, candidates=2
+    )
+    if engine == "sglang":
+        raw["correctness"]["serve_args"] = [
+            "--mem-fraction-static",
+            "0.4",
+            "--tp-size",
+            "8",
+        ]
+        for spec in [raw["engines"]["baseline"], *raw["engines"]["candidates"]]:
+            spec["serve_args"] += ["--mem-fraction-static", "0.85"]
+    req = validate_bench_request_dict(raw)
     trace = load_workload_trace(SAMPLE_TRACE, expected_sha256=req.workload_trace.sha256)
     layout = OutputLayout(tmp_path / "out")
     layout.prepare()
     provider = _EngineProvider(req=req, mock=True, logs_dir=tmp_path / "logs")
+    starts = []
+    original_start = provider.start
+
+    def record_start(start, **kwargs):
+        starts.append(start)
+        return original_start(start, **kwargs)
+
+    monkeypatch.setattr(provider, "start", record_start)
     from bench.correctness import select_correctness_prompts
     from bench.validate import sha256_file
 
@@ -205,6 +234,19 @@ def test_the_runner_performs_exactly_the_planned_starts(tmp_path: Path):
         "scorer",
         "baseline-drift",
     ]
+    if engine == "sglang":
+        for start in starts:
+            if start.kind == "scorer":
+                assert start.spec.serve_args[-4:] == [
+                    "--mem-fraction-static",
+                    "0.4",
+                    "--tp-size",
+                    "8",
+                ]
+                assert start.gpu_count == 8
+            else:
+                assert start.spec.serve_args[-2:] == ["--mem-fraction-static", "0.85"]
+                assert start.gpu_count is None
     # The sample request predates PAR-108's relative bar. It must retain the
     # original candidate-only correctness path rather than grading a baseline.
     assert not (layout.correctness_dir / "baseline.jsonl").exists()
