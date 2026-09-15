@@ -705,12 +705,18 @@ def test_write_remote_env_does_not_put_secrets_in_ssh_argv(tmp_path: Path, monke
     assert all(secret not in r for r in ssh_remotes)
 
 
-def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("scorer_tp_size", [0, 8])
+def test_write_remote_env_forwards_bench_settings(
+    tmp_path: Path, monkeypatch, scorer_tp_size
+):
     from gpu.orchestrate import _write_remote_env
     from gpu.types import Pod, SshTarget
 
     ensure_durable_keypair(tmp_path / "st")
     monkeypatch.setattr("gpu.orchestrate.config.BENCH_HEALTH_TIMEOUT_S", 1800.0)
+    monkeypatch.setattr(
+        "gpu.orchestrate.config.BENCH_SGLANG_SCORER_TP_SIZE", scorer_tp_size
+    )
     pushed: list[str] = []
 
     def capturing_push(pod, local, remote, **kwargs):
@@ -738,6 +744,7 @@ def test_write_remote_env_forwards_health_timeout(tmp_path: Path, monkeypatch):
     # prints all of them into the pytest log the moment it fails.
     env = dict(line.split("=", 1) for line in pushed[0].splitlines() if "=" in line)
     assert env["PARETON_BENCH_HEALTH_TIMEOUT_S"] == "1800.0"
+    assert env["PARETON_BENCH_SGLANG_SCORER_TP_SIZE"] == str(scorer_tp_size)
     assert env["HF_XET_HIGH_PERFORMANCE"] == "1"
     assert env["PARETON_BENCH_ENGINE_CACHE_DIR"] == "/workspace/engine-cache"
 

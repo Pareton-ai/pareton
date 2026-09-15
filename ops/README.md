@@ -40,6 +40,37 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ## A merge to `main` is a production deploy
 
+### Optional eight-GPU SGLang correctness scorer
+
+On a validator whose GPU target has eight available GPUs, set
+`PARETON_BENCH_SGLANG_SCORER_TP_SIZE=8` in `/opt/pareton/.env` to use TP8 for the
+correctness scorer. The round worker forwards the setting to the remote harness.
+The baseline, candidates, and final drift replay retain the campaign's TP and
+GPU allocation. Zero (the default) inherits the campaign configuration.
+
+This setting does not change GPU provisioning or reserve additional GPUs.
+Enable it only when every SGLang target reachable by that worker has enough
+available GPUs, such as a dedicated eight-GPU static SSH host. A worker that can
+receive four-GPU rentals must leave it at zero unless its provisioning is
+separately arranged to guarantee eight GPUs. Keep the campaign GPU count at four
+when the timed workload is a four-GPU benchmark.
+
+Deploy the code before enabling the setting, then let active rounds finish and
+restart `pareton-round-worker.service` to reload its environment. Legacy combined
+workers need `pareton-worker.service` restarted instead. Follow the maintenance
+and deploy-timer procedure below when doing manual work. The next round's
+bootstrap uploads the harness and writes the updated remote environment; engine
+images, pinned weights, and database schemas need no changes.
+
+Verify `gpu_counts` in the `round_plan` harness event: the scorer should use eight
+GPUs and the timed stages should retain four. Check the scorer's Docker launch
+for `--gpus 8` and TP8, and require successful baseline and candidate correctness
+reports before accepting the result. To roll back, set the variable to zero and
+reload the idle execution worker. Changing TP can change numerical logprobs;
+both baseline and candidate outputs are graded by the same scorer.
+
+### Deployment lifecycle
+
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
 separate promote step. Every tick that holds the deploy lock first runs the
 stage-1 config sync (`sync-config.py deploy-hook`): managed-file drift
