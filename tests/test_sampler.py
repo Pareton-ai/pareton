@@ -186,6 +186,83 @@ def test_hf_chat_formatter_rejects_a_changed_template():
         )
 
 
+@pytest.mark.parametrize("config", [{}, {"chat_template": None}, {"chat_template": ""}])
+def test_hf_chat_formatter_loads_standalone_template(tmp_path, monkeypatch, config):
+    template = _fake_tokenizer_config()["chat_template"] + "\r\n"
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(config))
+    (tmp_path / "chat_template.jinja").write_bytes(template.encode("utf-8"))
+    calls = []
+
+    def download(*, filename, **kwargs):
+        calls.append((filename, kwargs))
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+    monkeypatch.setattr("bench.sampler._hf_token", lambda: "test-token")
+    kwargs = {"repo_id": "org/model", "revision": "a" * 40, "token": "test-token"}
+    expected = "sha256:" + hashlib.sha256(template.encode("utf-8")).hexdigest()
+    formatter = build_prompt_formatter(
+        _chat_rule(),
+        model_repo=kwargs["repo_id"],
+        model_revision=kwargs["revision"],
+        expected_template_sha256=expected,
+    )
+    assert formatter.render("issue text").startswith(
+        "<user>issue text</user><assistant><no-think>"
+    )
+    assert formatter.receipt["chat_template"]["sha256"] == expected
+    assert calls == [("tokenizer_config.json", kwargs), ("chat_template.jinja", kwargs)]
+    with pytest.raises(SamplerError, match="chat template sha256 mismatch"):
+        build_prompt_formatter(
+            _chat_rule(),
+            model_repo=kwargs["repo_id"],
+            model_revision=kwargs["revision"],
+            expected_template_sha256="sha256:" + "0" * 64,
+        )
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_hf_chat_formatter_preserves_embedded_template(tmp_path, monkeypatch, named):
+    config = _fake_tokenizer_config()
+    if named:
+        config["chat_template"] = [
+            {"name": "default", "template": config["chat_template"]}
+        ]
+    path = tmp_path / "tokenizer_config.json"
+    path.write_text(json.dumps(config))
+
+    def download(*, filename, **kwargs):
+        assert filename == "tokenizer_config.json"
+        return str(path)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+    formatter = build_prompt_formatter(
+        _chat_rule(), model_repo="org/model", model_revision="a" * 40
+    )
+    assert formatter.render("issue text") == _chat_formatter().render("issue text")
+
+
+@pytest.mark.parametrize(
+    "template, cause",
+    [(None, FileNotFoundError), ("", ValueError)],
+)
+def test_hf_chat_formatter_requires_usable_standalone_template(
+    tmp_path, monkeypatch, template, cause
+):
+    (tmp_path / "tokenizer_config.json").write_text("{}")
+    if template is not None:
+        (tmp_path / "chat_template.jinja").write_text(template)
+    monkeypatch.setattr(
+        "huggingface_hub.hf_hub_download",
+        lambda *, filename, **kwargs: str(tmp_path / filename),
+    )
+    with pytest.raises(SamplerError, match="failed to load chat template") as exc:
+        build_prompt_formatter(
+            _chat_rule(), model_repo="org/model", model_revision="a" * 40
+        )
+    assert isinstance(exc.value.__cause__, cause)
+
+
 def test_chat_formatted_trace_hashes_the_rendered_prompt():
     rows = [_user_row(f"prompt-{i}") for i in range(8)]
     sampled = generate_trace(

@@ -158,6 +158,11 @@ def _call_load_tokenizer_config(**kwargs: Any) -> dict[str, Any]:
         config = json.load(fh)
     if not isinstance(config, dict):
         raise TypeError("tokenizer_config.json must contain an object")
+    if not config.get("chat_template"):
+        path = hf_hub_download(filename="chat_template.jinja", **kwargs)
+        # Preserve the template bytes for the receipt's SHA-256 pin.
+        with open(path, encoding="utf-8", newline="") as fh:
+            config["chat_template"] = fh.read()
     return config
 
 
