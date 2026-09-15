@@ -9,7 +9,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from bench.sampler import PromptFormatter, SampledTrace, SamplerError, encode_trace
+from bench.sampler import (
+    PromptFormatter,
+    PromptRenderError,
+    SampledTrace,
+    SamplerError,
+    encode_trace,
+)
 
 GROUPS = ("short", "medium", "long", "near_limit")
 
@@ -245,16 +251,22 @@ def _select(
     )
     for row_index in order:
         eligible = {}
-        for prefix in _prefixes(
-            row_index,
-            _fetch(row_fetcher, row_index),
-            formatter,
-            context,
-            rule["max_tokens"],
-        ):
-            for group in groups:
-                if group["min_tokens"] <= prefix.input_tokens <= group["max_tokens"]:
-                    eligible[group["name"]] = prefix
+        row = _fetch(row_fetcher, row_index)
+        try:
+            for prefix in _prefixes(
+                row_index, row, formatter, context, rule["max_tokens"]
+            ):
+                for group in groups:
+                    if (
+                        group["min_tokens"]
+                        <= prefix.input_tokens
+                        <= group["max_tokens"]
+                    ):
+                        eligible[group["name"]] = prefix
+        except PromptRenderError:
+            # Discard the whole row, including prefixes rendered before the
+            # failure. Receipt replay bypasses selection and must still fail.
+            continue
         if not eligible:
             continue
         options[row_index] = eligible

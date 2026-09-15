@@ -36,6 +36,10 @@ class SamplerError(ValueError):
     """Invalid sampler inputs or generation failure."""
 
 
+class PromptRenderError(SamplerError):
+    """The pinned chat template cannot render the supplied messages."""
+
+
 @dataclass(frozen=True)
 class SampledTrace:
     sha256: str
@@ -333,12 +337,12 @@ def build_prompt_formatter(
                 **special_tokens,
             )
         except Exception as exc:
-            raise SamplerError(
+            raise PromptRenderError(
                 f"chat template render failed for {repo}@{revision}: "
                 f"{type(exc).__name__}"
             ) from exc
         if not isinstance(rendered, str) or not rendered:
-            raise SamplerError(
+            raise PromptRenderError(
                 f"chat template for {repo}@{revision} rendered an empty prompt"
             )
         return rendered

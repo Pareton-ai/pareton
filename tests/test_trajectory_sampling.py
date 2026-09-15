@@ -3,6 +3,7 @@
 import copy
 import io
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from uuid import uuid4
@@ -41,7 +42,7 @@ def rule(**overrides):
     }
 
 
-def formatter(thinking=False):
+def formatter(thinking=False, template_prefix=""):
     tokenizer = Tokenizer(
         models.WordLevel(
             {"[UNK]": 0, "user": 1, "assistant": 2, "end": 3, "think": 4, "data": 5},
@@ -54,7 +55,8 @@ def formatter(thinking=False):
         model_repo="test/model",
         model_revision="b" * 40,
         config_loader=lambda **_: {
-            "chat_template": "{% if enable_thinking %}system reason end {% endif %}{% for m in messages %}{{ m.role }} {{ m.content }} end {% endfor %}assistant think"
+            "chat_template": template_prefix
+            + "{% if enable_thinking %}system reason end {% endif %}{% for m in messages %}{{ m.role }} {{ m.content }} end {% endfor %}assistant think"
         },
         tokenizer_loader=lambda **_: tokenizer.to_str(),
     )
@@ -254,6 +256,78 @@ def test_content_fallback_and_already_normalized_assistant_are_preserved():
 def test_missing_coverage_fails_without_short_fallback():
     with pytest.raises(SamplerError, match="coverage unavailable"):
         sample(row_fetcher=lambda _: {"trajectory": row()["trajectory"][:3]})
+
+
+@pytest.fixture
+def rejecting_formatter():
+    return formatter(
+        template_prefix="{% for m in messages %}{% if 'REJECT' in m.content %}"
+        "{{ raise_exception('unsupported message content') }}{% endif %}{% endfor %}"
+    )
+
+
+@pytest.mark.parametrize("message_index", [1, 5])
+def test_template_rejection_skips_the_entire_row(rejecting_formatter, message_index):
+    initial = sample(prompt_formatter=rejecting_formatter)
+    rejected_index = initial.row_indices[0]
+    rejected = row()
+    rejected["trajectory"][message_index]["text"] = "REJECT"
+
+    def fetch(index):
+        return rejected if index == rejected_index else row()
+
+    sampled = sample(row_fetcher=fetch, prompt_formatter=rejecting_formatter)
+    assert rejected_index not in sampled.row_indices
+    assert len(sampled.row_indices) == 8
+    validate_workload_trace_dict(json.loads(sampled.body))
+    rebuilt = sample(
+        row_fetcher=fetch,
+        prompt_formatter=rejecting_formatter,
+        sampling_receipt=sampled.receipt,
+    )
+    assert rebuilt.body == sampled.body
+
+
+def test_rejected_rows_cannot_replace_required_coverage(rejecting_formatter):
+    rejected = row()
+    rejected["trajectory"][1]["text"] = "REJECT"
+    with pytest.raises(SamplerError, match="coverage unavailable"):
+        sample(row_fetcher=lambda _: rejected, prompt_formatter=rejecting_formatter)
+
+
+def test_receipt_replay_does_not_replace_a_row_that_fails_to_render(
+    rejecting_formatter,
+):
+    sampled = sample(prompt_formatter=rejecting_formatter)
+    rejected = row()
+    rejected["trajectory"][1]["text"] = "REJECT"
+    fetched = []
+
+    def fetch(index):
+        fetched.append(index)
+        return rejected if index == sampled.row_indices[0] else row()
+
+    with pytest.raises(SamplerError, match="render failed"):
+        sample(
+            row_fetcher=fetch,
+            prompt_formatter=rejecting_formatter,
+            sampling_receipt=sampled.receipt,
+        )
+    assert fetched == [sampled.row_indices[0]]
+
+
+@pytest.mark.parametrize("stage", ["fetch", "tokenize"])
+def test_sampling_still_surfaces_fetch_and_tokenizer_errors(stage):
+    def fail(_):
+        raise SamplerError(f"{stage} unavailable")
+
+    kwargs = (
+        {"row_fetcher": fail}
+        if stage == "fetch"
+        else {"prompt_formatter": replace(formatter(), encode=fail)}
+    )
+    with pytest.raises(SamplerError, match=f"{stage}.*(?:failed|unavailable)"):
+        sample(**kwargs)
 
 
 @pytest.mark.parametrize(
