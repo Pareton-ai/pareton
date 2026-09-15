@@ -13,6 +13,59 @@ from bench.main import (
 from bench.schemas import EngineSpec, EnginesSpec
 
 
+@pytest.mark.parametrize(
+    "tp_args,expected",
+    [
+        ([], ["--tp-size", "8"]),
+        (["--tp-size", "4"], ["--tp-size", "8"]),
+        (["--tp-size=4"], ["--tp-size=8"]),
+        (["--tensor-parallel-size", "4"], ["--tensor-parallel-size", "8"]),
+        (["--tensor-parallel-size=4"], ["--tensor-parallel-size=8"]),
+        (["--tp", "4"], ["--tp", "8"]),
+        (["--tp=4"], ["--tp=8"]),
+        (
+            ["--tp-size", "2", "--tensor-parallel-size=4"],
+            ["--tp-size", "8", "--tensor-parallel-size=8"],
+        ),
+    ],
+)
+def test_sglang_scorer_tp_override_preserves_timed_specs(tp_args, expected):
+    args = ["--context-length", "262144", *tp_args]
+    spec = EngineSpec(image="sha256:" + "a" * 64, name="sglang", serve_args=args)
+    plan = plan_round_starts(
+        EnginesSpec(baseline=spec, candidates=[spec]), sglang_scorer_tp_size=8
+    )
+    for start in plan:
+        if start.kind == "scorer":
+            assert start.spec.serve_args == ["--context-length", "262151", *expected]
+            assert start.gpu_count == 8
+            assert start.spec.env["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] == "1"
+        else:
+            assert start.spec is spec
+            assert start.spec.serve_args == args
+            assert start.gpu_count is None
+    assert spec.serve_args == ["--context-length", "262144", *tp_args]
+    assert spec.env == {}
+
+
+def test_sglang_scorer_override_does_not_change_vllm():
+    spec = EngineSpec(
+        image="sha256:" + "a" * 64,
+        serve_args=["--tensor-parallel-size", "4"],
+        name="vllm",
+    )
+    engines = EnginesSpec(baseline=spec, candidates=[spec])
+    assert plan_round_starts(engines, sglang_scorer_tp_size=8) == plan_round_starts(
+        engines
+    )
+
+
+def test_sglang_scorer_override_rejects_negative_size():
+    spec = EngineSpec(image="sha256:" + "a" * 64, name="sglang")
+    with pytest.raises(ValueError, match="nonnegative"):
+        scorer_engine_spec(spec, sglang_tp_size=-1)
+
+
 def test_scorer_engine_spec_appends_flags_without_mutating():
     original_args = ["--model", "/model", "--dtype", "bfloat16"]
     spec = EngineSpec(

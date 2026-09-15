@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+import config
 from bench import __version__
 from bench.correctness import (
     BASELINE_INDEX,
@@ -125,7 +126,7 @@ EXIT_ENGINE = 3
 logger = logging.getLogger("bench")
 
 
-def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
+def scorer_engine_spec(spec: EngineSpec, *, sglang_tp_size: int = 0) -> EngineSpec:
     """The scorer: the campaign's own baseline image plus the scorer flags.
 
     The scorer is per campaign rather than per candidate, and it is derived
@@ -135,6 +136,20 @@ def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
     extra = correctness_extra_serve_args(spec.name)
     args = list(spec.serve_args)
     env = dict(spec.env)
+    if sglang_tp_size < 0:
+        raise ValueError("SGLang scorer TP size must be nonnegative")
+    if spec.name == "sglang" and sglang_tp_size:
+        tp_flags = ("--tp-size", "--tensor-parallel-size", "--tp")
+        found = False
+        for i, arg in enumerate(args):
+            if arg in tp_flags:
+                args[i + 1] = str(sglang_tp_size)
+                found = True
+            elif any(arg.startswith(flag + "=") for flag in tp_flags):
+                args[i] = arg.partition("=")[0] + "=" + str(sglang_tp_size)
+                found = True
+        if not found:
+            args.extend(["--tp-size", str(sglang_tp_size)])
     if spec.name == "sglang":
         context_flag = "--context-length"
         headroom = SGLANG_SCORER_CONTEXT_HEADROOM
@@ -189,9 +204,13 @@ class EngineStart:
     # phase name alone cannot tell the first from the seventh.
     step: int = 0
     steps: int = 0
+    # None inherits the timed workload's hardware.gpu_count.
+    gpu_count: int | None = None
 
 
-def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[EngineStart]:
+def plan_round_starts(
+    engines: EnginesSpec, *, mode: str = "all", sglang_scorer_tp_size: int = 0
+) -> list[EngineStart]:
     """Every container this round will start, in order.
 
     The runner consumes this list, so the plan is the only place a start can
@@ -227,8 +246,15 @@ def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[Engine
             EngineStart(
                 role="scorer",
                 kind="scorer",
-                spec=scorer_engine_spec(engines.baseline),
+                spec=scorer_engine_spec(
+                    engines.baseline, sglang_tp_size=sglang_scorer_tp_size
+                ),
                 mount_engine_cache=False,
+                gpu_count=(
+                    sglang_scorer_tp_size or None
+                    if engines.baseline.name == "sglang"
+                    else None
+                ),
             )
         )
     starts.append(
@@ -488,7 +514,11 @@ class _EngineProvider:
                 spec=start.spec,
                 network=net,
                 role=start.role,
-                gpu_count=_effective_gpu_count(self._req.hardware.gpu_count),
+                gpu_count=_effective_gpu_count(
+                    start.gpu_count
+                    if start.gpu_count is not None
+                    else self._req.hardware.gpu_count
+                ),
                 weights_dir=self.weights_dir,
                 publish_port=False,
                 pull=_should_pull_image(start.spec.image),
@@ -532,9 +562,23 @@ def run_round(
 ]:
     """Execute the whole round against one pod. Returns the raw material."""
     requests = list(trace.requests)
-    plan = plan_round_starts(req.engines, mode=req.mode)
+    plan = plan_round_starts(
+        req.engines,
+        mode=req.mode,
+        sglang_scorer_tp_size=config.BENCH_SGLANG_SCORER_TP_SIZE,
+    )
     layout.append_log(
-        {"event": "round_plan", "starts": [s.role for s in plan], "count": len(plan)}
+        {
+            "event": "round_plan",
+            "starts": [s.role for s in plan],
+            "count": len(plan),
+            "gpu_counts": {
+                s.role: s.gpu_count
+                if s.gpu_count is not None
+                else req.hardware.gpu_count
+                for s in plan
+            },
+        }
     )
 
     baseline: EngineReplay | None = None

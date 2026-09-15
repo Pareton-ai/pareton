@@ -151,6 +151,37 @@ def test_sla_bench_mode_skips_the_scorer():
     assert not any(s.kind == "scorer" for s in plan)
 
 
+@pytest.mark.parametrize("scorer_tp_size", [0, 8])
+def test_scorer_tp_override_reaches_docker_gpu_allocation(
+    tmp_path, monkeypatch, scorer_tp_size
+):
+    from tests.test_lifecycle import FakeDocker
+
+    raw = _request(SGLANG_SERVE_ARGS, candidates=1, cache_dir=SGLANG_CACHE_DIR)
+    raw["hardware"]["gpu_count"] = 4
+    for spec in [raw["engines"]["baseline"], *raw["engines"]["candidates"]]:
+        spec["serve_args"] = ["--model-path", "/model", "--tp-size", "4"]
+    req = validate_bench_request_dict(raw)
+    fake = FakeDocker()
+    for spec in [req.engines.baseline, *req.engines.candidates]:
+        fake.image_digests[spec.image] = [spec.image]
+    monkeypatch.setattr("bench.lifecycle.wait_until_healthy", lambda *_a, **_k: None)
+    monkeypatch.setattr("bench.main._effective_gpu_count", lambda n: n)
+    provider = _EngineProvider(
+        req=req, mock=False, logs_dir=tmp_path, docker_runner=fake
+    )
+    for start in plan_round_starts(req.engines, sglang_scorer_tp_size=scorer_tp_size):
+        with provider.start(start, phase=BenchPhase.SLA_BENCH):
+            pass
+    runs = [argv for argv, _ in fake.calls if argv[:2] == ["docker", "run"]]
+    assert len(runs) == 4
+    for argv in runs:
+        scorer = argv[argv.index("--name") + 1].endswith("-scorer")
+        expected = str(scorer_tp_size if scorer and scorer_tp_size else 4)
+        assert argv[argv.index("--gpus") + 1] == expected
+        assert argv[argv.index("--tp-size") + 1] == expected
+
+
 def test_the_runner_performs_exactly_the_planned_starts(tmp_path: Path):
     """The runner starts what the plan lists, and nothing else."""
     req = validate_bench_request_dict(_request(VLLM_SERVE_ARGS, candidates=2))
