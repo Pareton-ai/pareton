@@ -327,7 +327,7 @@ configuration before opening, using the normal deployment process.
 
 ## 4. Open the Qwen campaign
 
-The launch helper targets four RTX 5090 GPUs, `nvidia/Qwen3.8-27B-NVFP4`, context length
+The launch helper targets four RTX 5090 GPUs, `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`, context length
 262144, 32 requests spaced 2 ms apart and up to 5120 output tokens. Sampler
 version 3 uses complete conversation prefixes across four groups with eight
 requests each. Targets are fixed at 4096, 8192, 16384 and 32768 input tokens,
@@ -336,16 +336,27 @@ room for the full output ceiling. This workload covers inputs up to 32K while
 retaining the 262144-token model limit. Source preflight must fill every tier
 before opening. Thinking is enabled and the failure coefficient is 0.1.
 The model revision is
-`dbb8f445b3145f8a4c18ddc769f032d57d32867c`. Its
-[model configuration](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4/blob/dbb8f445b3145f8a4c18ddc769f032d57d32867c/config.json)
+`009632fef96dd349150baa780c984e62e70e91fe`. Its
+[model configuration](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead/blob/009632fef96dd349150baa780c984e62e70e91fe/config.json)
 declares the Qwen3.5 architecture, BF16 activation dtype and ModelOpt mixed
-quantization: NVFP4 for MLP layers and `lm_head`, FP8 for attention layers.
+quantization: NVFP4 for MLP layers, FP8 for attention layers and BF16 for
+`lm_head`.
 Pin `bench.model.quantization: "modelopt_mixed"` and
 `bench.model.dtype: "bfloat16"`. The pinned SGLang source supports this loader;
 `fp8` would select the wrong checkpoint format. See the
-[NVIDIA model card](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4/blob/dbb8f445b3145f8a4c18ddc769f032d57d32867c/README.md)
+[RadixArk model card](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead/blob/009632fef96dd349150baa780c984e62e70e91fe/README.md)
 for the quantization recipe. The workload pin is in
 `fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json`.
+
+The pinned RadixArk tokenizer config has no embedded chat template. Both the
+sampler and standalone sample load `chat_template.jinja` from the same model
+revision. That template and `tokenizer.json` are byte-identical to the previous
+NVIDIA NVFP4 and original Qwen FP8 pins. Sixteen formatter comparisons covering
+thinking on/off, conversation history, tool results, Unicode/code and long
+inputs produced identical text and token IDs. RadixArk's padding token differs
+from Qwen FP8, but the template does not use it and the sampler disables padding.
+See the [tokenizer validation record](../fixtures/campaigns/sglang_qwen38_27b/tokenizer-validation.json)
+for hashes, inputs and the scope of this CPU check.
 
 The native images and the earlier one-H200, 8192-context FP8 configuration
 passed validation on 2026-09-09
@@ -386,8 +397,8 @@ Sample campaign entries, in addition to the source and image pins:
   },
   "bench": {
     "model": {
-      "hf_repo": "nvidia/Qwen3.8-27B-NVFP4",
-      "hf_revision": "dbb8f445b3145f8a4c18ddc769f032d57d32867c",
+      "hf_repo": "RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead",
+      "hf_revision": "009632fef96dd349150baa780c984e62e70e91fe",
       "dtype": "bfloat16",
       "quantization": "modelopt_mixed",
       "max_model_len": 262144

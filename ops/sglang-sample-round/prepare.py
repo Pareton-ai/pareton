@@ -29,13 +29,6 @@ fields = json.loads(
 )
 bench = fields["bench"]
 model = bench["model"]
-# This standalone sample uses NVIDIA's mixed FP8/NVFP4 checkpoint. Let SGLang
-# detect its per-layer quantization from config.json instead of forcing FP8.
-model.update(
-    hf_repo="nvidia/Qwen3.8-27B-NVFP4",
-    hf_revision="dbb8f445b3145f8a4c18ddc769f032d57d32867c",
-    quantization=None,
-)
 cache = (
     config.BENCH_HF_CACHE_DIR
     / model["hf_repo"].replace("/", "--")

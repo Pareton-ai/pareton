@@ -1,0 +1,180 @@
+{
+  "checked_at": "2026-09-15T19:03:27.476761+00:00",
+  "scope": "Text prompt rendering and tokenization using build_prompt_formatter with the campaign sampling rule and pinned public tokenizer files. No GPU inference or dataset coverage preflight.",
+  "tokenizers_version": "0.22.2",
+  "models": {
+    "radixark": {
+      "repo": "RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead",
+      "revision": "009632fef96dd349150baa780c984e62e70e91fe",
+      "template_source": "chat_template.jinja",
+      "template_bytes": 8952,
+      "template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer_json_bytes": 12809320,
+      "tokenizer_json_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+      "tokenizer_config_sha256": "e5d078b00e6c1223b32444db8c1001dc71d86ceef8ee706b5bf084c3a43a1f9c",
+      "bos_token": null,
+      "eos_token": "<|im_end|>",
+      "pad_token": "<|im_end|>"
+    },
+    "nvidia": {
+      "repo": "nvidia/Qwen3.8-27B-NVFP4",
+      "revision": "dbb8f445b3145f8a4c18ddc769f032d57d32867c",
+      "template_source": "chat_template.jinja",
+      "template_bytes": 8952,
+      "template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer_json_bytes": 12809320,
+      "tokenizer_json_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+      "tokenizer_config_sha256": "e5d078b00e6c1223b32444db8c1001dc71d86ceef8ee706b5bf084c3a43a1f9c",
+      "bos_token": null,
+      "eos_token": "<|im_end|>",
+      "pad_token": "<|im_end|>"
+    },
+    "fp8": {
+      "repo": "Qwen/Qwen3.8-27B-FP8",
+      "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "template_source": "tokenizer_config.json",
+      "template_bytes": 8952,
+      "template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "tokenizer_json_bytes": 12809320,
+      "tokenizer_json_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+      "tokenizer_config_sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+      "bos_token": null,
+      "eos_token": "<|im_end|>",
+      "pad_token": "<|endoftext|>"
+    }
+  },
+  "template_undeclared_variables": [
+    "add_generation_prompt",
+    "add_vision_id",
+    "content",
+    "enable_thinking",
+    "messages",
+    "preserve_thinking",
+    "reasoning_content",
+    "reasoning_effort",
+    "resolved_reasoning_effort",
+    "tools"
+  ],
+  "padding_assessment": "RadixArk and NVIDIA set pad_token to <|im_end|>; FP8 sets <|endoftext|>. The template does not reference pad_token, and build_prompt_formatter disables tokenizer padding and truncation. Rendered text and token IDs match in all probe cases.",
+  "cases": [
+    {
+      "case": "single_turn",
+      "enable_thinking": false,
+      "token_count": 17,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "unicode_and_code",
+      "enable_thinking": false,
+      "token_count": 33,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "conversation",
+      "enable_thinking": false,
+      "token_count": 43,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "tool_result",
+      "enable_thinking": false,
+      "token_count": 56,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_4096",
+      "enable_thinking": false,
+      "token_count": 4108,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_8192",
+      "enable_thinking": false,
+      "token_count": 8204,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_16384",
+      "enable_thinking": false,
+      "token_count": 16396,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_32768",
+      "enable_thinking": false,
+      "token_count": 32780,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "single_turn",
+      "enable_thinking": true,
+      "token_count": 57,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "unicode_and_code",
+      "enable_thinking": true,
+      "token_count": 73,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "conversation",
+      "enable_thinking": true,
+      "token_count": 83,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "tool_result",
+      "enable_thinking": true,
+      "token_count": 96,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_4096",
+      "enable_thinking": true,
+      "token_count": 4148,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_8192",
+      "enable_thinking": true,
+      "token_count": 8244,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_16384",
+      "enable_thinking": true,
+      "token_count": 16436,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    },
+    {
+      "case": "long_32768",
+      "enable_thinking": true,
+      "token_count": 32820,
+      "rendered_text_equal": true,
+      "token_ids_equal": true
+    }
+  ],
+  "probe_inputs": {
+    "single_turn": "User: Explain binary search.",
+    "unicode_and_code": "User: \u65e5\u672c\u8a9e: caf\u00e9 \ud83d\ude42 followed by a fenced Python function with indentation.",
+    "conversation": "User, assistant with a <think> block, then a follow-up user message.",
+    "tool_result": "User, assistant, tool result containing Python code, then a follow-up user message.",
+    "long_4096/8192/16384/32768": "One user message containing \"token \" repeated the named number of times; these are repetitions, not assertions of exact token tier sizes."
+  }
+}

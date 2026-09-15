@@ -266,8 +266,8 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert manifest.allowed_paths == ["python/sglang/**", "rust/**"]
     assert "**/CMakeLists.txt" not in manifest.denied_paths
     assert manifest.engine["install_cmd"] == "/usr/local/bin/pareton-install-sglang"
-    assert request["model"]["hf_repo"] == "nvidia/Qwen3.8-27B-NVFP4"
-    assert request["model"]["hf_revision"] == "dbb8f445b3145f8a4c18ddc769f032d57d32867c"
+    assert request["model"]["hf_repo"] == "RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead"
+    assert request["model"]["hf_revision"] == "009632fef96dd349150baa780c984e62e70e91fe"
     assert request["model"]["quantization"] == "modelopt_mixed"
     assert request["model"]["max_model_len"] == 262144
     assert request["hardware"]["gpu_count"] == 4

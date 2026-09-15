@@ -5,8 +5,8 @@
 # lmsysorg/sglang runtime image lacks the trusted offline miner-build installer.
 # The harness mounts pinned weights at /model and manages Docker networking,
 # listen address, port and GPU allocation separately from these serving flags.
-# NVIDIA's NVFP4 checkpoint uses mixed NVFP4/FP8 layers; SGLang loads it with
-# modelopt_mixed (MLP and lm_head: NVFP4; attention: FP8).
+# RadixArk's checkpoint uses mixed NVFP4/FP8 layers with a BF16 lm_head.
+# SGLang loads its per-layer quantization with modelopt_mixed.
 set -euo pipefail
 engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF}
 if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
@@ -21,8 +21,8 @@ python -m campaign.seed \
   --base-image-digest "$engine_ref" \
   --baseline-engine-image-digest "$engine_ref" \
   --gpu-skus RTX5090 --bench-gpu-count 4 \
-  --bench-model-repo nvidia/Qwen3.8-27B-NVFP4 \
-  --bench-model-revision dbb8f445b3145f8a4c18ddc769f032d57d32867c \
+  --bench-model-repo RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead \
+  --bench-model-revision 009632fef96dd349150baa780c984e62e70e91fe \
   --bench-dtype bfloat16 --bench-quantization modelopt_mixed --bench-max-model-len 262144 \
   --bench-serve-args=--trust-remote-code \
   --bench-serve-args=--served-model-name --bench-serve-args=qwen3.8-27b \

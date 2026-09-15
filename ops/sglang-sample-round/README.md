@@ -3,13 +3,17 @@
 Build the included comment-only patch and evaluate it on the warmed, dedicated
 GPU VM without creating a campaign or writing to the database or chain.
 
-The sample uses [nvidia/Qwen3.8-27B-NVFP4](https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4/tree/dbb8f445b3145f8a4c18ddc769f032d57d32867c)
-at revision `dbb8f445b3145f8a4c18ddc769f032d57d32867c`. Finish caching it
+The sample uses [RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead/tree/009632fef96dd349150baa780c984e62e70e91fe)
+at revision `009632fef96dd349150baa780c984e62e70e91fe`. Finish caching it
 before starting the runner; its tokenizer is read from:
 
 ```text
-/workspace/hf-cache/nvidia--Qwen3.8-27B-NVFP4/dbb8f445b3145f8a4c18ddc769f032d57d32867c
+/workspace/hf-cache/RadixArk--Qwen3.8-27B-NVFP4-BF16-LMHead/009632fef96dd349150baa780c984e62e70e91fe
 ```
+
+Include `tokenizer_config.json`, `tokenizer.json` and `chat_template.jinja` from
+that revision. The template is stored separately from the tokenizer config.
+The sample inherits the model and quantization settings from the campaign fixture.
 
 ## Run
 
@@ -39,8 +43,8 @@ The runner uses `/workspace/pareton-sample-round-nvfp4` for its virtual environm
 request, trace, build log and reports. Pass a different output directory as its
 first argument to generate a fresh sample directory. Rerunning with the same
 directory reuses the sampled trace and writes a new timestamped report directory.
-Use a fresh directory when switching models; do not pass an old FP8 sample
-directory, because its trace was prepared with a different pinned tokenizer.
+Use a fresh directory when switching models, including from the NVIDIA NVFP4
+checkpoint; existing traces and receipts belong to their original model pin.
 
 The VM needs Python 3 with venv support, Git, Docker with the NVIDIA runtime,
 `flock`, and four available RTX5090 GPUs. Run as root. Internet access is required
@@ -56,11 +60,11 @@ needed.
   The candidate stays local as `pareton-sample:sglang-minimal`.
 - Use the workload and hardware settings from
   [the campaign fixture](../../fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json),
-  with the sample's NVFP4 model override: four RTX5090 GPUs, 262144 context configuration,
+  including its pinned RadixArk model: four RTX5090 GPUs, 262144 context configuration,
   32 sampled prompts across the 4K/8K/16K/32K input tiers, and three timing
   repetitions by default.
-- Auto-detect the checkpoint's mixed FP8/NVFP4 quantization from its model
-  configuration (`quantization: null` in the request, no `--quantization` flag).
+- Use the campaign's `modelopt_mixed` loader: NVFP4 MLP layers, FP8 attention
+  and an unquantized BF16 output head.
 - Run baseline, candidate, NVFP4 correctness scoring, and baseline drift replay.
   The fixed local sampling seed is reproducible. It does not represent a
   chain-selected production round or test a full 262K input window.
