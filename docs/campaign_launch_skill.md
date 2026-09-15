@@ -443,8 +443,9 @@ Docker host access; bootstrap uses root or sudo for host setup.
 The VM's provider name and hostname have no Pareton naming requirement.
 The orchestrator generates `pt-<UTC timestamp>-<ttl>h-<8 hex digits>` as an
 internal run name, without renaming the VM. Static SSH does not register a
-managed rental, and its destroy operation is a no-op. The TTL reaper skips
-static SSH. Keep manually managed cloud VMs outside that `pt-...` naming
+managed rental, and its destroy operation is a no-op. The reaper can clean idle
+benchmark containers on the static host, but does not delete the VM.
+Keep manually managed cloud VMs outside that `pt-...` naming
 pattern: the reaper also scans credentialed cloud providers and can delete
 expired resources with matching names, even when static SSH is selected.
 
