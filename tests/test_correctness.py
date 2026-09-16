@@ -856,7 +856,7 @@ def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
     assert "16-gram" in line["degenerate"]
 
 
-def _baseline_reference(natural_text: str, forced_text: str):
+def _baseline_reference(natural_text: str, forced_text: str, *, forced: bool = True):
     return build_baseline_degeneracy_references(
         [_captured("r1", "Hello world", forced_text)],
         {
@@ -865,7 +865,7 @@ def _baseline_reference(natural_text: str, forced_text: str):
                 completion_tokens=len(mock_tokenize(natural_text)),
                 finish_reason="stop",
                 text=natural_text,
-                probed=True,
+                probed=forced,
             )
         },
         {"r1": (forced_text,)},
@@ -1253,8 +1253,9 @@ def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
     assert "degenerate" in (report.reason or "")
 
 
-def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Path):
-    """The full output remains watched without imposing one absolute tail shape."""
+@pytest.mark.parametrize("forced", [False, True])
+def test_tail_repetition_policy_requires_a_forced_trace(tmp_path: Path, forced: bool):
+    """Only forced traces make tail checks diagnostic, even with a clean baseline."""
     baseline_forced = PROSE_TEXT + REPETITIVE_LIST_TEXT
     candidate = PROSE_TEXT + LOOP_TEXT
     outputs = [_captured("r1", "Hello world", candidate, tokens=240)]
@@ -1264,20 +1265,36 @@ def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Pat
             outputs,
             cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
-            baseline_degeneracy=_baseline_reference(PROSE_TEXT, baseline_forced),
+            baseline_degeneracy=_baseline_reference(
+                PROSE_TEXT if forced else baseline_forced,
+                baseline_forced,
+                forced=forced,
+            ),
         )
-    assert report.verdict == "fail_correctness"
-    assert "baseline" in (report.reason or "")
+    assert report.verdict == ("pass" if forced else "fail_correctness")
+    evidence = json.loads((tmp_path / "correctness" / "candidate_0.jsonl").read_text())
+    assert evidence["relative_degenerate"] is not None
+    assert evidence["degeneracy_scope"] == (
+        "natural_prefix" if forced else "full_output"
+    )
+    assert evidence["degeneracy_exemptions"] == (
+        ["forced_tail_diagnostic_only"] if forced else []
+    )
 
 
 @pytest.mark.parametrize(
     "prefix", [PROSE_TEXT, " OK", LOOP_TEXT], ids=["clean", "short", "exempt-loop"]
 )
 @pytest.mark.parametrize("cheap_filler", [False, True])
-def test_repeating_baseline_does_not_exempt_a_more_degenerate_tail(
+@pytest.mark.parametrize(
+    "min_mean,verdict", [(-4.0, "pass"), (1.0, "fail_correctness")]
+)
+def test_forced_tail_policy_accepts_filler_but_preserves_logprob_checks(
     tmp_path: Path,
     prefix: str,
     cheap_filler: bool,
+    min_mean: float,
+    verdict: str,
 ):
     natural = PROSE_TEXT if prefix == LOOP_TEXT else prefix
     period = " ".join(f"symbol_{i:03d}" for i in range(137))
@@ -1291,19 +1308,21 @@ def test_repeating_baseline_does_not_exempt_a_more_degenerate_tail(
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1),
+            cfg=_cfg(num_prompts=1, min_mean=min_mean),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
             baseline_degeneracy=_baseline_reference(natural, baseline_forced),
         )
-    assert report.verdict == "fail_correctness"
-    assert "baseline" in (report.reason or "")
+    assert report.verdict == verdict
+    if verdict != "pass":
+        assert "mean logprob" in (report.reason or "")
     evidence = json.loads((tmp_path / "correctness" / "candidate_0.jsonl").read_text())
     assert evidence["mean_logprob"] == pytest.approx(-0.1)
     assert evidence["relative_degenerate"] is not None
     assert evidence["degeneracy_exemptions"] == (
         ["prefix_matches_forced_baseline"] if prefix == LOOP_TEXT else []
-    )
-    assert evidence["degenerate"] == evidence["relative_degenerate"]
+    ) + ["forced_tail_diagnostic_only"]
+    assert evidence["degeneracy_scope"] == "natural_prefix"
+    assert evidence["degenerate"] is None
 
 
 @pytest.mark.parametrize("candidate_index", [BASELINE_INDEX, 0])

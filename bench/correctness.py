@@ -27,9 +27,11 @@ the checks grade the whole output. For a forced-length completion, the pinned
 baseline is replayed once with EOS handling restored. Its natural response must
 be non-degenerate, but its token count can cut into repetition in a different
 forced response. A flagged prefix is allowed only when it is also a prefix of
-a measured forced baseline output. The full-output relative repetition check
-still applies, even when the forced baseline repeats or the prefix matches.
-Logprob checks also grade the whole captured output.
+a measured forced baseline output. Forced-length runs deliberately prioritize
+decode measurement: full-output repetition is diagnostic only, regardless of
+whether the baseline repeats. This allows cheap repeating filler after a valid
+prefix. Logprob checks still grade the whole captured output, but do not replace
+the disabled tail loop defense.
 
 The manifest-pinned ``max_mean_logprob_drop`` separately catches a candidate
 that degrades the model and still clears the absolute floor.
@@ -1101,6 +1103,9 @@ def grade_candidate(
                     repeated_span_ratio=repeated_span_ratio,
                 )
             prefix_degenerate = this_degenerate
+            forced_tail = reference is not None and bool(
+                reference.forced_output_samples
+            )
             exemptions = []
             if (
                 this_degenerate is not None
@@ -1114,8 +1119,13 @@ def grade_candidate(
                 # forced response. Do not reject a prefix the baseline emitted.
                 exemptions.append("prefix_matches_forced_baseline")
                 this_degenerate = None
-            if relative_degenerate is not None and this_degenerate is None:
-                this_degenerate = relative_degenerate
+            if relative_degenerate is not None:
+                if forced_tail:
+                    # Deliberate throughput policy for ignore_eos traces, not
+                    # evidence that this continuation is safe or meaningful.
+                    exemptions.append("forced_tail_diagnostic_only")
+                elif this_degenerate is None:
+                    this_degenerate = relative_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
@@ -1148,6 +1158,9 @@ def grade_candidate(
                             else reference.full_repeated_span_ratio
                         ),
                         "relative_degenerate": relative_degenerate,
+                        "degeneracy_scope": "natural_prefix"
+                        if forced_tail
+                        else "full_output",
                         "prefix_degenerate": prefix_degenerate,
                         "degeneracy_exemptions": exemptions,
                         "degenerate": this_degenerate,
