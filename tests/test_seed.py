@@ -278,7 +278,8 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert manifest.sampling_rule["n_prompts"] == 32
     assert manifest.sampling_rule["max_tokens"] == 5120
     assert manifest.sampling_rule["request_interval_ms"] == 2
-    assert manifest.sampling_rule["enable_thinking"] is True
+    assert manifest.sampling_rule["enable_thinking"] is False
+    assert manifest.sampling_rule["ignore_eos"] is True
     assert manifest.scoring_rule["failure_penalty"] == 0.1
     assert request["scoring_rule"] == manifest.scoring_rule
     assert preflight == [(manifest.sampling_rule, manifest.bench, manifest.engine)]

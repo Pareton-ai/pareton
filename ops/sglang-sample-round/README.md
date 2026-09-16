@@ -45,6 +45,8 @@ first argument to generate a fresh sample directory. Rerunning with the same
 directory reuses the sampled trace and writes a new timestamped report directory.
 Use a fresh directory when switching models, including from the NVIDIA NVFP4
 checkpoint; existing traces and receipts belong to their original model pin.
+Also use a fresh directory when changing sampling settings. Existing traces are
+reused as written, including their thinking mode and EOS behavior.
 
 The VM needs Python 3 with venv support, Git, Docker with the NVIDIA runtime,
 `flock`, and four available RTX5090 GPUs. Run as root. Internet access is required
@@ -63,6 +65,15 @@ needed.
   including its pinned RadixArk model: four RTX5090 GPUs, 262144 context configuration,
   32 sampled prompts across the 4K/8K/16K/32K input tiers, and three timing
   repetitions by default.
+- Preserve the dataset system prompts and disable thinking. Timed baseline,
+  candidate and drift requests use `ignore_eos=true` and must each emit 5120
+  tokens. A separate baseline probe restores EOS handling to locate the natural
+  stop. Correctness grades plausibility and absolute degeneracy through that
+  boundary; full forced outputs retain the existing baseline-relative repetition
+  checks. Matching baseline loops after the natural stop are allowed, while
+  early loops and tails more degenerate than the baseline still fail.
+  This measures synthetic decoding with forced continuations, which may repeat;
+  the score remains E2E speedup and includes time to first token.
 - Use the campaign's `modelopt_mixed` loader: NVFP4 MLP layers, FP8 attention
   and an unquantized BF16 output head.
 - Run baseline, candidate, NVFP4 correctness scoring, and baseline drift replay.

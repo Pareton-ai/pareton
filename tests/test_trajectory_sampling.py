@@ -4,6 +4,7 @@ import copy
 import io
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from uuid import uuid4
@@ -149,6 +150,33 @@ def test_262k_context_keeps_fixed_inputs_and_full_output_allowances(engine):
         "32k": 32768,
     }
     assert all(r["max_tokens"] == 5120 for r in requests)
+
+
+def test_qwen_fixture_generates_reproducible_forced_outputs_without_thinking():
+    fixture = (
+        Path(__file__).resolve().parents[1] / "fixtures/campaigns/sglang_qwen38_27b"
+    )
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    workload_rule = json.loads((fixture / "sampling_rule.json").read_text())
+    assert fields["sampling_rule"] == workload_rule
+    kwargs = {
+        "rule": workload_rule,
+        "sampling_context": sampling_context_for_campaign(
+            fields["bench"], fields["engine"]
+        ),
+    }
+    sampled = sample(**kwargs)
+    trace = validate_workload_trace_dict(json.loads(sampled.body))
+    assert len(trace.requests) == 32
+    assert trace.meta.sampling["enable_thinking"] is False
+    assert sampled.receipt["ignore_eos"] is True
+    for group in ("4k", "8k", "16k", "32k"):
+        assert sum(r.input_length_group == group for r in trace.requests) == 8
+    for request in trace.requests:
+        assert request.sampling.ignore_eos is True
+        assert request.max_tokens == 5120
+        assert "system DATASET_SYSTEM_PROMPT end" in request.prompt
+    assert sample(**kwargs, sampling_receipt=sampled.receipt).body == sampled.body
 
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
