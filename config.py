@@ -334,7 +334,7 @@ GPU_PROVIDERS: list[str] = _load_gpu_providers()
 GPU_PROVIDER: str = GPU_PROVIDERS[0] if GPU_PROVIDERS else "lium"
 GPU_PROVIDER_FALLBACKS: list[str] = list(GPU_PROVIDERS[1:])
 
-SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.1"))
+SUBMISSION_FEE_TAO: float = float(os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.15"))
 # Validator-controlled, exact SS58 hotkey matches. Empty means everyone pays.
 SUBMISSION_FEE_EXEMPT_HOTKEYS: frozenset[str] = frozenset(
     hotkey.strip()
