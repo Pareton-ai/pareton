@@ -24,10 +24,13 @@ answer on every absolute bar. Two mandatory harness checks identify it:
 They are exploit checks, not competition parameters, and therefore do not
 live in the campaign manifest or bench request. For an ordinary completion,
 the checks grade the whole output. For a forced-length completion, the pinned
-baseline is replayed once with EOS handling restored. Absolute checks grade
-the candidate only through that trusted, prompt-specific stop boundary, while
-the complete forced output must not be more degenerate than the baseline's
-complete output. Candidate-reported stop positions are never used.
+baseline is replayed once with EOS handling restored. Its natural response must
+be non-degenerate, but its token count can cut into repetition in a different
+forced response. A flagged prefix is allowed only when it is also a prefix of
+a measured forced baseline output. Full-output repetition differences are
+diagnostic when the forced baseline itself repeats; its post-EOS repetition
+ratios are not stable correctness thresholds. Candidate-only prefix loops
+remain failures. Logprob checks still grade the whole captured output.
 
 The manifest-pinned ``max_mean_logprob_drop`` separately catches a candidate
 that degrades the model and still clears the absolute floor.
@@ -624,6 +627,8 @@ class BaselineDegeneracyReference:
     natural_stop_tokens: int
     full_distinct_ngram_ratio: float
     full_repeated_span_ratio: float
+    forced_output_samples: tuple[str, ...] = ()
+    forced_repetition: bool = False
 
 
 class BaselineDegeneracyReferences(dict[str, BaselineDegeneracyReference]):
@@ -719,7 +724,8 @@ def build_baseline_degeneracy_references(
     When the natural stop came from the ``ignore_eos`` probe
     (``NaturalStopReference.probed``), SLA samples are forced-length
     and may loop after EOS. Only ``stop.text`` decides the drop; byte
-    equality with the median SLA output is not a path signal.
+    equality with the median SLA output is not a path signal. Retain all
+    measured forced samples for prefix matching, including non-median paths.
     """
     references: dict[str, BaselineDegeneracyReference] = {}
     dropped: dict[str, str] = {}
@@ -765,6 +771,9 @@ def build_baseline_degeneracy_references(
             natural_stop_tokens=stop.completion_tokens,
             full_distinct_ngram_ratio=min(ratio[0] for ratio in sample_ratios),
             full_repeated_span_ratio=max(ratio[1] for ratio in sample_ratios),
+            forced_output_samples=tuple(samples) if stop.probed else (),
+            forced_repetition=stop.probed
+            and any(degeneracy_reason(text) is not None for text in samples),
         )
     return BaselineDegeneracyReferences(references, dropped=dropped)
 
@@ -833,11 +842,16 @@ def score_captured_output(
     # dropped when the scorer returned no logprob for it, so first..last spans
     # everything the scorer saw of this output.
     span = scores[-1].position - scores[0].position + 1
-    prefix = (
-        captured.output_text
-        if prefix_token_limit is None
-        else "".join(p.token for p in scores[:prefix_token_limit])
-    )
+    prefix = captured.output_text
+    if prefix_token_limit is not None:
+        prefix_scores = scores[:prefix_token_limit]
+        prefix = "".join(p.token for p in prefix_scores)
+        if prefix_scores and prefix_scores[-1].text_offset >= len(captured.prompt):
+            # A token straddling the prompt boundary can absorb leading output
+            # whitespace. Slice the original text so exact prefix matches survive.
+            last = prefix_scores[-1]
+            end = last.text_offset + len(last.token) - len(captured.prompt)
+            prefix = captured.output_text[:end]
     return scores, span, prefix
 
 
@@ -1090,7 +1104,26 @@ def grade_candidate(
                     distinct_ratio=distinct_ratio,
                     repeated_span_ratio=repeated_span_ratio,
                 )
-                if this_degenerate is None:
+            prefix_degenerate = this_degenerate
+            exemptions = []
+            if (
+                this_degenerate is not None
+                and reference is not None
+                and any(
+                    text.startswith(prefix_text)
+                    for text in reference.forced_output_samples
+                )
+            ):
+                # The probe can take a different path and stop later than a
+                # forced response. Do not reject a prefix the baseline emitted.
+                exemptions.append("prefix_matches_forced_baseline")
+                this_degenerate = None
+            if relative_degenerate is not None:
+                if reference is not None and reference.forced_repetition:
+                    # Once forcing the baseline past EOS produces loops, exact
+                    # loop ratios vary with its sampled path and decoded length.
+                    exemptions.append("forced_baseline_repeats")
+                elif this_degenerate is None:
                     this_degenerate = relative_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
@@ -1124,6 +1157,11 @@ def grade_candidate(
                             else reference.full_repeated_span_ratio
                         ),
                         "relative_degenerate": relative_degenerate,
+                        "baseline_forced_repetition": bool(
+                            reference is not None and reference.forced_repetition
+                        ),
+                        "prefix_degenerate": prefix_degenerate,
+                        "degeneracy_exemptions": exemptions,
                         "degenerate": this_degenerate,
                     },
                     sort_keys=True,

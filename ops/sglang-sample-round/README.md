@@ -68,10 +68,13 @@ needed.
 - Preserve the dataset system prompts and disable thinking. Timed baseline,
   candidate and drift requests use `ignore_eos=true` and must each emit 5120
   tokens. A separate baseline probe restores EOS handling to locate the natural
-  stop. Correctness grades plausibility and absolute degeneracy through that
-  boundary; full forced outputs retain the existing baseline-relative repetition
-  checks. Matching baseline loops after the natural stop are allowed, while
-  early loops and tails more degenerate than the baseline still fail.
+  stop. Logprob checks grade the full captured output. Degeneracy checks use the
+  probe's token count as a prefix window, allowing a flagged prefix only when it
+  exactly matches the start of a measured forced baseline output. When any
+  measured forced baseline output repeats, full-output repetition differences
+  are diagnostic rather than disqualifying. A clean natural baseline probe is
+  still required; candidate-only prefix loops and logprob failures still fail.
+  Correctness evidence records the original flags and any applied exemptions.
   This measures synthetic decoding with forced continuations, which may repeat;
   the score remains E2E speedup and includes time to first token.
 - Use the campaign's `modelopt_mixed` loader: NVFP4 MLP layers, FP8 attention
