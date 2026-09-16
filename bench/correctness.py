@@ -27,10 +27,9 @@ the checks grade the whole output. For a forced-length completion, the pinned
 baseline is replayed once with EOS handling restored. Its natural response must
 be non-degenerate, but its token count can cut into repetition in a different
 forced response. A flagged prefix is allowed only when it is also a prefix of
-a measured forced baseline output. Full-output repetition differences are
-diagnostic when the forced baseline itself repeats; its post-EOS repetition
-ratios are not stable correctness thresholds. Candidate-only prefix loops
-remain failures. Logprob checks still grade the whole captured output.
+a measured forced baseline output. The full-output relative repetition check
+still applies, even when the forced baseline repeats or the prefix matches.
+Logprob checks also grade the whole captured output.
 
 The manifest-pinned ``max_mean_logprob_drop`` separately catches a candidate
 that degrades the model and still clears the absolute floor.
@@ -628,7 +627,6 @@ class BaselineDegeneracyReference:
     full_distinct_ngram_ratio: float
     full_repeated_span_ratio: float
     forced_output_samples: tuple[str, ...] = ()
-    forced_repetition: bool = False
 
 
 class BaselineDegeneracyReferences(dict[str, BaselineDegeneracyReference]):
@@ -772,8 +770,6 @@ def build_baseline_degeneracy_references(
             full_distinct_ngram_ratio=min(ratio[0] for ratio in sample_ratios),
             full_repeated_span_ratio=max(ratio[1] for ratio in sample_ratios),
             forced_output_samples=tuple(samples) if stop.probed else (),
-            forced_repetition=stop.probed
-            and any(degeneracy_reason(text) is not None for text in samples),
         )
     return BaselineDegeneracyReferences(references, dropped=dropped)
 
@@ -1118,13 +1114,8 @@ def grade_candidate(
                 # forced response. Do not reject a prefix the baseline emitted.
                 exemptions.append("prefix_matches_forced_baseline")
                 this_degenerate = None
-            if relative_degenerate is not None:
-                if reference is not None and reference.forced_repetition:
-                    # Once forcing the baseline past EOS produces loops, exact
-                    # loop ratios vary with its sampled path and decoded length.
-                    exemptions.append("forced_baseline_repeats")
-                elif this_degenerate is None:
-                    this_degenerate = relative_degenerate
+            if relative_degenerate is not None and this_degenerate is None:
+                this_degenerate = relative_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
@@ -1157,9 +1148,6 @@ def grade_candidate(
                             else reference.full_repeated_span_ratio
                         ),
                         "relative_degenerate": relative_degenerate,
-                        "baseline_forced_repetition": bool(
-                            reference is not None and reference.forced_repetition
-                        ),
                         "prefix_degenerate": prefix_degenerate,
                         "degeneracy_exemptions": exemptions,
                         "degenerate": this_degenerate,

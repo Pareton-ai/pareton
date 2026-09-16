@@ -1270,13 +1270,20 @@ def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Pat
     assert "baseline" in (report.reason or "")
 
 
-def test_forced_tail_exception_is_not_tied_to_one_output_budget(
+@pytest.mark.parametrize(
+    "prefix", [PROSE_TEXT, " OK", LOOP_TEXT], ids=["clean", "short", "exempt-loop"]
+)
+@pytest.mark.parametrize("cheap_filler", [False, True])
+def test_repeating_baseline_does_not_exempt_a_more_degenerate_tail(
     tmp_path: Path,
+    prefix: str,
+    cheap_filler: bool,
 ):
-    natural = PROSE_TEXT
+    natural = PROSE_TEXT if prefix == LOOP_TEXT else prefix
     period = " ".join(f"symbol_{i:03d}" for i in range(137))
-    baseline_forced = natural + (" " + period) * 3
-    candidate = natural + (" " + period) * 6
+    baseline_forced = prefix + (" " + period) * 3
+    candidate = prefix + (LOOP_TEXT * 6 if cheap_filler else (" " + period) * 6)
+    assert degeneracy_reason(baseline_forced) is not None
     outputs = [_captured("r1", "Hello world", candidate, tokens=900)]
     with MockEngine(
         MockEngineConfig(host="127.0.0.1", port=0, logprobs=[-0.1])
@@ -1288,11 +1295,15 @@ def test_forced_tail_exception_is_not_tied_to_one_output_budget(
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
             baseline_degeneracy=_baseline_reference(natural, baseline_forced),
         )
-    assert report.verdict == "pass"
+    assert report.verdict == "fail_correctness"
+    assert "baseline" in (report.reason or "")
     evidence = json.loads((tmp_path / "correctness" / "candidate_0.jsonl").read_text())
+    assert evidence["mean_logprob"] == pytest.approx(-0.1)
     assert evidence["relative_degenerate"] is not None
-    assert evidence["degeneracy_exemptions"] == ["forced_baseline_repeats"]
-    assert evidence["degenerate"] is None
+    assert evidence["degeneracy_exemptions"] == (
+        ["prefix_matches_forced_baseline"] if prefix == LOOP_TEXT else []
+    )
+    assert evidence["degenerate"] == evidence["relative_degenerate"]
 
 
 @pytest.mark.parametrize("candidate_index", [BASELINE_INDEX, 0])

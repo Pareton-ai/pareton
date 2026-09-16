@@ -70,13 +70,18 @@ needed.
   tokens. A separate baseline probe restores EOS handling to locate the natural
   stop. Logprob checks grade the full captured output. Degeneracy checks use the
   probe's token count as a prefix window, allowing a flagged prefix only when it
-  exactly matches the start of a measured forced baseline output. When any
-  measured forced baseline output repeats, full-output repetition differences
-  are diagnostic rather than disqualifying. A clean natural baseline probe is
-  still required; candidate-only prefix loops and logprob failures still fail.
+  exactly matches the start of a measured forced baseline output. Full-output
+  repetition must still pass the baseline-relative check, even when the baseline
+  repeats or the prefix matches. A clean natural baseline probe is required;
+  candidate-only prefix loops and logprob failures still fail.
   Correctness evidence records the original flags and any applied exemptions.
   This measures synthetic decoding with forced continuations, which may repeat;
   the score remains E2E speedup and includes time to first token.
+  The current short-answer workload is not qualified for campaign scoring:
+  forced tails can reject honest candidates, and a looping baseline weakens the
+  relative check. Select and validate naturally long assistant responses before
+  seeding a campaign. Removing the tail exemption does not resolve that workload
+  limitation.
 - Use the campaign's `modelopt_mixed` loader: NVFP4 MLP layers, FP8 attention
   and an unquantized BF16 output head.
 - Run baseline, candidate, NVFP4 correctness scoring, and baseline drift replay.
