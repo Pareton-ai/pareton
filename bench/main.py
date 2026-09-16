@@ -192,26 +192,6 @@ class EngineStart:
     # phase name alone cannot tell the first from the seventh.
     step: int = 0
     steps: int = 0
-    # None inherits the timed workload's hardware.gpu_count.
-    gpu_count: int | None = None
-
-
-def _sglang_scorer_gpu_count(serve_args: list[str]) -> int | None:
-    """Match SGLang's last TP argument so Docker exposes the scorer's GPUs."""
-    count = None
-    for i, arg in enumerate(serve_args):
-        flag, sep, value = arg.partition("=")
-        if flag not in {"--tp-size", "--tensor-parallel-size", "--tp"}:
-            continue
-        try:
-            count = int(value if sep else serve_args[i + 1])
-        except (IndexError, ValueError) as exc:
-            raise ValueError(
-                "SGLang scorer TP size must be a positive integer"
-            ) from exc
-        if count < 1:
-            raise ValueError("SGLang scorer TP size must be a positive integer")
-    return count
 
 
 def plan_round_starts(
@@ -259,11 +239,6 @@ def plan_round_starts(
                     engines.baseline, serve_args=correctness_serve_args
                 ),
                 mount_engine_cache=False,
-                gpu_count=(
-                    _sglang_scorer_gpu_count(correctness_serve_args or [])
-                    if engines.baseline.name == "sglang"
-                    else None
-                ),
             )
         )
     starts.append(
@@ -523,11 +498,7 @@ class _EngineProvider:
                 spec=start.spec,
                 network=net,
                 role=start.role,
-                gpu_count=_effective_gpu_count(
-                    start.gpu_count
-                    if start.gpu_count is not None
-                    else self._req.hardware.gpu_count
-                ),
+                gpu_count=_effective_gpu_count(self._req.hardware.gpu_count),
                 weights_dir=self.weights_dir,
                 publish_port=False,
                 pull=_should_pull_image(start.spec.image),
@@ -577,17 +548,7 @@ def run_round(
         correctness_serve_args=req.correctness.serve_args,
     )
     layout.append_log(
-        {
-            "event": "round_plan",
-            "starts": [s.role for s in plan],
-            "count": len(plan),
-            "gpu_counts": {
-                s.role: s.gpu_count
-                if s.gpu_count is not None
-                else req.hardware.gpu_count
-                for s in plan
-            },
-        }
+        {"event": "round_plan", "starts": [s.role for s in plan], "count": len(plan)}
     )
 
     baseline: EngineReplay | None = None

@@ -151,19 +151,24 @@ def test_sla_bench_mode_skips_the_scorer():
     assert not any(s.kind == "scorer" for s in plan)
 
 
-@pytest.mark.parametrize("scorer_tp_size", [0, 8])
-def test_scorer_tp_override_reaches_docker_gpu_allocation(
-    tmp_path, monkeypatch, scorer_tp_size
+@pytest.mark.parametrize("correctness_args", [[], ["--mem-fraction-static", "0.4"]])
+def test_scorer_memory_override_preserves_docker_gpu_allocation(
+    tmp_path, monkeypatch, correctness_args
 ):
     from tests.test_lifecycle import FakeDocker
 
     raw = _request(SGLANG_SERVE_ARGS, candidates=1, cache_dir=SGLANG_CACHE_DIR)
     raw["hardware"]["gpu_count"] = 4
+    raw["correctness"]["serve_args"] = correctness_args
     for spec in [raw["engines"]["baseline"], *raw["engines"]["candidates"]]:
-        spec["serve_args"] = ["--model-path", "/model", "--tp-size", "4"]
-    raw["correctness"]["serve_args"] = (
-        ["--tp-size", str(scorer_tp_size)] if scorer_tp_size else []
-    )
+        spec["serve_args"] = [
+            "--model-path",
+            "/model",
+            "--tp-size",
+            "4",
+            "--mem-fraction-static",
+            "0.85",
+        ]
     req = validate_bench_request_dict(raw)
     fake = FakeDocker()
     for spec in [req.engines.baseline, *req.engines.candidates]:
@@ -182,10 +187,11 @@ def test_scorer_tp_override_reaches_docker_gpu_allocation(
     assert len(runs) == 4
     for argv in runs:
         scorer = argv[argv.index("--name") + 1].endswith("-scorer")
-        expected = str(scorer_tp_size if scorer and scorer_tp_size else 4)
-        assert argv[argv.index("--gpus") + 1] == expected
-        tp_index = len(argv) - 1 - argv[::-1].index("--tp-size")
-        assert argv[tp_index + 1] == expected
+        expected = "0.4" if scorer and correctness_args else "0.85"
+        assert argv[argv.index("--gpus") + 1] == "4"
+        assert argv[argv.index("--tp-size") + 1] == "4"
+        mem_index = len(argv) - 1 - argv[::-1].index("--mem-fraction-static")
+        assert argv[mem_index + 1] == expected
 
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
@@ -197,12 +203,7 @@ def test_the_runner_performs_exactly_the_planned_starts(
         SGLANG_SERVE_ARGS if engine == "sglang" else VLLM_SERVE_ARGS, candidates=2
     )
     if engine == "sglang":
-        raw["correctness"]["serve_args"] = [
-            "--mem-fraction-static",
-            "0.4",
-            "--tp-size",
-            "8",
-        ]
+        raw["correctness"]["serve_args"] = ["--mem-fraction-static", "0.4"]
         for spec in [raw["engines"]["baseline"], *raw["engines"]["candidates"]]:
             spec["serve_args"] += ["--mem-fraction-static", "0.85"]
     req = validate_bench_request_dict(raw)
@@ -236,17 +237,8 @@ def test_the_runner_performs_exactly_the_planned_starts(
     ]
     if engine == "sglang":
         for start in starts:
-            if start.kind == "scorer":
-                assert start.spec.serve_args[-4:] == [
-                    "--mem-fraction-static",
-                    "0.4",
-                    "--tp-size",
-                    "8",
-                ]
-                assert start.gpu_count == 8
-            else:
-                assert start.spec.serve_args[-2:] == ["--mem-fraction-static", "0.85"]
-                assert start.gpu_count is None
+            expected = "0.4" if start.kind == "scorer" else "0.85"
+            assert start.spec.serve_args[-2:] == ["--mem-fraction-static", expected]
     # The sample request predates PAR-108's relative bar. It must retain the
     # original candidate-only correctness path rather than grading a baseline.
     assert not (layout.correctness_dir / "baseline.jsonl").exists()

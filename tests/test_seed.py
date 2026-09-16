@@ -302,12 +302,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]
     parsed = validate_bench_request_dict(request)
-    assert parsed.correctness.serve_args == [
-        "--mem-fraction-static",
-        "0.4",
-        "--tp-size",
-        "8",
-    ]
+    assert parsed.correctness.serve_args == ["--mem-fraction-static", "0.4"]
     plan = plan_round_starts(
         parsed.engines, correctness_serve_args=parsed.correctness.serve_args
     )
@@ -319,13 +314,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     ]
     for start in plan:
         if start.kind == "scorer":
-            assert start.spec.serve_args[-4:] == [
-                "--mem-fraction-static",
-                "0.4",
-                "--tp-size",
-                "8",
-            ]
-            assert start.gpu_count == 8
+            assert start.spec.serve_args[-2:] == ["--mem-fraction-static", "0.4"]
         else:
             assert start.spec.serve_args == baseline["serve_args"]
     assert baseline["name"] == "sglang"

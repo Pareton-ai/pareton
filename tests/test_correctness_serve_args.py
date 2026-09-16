@@ -13,55 +13,6 @@ from bench.main import (
 from bench.schemas import EngineSpec, EnginesSpec
 
 
-@pytest.mark.parametrize(
-    "override",
-    [
-        ["--tp-size", "8"],
-        ["--tp-size=8"],
-        ["--tensor-parallel-size", "8"],
-        ["--tensor-parallel-size=8"],
-        ["--tp", "8"],
-        ["--tp=8"],
-        ["--tp-size", "2", "--tensor-parallel-size=8"],
-    ],
-)
-def test_sglang_scorer_tp_override_preserves_timed_specs(override):
-    args = ["--context-length", "262144", "--tp-size", "4"]
-    spec = EngineSpec(image="sha256:" + "a" * 64, name="sglang", serve_args=args)
-    plan = plan_round_starts(
-        EnginesSpec(baseline=spec, candidates=[spec]), correctness_serve_args=override
-    )
-    for start in plan:
-        if start.kind == "scorer":
-            assert start.spec.serve_args == [
-                "--context-length",
-                "262151",
-                "--tp-size",
-                "4",
-                *override,
-            ]
-            assert start.gpu_count == 8
-            assert start.spec.env["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] == "1"
-        else:
-            assert start.spec is spec
-            assert start.spec.serve_args == args
-            assert start.gpu_count is None
-    assert spec.serve_args == ["--context-length", "262144", "--tp-size", "4"]
-    assert spec.env == {}
-
-
-@pytest.mark.parametrize(
-    "override", [["--tp-size", "-1"], ["--tp=0"], ["--tp-size"], ["--tp=abc"]]
-)
-def test_sglang_scorer_override_rejects_invalid_size(override):
-    spec = EngineSpec(image="sha256:" + "a" * 64, name="sglang")
-    with pytest.raises(ValueError, match="positive integer"):
-        plan_round_starts(
-            EnginesSpec(baseline=spec, candidates=[spec]),
-            correctness_serve_args=override,
-        )
-
-
 def test_scorer_engine_spec_appends_flags_without_mutating():
     original_args = ["--model", "/model", "--dtype", "bfloat16"]
     spec = EngineSpec(

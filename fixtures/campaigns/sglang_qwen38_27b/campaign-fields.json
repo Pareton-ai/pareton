@@ -75,9 +75,7 @@
     "correctness": {
       "serve_args": [
         "--mem-fraction-static",
-        "0.4",
-        "--tp-size",
-        "8"
+        "0.4"
       ],
       "thresholds": {
         "min_mean_logprob": -4.0,
