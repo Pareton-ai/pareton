@@ -13,6 +13,7 @@ import threading
 
 import config
 from chain.rpc import fetch_metagraph
+from observability import probe as obs_probe
 from round.store import (
     get_latest_chain_set_block,
     get_latest_completed_round_marker,
@@ -56,6 +57,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
     _configure_logging(args.verbose)
+
+    # Read-only deployment-probe poller (stage-2 spec 7.2): a daemon thread
+    # so a re-verify against the running weights process never restarts it
+    # and never touches the chain mid-cycle.
+    threading.Thread(
+        target=obs_probe.run_probe_loop, args=("pareton-weights",), daemon=True
+    ).start()
 
     drain = threading.Event()
 

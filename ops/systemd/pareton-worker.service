@@ -12,10 +12,23 @@ Type=simple
 User=root
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
+# Stage-2 release coordination (spec 4.1): explicit paths, no /run guessing.
+Environment=PARETON_COORDINATION=1
+Environment=PARETON_UNIT_NAME=pareton-worker
+Environment=PARETON_ACTIVITY_LOCK=/run/pareton-activity.lock
+Environment=PARETON_RELEASE_STATE=/var/lib/pareton-deploy/release-state.json
+# ExecCondition runs before any ExecStartPre (spec 5.4): applying/quiescing
+# block startup, an exit of 1 is the expected skip and does not fail the unit.
+ExecCondition=/usr/local/lib/pareton-ops/release.py gate --unit pareton-worker
+# Probe first (system Python, no venv), before the venv-dependent steps.
+ExecStartPre=/usr/local/lib/pareton-ops/release.py emit-probe --unit pareton-worker
 ExecStartPre=/opt/pareton/.venv/bin/python -m builder.gc_config
 ExecStart=/opt/pareton/.venv/bin/python -m worker.main
 Restart=on-failure
 RestartSec=10
+# mixed: SIGTERM only to the main process so drain finishes bench children;
+# leftover children are cleaned after the main process exits (spec 5.2).
+KillMode=mixed
 # The worker drains on SIGTERM (finishes the in-flight job before exiting).
 # Worst case is a bench job: provision+bootstrap+pull+bench+teardown can run
 # several hours per GPU SKU, so give a wide margin, then SIGKILL.

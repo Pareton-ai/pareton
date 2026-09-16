@@ -9,10 +9,18 @@ Type=simple
 User=root
 WorkingDirectory=/opt/pareton
 EnvironmentFile=/opt/pareton/.env
+Environment=PARETON_COORDINATION=1
+Environment=PARETON_UNIT_NAME=pareton-round-worker
+Environment=PARETON_ACTIVITY_LOCK=/run/pareton-activity.lock
+Environment=PARETON_RELEASE_STATE=/var/lib/pareton-deploy/release-state.json
+ExecCondition=/usr/local/lib/pareton-ops/release.py gate --unit pareton-round-worker
+ExecStartPre=/usr/local/lib/pareton-ops/release.py emit-probe --unit pareton-round-worker
+ExecStartPre=/opt/pareton/.venv/bin/python -m builder.gc_config
 ExecStart=/opt/pareton/.venv/bin/python -m worker.main --queue rounds
 Restart=on-failure
 RestartSec=10
 # SIGTERM drains the current round, including GPU teardown, before exit.
+KillMode=mixed
 TimeoutStopSec=8h
 
 [Install]
