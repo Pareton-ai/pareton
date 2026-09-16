@@ -197,12 +197,12 @@ def _fire(
                 f"request {req.id}: engine input token count {res.prompt_tokens} differs from trace {req.input_tokens}"
             )
         if (
-            req.input_tokens is not None
-            and res.finish_reason == "length"
-            and res.completion_tokens != req.max_tokens
-        ):
+            req.sampling.ignore_eos
+            or (req.input_tokens is not None and res.finish_reason == "length")
+        ) and res.completion_tokens != req.max_tokens:
             raise EngineError(
-                f"request {req.id}: engine shortened the pinned output allowance"
+                f"request {req.id}: engine did not honor the pinned output allowance "
+                f"({res.completion_tokens} != {req.max_tokens})"
             )
         dispatch = res.dispatch_monotonic_s or dispatch
         completed = res.completion_monotonic_s or time.monotonic()

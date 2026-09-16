@@ -9,7 +9,6 @@ import pytest
 
 from bench.correctness import (
     BASELINE_INDEX,
-    BaselineDegeneracyReference,
     CapturedOutput,
     MAX_BASELINE_PROMPT_DROPS,
     PendingCorrectness,
@@ -857,14 +856,20 @@ def test_degeneracy_evidence_records_the_metric(tmp_path: Path):
     assert "16-gram" in line["degenerate"]
 
 
-def _baseline_reference(natural_text: str, forced_text: str):
-    return {
-        "r1": BaselineDegeneracyReference(
-            natural_stop_tokens=len(mock_tokenize(natural_text)),
-            full_distinct_ngram_ratio=distinct_ngram_ratio(forced_text),
-            full_repeated_span_ratio=longest_repeated_substring_ratio(forced_text),
-        )
-    }
+def _baseline_reference(natural_text: str, forced_text: str, *, forced: bool = True):
+    return build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", forced_text)],
+        {
+            "r1": NaturalStopReference(
+                request_id="r1",
+                completion_tokens=len(mock_tokenize(natural_text)),
+                finish_reason="stop",
+                text=natural_text,
+                probed=forced,
+            )
+        },
+        {"r1": (forced_text,)},
+    )
 
 
 def test_forced_baseline_padding_is_not_disqualified(tmp_path: Path):
@@ -1248,8 +1253,9 @@ def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
     assert "degenerate" in (report.reason or "")
 
 
-def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Path):
-    """The full output remains watched without imposing one absolute tail shape."""
+@pytest.mark.parametrize("forced", [False, True])
+def test_tail_repetition_policy_requires_a_forced_trace(tmp_path: Path, forced: bool):
+    """Only forced traces make tail checks diagnostic, even with a clean baseline."""
     baseline_forced = PROSE_TEXT + REPETITIVE_LIST_TEXT
     candidate = PROSE_TEXT + LOOP_TEXT
     outputs = [_captured("r1", "Hello world", candidate, tokens=240)]
@@ -1259,29 +1265,108 @@ def test_more_degenerate_forced_tail_than_baseline_is_disqualified(tmp_path: Pat
             outputs,
             cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
-            baseline_degeneracy=_baseline_reference(PROSE_TEXT, baseline_forced),
+            baseline_degeneracy=_baseline_reference(
+                PROSE_TEXT if forced else baseline_forced,
+                baseline_forced,
+                forced=forced,
+            ),
         )
-    assert report.verdict == "fail_correctness"
-    assert "baseline" in (report.reason or "")
+    assert report.verdict == ("pass" if forced else "fail_correctness")
+    evidence = json.loads((tmp_path / "correctness" / "candidate_0.jsonl").read_text())
+    assert evidence["relative_degenerate"] is not None
+    assert evidence["degeneracy_scope"] == (
+        "natural_prefix" if forced else "full_output"
+    )
+    assert evidence["degeneracy_exemptions"] == (
+        ["forced_tail_diagnostic_only"] if forced else []
+    )
 
 
-def test_baseline_relative_loop_check_is_not_tied_to_one_output_budget(
+@pytest.mark.parametrize(
+    "prefix", [PROSE_TEXT, " OK", LOOP_TEXT], ids=["clean", "short", "exempt-loop"]
+)
+@pytest.mark.parametrize("cheap_filler", [False, True])
+@pytest.mark.parametrize(
+    "min_mean,verdict", [(-4.0, "pass"), (1.0, "fail_correctness")]
+)
+def test_forced_tail_policy_accepts_filler_but_preserves_logprob_checks(
     tmp_path: Path,
+    prefix: str,
+    cheap_filler: bool,
+    min_mean: float,
+    verdict: str,
 ):
-    natural = PROSE_TEXT * 2
+    natural = PROSE_TEXT if prefix == LOOP_TEXT else prefix
     period = " ".join(f"symbol_{i:03d}" for i in range(137))
-    baseline_forced = natural + (" " + period) * 3
-    candidate = natural + (" " + period) * 6
+    baseline_forced = prefix + (" " + period) * 3
+    candidate = prefix + (LOOP_TEXT * 6 if cheap_filler else (" " + period) * 6)
+    assert degeneracy_reason(baseline_forced) is not None
     outputs = [_captured("r1", "Hello world", candidate, tokens=900)]
-    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+    with MockEngine(
+        MockEngineConfig(host="127.0.0.1", port=0, logprobs=[-0.1])
+    ) as scorer:
         report = grade_candidate(
             scorer.base_url,
             outputs,
-            cfg=_cfg(num_prompts=1),
+            cfg=_cfg(num_prompts=1, min_mean=min_mean),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
             baseline_degeneracy=_baseline_reference(natural, baseline_forced),
         )
-    assert report.verdict == "fail_correctness"
+    assert report.verdict == verdict
+    if verdict != "pass":
+        assert "mean logprob" in (report.reason or "")
+    evidence = json.loads((tmp_path / "correctness" / "candidate_0.jsonl").read_text())
+    assert evidence["mean_logprob"] == pytest.approx(-0.1)
+    assert evidence["relative_degenerate"] is not None
+    assert evidence["degeneracy_exemptions"] == (
+        ["prefix_matches_forced_baseline"] if prefix == LOOP_TEXT else []
+    ) + ["forced_tail_diagnostic_only"]
+    assert evidence["degeneracy_scope"] == "natural_prefix"
+    assert evidence["degenerate"] is None
+
+
+@pytest.mark.parametrize("candidate_index", [BASELINE_INDEX, 0])
+@pytest.mark.parametrize(
+    "min_mean,verdict", [(-4.0, "pass"), (1.0, "fail_correctness")]
+)
+def test_forced_prefix_can_match_a_nonmedian_baseline_path(
+    tmp_path: Path, candidate_index, min_mean, verdict
+):
+    """A separate natural probe's length can include loops in another path."""
+    references = build_baseline_degeneracy_references(
+        [_captured("r1", "Hello world", PROSE_TEXT)],
+        {
+            "r1": NaturalStopReference(
+                request_id="r1",
+                completion_tokens=len(mock_tokenize(PROSE_TEXT)),
+                finish_reason="stop",
+                text=PROSE_TEXT,
+                probed=True,
+            )
+        },
+        {"r1": (PROSE_TEXT, LOOP_TEXT, PROSE_TEXT)},
+    )
+    pending = [
+        PendingCorrectness(
+            candidate_index=candidate_index,
+            outputs=[_captured("r1", "Hello world", LOOP_TEXT, tokens=200)],
+        )
+    ]
+    with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            pending,
+            cfg=_cfg(num_prompts=1, min_mean=min_mean),
+            evidence_dir=tmp_path,
+            baseline_degeneracy=references,
+        )
+    assert reports[candidate_index].verdict == verdict
+    evidence = json.loads((tmp_path / f"{pending[0].evidence_name}.jsonl").read_text())
+    assert evidence["prefix_degenerate"] is not None
+    assert evidence["degeneracy_exemptions"] == ["prefix_matches_forced_baseline"]
+    assert evidence["degenerate"] is None
+    if verdict != "pass":
+        assert "mean logprob" in reports[candidate_index].reason
 
 
 # ---------------------------------------------------------------------------

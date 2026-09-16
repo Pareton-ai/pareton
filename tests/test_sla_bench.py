@@ -375,24 +375,31 @@ def test_arrival_offsets_respected(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    "input_count,output_count,finish,error",
+    "input_tokens,input_count,output_count,finish,ignore_eos,error",
     [
-        (30, 2, "length", None),
-        (29, 2, "length", "input token count"),
-        (30, 1, "length", "output allowance"),
-        (30, 1, "stop", None),
+        (30, 30, 2, "length", False, None),
+        (30, 29, 2, "length", False, "input token count"),
+        (30, 30, 1, "length", False, "output allowance"),
+        (30, 30, 1, "stop", False, None),
+        (30, 30, 2, "length", True, None),
+        (30, 30, 2, "stop", True, None),
+        (30, 30, 1, "stop", True, "output allowance"),
+        (30, 30, 1, None, True, "output allowance"),
+        (30, 30, 3, "length", True, "output allowance"),
+        (None, 30, 1, "stop", True, "output allowance"),
+        (None, 30, 2, "length", True, None),
     ],
 )
-def test_replay_rejects_silent_context_clamping(
-    monkeypatch, input_count, output_count, finish, error
+def test_replay_enforces_pinned_input_and_forced_output_lengths(
+    monkeypatch, input_tokens, input_count, output_count, finish, ignore_eos, error
 ):
     request = TraceRequest(
         id="long",
         arrival_offset_ms=0,
         max_tokens=2,
-        sampling=TraceSampling(0.0, 1.0),
+        sampling=TraceSampling(0.0, 1.0, ignore_eos=ignore_eos),
         prompt="history",
-        input_tokens=30,
+        input_tokens=input_tokens,
     )
     started = time.monotonic()
     monkeypatch.setattr(
@@ -428,7 +435,7 @@ def test_replay_rejects_silent_context_clamping(
     else:
         assert not errors
         assert rows[0]["completion_offset_ms"] == pytest.approx(200)
-    assert rows[0]["input_tokens"] == 30
+    assert rows[0]["input_tokens"] == input_tokens
     assert rows[0]["max_tokens"] == 2
 
 
