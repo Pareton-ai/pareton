@@ -95,12 +95,15 @@ PROSE_TEXT = (
 LONG_PERIOD_LOOP_TEXT = PROSE_TEXT * 6
 
 
-def _captured(request_id: str, prompt: str, text: str, tokens: int = 2):
+def _captured(
+    request_id: str, prompt: str, text: str, tokens: int = 2, *, ignore_eos=False
+):
     return CapturedOutput(
         request_id=request_id,
         prompt=prompt,
         output_text=text,
         completion_tokens=tokens,
+        ignore_eos=ignore_eos,
     )
 
 
@@ -875,7 +878,7 @@ def _baseline_reference(natural_text: str, forced_text: str, *, forced: bool = T
 def test_forced_baseline_padding_is_not_disqualified(tmp_path: Path):
     """Expected repetition after the trusted baseline stop is baseline-relative."""
     forced = PROSE_TEXT + LOOP_TEXT
-    outputs = [_captured("r1", "Hello world", forced, tokens=240)]
+    outputs = [_captured("r1", "Hello world", forced, tokens=240, ignore_eos=True)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
             scorer.base_url,
@@ -1258,7 +1261,7 @@ def test_tail_repetition_policy_requires_a_forced_trace(tmp_path: Path, forced: 
     """Only forced traces make tail checks diagnostic, even with a clean baseline."""
     baseline_forced = PROSE_TEXT + REPETITIVE_LIST_TEXT
     candidate = PROSE_TEXT + LOOP_TEXT
-    outputs = [_captured("r1", "Hello world", candidate, tokens=240)]
+    outputs = [_captured("r1", "Hello world", candidate, tokens=240, ignore_eos=forced)]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:
         report = grade_candidate(
             scorer.base_url,
@@ -1301,7 +1304,7 @@ def test_forced_tail_policy_accepts_filler_but_preserves_logprob_checks(
     baseline_forced = prefix + (" " + period) * 3
     candidate = prefix + (LOOP_TEXT * 6 if cheap_filler else (" " + period) * 6)
     assert degeneracy_reason(baseline_forced) is not None
-    outputs = [_captured("r1", "Hello world", candidate, tokens=900)]
+    outputs = [_captured("r1", "Hello world", candidate, tokens=900, ignore_eos=True)]
     with MockEngine(
         MockEngineConfig(host="127.0.0.1", port=0, logprobs=[-0.1])
     ) as scorer:
@@ -1349,7 +1352,9 @@ def test_forced_prefix_can_match_a_nonmedian_baseline_path(
     pending = [
         PendingCorrectness(
             candidate_index=candidate_index,
-            outputs=[_captured("r1", "Hello world", LOOP_TEXT, tokens=200)],
+            outputs=[
+                _captured("r1", "Hello world", LOOP_TEXT, tokens=200, ignore_eos=True)
+            ],
         )
     ]
     with MockEngine(MockEngineConfig(host="127.0.0.1", port=0)) as scorer:

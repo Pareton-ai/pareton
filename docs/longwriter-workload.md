@@ -84,3 +84,34 @@ Receipts pin selected rows, reference hashes, rendered input token hashes,
 tokenizer/template metadata and the trace hash. Worker replay fetches only the
 selected rows and fails if the source or rendering contract changes. No database
 migration is required, and existing campaigns are not rewritten.
+
+## Natural-output repetition enforcement
+
+For every retained correctness prompt, every measured natural-output repetition
+must pass the absolute repetition checks on its full reconstructed text, including
+text beyond the baseline's output length. This also applies when generation hits
+the 5120-token ceiling. A looping non-median repetition fails correctness even
+when the latency-median response is clean. The policy applies to all normal-EOS
+workloads, not only LongWriter; it is deliberately stricter than median-only
+grading. Logprob checks and existing candidate length checks still use the
+latency-median response.
+
+Correctness evidence records per-repetition outcomes in `repetition_degeneracy`;
+full texts remain in the corresponding SLA `rep_N/requests.jsonl` evidence. The
+existing character n-gram and repeated-span thresholds, including the thinking /
+answer split, are unchanged. These are heuristic repetition checks, not a
+semantic-quality guarantee or a detector for every short repeated passage.
+
+The existing baseline instability policy is unchanged: if any measured natural
+baseline repetition is degenerate, that correctness prompt is excluded for all
+engines with an audited reason. More than four exclusions fail the round; an
+empty retained set cannot pass. Qualification already rejects degenerate outputs,
+but qualification alone does not establish behavior under concurrent round load.
+
+Speculative decoding receives the same text checks. Stream deltas are joined
+before grading; token counts and chunk boundaries cannot truncate the inspected
+text. Existing timing validation rejects streams with fewer inter-chunk gaps than
+reported completion tokens require, so some coalesced speculative streams remain
+incompatible with SLA timing. Forced-tail diagnostic exemptions require both a
+forced baseline probe reference and the original request's `ignore_eos=true`;
+normal-EOS requests cannot inherit them.
