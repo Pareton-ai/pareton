@@ -10,6 +10,7 @@ existed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 from uuid import UUID
 
@@ -24,12 +25,14 @@ from campaign.exclusion import (
 from db.connection import db_connection
 from gate.types import SubmissionState
 from round.rank import (
+    ENTRY_STATUSES,
     EVENT_OVERTAKEN,
     EVENT_SEATED,
     EVENT_VACATED,
     SETTLED_STATUSES,
     RankDecision,
 )
+from round.void_detail import sanitize_void_detail
 
 # rounds.void_reason written by the watcher. The runner owns the rest.
 VOID_HEARTBEAT_STALE = "heartbeat_stale"
@@ -291,13 +294,19 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
                 UPDATE rounds
                 SET status = 'void',
                     void_reason = %s,
+                    void_detail = %s,
                     completed_at = now()
                 WHERE status = 'running'
                   AND COALESCE(heartbeat_at, started_at)
                       < now() - make_interval(secs => %s)
                 RETURNING id, campaign_id, ordinal
                 """,
-                (VOID_HEARTBEAT_STALE, int(stale_s)),
+                (
+                    VOID_HEARTBEAT_STALE,
+                    f"no heartbeat for over {int(stale_s)}s; the pod stopped "
+                    "reporting and the round was reaped",
+                    int(stale_s),
+                ),
             )
             voided = [dict(r) for r in cur.fetchall()]
             for row in voided:
@@ -308,10 +317,19 @@ def reap_stale_rounds(stale_s: int) -> list[dict[str, Any]]:
 def _requeue_challengers(cur: Any, round_id: Any, void_reason: str) -> None:
     """Put unsettled challenger entries back on the round queue.
 
-    Terminal entries are already judged; requeueing them would resurrect a
-    disqualified or scored submission. infra_failed is not terminal: it gets
-    its one requeue. SETTLED_STATUSES is the do-not-requeue test.
+    A voided round never reached settlement, so a disqualified entry can only
+    be a live-streamed pod report, not a verdict: reset it first or the
+    requeue would strand the challenger. infra_failed is not terminal: it
+    gets its one requeue. SETTLED_STATUSES is the do-not-requeue test.
     """
+    cur.execute(
+        """
+        UPDATE round_entries
+        SET status = 'pending', disqualify_reason = NULL
+        WHERE round_id = %s AND status = 'disqualified'
+        """,
+        (str(round_id),),
+    )
     cur.execute(
         """
         INSERT INTO submission_events (submission_id, state, detail)
@@ -369,7 +387,6 @@ def claim_pending_round() -> dict[str, Any] | None:
                           sampled_trace_sha256, sampling_receipt, scoring_rule,
                           status, incumbent_submission_id, winner_submission_id,
                           leader_changed, baseline_drift, phase, progress,
-                          provision_attempts,
                           created_at, started_at, heartbeat_at, completed_at
                 """
             )
@@ -451,6 +468,62 @@ def touch_round_heartbeat(*, round_id: UUID | str) -> bool:
             return cur.rowcount > 0
 
 
+def _lock_running_round(cur: Any, round_id: UUID | str) -> bool:
+    """Take the rounds row lock if the round is still running.
+
+    Live updates, void, stale reap, and settlement all take this lock
+    first so they never deadlock and a late poll cannot read a stale
+    running snapshot while a void is in flight.
+    """
+    cur.execute(
+        """
+        SELECT id FROM rounds
+        WHERE id = %s AND status = 'running'
+        FOR UPDATE
+        """,
+        (str(round_id),),
+    )
+    return cur.fetchone() is not None
+
+
+def update_round_entry_live_status(
+    *,
+    entry_id: int,
+    status: str,
+    reason: str | None = None,
+) -> bool:
+    """Pod-reported mid-round progress for one entry. Returns whether it landed.
+
+    Forward-only: a pending/running row moves to the reported status, a
+    settled row is left alone. Locks the owning running round first so a
+    concurrent void cannot be missed as a stale snapshot, and so every
+    writer uses the same round-first lock order. Settlement
+    (complete_round) stays the authority and can still overwrite whatever
+    a pod reported.
+    """
+    if status not in ENTRY_STATUSES:
+        raise ValueError(f"unknown entry status {status!r}")
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT round_id FROM round_entries WHERE id = %s",
+                (int(entry_id),),
+            )
+            row = cur.fetchone()
+            if row is None or not _lock_running_round(cur, row[0]):
+                return False
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = %s,
+                    disqualify_reason = COALESCE(%s, disqualify_reason)
+                WHERE id = %s AND status IN ('pending', 'running')
+                """,
+                (status, reason, int(entry_id)),
+            )
+            return cur.rowcount > 0
+
+
 def complete_round(
     *,
     round_id: UUID | str,
@@ -471,6 +544,11 @@ def complete_round(
     """
     with db_connection() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Round-first lock, same order as void/reap/live-status. Claiming
+            # here also makes a concurrent void return False before any
+            # entry write, instead of rolling back after the fact.
+            if not _lock_running_round(cur, round_id):
+                return False
             for entry in entries:
                 report = entry.get("report") or {}
                 cur.execute(
@@ -704,12 +782,18 @@ def complete_round(
     return True
 
 
-def void_round(round_id: UUID | str, reason: str) -> bool:
+def void_round(round_id: UUID | str, reason: str, detail: str = "") -> bool:
     """Abandon a running round. Returns False when it was already settled.
 
     Never touches leaders or leader_history. Requeues challengers that have
     not reached a settled status.
+
+    ``detail`` is the free text behind ``reason``. It is scrubbed here rather
+    than at the API, so a credential in a provider error or a presigned URL
+    never reaches the column: this is a public field. NULL when empty, so a
+    reader can tell "no detail" from "".
     """
+    scrubbed = sanitize_void_detail(detail)
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -717,11 +801,12 @@ def void_round(round_id: UUID | str, reason: str) -> bool:
                 UPDATE rounds
                 SET status = 'void',
                     void_reason = %s,
+                    void_detail = %s,
                     completed_at = now()
                 WHERE id = %s AND status = 'running'
                 RETURNING id
                 """,
-                (reason, str(round_id)),
+                (reason, scrubbed or None, str(round_id)),
             )
             landed = cur.fetchone() is not None
             if not landed:
@@ -784,7 +869,7 @@ def list_rounds(
             total = int(meta["n"])
             cur.execute(
                 """
-                SELECT r.id, r.ordinal, r.status, r.void_reason, r.gpu_sku,
+                SELECT r.id, r.ordinal, r.status, r.void_reason, r.void_detail, r.gpu_sku,
                        r.seed_block, r.seed_block_hash, r.leader_changed,
                        r.created_at, r.completed_at,
                        (SELECT COUNT(*) FROM round_entries e
@@ -806,7 +891,7 @@ def get_round(round_id: UUID | str) -> dict[str, Any] | None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, campaign_id, ordinal, status, void_reason, gpu_sku,
+                SELECT id, campaign_id, ordinal, status, void_reason, void_detail, gpu_sku,
                        seed_block, seed_block_hash, seed_hex,
                        sampled_trace_sha256, scoring_rule,
                        incumbent_submission_id, winner_submission_id,
@@ -846,6 +931,63 @@ def get_latest_weight_set() -> dict[str, Any] | None:
             )
             row = cur.fetchone()
     return dict(row) if row is not None else None
+
+
+def get_latest_completed_round_marker() -> str | None:
+    """Id of the most recently completed scored round, or None."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM rounds
+                WHERE status = 'complete' AND completed_at IS NOT NULL
+                ORDER BY completed_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def get_latest_stored_round_marker() -> str | None:
+    """Newest scored round already covered by the latest weight snapshot."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id
+                FROM rounds r
+                WHERE r.status = 'complete'
+                  AND r.completed_at <= (
+                    SELECT created_at
+                    FROM weight_sets
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                  )
+                ORDER BY r.completed_at DESC, r.id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def get_latest_chain_set_block() -> int | None:
+    """Block of the newest weight row with a terminal chain result."""
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT computed_at_block
+                FROM weight_sets
+                WHERE set_ok IS NOT NULL
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row is not None else None
 
 
 def list_idle_seated_leaders() -> list[dict[str, Any]]:
@@ -1367,11 +1509,82 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
             )
 
 
+def list_patch_evaluation_times(
+    submission_ids: list[UUID | str],
+) -> dict[str, datetime | None]:
+    """First finalized evaluation for submissions enrolled in delayed disclosure.
+
+    Missing keys are legacy submissions and retain immediate URL visibility.
+    A None value means an enrolled submission has no finalized evaluation yet.
+    Live entries, void rounds, operator bans and infrastructure failures do not
+    start the clock. Re-evaluated leaders keep their first qualifying timestamp.
+    """
+    if not submission_ids:
+        return {}
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT c.submission_id, MIN(r.completed_at) AS evaluated_at
+                FROM submission_events c
+                LEFT JOIN round_entries e ON e.submission_id = c.submission_id
+                  AND e.status IN ('scored', 'disqualified')
+                LEFT JOIN rounds r ON r.id = e.round_id
+                  AND r.status = 'complete'
+                WHERE c.submission_id = ANY(%s::uuid[])
+                  AND c.state = 'committed'
+                  AND c.detail @> '{"patch_reveal_delayed": true}'::jsonb
+                GROUP BY c.submission_id
+                """,
+                ([str(sid) for sid in submission_ids],),
+            )
+            return {str(r["submission_id"]): r["evaluated_at"] for r in cur.fetchall()}
+
+
+def get_round_entry_report(
+    round_id: UUID | str, entry_id: int
+) -> dict[str, Any] | None:
+    """One entry's stored ``report``, addressed within its round.
+
+    Served on its own endpoint rather than folded into the round detail: a
+    round holds a report per entry and each carries every prompt's timings, so
+    inlining them would bloat the response the live dashboard polls hardest.
+
+    ``round_status`` comes along because the caller sets cache headers from it,
+    and an entry of a running round is still moving. ``evidence_s3_url`` stays
+    unselected: the tarball keeps its own gate, and the report is the part a
+    miner needs to re-derive the score.
+
+    None when the entry does not exist, or exists under a different round.
+    """
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT e.id, e.round_id, e.submission_id, e.role,
+                       e.engine_image_ref, e.status, e.score,
+                       e.disqualify_reason, e.report,
+                       e.started_at, e.completed_at,
+                       s.patch_hash, s.hotkey,
+                       r.status AS round_status, r.ordinal AS round_ordinal,
+                       r.scoring_rule, r.sampling_receipt
+                FROM round_entries e
+                JOIN rounds r ON r.id = e.round_id
+                LEFT JOIN submissions s ON s.id = e.submission_id
+                WHERE e.round_id = %s AND e.id = %s
+                """,
+                (str(round_id), int(entry_id)),
+            )
+            row = cur.fetchone()
+    return dict(row) if row is not None else None
+
+
 def list_round_entries(round_id: UUID | str) -> list[dict[str, Any]]:
     """Every entry of one round, in run order.
 
     ``evidence_s3_url`` and ``report`` are deliberately not selected: evidence
-    stays behind its current gate.
+    stays behind its current gate, and the report is large enough to want its
+    own endpoint (``get_round_entry_report``).
     """
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -1465,6 +1678,10 @@ def list_submission_round_entries(
     it won with, not a fresh ``pending``. A submission whose only entry is live
     still reports that entry, so the live assignment has one source of truth
     rather than being reconstructed from the ``round_assigned`` event.
+
+    ``_patch_evaluated_at`` is internal metadata for URL disclosure. Compute it
+    over the same entries before choosing the displayed round, so callers do
+    not need another database query for a leader's first finalized evaluation.
     """
     if not submission_ids:
         return {}
@@ -1478,7 +1695,11 @@ def list_submission_round_entries(
                 """
                 SELECT DISTINCT ON (e.submission_id)
                        e.submission_id, e.round_id, r.ordinal, e.status,
-                       e.score, e.disqualify_reason
+                       e.score, e.disqualify_reason,
+                       MIN(r.completed_at) FILTER (
+                           WHERE r.status = 'complete'
+                             AND e.status IN ('scored', 'disqualified')
+                       ) OVER (PARTITION BY e.submission_id) AS patch_evaluated_at
                 FROM round_entries e
                 JOIN rounds r ON r.id = e.round_id
                 WHERE e.submission_id = ANY(%s::uuid[]) AND r.status <> 'void'
@@ -1497,6 +1718,7 @@ def list_submission_round_entries(
             "status": r["status"],
             "score": r["score"],
             "disqualify_reason": r["disqualify_reason"],
+            "_patch_evaluated_at": r["patch_evaluated_at"],
         }
         for r in rows
     }

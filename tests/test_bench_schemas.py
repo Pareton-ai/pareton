@@ -38,6 +38,23 @@ def test_sample_request_round_trip():
     # Round-trip through validator again
     again = validate_bench_request_dict(back)
     assert again.task_id == req.task_id
+
+
+def test_leader_candidate_index_is_optional_and_range_checked():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    # Absent: older requests bench every candidate, no short-circuit.
+    req = validate_bench_request_dict(raw)
+    assert req.leader_candidate_index is None
+
+    raw["leader_candidate_index"] = 0
+    req = validate_bench_request_dict(raw)
+    assert req.leader_candidate_index == 0
+    again = validate_bench_request_dict(req.to_dict())
+    assert again.leader_candidate_index == 0
+
+    raw["leader_candidate_index"] = 1  # sample request has one candidate
+    with pytest.raises(RequestValidationError, match="leader_candidate_index"):
+        validate_bench_request_dict(raw)
     assert again.correctness.thresholds.min_mean_logprob == -4.0
     assert again.scoring_rule == {"name": "median_e2e_speedup"}
 
@@ -47,6 +64,29 @@ def test_candidates_must_be_a_non_empty_list():
     raw["engines"]["candidates"] = []
     with pytest.raises(RequestValidationError, match="candidates"):
         validate_bench_request_dict(raw)
+
+
+@pytest.mark.parametrize("serve_args", [None, "--mem-fraction-static=0.4", [0.4]])
+def test_correctness_serve_args_must_be_strings_in_a_list(serve_args):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["correctness"]["serve_args"] = serve_args
+    with pytest.raises(RequestValidationError, match=r"correctness\.serve_args"):
+        validate_bench_request_dict(raw)
+
+
+@pytest.mark.parametrize("name", ["unknown", None, [], {}])
+def test_invalid_engine_name_is_rejected(name):
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    raw["engines"]["baseline"]["name"] = name
+    with pytest.raises(RequestValidationError, match="engines.baseline.name"):
+        validate_bench_request_dict(raw)
+
+
+def test_legacy_bench_request_defaults_to_vllm():
+    raw = json.loads(SAMPLE_REQUEST.read_text(encoding="utf-8"))
+    req = validate_bench_request_dict(raw)
+    assert req.engines.baseline.name == "vllm"
+    assert req.engines.candidates[0].name == "vllm"
 
 
 def test_every_candidate_image_must_be_digest_pinned():

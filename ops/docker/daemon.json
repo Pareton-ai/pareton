@@ -1,0 +1,7 @@
+{
+  "builder": {
+    "gc": {
+      "enabled": false
+    }
+  }
+}

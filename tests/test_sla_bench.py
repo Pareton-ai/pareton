@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from bench.lifecycle import EngineError
+from bench.http import StreamResult
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.schemas import (
     SlaBenchConfig,
@@ -18,7 +21,9 @@ from bench.schemas import (
     TraceSampling,
     WorkloadTrace,
 )
+from bench.score import PromptTiming
 from bench.sla_bench import (
+    _fire,
     _engine_metrics_from_reps,
     _median_rep_row,
     aggregate_rep_metrics,
@@ -265,6 +270,62 @@ def test_warmup_excluded_from_metrics(tmp_path: Path):
         assert all(not r["warmup"] for r in rep_rows)
 
 
+@pytest.mark.parametrize("role", ["baseline", "candidate-0", "baseline-drift"])
+@pytest.mark.parametrize("engine_name,warmups", [("vllm", 1), ("sglang", 2)])
+def test_engine_warmups_excluded_from_score_and_outputs(
+    tmp_path: Path, monkeypatch, role, engine_name, warmups
+):
+    requests = [
+        TraceRequest(
+            id=rid,
+            arrival_offset_ms=i * 10,
+            max_tokens=2,
+            sampling=TraceSampling(0.0, 1.0),
+            prompt=rid,
+        )
+        for i, rid in enumerate(["r1", "r2"])
+    ]
+    calls = []
+
+    def replay(base_url, batch, **kwargs):
+        assert batch == requests
+        calls.append(kwargs["is_warmup"])
+        cold = len(calls) <= warmups
+        rows = [
+            dict(
+                _row(req.id, 3000 if cold else 10, [5], 3005 if cold else 15, tokens=2),
+                warmup=kwargs["is_warmup"],
+                rep=kwargs["rep"],
+                text="cold" if cold else "ready",
+            )
+            for req in batch
+        ]
+        return rows, 10.0 if cold else 1.0, []
+
+    monkeypatch.setattr("bench.sla_bench._replay", replay)
+    result = run_sla_engine(
+        "http://unused",
+        role=role,
+        requests=requests,
+        cfg=SlaBenchConfig(
+            repetitions=3, thresholds=SlaThresholds(p99_ttft_ms=100, p99_itl_ms=100)
+        ),
+        evidence_dir=tmp_path,
+        engine_name=engine_name,
+    )
+    assert calls == [True] * warmups + [False] * 3
+    assert result.result.metrics.e2e_ms.p99 == 15
+    assert result.result.cross_rep_variance["p99_e2e_ms_rel_range"] == 0
+    assert result.outputs == {req.id: "ready" for req in requests}
+    assert all(samples == ("ready",) * 3 for samples in result.output_samples.values())
+    paths = sorted((tmp_path / role).glob("warmup*/requests.jsonl"))
+    assert len(paths) == warmups
+    for path in paths:
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert {r["request_id"] for r in rows if "request_id" in r} == {"r1", "r2"}
+        assert all(r["warmup"] for r in rows if "request_id" in r)
+
+
 def test_arrival_offsets_respected(tmp_path: Path):
     # A late-arriving request must not start before its offset.
     trace = WorkloadTrace(
@@ -302,6 +363,80 @@ def test_arrival_offsets_respected(tmp_path: Path):
         elapsed = time.monotonic() - t0
     # The 80ms-offset request means the rep takes >= ~80ms.
     assert elapsed >= 0.08
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "baseline" / "rep_1" / "requests.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    late = next(row for row in rows if row.get("request_id") == "late")
+    assert late["dispatch_offset_ms"] >= 80
+    assert late["completion_offset_ms"] > late["dispatch_offset_ms"]
+
+
+@pytest.mark.parametrize(
+    "input_tokens,input_count,output_count,finish,ignore_eos,error",
+    [
+        (30, 30, 2, "length", False, None),
+        (30, 29, 2, "length", False, "input token count"),
+        (30, 30, 1, "length", False, "output allowance"),
+        (30, 30, 1, "stop", False, None),
+        (30, 30, 2, "length", True, None),
+        (30, 30, 2, "stop", True, None),
+        (30, 30, 1, "stop", True, "output allowance"),
+        (30, 30, 1, None, True, "output allowance"),
+        (30, 30, 3, "length", True, "output allowance"),
+        (None, 30, 1, "stop", True, "output allowance"),
+        (None, 30, 2, "length", True, None),
+    ],
+)
+def test_replay_enforces_pinned_input_and_forced_output_lengths(
+    monkeypatch, input_tokens, input_count, output_count, finish, ignore_eos, error
+):
+    request = TraceRequest(
+        id="long",
+        arrival_offset_ms=0,
+        max_tokens=2,
+        sampling=TraceSampling(0.0, 1.0, ignore_eos=ignore_eos),
+        prompt="history",
+        input_tokens=input_tokens,
+    )
+    started = time.monotonic()
+    monkeypatch.setattr(
+        "bench.sla_bench.post_completion_stream",
+        lambda *args, **kwargs: StreamResult(
+            text="answer",
+            finish_reason=finish,
+            completion_tokens=output_count,
+            prompt_tokens=input_count,
+            ttft_s=0.1,
+            itl_s=[0.1],
+            e2e_s=0.2,
+            dispatch_monotonic_s=started,
+            completion_monotonic_s=started + 0.2,
+        ),
+    )
+    rows, errors = [], []
+    _fire(
+        "http://unused",
+        request,
+        t0=started,
+        rep=1,
+        role="candidate-0",
+        is_warmup=False,
+        timeout_s=1,
+        out=rows,
+        errs=errors,
+        lock=threading.Lock(),
+    )
+    if error:
+        assert error in errors[0]
+        assert error in rows[0]["error"]
+    else:
+        assert not errors
+        assert rows[0]["completion_offset_ms"] == pytest.approx(200)
+    assert rows[0]["input_tokens"] == input_tokens
+    assert rows[0]["max_tokens"] == 2
 
 
 def test_median_rep_row_keeps_one_real_repetition():
@@ -352,5 +487,94 @@ def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
     )
     assert references["forced"].completion_tokens == 417
     assert references["forced"].text == "natural answer"
-    evidence = tmp_path / "baseline_natural_stops.jsonl"
-    assert json.loads(evidence.read_text(encoding="utf-8"))["request_id"] == ("forced")
+    assert references["forced"].finish_reason == "stop"
+    assert references["forced"].probed is True
+    evidence = json.loads(
+        (tmp_path / "baseline_natural_stops.jsonl").read_text(encoding="utf-8")
+    )
+    assert evidence["request_id"] == "forced"
+    assert evidence["finish_reason"] == "stop"
+    assert evidence["probed"] is True
+
+
+def test_median_rep_row_keeps_the_clean_mid_latency_on_a_one_in_three_loop():
+    """Round 10 hf-003 baseline: the 74s loop is not the graded artifact."""
+    rows = [
+        {
+            "e2e_ms": 74308.0,
+            "text": "loop",
+            "completion_tokens": 5120,
+            "finish_reason": "length",
+        },
+        {
+            "e2e_ms": 4421.8,
+            "text": "short",
+            "completion_tokens": 59,
+            "finish_reason": "stop",
+        },
+        {
+            "e2e_ms": 5643.6,
+            "text": "median",
+            "completion_tokens": 78,
+            "finish_reason": "stop",
+        },
+    ]
+    chosen = _median_rep_row(rows)
+    assert chosen["text"] == "median"
+    assert chosen["completion_tokens"] == 78
+
+
+def test_median_rep_row_keeps_a_short_loop_when_it_lands_mid_pack():
+    """Round 8 hf-026: finish_reason=repetition becomes the graded artifact."""
+    rows = [
+        {"e2e_ms": 1595.9, "text": "loop", "finish_reason": "repetition"},
+        {"e2e_ms": 1646.0, "text": "ok-long", "finish_reason": "stop"},
+        {"e2e_ms": 1586.8, "text": "ok-short", "finish_reason": "stop"},
+    ]
+    assert _median_rep_row(rows)["text"] == "loop"
+
+
+def test_natural_stop_is_byte_equal_to_the_median_output_without_ignore_eos(
+    tmp_path: Path,
+):
+    """This campaign's traces set no ignore_eos, so stop.text IS the median."""
+    median = (
+        "I'll start by exploring the repository structure...\n"
+        "<parameter=command>\nfind /redis-py -type f"
+    )
+    request = TraceRequest(
+        id="hf-003",
+        arrival_offset_ms=0,
+        max_tokens=5120,
+        sampling=TraceSampling(0.0, 1.0),
+        prompt="explore",
+    )
+    replay = SimpleNamespace(
+        result=SimpleNamespace(
+            timings={
+                "hf-003": PromptTiming(ttft_s=0.1, itl_s=[0.01], completion_tokens=78)
+            }
+        ),
+        outputs={"hf-003": median},
+    )
+    references = capture_baseline_natural_stops(
+        "http://unused",
+        requests=[request],
+        replay=replay,
+        evidence_dir=tmp_path,
+    )
+    assert references["hf-003"].text == median
+    assert references["hf-003"].text == replay.outputs["hf-003"]
+    assert references["hf-003"].completion_tokens == 78
+    # Matches the round-10 VM row: finish_reason is JSON null, so this
+    # was the copy path. An ignore_eos probe would have written "stop"
+    # and probed=true.
+    assert references["hf-003"].finish_reason is None
+    assert references["hf-003"].probed is False
+    evidence = json.loads(
+        (tmp_path / "baseline_natural_stops.jsonl").read_text(encoding="utf-8")
+    )
+    assert evidence["text"] == median
+    assert evidence["completion_tokens"] == 78
+    assert evidence["finish_reason"] is None
+    assert evidence["probed"] is False

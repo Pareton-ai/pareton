@@ -50,20 +50,25 @@ def test_reject_v2_wrong_field_count():
     assert parse_patch_commitment("v2|only|three|parts") is None
 
 
-def test_encode_fits_finney_maxfields():
+@pytest.mark.parametrize("private", [False, True])
+def test_encode_fits_finney_maxfields(private):
     # CommitmentInfo.fields is a BoundedVec with MaxFields=3 on finney
     # (3 x 128-byte Raw chunks); exceeding it traps validate_transaction.
     raw = encode_patch_commitment(
         campaign_id="123e4567-e89b-12d3-a456-426614174000",
         baseline_commit="a" * 40,
         patch_hash="sha256:" + "b" * 64,
-        retrieval_url="https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/campaigns/"
+        retrieval_url="https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/"
+        + ("private/" if private else "")
+        + "campaigns/"
         + "c" * 36
         + "/patches/"
         + "h" * 48
         + "/"
         + "d" * 36
         + ".diff",
+        payment_block=2**31 - 1,
+        payment_tx=9999,
     )
     assert len(raw.encode()) <= 3 * 128
 

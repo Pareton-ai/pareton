@@ -9,6 +9,7 @@ from __future__ import annotations
 import socket
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -101,7 +102,7 @@ def test_publish_port_lifecycle_healthy_and_cleanup(
     mock_engine_image: str, tmp_path: Path
 ):
     """Works on Docker Desktop and Linux: random host port + completions."""
-    run_id = "itpub" + "0" * 7
+    run_id = "itpub" + uuid4().hex[:7]
     logs = tmp_path / "logs"
     spec = EngineSpec(image=mock_engine_image, serve_args=[], env={})
 
@@ -145,7 +146,7 @@ def test_publish_port_lifecycle_healthy_and_cleanup(
 
 def test_internal_network_blocks_egress(mock_engine_image: str):
     """Outbound HTTPS from an --internal network container must fail."""
-    run_id = "itneg" + "0" * 7
+    run_id = "itneg" + uuid4().hex[:7]
     # Pull alpine once so the probe itself does not need egress from the
     # internal network (image must already be local).
     pull = subprocess.run(
@@ -196,7 +197,7 @@ def test_internal_network_lifecycle_when_ip_reachable(
     mock_engine_image: str, tmp_path: Path
 ):
     """Full internal-network path on Linux; self-skip on Docker Desktop."""
-    run_id = "itlip" + "0" * 7
+    run_id = "itlip" + uuid4().hex[:7]
     # Preflight: start a short-lived container on an internal net and probe IP.
     with BenchNetwork(
         run_id=run_id + "p",
@@ -290,7 +291,7 @@ def test_two_publish_port_engines_no_port_collision(
     mock_engine_image: str, tmp_path: Path
 ):
     """Baseline + candidate concurrently must get distinct host ports."""
-    run_id = "it2en" + "0" * 7
+    run_id = "it2en" + uuid4().hex[:7]
     spec = EngineSpec(image=mock_engine_image, serve_args=[], env={})
     with BenchNetwork(
         run_id=run_id, internal=False, runner=default_docker_runner, cmd_timeout_s=60

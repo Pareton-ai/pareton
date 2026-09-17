@@ -16,6 +16,7 @@ import config
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
     CHAT_TEMPLATE_ALGO_VERSION,
+    TRAJECTORY_ALGO_VERSION,
     PromptFormatter,
     SamplerError,
     build_prompt_formatter,
@@ -39,7 +40,7 @@ from gpu.errors import GpuError, NoCapacityError, ProvisionError
 from gpu.orchestrate import EXIT_DESTROY_FAILED, run_bench_on_pod
 from gpu.types import PodSpec
 from observability import events as obs
-from round.rank import Entry, rank_round
+from round.rank import VOID_LEADER_INFRA_FAILED, Entry, rank_round
 from round.store import (
     VOID_LEADER_IMAGE_MISSING,
     VOID_POD_FAILED,
@@ -52,6 +53,7 @@ from round.store import (
     list_round_entries,
     set_round_phase,
     touch_round_heartbeat,
+    update_round_entry_live_status,
     void_round,
 )
 from worker.phase_reporter import PhaseReporter
@@ -61,22 +63,6 @@ logger = logging.getLogger(__name__)
 
 class RoundDeferred(Exception):
     """The GPU market was empty. Wait and re-claim; the round is not spent."""
-
-    def __init__(self, delay_s: float, detail: str) -> None:
-        super().__init__(detail)
-        self.delay_s = delay_s
-        self.detail = detail
-
-
-def capacity_retry_delay_s(attempts: int) -> float:
-    """Backoff before re-claiming a round no provider could fill.
-
-    Doubles per prior attempt and saturates at PROVISION_RETRY_MAX_S. The
-    exponent is clamped so a long outage cannot build an absurd shift value.
-    """
-    base = float(config.PROVISION_RETRY_BASE_S)
-    cap = float(config.PROVISION_RETRY_MAX_S)
-    return min(base * float(2 ** min(max(attempts, 0), 20)), cap)
 
 
 class RoundInfraError(Exception):
@@ -175,12 +161,17 @@ def materialize_round_trace(
                     "ignore_eos": receipt.get("ignore_eos"),
                     "algo_version": receipt.get("algo_version"),
                     "seed_block_offset": receipt.get("seed_block_offset"),
+                    **{
+                        key: receipt[key]
+                        for key in ("request_interval_ms", "enable_thinking")
+                        if key in receipt
+                    },
                 }
             )
             formatter = None
-            if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION:
+            if rule["algo_version"] >= CHAT_TEMPLATE_ALGO_VERSION:
                 formatter = prompt_formatter
-            if rule["algo_version"] == CHAT_TEMPLATE_ALGO_VERSION and formatter is None:
+            if rule["algo_version"] >= CHAT_TEMPLATE_ALGO_VERSION and formatter is None:
                 template = receipt.get("chat_template")
                 if isinstance(template, dict):
                     bench = (
@@ -220,8 +211,15 @@ def materialize_round_trace(
                     )
                 else:
                     raise SamplerError(
-                        "algo_version 2 receipt requires chat template metadata"
+                        "chat sampling receipt requires chat template metadata"
                     )
+            sampling_context = None
+            if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
+                from bench.trajectory import sampling_context_for_campaign
+
+                sampling_context = sampling_context_for_campaign(
+                    campaign.bench, getattr(campaign, "engine", None)
+                )
             sampled = generate_trace(
                 rule=rule,
                 seed_hex=str(
@@ -231,6 +229,10 @@ def materialize_round_trace(
                 prompt_formatter=formatter,
                 sample_seed_block=int(receipt.get("sample_seed_block") or 0),
                 sample_seed_block_hash=str(receipt.get("sample_seed_block_hash") or ""),
+                sampling_context=sampling_context,
+                sampling_receipt=receipt
+                if rule["algo_version"] == TRAJECTORY_ALGO_VERSION
+                else None,
             )
         except (SamplerError, TypeError, ValueError, KeyError) as exc:
             raise RoundInfraError(VOID_TRACE_UNAVAILABLE, str(exc)) from exc
@@ -305,10 +307,10 @@ def build_round_request(
     extra_serve = list(bench.get("serve_args") or [])
     engine_profile = _campaign_engine_profile(campaign)
     cache_dir = str(engine_profile["cache_dir"])
-    serve_args = ["--model", "/model"]
-    # SGLang rejects --max-model-len (it uses campaign --context-length).
-    if engine_profile["name"] != "sglang":
-        serve_args.extend(["--max-model-len", str(max_model_len)])
+    if engine_profile["name"] == "sglang":
+        serve_args = ["--model-path", "/model", "--context-length", str(max_model_len)]
+    else:
+        serve_args = ["--model", "/model", "--max-model-len", str(max_model_len)]
     serve_args.extend(["--dtype", dtype])
     quantization = model.get("quantization")
     if quantization is not None and str(quantization).strip() != "":
@@ -351,6 +353,8 @@ def build_round_request(
             ),
         },
     }
+    if "serve_args" in corr_cfg:
+        correctness["serve_args"] = list(corr_cfg["serve_args"])
     # The relative model-quality bar is campaign policy and is forwarded only
     # when the manifest carries it. Repeat-loop rejection is mandatory harness
     # policy in bench/correctness.py and is intentionally absent here.
@@ -360,6 +364,10 @@ def build_round_request(
         )
 
     scoring_rule = _parse_json_field(round_row.get("scoring_rule")) or {}
+    leader_candidate_index = next(
+        (i for i, row in enumerate(candidates) if row["role"] == "leader"),
+        None,
+    )
     req = {
         "schema_version": 1,
         "task_id": task_id,
@@ -377,6 +385,7 @@ def build_round_request(
         },
         "engines": {
             "baseline": {
+                "name": engine_profile["name"],
                 "image": baseline_image,
                 "serve_args": list(serve_args),
                 "env": {},
@@ -384,6 +393,7 @@ def build_round_request(
             },
             "candidates": [
                 {
+                    "name": engine_profile["name"],
                     "image": str(row["engine_image_ref"]),
                     "serve_args": list(serve_args),
                     "env": {},
@@ -406,6 +416,7 @@ def build_round_request(
         },
         "scoring_rule": dict(scoring_rule),
         "hf_token_env": "HF_TOKEN",
+        "leader_candidate_index": leader_candidate_index,
     }
     try:
         validate_bench_request_dict(req)
@@ -573,17 +584,60 @@ def _round_heartbeat_writer(round_id: str) -> Callable[..., bool]:
     return beat
 
 
-def _void(round_row: dict[str, Any], reason: str) -> None:
+def _round_entry_status_writer(
+    entries: list[dict[str, Any]],
+) -> Callable[[dict[str, Any]], None]:
+    """Map pod-reported per-entry statuses onto round_entries rows.
+
+    The harness numbers candidates in request order, and the request was
+    built from this same entries list, so a decimal key lines up with the
+    non-baseline rows. Best-effort: a bad payload is dropped, never fatal,
+    and the store write itself is forward-only so settlement stays the
+    authority.
+    """
+    baseline_id = next((e["id"] for e in entries if e["role"] == "baseline"), None)
+    candidate_ids = [e["id"] for e in entries if e["role"] != "baseline"]
+
+    def write(statuses: dict[str, Any]) -> None:
+        for key, item in statuses.items():
+            if not isinstance(item, dict):
+                continue
+            if key == "baseline":
+                entry_id = baseline_id
+            else:
+                try:
+                    entry_id = candidate_ids[int(key)]
+                except (ValueError, IndexError):
+                    continue
+            if entry_id is None:
+                continue
+            reason = item.get("reason")
+            try:
+                update_round_entry_live_status(
+                    entry_id=int(entry_id),
+                    status=str(item.get("status")),
+                    reason=None if reason is None else str(reason),
+                )
+            except Exception as exc:  # noqa: BLE001 - progress must not fail a bench
+                logger.warning("entry status write failed (%s): %s", key, exc)
+
+    return write
+
+
+def _void(round_row: dict[str, Any], reason: str, detail: str = "") -> None:
     round_id = str(round_row["id"])
-    landed = void_round(round_id, reason)
+    # The store scrubs and truncates; the log below keeps the raw string.
+    landed = void_round(round_id, reason, detail)
     if not landed:
         logger.info("round %s already settled; skipped void %s", round_id, reason)
         return
+    log_detail = detail.replace("\r", " ").replace("\n", " ")[:1000]
     logger.warning(
-        "voided round %s (campaign %s): %s",
+        "voided round %s (campaign %s): %s%s",
         round_row.get("ordinal"),
         round_row.get("campaign_id"),
         reason,
+        f": {log_detail}" if log_detail else "",
     )
     obs.round_voided(
         round_id=round_id,
@@ -594,15 +648,15 @@ def _void(round_row: dict[str, Any], reason: str) -> None:
 
 def _defer(round_row: dict[str, Any], exc: RoundDeferred) -> None:
     round_id = str(round_row["id"])
-    if not defer_round_for_capacity(round_id, delay_s=exc.delay_s):
+    if not defer_round_for_capacity(round_id, delay_s=config.PROVISION_RETRY_S):
         logger.info("round %s already settled; skipped defer", round_id)
         return
     logger.warning(
-        "deferred round %s (campaign %s) for %.0fs: %s",
+        "deferred round %s (campaign %s) for %ds: %s",
         round_row.get("ordinal"),
         round_row.get("campaign_id"),
-        exc.delay_s,
-        exc.detail,
+        config.PROVISION_RETRY_S,
+        exc,
     )
 
 
@@ -643,7 +697,7 @@ def process_round(
         _defer(round_row, exc)
         return "deferred"
     except RoundInfraError as exc:
-        _void(round_row, exc.reason)
+        _void(round_row, exc.reason, exc.detail)
         return exc.reason
 
 
@@ -749,6 +803,11 @@ def _process_round(
             )
             leftover = remaining_round_budget_s(round_row["started_at"], now=now)
             fn = run_pod_fn or run_bench_on_pod
+            # Only the real pod runner polls per-entry progress; injected
+            # fakes keep their narrower signature.
+            extra: dict[str, Any] = {}
+            if run_pod_fn is None:
+                extra["on_entry_status"] = _round_entry_status_writer(entries)
             try:
                 exit_code = fn(
                     spec,
@@ -756,17 +815,12 @@ def _process_round(
                     output_dir=output_dir,
                     on_phase=reporter.set,
                     bench_timeout_s=leftover,
+                    **extra,
                 )
             except NoCapacityError as exc:
-                # Nothing was rented, so the cohort and seed stay valid. Voiding
-                # here is what let an out-of-stock market burn a round every
-                # poll interval; keep the round and wait the market out.
-                raise RoundDeferred(
-                    capacity_retry_delay_s(
-                        int(round_row.get("provision_attempts") or 0)
-                    ),
-                    str(exc),
-                ) from exc
+                # No evaluation started, so keep the cohort and seed while the
+                # cloud market is empty or the dedicated static host is busy.
+                raise RoundDeferred(str(exc)) from exc
             except ProvisionError as exc:
                 provision_error = True
                 raise RoundInfraError(VOID_POD_PROVISION_FAILED, str(exc)) from exc
@@ -846,7 +900,13 @@ def _process_round(
         leader_score=incumbent_score,
     )
     if decision.void:
-        raise RoundInfraError(str(decision.void_reason))
+        reason = str(decision.void_reason)
+        detail = ""
+        if reason == VOID_LEADER_INFRA_FAILED:
+            leader_result = next((r for r in results if r["role"] == "leader"), None)
+            if leader_result is not None:
+                detail = str(leader_result.get("disqualify_reason") or "")
+        raise RoundInfraError(reason, detail)
 
     evidence_url = None
     if not mock_bench:

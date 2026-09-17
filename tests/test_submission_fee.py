@@ -49,13 +49,25 @@ def test_submission_fee_is_canonical_and_exact():
     assert submission_fee_rao(fee) == 500_000
 
 
-@pytest.mark.parametrize("amount", ["-1", "nan", "0.0000000001", True, None])
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "-1",
+        "nan",
+        "0.0000000001",
+        True,
+        None,
+        0.15,
+        "1.00000000000000000000000000001",
+        "18446744073.709551616",
+    ],
+)
 def test_submission_fee_rejects_invalid_amount(amount):
     with pytest.raises(ValueError, match="submission_fee.amount_tao"):
         validate_submission_fee({"amount_tao": amount, "recipient": FEE["recipient"]})
 
 
-def test_fee_amount_and_recipient_each_change_the_manifest_hash():
+def test_fee_amount_and_recipient_do_not_change_the_manifest_hash():
     kwargs = _manifest_kwargs()
     base = build_manifest(**kwargs)
     other_amount = build_manifest(
@@ -72,6 +84,85 @@ def test_fee_amount_and_recipient_each_change_the_manifest_hash():
                 other_recipient.manifest_hash,
             }
         )
-        == 3
+        == 1
     )
     assert base.to_public_dict()["submission_fee"] == FEE
+
+
+@pytest.mark.parametrize("amount", ["1e-999999999", "0.0000000010000000000000000001"])
+def test_tiny_amounts_never_round_to_free(amount):
+    with pytest.raises(ValueError):
+        submission_fee_rao({**FEE, "amount_tao": amount})
+
+
+def test_fee_history_selects_payment_block_not_current_price():
+    from campaign.fees import fee_at_block
+
+    history = [
+        {**FEE, "effective_from_block": 0},
+        {**FEE, "amount_tao": "0.15", "effective_from_block": 1000},
+    ]
+    assert fee_at_block(history, 999) == FEE
+    assert fee_at_block(history, 1000)["amount_tao"] == "0.15"
+
+
+@pytest.mark.parametrize("blocks", [[], [1], [0, 0], [0, -1], [0, True], [0, 1.5]])
+def test_fee_history_rejects_missing_or_ambiguous_boundaries(blocks):
+    from campaign.fees import validate_fee_history
+
+    with pytest.raises(ValueError):
+        validate_fee_history([{**FEE, "effective_from_block": b} for b in blocks])
+
+
+def test_negative_zero_is_canonical_zero():
+    assert validate_submission_fee({**FEE, "amount_tao": "-0"})["amount_tao"] == "0"
+
+
+@pytest.mark.parametrize("activation", [899, 999])
+def test_scheduler_rejects_retroactive_or_near_term_fee_changes(activation):
+    from campaign.set_fee import schedule_fee
+
+    with pytest.raises(ValueError, match="at least 100 blocks"):
+        schedule_fee("unused", "0.15", activation, current_block=900)
+
+
+def test_scheduler_appends_fee_without_rewriting_terms(monkeypatch):
+    from contextlib import contextmanager
+    from campaign import set_fee
+
+    history = [{**FEE, "effective_from_block": 0}]
+
+    class Cursor:
+        def __init__(self):
+            self.written = None
+
+        def execute(self, query, params):
+            if query.startswith("UPDATE"):
+                self.written = params[0].adapted
+                assert "manifest_hash" not in query
+                assert "customer_signoff" not in query
+
+        def fetchone(self):
+            return (history,)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+    cur = Cursor()
+
+    class Conn:
+        def cursor(self):
+            return cur
+
+    @contextmanager
+    def connect():
+        yield Conn()
+
+    monkeypatch.setattr(set_fee, "db_connection", connect)
+    result = set_fee.schedule_fee("campaign", "0.15", 1000, current_block=900)
+    assert cur.written == [*history, result]
+    assert result["effective_from_block"] == 1000
+    assert result["amount_tao"] == "0.15"

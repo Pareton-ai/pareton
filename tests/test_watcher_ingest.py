@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -24,11 +25,14 @@ def _com(**overrides) -> PatchCommitment:
         uid=1,
         hotkey="hk1",
         coldkey="ck1",
-        commit_block=10,
+        commit_block=1000,
         campaign_id="11111111-1111-4111-8111-111111111111",
         baseline_commit="a" * 40,
         patch_hash=hash_patch_bytes(PATCH),
-        retrieval_url="https://cdn.example.com/stage0/campaigns/c/patches/hk1/1.diff",
+        retrieval_url=(
+            "https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/private/campaigns/"
+            "11111111-1111-4111-8111-111111111111/patches/hk1/22222222-2222-4222-8222-222222222222.diff"
+        ),
         raw="",
     )
     kwargs.update(overrides)
@@ -39,11 +43,69 @@ def _com(**overrides) -> PatchCommitment:
 def _cdn(monkeypatch):
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "https://cdn.example.com")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
+    monkeypatch.setattr(config, "S3_BUCKET", "pareton-s3")
+    monkeypatch.setattr(config, "S3_REGION", "us-east-2")
+    monkeypatch.setattr(config, "S3_ENDPOINT_URL", "")
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", None)
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", frozenset())
     monkeypatch.setattr(watcher, "fetch_patch_bytes", lambda _url, **_kwargs: PATCH)
     monkeypatch.setattr(watcher, "get_submission_for_campaign", lambda *_args: None)
     watcher._failed_hash_checks.clear()
     yield
     watcher._failed_hash_checks.clear()
+
+
+START = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def test_ingest_rejects_commitment_before_competition_start(monkeypatch, inserted):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
+
+    sid = watcher.ingest_commitment(
+        _com(),
+        fetch_commit_datetime=lambda _block: START - timedelta(seconds=12),
+    )
+
+    assert sid is None
+    assert inserted == {}
+
+
+@pytest.mark.parametrize("offset_s", [0, 12])
+def test_ingest_accepts_commitment_at_or_after_competition_start(
+    monkeypatch, inserted, offset_s
+):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
+
+    sid = watcher.ingest_commitment(
+        _com(),
+        fetch_commit_datetime=lambda _block: START + timedelta(seconds=offset_s),
+    )
+
+    assert sid == "sid"
+
+
+@pytest.mark.parametrize(
+    "fetch_commit_datetime",
+    [None, lambda _block: None],
+)
+def test_ingest_fails_closed_when_competition_block_time_is_unavailable(
+    monkeypatch, inserted, fetch_commit_datetime
+):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
+    monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
+
+    sid = watcher.ingest_commitment(_com(), fetch_commit_datetime=fetch_commit_datetime)
+
+    assert sid is None
+    assert inserted == {}
 
 
 def test_ingest_skips_hotkey_mismatch(monkeypatch):
@@ -57,9 +119,7 @@ def test_ingest_skips_hotkey_mismatch(monkeypatch):
         lambda **_k: called.__setitem__("insert", True) or "sid",
     )
     sid = watcher.ingest_commitment(
-        _com(
-            retrieval_url="https://cdn.example.com/stage0/campaigns/c/patches/other/1.diff"
-        )
+        _com(retrieval_url=_com().retrieval_url.replace("/hk1/", "/other/"))
     )
     assert sid is None
     assert called["insert"] is False
@@ -114,6 +174,13 @@ def _open_campaign(*, amount_tao: str) -> SimpleNamespace:
     return SimpleNamespace(
         status="open",
         submission_fee={"amount_tao": amount_tao, "recipient": RECIPIENT},
+        submission_fee_history=[
+            {
+                "amount_tao": amount_tao,
+                "recipient": RECIPIENT,
+                "effective_from_block": 0,
+            }
+        ],
     )
 
 
@@ -190,6 +257,29 @@ def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
     assert inserted["patch_fingerprint"] == patch_fingerprint_bytes(PATCH)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        _com().retrieval_url.replace("/private/", "/"),
+        _com().retrieval_url.replace(
+            "11111111-1111-4111-8111-111111111111",
+            "33333333-3333-4333-8333-333333333333",
+        ),
+    ],
+)
+def test_new_commitments_reject_public_or_cross_campaign_uploads(
+    monkeypatch, inserted, url
+):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
+    monkeypatch.setattr(
+        watcher, "fetch_patch_bytes", lambda *a, **k: pytest.fail("unauthorized read")
+    )
+    assert watcher.ingest_commitment(_com(retrieval_url=url)) is None
+    assert not inserted
+
+
 def test_ingest_rejects_fingerprint_duplicate(monkeypatch, inserted):
     monkeypatch.setattr(
         watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
@@ -251,6 +341,31 @@ def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
 def test_ingest_with_fee_rejects_missing_proof(inserted):
     sid = watcher.ingest_commitment(_com())
     assert sid is None
+    assert inserted == {}
+
+
+@pytest.mark.parametrize("proof", [{}, {"payment_block": 900, "payment_tx": 2}])
+def test_exempt_hotkey_skips_fee_without_consuming_proof(monkeypatch, inserted, proof):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", {"hk1", "dev2"})
+    monkeypatch.setattr(
+        watcher, "check_fee_proof", lambda *_: pytest.fail("exempt fee checked")
+    )
+    assert watcher.ingest_commitment(_com(**proof)) == "sid"
+    assert inserted["payment_block"] is None
+    assert inserted["payment_tx"] is None
+    assert inserted["patch_fingerprint"] == patch_fingerprint_bytes(PATCH)
+
+
+@pytest.mark.parametrize("exempt", [{"hk2"}, {"ck1"}, {"HK1"}, {"hk"}])
+def test_fee_exemption_requires_exact_submitting_hotkey(monkeypatch, inserted, exempt):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", exempt)
+    assert watcher.ingest_commitment(_com()) is None
+    assert inserted == {}
+
+
+def test_exempt_hotkey_still_requires_patch_integrity(monkeypatch, inserted):
+    monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", {"hk1"})
+    assert watcher.ingest_commitment(_com(), fetcher=lambda _: b"wrong patch") is None
     assert inserted == {}
 
 
@@ -324,3 +439,53 @@ def test_ingest_with_fee_rejects_when_chain_is_unreachable(inserted):
     sid = watcher.ingest_commitment(_com(payment_block=900, payment_tx=0))
     assert sid is None
     assert inserted == {}
+
+
+@pytest.mark.parametrize(
+    "payment_block,amount_rao,accepted",
+    [
+        (899, FEE_RAO, True),
+        (900, FEE_RAO, False),
+        (900, 150_000_000, True),
+    ],
+)
+def test_fee_change_mid_campaign_uses_payment_block(
+    monkeypatch, inserted, payment_block, amount_rao, accepted
+):
+    campaign = _open_campaign(amount_tao=str(FEE_TAO))
+    campaign.submission_fee_history.append(
+        {
+            "amount_tao": "0.15",
+            "recipient": RECIPIENT,
+            "effective_from_block": 900,
+        }
+    )
+    monkeypatch.setattr(watcher, "get_campaign", lambda _cid: campaign)
+    result = watcher.ingest_commitment(
+        _com(payment_block=payment_block, payment_tx=0),
+        fetch_block=lambda _b: _paid_view(amount=amount_rao),
+    )
+    assert (result == "sid") is accepted
+
+
+def test_unconsumed_reused_payment_must_meet_target_campaign_fee(monkeypatch, inserted):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0.15")
+    )
+    assert (
+        watcher.ingest_commitment(
+            _com(payment_block=900, payment_tx=0),
+            fetch_block=lambda _b: _paid_view(),
+        )
+        is None
+    )
+    assert not inserted
+
+
+def test_payment_after_commitment_is_rejected(inserted):
+    result = watcher.ingest_commitment(
+        _com(payment_block=1001, payment_tx=0),
+        fetch_block=lambda _b: _paid_view(),
+    )
+    assert result is None
+    assert not inserted

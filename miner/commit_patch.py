@@ -2,8 +2,8 @@
 """Commit a Pareton patch on-chain (Stage 0).
 
 Flow:
-  1. Request Pareton-presigned S3 upload (or reuse --retrieval-url)
-  2. PUT patch bytes
+  1. Sign a private upload request locally (or reuse --retrieval-url)
+  2. PUT patch bytes with the signed checksum and conditional-write headers
   3. Transfer the submission fee from the coldkey (when the fee is on)
   4. Commitments.set_commitment with v2 patch payload (plaintext Raw fields)
 
@@ -22,17 +22,25 @@ import argparse
 import hashlib
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from uuid import UUID, uuid4
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from campaign.fees import submission_fee_rao, validate_submission_fee  # noqa: E402
+import config  # noqa: E402
+from campaign.fees import (  # noqa: E402
+    TRUSTED_PAYMENT_RECIPIENT,
+    submission_fee_rao,
+    validate_submission_fee,
+)
 from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
-from storage.s3 import patch_url_hotkey  # noqa: E402
+from storage.s3 import patch_url_hotkey, private_patch_key  # noqa: E402
+from storage.upload_auth import upload_message  # noqa: E402
 
 # Widest fee proof the payload may need to hold (10-digit block, 4-digit index),
 # used to size the payload before any money moves.
@@ -40,12 +48,8 @@ _PREFLIGHT_BLOCK = 2**31 - 1
 _PREFLIGHT_TX = 9999
 
 
-def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return f"sha256:{h.hexdigest()}"
+class APIError(RuntimeError):
+    """An API HTTP error with its status and response body, without the URL."""
 
 
 def _http_json(method: str, url: str, body: dict | None = None) -> dict:
@@ -56,19 +60,60 @@ def _http_json(method: str, url: str, body: dict | None = None) -> dict:
         method=method,
         headers={"Content-Type": "application/json"} if body is not None else {},
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        with exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+        raise APIError(f"HTTP {exc.code}: {detail}") from None
 
 
-def _put_bytes(url: str, data: bytes) -> None:
+def _put_bytes(url: str, data: bytes, headers: dict[str, str]) -> None:
     req = urllib.request.Request(
         url,
         data=data,
         method="PUT",
-        headers={"Content-Type": "text/plain"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         resp.read()
+
+
+def _upload_patch(
+    wallet,
+    *,
+    patch_bytes: bytes,
+    campaign_id: str,
+    network: str,
+    netuid: int,
+    api_base: str,
+) -> str:
+    """Sign locally, then use the API's upload-only S3 authorization."""
+    fields = {
+        "campaign_id": str(UUID(campaign_id)),
+        "hotkey": wallet.hotkey.ss58_address,
+        "patch_hash": "sha256:" + hashlib.sha256(patch_bytes).hexdigest(),
+        "upload_id": str(uuid4()),
+        "expires_at": int(time.time()) + config.UPLOAD_AUTH_TTL_S,
+        "network": network,
+        "netuid": netuid,
+    }
+    request = {**fields, "signature": wallet.hotkey.sign(upload_message(fields)).hex()}
+    endpoint = f"{api_base.rstrip('/')}/v1/uploads/patch"
+    # Reuse the signed UUID after a lost PUT response. The API confirms the
+    # stored checksum before reporting already_uploaded.
+    for attempt in range(2):
+        presign = _http_json("POST", endpoint, request)
+        if presign["already_uploaded"]:
+            return presign["retrieval_url"]
+        try:
+            _put_bytes(presign["upload_url"], patch_bytes, presign["required_headers"])
+            return presign["retrieval_url"]
+        except (urllib.error.URLError, TimeoutError):
+            if attempt:
+                raise
+    raise RuntimeError("patch upload did not complete")
 
 
 def _plaintext_fields(payload: str) -> list[dict]:
@@ -197,7 +242,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--campaign-id", required=True)
     p.add_argument("--patch", required=True, type=Path, help="Unified git diff file")
     p.add_argument("--api-base", default="https://api.pareton.ai")
-    p.add_argument("--retrieval-url", default=None, help="Skip upload; use this URL")
+    p.add_argument(
+        "--retrieval-url",
+        default=None,
+        help="Skip upload; reuse this campaign's private patch locator",
+    )
     p.add_argument("--wallet-name", required=True)
     p.add_argument("--wallet-hotkey", default="default")
     p.add_argument("--network", default="finney")
@@ -212,6 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run",
         action="store_true",
         help="Print commitment payload without submitting on-chain",
+    )
+    p.add_argument(
+        "--max-fee-tao", help="Refuse a new payment above this exact TAO cap"
     )
     p.add_argument(
         "--yes",
@@ -253,7 +305,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     patch_bytes = args.patch.read_bytes()
-    patch_hash = _sha256_file(args.patch)
+    patch_hash = "sha256:" + hashlib.sha256(patch_bytes).hexdigest()
+    if not 0 < len(patch_bytes) <= config.PATCH_MAX_BYTES:
+        print("error: patch is empty or exceeds the size limit", file=sys.stderr)
+        return 1
 
     import bittensor as bt
 
@@ -284,21 +339,27 @@ def main(argv: list[str] | None = None) -> int:
     fee_amount_rao = submission_fee_rao(fee)
     recipient = fee["recipient"]
 
-    if args.payment_block is not None and fee_amount_rao <= 0:
+    if recipient != TRUSTED_PAYMENT_RECIPIENT:
         print(
-            "error: --payment-block/--payment-tx require a positive campaign fee",
+            "error: campaign fee recipient differs from the locally trusted recipient",
             file=sys.stderr,
         )
         return 1
+    if args.max_fee_tao is not None:
+        try:
+            cap = submission_fee_rao(
+                {"amount_tao": args.max_fee_tao, "recipient": recipient}
+            )
+        except ValueError as exc:
+            print(f"error: invalid --max-fee-tao: {exc}", file=sys.stderr)
+            return 1
+        if args.payment_block is None and fee_amount_rao > cap:
+            print("error: campaign fee exceeds --max-fee-tao", file=sys.stderr)
+            return 1
 
     _say(f"Campaign submission fee: {fee_tao} TAO")
     _say(f"Payment recipient: {recipient}")
-    if (
-        fee_amount_rao > 0
-        and args.payment_block is None
-        and not args.dry_run
-        and not args.yes
-    ):
+    if args.payment_block is None and not args.dry_run and not args.yes:
         if not sys.stdin.isatty():
             print(
                 "error: fee confirmation requires an interactive terminal or --yes",
@@ -315,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.retrieval_url:
         retrieval_url = args.retrieval_url
+        key = private_patch_key(retrieval_url)
+        if key is None or key.split("/")[-4] != str(UUID(args.campaign_id)):
+            print(
+                "error: --retrieval-url must be a private patch for this campaign",
+                file=sys.stderr,
+            )
+            return 1
         if patch_url_hotkey(retrieval_url) != hotkey:
             print(
                 f"error: --retrieval-url path hotkey must match wallet hotkey {hotkey}",
@@ -323,20 +391,21 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         try:
-            presign = _http_json(
-                "POST",
-                f"{args.api_base.rstrip('/')}/v1/uploads/patch",
-                {"campaign_id": args.campaign_id, "hotkey": hotkey},
+            retrieval_url = _upload_patch(
+                wallet,
+                patch_bytes=patch_bytes,
+                campaign_id=args.campaign_id,
+                network=args.network,
+                netuid=args.netuid,
+                api_base=args.api_base,
             )
+        except APIError as exc:
+            print(f"error: patch upload failed: {exc}", file=sys.stderr)
+            return 1
         except Exception as exc:
-            print(f"error: presign failed: {exc}", file=sys.stderr)
+            # S3 PUT exceptions can contain bearer URLs. Do not print them.
+            print(f"error: patch upload failed ({type(exc).__name__})", file=sys.stderr)
             return 1
-        try:
-            _put_bytes(presign["upload_url"], patch_bytes)
-        except urllib.error.URLError as exc:
-            print(f"error: upload failed: {exc}", file=sys.stderr)
-            return 1
-        retrieval_url = presign["retrieval_url"]
         _say(f"📤 Uploaded the patch to {retrieval_url}.")
 
     payload_args: dict[str, object] = {
@@ -349,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = encode_patch_commitment(**payload_args)
         # Size the payload against a worst-case proof before any money moves.
         probe = payload
-        if fee_amount_rao > 0:
+        if fee_amount_rao > 0 or args.payment_block is not None:
             probe = encode_patch_commitment(
                 **payload_args,
                 payment_block=_PREFLIGHT_BLOCK,
@@ -361,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
-        if fee_amount_rao > 0 and args.payment_block is not None:
+        if args.payment_block is not None:
             payload = encode_patch_commitment(
                 **payload_args,
                 payment_block=args.payment_block,
@@ -369,7 +438,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         _say(f"Commitment payload ({len(payload.encode())} bytes):")
         print(payload)
-        if fee_amount_rao > 0:
+        if fee_amount_rao > 0 or args.payment_block is not None:
             if args.payment_block is not None:
                 _say(
                     f"Dry run: would reuse payment "
@@ -393,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
     # cannot commit, and the fee would be spent for nothing. Reuse flags let
     # a miner retry the commitment after a transfer that already landed.
     payment_block = payment_tx = None
-    if fee_amount_rao > 0:
+    if fee_amount_rao > 0 or args.payment_block is not None:
         if args.payment_block is not None:
             payment_block, payment_tx = args.payment_block, args.payment_tx
             _say(f"Reusing payment {payment_block}-{payment_tx}.")

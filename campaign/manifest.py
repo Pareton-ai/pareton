@@ -55,7 +55,7 @@ def freeze_manifest_fields(
     sampling_rule: dict[str, Any] | None = None,
     scoring_rule: dict[str, Any] | None = None,
     emission_rule: dict[str, Any] | None = None,
-    submission_fee: dict[str, Any],
+    submission_fee: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
 
@@ -72,8 +72,7 @@ def freeze_manifest_fields(
     rule: the pay schedule is the most important term a miner competes under,
     so it must not be able to change under them silently. Absent means the
     campaign pays nothing.
-    ``submission_fee`` pins the exact amount and recipient for every persisted
-    campaign.
+    ``submission_fee`` is deliberately excluded: fees have block-effective history.
 
     The submission window used to be pinned here as ``window``. It was dropped
     with the feature, so campaigns hashed before that no longer recompute to
@@ -105,7 +104,6 @@ def freeze_manifest_fields(
         out["engine"] = validate_engine(engine)
     if emission_rule is not None:
         out["emission_rule"] = validate_emission_rule(emission_rule)
-    out["submission_fee"] = validate_submission_fee(submission_fee)
     if workload_pool is not None:
         out["workload_pool"] = _canon(list(workload_pool))
     if sampling_rule is not None:
@@ -190,7 +188,7 @@ def build_manifest(
     rule_obj = fields.get("sampling_rule")
     scoring_obj = fields["scoring_rule"]
     emission_obj = fields.get("emission_rule")
-    submission_fee_obj = fields["submission_fee"]
+    submission_fee_obj = validate_submission_fee(submission_fee)
     return CampaignManifest(
         campaign_id=campaign_id,
         profile_id=profile_id,

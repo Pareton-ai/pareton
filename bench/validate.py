@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from bench.schemas import BenchRequest, WorkloadTrace
+from campaign.engine import KNOWN_ENGINE_NAMES
+from campaign.models import validate_scoring_rule
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Bare digest, or registry ref pinned with @sha256:<64 hex> (optional #fragment).
@@ -175,6 +177,11 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         # back to the vLLM path. An SGLang request that omitted it would mount
         # the cache where SGLang never looks and never say so.
         _require_keys(eng, ["image", "cache_dir"], ctx=f"engines.{role}")
+        name = eng.get("name", "vllm")
+        if not isinstance(name, str) or name not in KNOWN_ENGINE_NAMES:
+            raise RequestValidationError(
+                f"engines.{role}.name must be one of {sorted(KNOWN_ENGINE_NAMES)}"
+            )
         try:
             extract_image_digest(str(eng["image"]))
         except RequestValidationError as exc:
@@ -193,6 +200,10 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
     if not isinstance(corr, dict):
         raise RequestValidationError("correctness must be an object")
     _require_keys(corr, ["num_prompts", "thresholds"], ctx="correctness")
+    if not isinstance(corr.get("serve_args", []), list) or not all(
+        isinstance(arg, str) for arg in corr.get("serve_args", [])
+    ):
+        raise RequestValidationError("correctness.serve_args must be a list of strings")
     if int(corr["num_prompts"]) < 1:
         raise RequestValidationError("correctness.num_prompts must be >= 1")
     thr = corr["thresholds"]
@@ -241,6 +252,7 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
         raise RequestValidationError(
             "scoring_rule must be an object with a non-empty name"
         )
+    validate_scoring_rule(rule)
 
     return BenchRequest.from_dict(d)
 
@@ -294,6 +306,11 @@ def _validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
                 f"workload_trace.requests: duplicate id {rid_s!r}"
             )
         seen_ids.add(rid_s)
+    sampling = (d.get("meta") or {}).get("sampling")
+    if sampling is not None:
+        from bench.trajectory import validate_trajectory_trace
+
+        validate_trajectory_trace(d["requests"], sampling)
     return WorkloadTrace.from_dict(d)
 
 

@@ -15,7 +15,12 @@
 
 </div>
 
-Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM baseline. Pareton validates patch integrity and allowed changes, builds patches in a reproducible container environment, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
+Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaigns**. Miners submit git (code) patches against a pinned vLLM or SGLang baseline. Pareton validates patch integrity and allowed changes, builds patches in a reproducible container environment, and benchmarks real performance gains. Improvements that pass become the new floor for the next campaign.
+
+The [campaign launch guide](docs/campaign_launch_skill.md) covers framework-specific
+patch paths, image builds and launch arguments, including a SGLang campaign for
+Qwen/Qwen3.8-27B-FP8 on four RTX 5090 GPUs with 262K context.
+The updated workload still requires GPU calibration before launch.
 
 ## How It Works
 
@@ -25,6 +30,42 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 4. **Hermetic build** applies the patch inside the pinned base image and pushes a content-addressed engine image to GHCR.
 5. **Rounds** batch queued submissions. One round rents one pod, draws one prompt set, and runs the baseline, the current leader, and every challenger against that set. The best image takes the crown. Scores compare inside one round only. On-chain scoring is still design-only.
 
+## Patch visibility
+
+For newly ingested submissions, the API and dashboard withhold the patch download
+link until two days after the first finalized `scored` or `disqualified`
+evaluation. `PARETON_PATCH_REVEAL_DELAY_S` configures that delay. Submissions
+ingested before rollout keep their existing links. Hashes, status, scores, and
+logs remain public.
+
+The miner signs its upload request locally. New patches use private S3 objects
+with independently random UUIDv4 filenames. The on-chain URL identifies the
+private object; it does not grant download access. The watcher and worker read
+it with S3 credentials. After the reveal deadline, the first API request copies
+the diff to public storage and returns a permanent URL without an expiry.
+See [patch visibility](docs/patch-visibility.md) for the upload contract,
+deployment prerequisites, and a local patch-hash command.
+
+## Campaign submission fees
+
+The campaign API publishes `submission_fee` with an exact decimal `amount_tao`
+and `recipient`. `miner/commit_patch.py` shows both and asks `y/N` before upload
+or payment. Scripted submitters must add `--yes`; use `--max-fee-tao 0.15` to cap
+a new payment. Missing or invalid fees and an unexpected recipient stop the CLI.
+`--dry-run` and `--payment-block` / `--payment-tx` never prompt for a new payment.
+Miners do not set a fee environment variable.
+
+Neon stores append-only fee history for each campaign. The watcher checks the fee
+at the payment's block, including when retrying an unconsumed payment reference.
+Fees are outside `manifest_hash`. See [fee rollout and scheduling](docs/campaign-fees.md).
+
+Validators can exempt exact dev hotkeys using
+`PARETON_SUBMISSION_FEE_EXEMPT_HOTKEYS=HOTKEY_SS58_1,HOTKEY_SS58_2` in
+`/opt/pareton/.env`, then restart `pareton-watcher`. These exemptions apply only
+at the validator: all integrity checks remain, and exempt commitments do not
+consume unverified payment references. The public miner CLI still follows the
+campaign fee; local environment overrides cannot grant or request an exemption.
+
 ## Layout
 
 | Path                    | Role                                          |
@@ -32,7 +73,7 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 | `campaign/`             | Profiles, manifests, seed CLI                 |
 | `chain/`                | Patch commitment parse + chain watcher/RPC    |
 | `gate/`                 | Patch validation gates a–d                    |
-| `builder/`              | Hermetic build + GHCR tagging                 |
+| `builder/`              | Hermetic build + GHCR tagging; [cache backup/restore](docs/build-cache.md) |
 | `bench/`                | Correctness / SLA harness                     |
 | `gpu/`                  | GPU pod rent/provision/destroy + remote bench |
 | `storage/`              | Pareton-presigned S3 uploads                  |
@@ -40,6 +81,7 @@ Pareton is a Bittensor subnet (SN10) that runs **inference-optimization campaign
 | `worker/`               | Job loop + chain watcher (`python -m worker.watcher`) |
 | `api/`                  | HTTP API (campaigns, submissions, presign)    |
 | `miner/commit_patch.py` | Miner commit CLI                              |
+| `miner/hash_patch.py`   | Compute a patch's commitment hash locally      |
 | `fixtures/`             | Synthetic campaign fixtures                   |
 | `images/baseline/`      | Baseline Dockerfile                           |
 | `ops/`                  | Deploy helpers (Vector, Axiom, GPU scripts)   |

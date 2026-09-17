@@ -9,6 +9,17 @@ from __future__ import annotations
 import pytest
 
 import chain.rpc as rpc
+from storage.s3 import _s3_retrieval_url, object_key_for
+
+
+def _private_cli_url():
+    return _s3_retrieval_url(
+        object_key_for(
+            "11111111-1111-4111-8111-111111111111",
+            "hk",
+            "22222222-2222-4222-8222-222222222222",
+        )
+    )
 
 
 def test_sdk_metagraph_read_surface():
@@ -108,7 +119,10 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
         "_http_json",
         lambda *_a, **_k: {
             "baseline_commit": "a" * 40,
-            "submission_fee": {"amount_tao": "0", "recipient": "5Recipient"},
+            "submission_fee": {
+                "amount_tao": "0",
+                "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+            },
         },
     )
     monkeypatch.setattr(
@@ -145,9 +159,10 @@ def test_verify_exception_still_exits_zero(monkeypatch, tmp_path):
             "--patch",
             str(patch),
             "--retrieval-url",
-            "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+            _private_cli_url(),
             "--wallet-name",
             "w",
+            "--yes",
         ]
     )
     assert rc == 0
@@ -168,7 +183,10 @@ def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
         "_http_json",
         lambda *_a, **_k: {
             "baseline_commit": "a" * 40,
-            "submission_fee": {"amount_tao": "0", "recipient": "5Recipient"},
+            "submission_fee": {
+                "amount_tao": "0",
+                "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+            },
         },
     )
     monkeypatch.setattr(
@@ -193,9 +211,10 @@ def test_dry_run_rejects_oversized_payload(monkeypatch, tmp_path):
             "--patch",
             str(patch),
             "--retrieval-url",
-            "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+            _private_cli_url(),
             "--wallet-name",
             "w",
+            "--yes",
             "--dry-run",
         ]
     )
@@ -218,7 +237,10 @@ def _fee_cli_stubs(monkeypatch, tmp_path, *, execute, submit=None):
         "_http_json",
         lambda *_a, **_k: {
             "baseline_commit": "a" * 40,
-            "submission_fee": {"amount_tao": "0.05", "recipient": "5Recipient"},
+            "submission_fee": {
+                "amount_tao": "0.05",
+                "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+            },
         },
     )
     monkeypatch.setattr(
@@ -264,7 +286,7 @@ def _fee_cli_argv(patch) -> list[str]:
         "--patch",
         str(patch),
         "--retrieval-url",
-        "https://example.com/stage0/campaigns/c/patches/hk/p.diff",
+        _private_cli_url(),
         "--wallet-name",
         "w",
         "--yes",
@@ -294,7 +316,7 @@ def test_fee_is_paid_before_commit_and_referenced_in_payload(
 
     assert cp.main(_fee_cli_argv(patch)) == 0
     assert order == ["pay", "commit"]
-    assert paid[0].dest_ss58 == "5Recipient"
+    assert paid[0].dest_ss58 == "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K"
     assert paid[0].amount_tao.rao == 50_000_000
     # Last encode is the committed one; the earlier call is the size pre-flight.
     assert committed[-1].endswith("|900|2")
@@ -601,3 +623,88 @@ def test_scan_chain_orders_by_commit_block(monkeypatch):
     created, _hotkeys = watcher.scan_chain(object(), 10, ingest=_ingest)
     assert seen == [(10, "hk2"), (20, "hk1")]
     assert created == ["sid-hk2", "sid-hk1"]
+
+
+@pytest.mark.parametrize("answer,expected", [("y", 0), ("yes", 0), ("", 1), ("n", 1)])
+def test_fee_confirmation_precedes_upload(monkeypatch, tmp_path, answer, expected):
+    from types import SimpleNamespace
+
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch,
+        tmp_path,
+        execute=lambda *_a, **_k: SimpleNamespace(success=True, extrinsic_id="900-2"),
+    )
+    monkeypatch.setattr(cp.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input", lambda _prompt: order.append("confirm") or answer
+    )
+    monkeypatch.setattr(
+        cp,
+        "_upload_patch",
+        lambda *_a, **_k: order.append("upload") or _private_cli_url(),
+    )
+    argv = _fee_cli_argv(patch)
+    index = argv.index("--retrieval-url")
+    del argv[index : index + 2]
+    argv.remove("--yes")
+    assert cp.main(argv) == expected
+    assert order == (
+        ["confirm", "upload", "pay", "commit"] if expected == 0 else ["confirm"]
+    )
+
+
+@pytest.mark.parametrize(
+    "cap,expected",
+    [("0.04", 1), ("0.05", 0), ("0.15", 0), ("0.0000000001", 1), ("nan", 1)],
+)
+def test_max_fee_cap(monkeypatch, tmp_path, cap, expected):
+    from types import SimpleNamespace
+
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch,
+        tmp_path,
+        execute=lambda *_a, **_k: SimpleNamespace(success=True, extrinsic_id="900-2"),
+    )
+    assert cp.main([*_fee_cli_argv(patch), "--max-fee-tao", cap]) == expected
+    assert order == (["pay", "commit"] if expected == 0 else [])
+
+
+@pytest.mark.parametrize(
+    "fee",
+    [
+        {"amount_tao": "0.05", "recipient": "5Compromised"},
+        {
+            "amount_tao": 0.05,
+            "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+        },
+        {
+            "amount_tao": "nan",
+            "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
+        },
+    ],
+)
+def test_invalid_fee_or_recipient_stops_before_upload(monkeypatch, tmp_path, fee):
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch, tmp_path, execute=lambda *_a, **_k: pytest.fail("payment")
+    )
+    monkeypatch.setattr(
+        cp,
+        "_http_json",
+        lambda *_a, **_k: {"baseline_commit": "a" * 40, "submission_fee": fee},
+    )
+    monkeypatch.setattr(cp, "_upload_patch", lambda *_a, **_k: pytest.fail("upload"))
+    assert cp.main(_fee_cli_argv(patch)) == 1
+    assert not order
+
+
+@pytest.mark.parametrize(
+    "flags", [["--dry-run"], ["--payment-block", "900", "--payment-tx", "2"]]
+)
+def test_dry_run_and_reuse_never_prompt_or_pay(monkeypatch, tmp_path, flags):
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch, tmp_path, execute=lambda *_a, **_k: pytest.fail("payment")
+    )
+    monkeypatch.setattr("builtins.input", lambda *_a: pytest.fail("prompt"))
+    argv = [arg for arg in _fee_cli_argv(patch) if arg != "--yes"]
+    assert cp.main([*argv, *flags]) == 0
+    assert "pay" not in order

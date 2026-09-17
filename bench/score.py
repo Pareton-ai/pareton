@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +20,14 @@ from typing import Any
 # before it earns speed credit on that prompt. Overridable per campaign with
 # a "tolerance" key on scoring_rule.
 DEFAULT_SPEED_TOLERANCE: float = 0.9
+
+# Why a prompt was forced to 0.0. Named because they are read back out of a
+# stored report and counted: matching these strings at the call site would
+# break silently the first time one is reworded.
+REASON_NO_CANDIDATE_TIMING = "no candidate timing"
+REASON_BASELINE_NO_TOKENS = "baseline emitted no tokens"
+REASON_BELOW_TOLERANCE = "candidate output below tolerance"
+REASON_INSUFFICIENT_TIMING = "insufficient timing"
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,7 @@ class PromptScore:
     baseline_e2e_s: float | None = None
     candidate_e2e_s: float | None = None
     reason: str | None = None
+    candidate_failed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +67,7 @@ class PromptScore:
             "baseline_e2e_s": self.baseline_e2e_s,
             "candidate_e2e_s": self.candidate_e2e_s,
             "reason": self.reason,
+            "candidate_failed": self.candidate_failed,
         }
 
 
@@ -66,6 +76,7 @@ class ScoreResult:
     score: float
     rule: str
     per_prompt: list[PromptScore]
+    breakdown: dict[str, Any] = field(default_factory=dict)
 
     def to_report(self) -> dict[str, Any]:
         """The ``round_entries.report`` payload for this entry."""
@@ -73,6 +84,7 @@ class ScoreResult:
             "rule": self.rule,
             "score": self.score,
             "prompts": [p.to_dict() for p in self.per_prompt],
+            "score_breakdown": self.breakdown,
         }
 
 
@@ -84,11 +96,26 @@ def aligned_e2e_s(timing: PromptTiming, aligned_k: int) -> float | None:
     """
     if aligned_k < 1 or timing.completion_tokens < aligned_k:
         return None
-    if aligned_k == 1:
-        return timing.ttft_s
     if len(timing.itl_s) < aligned_k - 1:
         return None
-    return timing.ttft_s + math.fsum(timing.itl_s[: aligned_k - 1])
+    samples = [timing.ttft_s, *timing.itl_s[: aligned_k - 1]]
+    if any(not math.isfinite(x) or x < 0 for x in samples):
+        return None
+    return timing.ttft_s + math.fsum(samples[1:])
+
+
+def failure_penalty(rule: Mapping[str, Any]) -> float:
+    value = rule.get("failure_penalty", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(
+            "scoring_rule.failure_penalty must be a finite nonnegative number"
+        )
+    return float(value)
 
 
 def _min_aligned_tokens(baseline_tokens: int, tolerance: float) -> int:
@@ -111,15 +138,28 @@ def prompt_speedup(
     fails the tolerance gate outright and scores 0.0 for the prompt, which
     never clears the crown bar on its own.
     """
+    # A failed candidate request only counts against a valid baseline reference.
+    reference_e2e = aligned_e2e_s(baseline, baseline.completion_tokens)
+    valid_reference = reference_e2e is not None and reference_e2e > 0
     if candidate is None:
-        return PromptScore(request_id, 0.0, 0, reason="no candidate timing")
+        return PromptScore(
+            request_id,
+            0.0,
+            0,
+            reason=REASON_NO_CANDIDATE_TIMING,
+            candidate_failed=valid_reference,
+        )
     if baseline.completion_tokens < 1:
-        return PromptScore(request_id, 0.0, 0, reason="baseline emitted no tokens")
+        return PromptScore(request_id, 0.0, 0, reason=REASON_BASELINE_NO_TOKENS)
 
     aligned_k = min(baseline.completion_tokens, candidate.completion_tokens)
     if aligned_k < _min_aligned_tokens(baseline.completion_tokens, tolerance):
         return PromptScore(
-            request_id, 0.0, aligned_k, reason="candidate output below tolerance"
+            request_id,
+            0.0,
+            aligned_k,
+            reason=REASON_BELOW_TOLERANCE,
+            candidate_failed=valid_reference,
         )
 
     base_e2e = aligned_e2e_s(baseline, aligned_k)
@@ -131,7 +171,8 @@ def prompt_speedup(
             aligned_k,
             baseline_e2e_s=base_e2e,
             candidate_e2e_s=cand_e2e,
-            reason="insufficient timing",
+            reason=REASON_INSUFFICIENT_TIMING,
+            candidate_failed=valid_reference,
         )
 
     return PromptScore(
@@ -143,6 +184,41 @@ def prompt_speedup(
     )
 
 
+def summarize_prompt_scores(
+    prompts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Counts behind one entry's score: how many prompts paid, and what did not.
+
+    Reads the ``prompts`` array of a stored ``round_entries.report``, so it
+    works on any past round without rerunning the bench.
+
+    A prompt is "zeroed" when it carries a ``reason``, never when its speedup
+    happens to be 0.0: a candidate exactly as fast as the baseline earns a
+    real 0.0 and must not be counted as a failure. ``zeroed_by_reason`` keeps
+    the reasons apart because they mean different things to a miner: the
+    tolerance gate is the patch answering less, while a timing gap is the
+    harness having nothing to compare.
+    """
+    total = 0
+    zeroed_by_reason: dict[str, int] = {}
+    for p in prompts:
+        if not isinstance(p, Mapping):
+            continue
+        total += 1
+        reason = p.get("reason")
+        if reason:
+            key = str(reason)
+            zeroed_by_reason[key] = zeroed_by_reason.get(key, 0) + 1
+    zeroed = sum(zeroed_by_reason.values())
+    return {
+        "total": total,
+        "scored": total - zeroed,
+        "zeroed": zeroed,
+        "below_tolerance": zeroed_by_reason.get(REASON_BELOW_TOLERANCE, 0),
+        "zeroed_by_reason": zeroed_by_reason,
+    }
+
+
 def _median_e2e_speedup(
     rule: Mapping[str, Any],
     baseline: Mapping[str, PromptTiming],
@@ -150,13 +226,29 @@ def _median_e2e_speedup(
 ) -> ScoreResult:
     """Median per-prompt e2e speedup. 0.35 means 35 percent faster."""
     tolerance = float(rule.get("tolerance", DEFAULT_SPEED_TOLERANCE))
+    coefficient = failure_penalty(rule)
     per_prompt = [
         prompt_speedup(rid, baseline[rid], candidate.get(rid), tolerance=tolerance)
         for rid in baseline
     ]
-    score = statistics.median([p.speedup for p in per_prompt]) if per_prompt else 0.0
+    median = (
+        float(statistics.median([p.speedup for p in per_prompt])) if per_prompt else 0.0
+    )
+    failed = sum(p.candidate_failed for p in per_prompt)
+    rate = failed / len(per_prompt) if per_prompt else 0.0
+    penalty = coefficient * rate
     return ScoreResult(
-        score=float(score), rule="median_e2e_speedup", per_prompt=per_prompt
+        score=median - penalty,
+        rule="median_e2e_speedup",
+        per_prompt=per_prompt,
+        breakdown={
+            "median_speedup": median,
+            "scheduled_requests": len(per_prompt),
+            "failed_requests": failed,
+            "failure_rate": rate,
+            "failure_penalty": coefficient,
+            "penalty": penalty,
+        },
     )
 
 

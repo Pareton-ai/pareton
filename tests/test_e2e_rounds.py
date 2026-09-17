@@ -33,6 +33,7 @@ from round.store import (
     reap_stale_rounds,
     set_round_phase,
     touch_round_heartbeat,
+    update_round_entry_live_status,
     vacate_leader_if_idle,
     void_round,
     waive_campaign_hotkey,
@@ -374,7 +375,6 @@ def test_stale_round_voids_and_requeues_challengers_only():
             )
             before = cur.fetchone()[0]
     leader_state_before = _latest_state(leader_sid)
-    dq_state_before = _latest_state(dq_sid)
 
     voided = reap_stale_rounds(1800)
 
@@ -392,7 +392,11 @@ def test_stale_round_voids_and_requeues_challengers_only():
     assert state == "bench_queued"
     assert detail["void_reason"] == "heartbeat_stale"
     assert _latest_state(leader_sid) == leader_state_before
-    assert _latest_state(dq_sid) == dq_state_before
+    # A DQ on a still-running round is only a live-streamed pod report, never
+    # a settlement verdict: the void requeues it like any unsettled entry.
+    state, detail = _latest_state(dq_sid)
+    assert state == "bench_queued"
+    assert detail["void_reason"] == "heartbeat_stale"
 
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
@@ -697,6 +701,113 @@ def _seed_incumbent(campaign_id: UUID, sid: str, image_ref: str) -> str:
     return rid
 
 
+def test_patch_release_uses_first_finalized_result_not_live_or_void_entries():
+    from campaign.store import append_event, list_campaign_submissions
+    from round.store import list_patch_evaluation_times, list_submission_round_entries
+
+    cid = _campaign()
+    scored = _submission(cid, image_ref=IMAGE_A, block=10)
+    disqualified = _submission(cid, image_ref=IMAGE_B, block=11)
+    failed = _submission(cid, image_ref=IMAGE_C, block=12)
+    banned = _submission(cid, image_ref=IMAGE_D, block=13)
+    append_event(banned, "disqualified", detail={"reason": "operator ban"})
+    first = datetime(2026, 9, 7, 8, tzinfo=timezone.utc)
+    cases = [
+        ("void", 6, [(scored, "scored"), (disqualified, "disqualified")]),
+        ("complete", 7, [(scored, "infra_failed"), (failed, "infra_failed")]),
+        ("complete", 8, [(scored, "scored"), (disqualified, "disqualified")]),
+        ("complete", 9, [(scored, "scored")]),
+        ("running", 5, [(failed, "disqualified")]),
+    ]
+    with db_connection() as conn, conn.cursor() as cur:
+        # A pre-rollout row has an ordinary committed event without enrollment.
+        cur.execute(
+            """
+            INSERT INTO submissions (
+                campaign_id, patch_hash, hotkey, baseline_commit, retrieval_url
+            ) VALUES (%s, %s, 'legacy-hotkey', 'deadbeef', 'https://cdn.test/old.diff')
+            RETURNING id
+            """,
+            (str(cid), "sha256:" + "f" * 64),
+        )
+        legacy = str(cur.fetchone()[0])
+        cur.execute(
+            """
+            INSERT INTO submission_events (submission_id, state, detail)
+            VALUES (%s, 'committed', '{"hotkey":"legacy-hotkey"}'::jsonb)
+            """,
+            (legacy,),
+        )
+        for ordinal, (status, hour, entries) in enumerate(cases, 1):
+            cur.execute(
+                """
+                INSERT INTO rounds (
+                    campaign_id, ordinal, gpu_sku, seed_block, seed_block_hash,
+                    seed_hex, sampled_trace_sha256, scoring_rule, status, completed_at
+                ) VALUES (%s, %s, 'H200', 1, '0x00', '00', %s,
+                          '{"name":"median_e2e_speedup"}'::jsonb, %s, %s)
+                RETURNING id
+                """,
+                (
+                    str(cid),
+                    ordinal,
+                    "sha256:" + "e" * 64,
+                    status,
+                    first.replace(hour=hour),
+                ),
+            )
+            rid = str(cur.fetchone()[0])
+            for sid, entry_status in entries:
+                cur.execute(
+                    """
+                    INSERT INTO round_entries (
+                        round_id, submission_id, role, engine_image_ref, status
+                    ) VALUES (%s, %s, 'challenger', %s, %s)
+                    """,
+                    (rid, sid, IMAGE_A, entry_status),
+                )
+    # Re-ingestion does not enroll an existing submission or rewrite its event.
+    assert (
+        insert_submission(
+            campaign_id=cid,
+            patch_hash="sha256:" + "f" * 64,
+            hotkey="legacy-hotkey",
+            baseline_commit="deadbeef",
+            retrieval_url="https://cdn.test/old.diff",
+        )
+        is None
+    )
+    assert list_patch_evaluation_times(
+        [scored, disqualified, failed, banned, legacy]
+    ) == {
+        scored: first,
+        disqualified: first,
+        failed: None,
+        banned: None,
+    }
+    assert list_patch_evaluation_times([]) == {}
+    # Both JSON paths reuse these existing reads instead of a visibility query.
+    outcomes = list_submission_round_entries([scored, disqualified, failed, banned])
+    assert outcomes[scored]["_patch_evaluated_at"] == first
+    assert outcomes[disqualified]["_patch_evaluated_at"] == first
+    assert outcomes[failed]["_patch_evaluated_at"] is None
+    assert banned not in outcomes
+    page = list_campaign_submissions(cid)
+    rows = {str(r["id"]): r for r in page["items"]}
+    assert rows[scored]["_patch_evaluated_at"] == first
+    assert rows[disqualified]["_patch_evaluated_at"] == first
+    for sid in (failed, banned, legacy):
+        assert rows[sid]["_patch_evaluated_at"] is None
+    assert all(
+        rows[sid]["_patch_reveal_delayed"]
+        for sid in (scored, disqualified, failed, banned)
+    )
+    assert not rows[legacy]["_patch_reveal_delayed"]
+    paged = list_campaign_submissions(cid, limit=2, offset=2)
+    assert paged["total"] == page["total"]
+    assert paged["items"] == page["items"][2:4]
+
+
 def _history(campaign_id: UUID) -> list[tuple]:
     with db_connection(readonly=True) as conn:
         with conn.cursor() as cur:
@@ -929,6 +1040,50 @@ def test_void_leaves_leader_untouched_and_requeues_challengers():
     assert status == "void"
     assert reason == VOID_POD_FAILED
     assert winner is None
+
+
+def test_void_reverts_live_streamed_disqualification():
+    """A live-streamed DQ is provisional: settlement never ran on a voided
+    round, so the entry goes back to pending and the challenger requeues."""
+    campaign_id = _campaign()
+    challenger = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    create_due_rounds(_FakeSubtensor())
+    claimed = claim_pending_round()
+    assert claimed is not None
+    rid = str(claimed["id"])
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE round_entries
+                SET status = 'disqualified', disqualify_reason = 'live: crashed'
+                WHERE round_id = %s AND role = 'challenger'
+                RETURNING id
+                """,
+                (rid,),
+            )
+            (entry_id,) = cur.fetchone()
+    assert void_round(rid, VOID_POD_FAILED)
+    state, _detail = _latest_state(challenger)
+    assert state == "bench_queued"
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, disqualify_reason FROM round_entries "
+                "WHERE round_id = %s AND role = 'challenger'",
+                (rid,),
+            )
+            row = cur.fetchone()
+    assert row == ("pending", None)
+    # A poll thread can outlive its join: a late beacon for a voided round
+    # must not land.
+    assert not update_round_entry_live_status(
+        entry_id=entry_id, status="disqualified", reason="late"
+    )
+    with db_connection(readonly=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM round_entries WHERE id = %s", (entry_id,))
+            assert cur.fetchone()[0] == "pending"
 
 
 def test_complete_seats_first_leader():

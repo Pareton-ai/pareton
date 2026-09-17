@@ -13,7 +13,7 @@ from db.connection import db_connection
 from gate.types import SUBMISSION_STATES
 
 from .exclusion import ACTION_WAIVED, latest_campaign_hotkey_action
-from .fees import validate_submission_fee
+from .fees import fee_at_block, validate_fee_history, validate_submission_fee
 from .manifest import build_manifest
 from .models import SLA, CampaignManifest, CustomerSignoff, validate_scoring_rule
 
@@ -55,8 +55,9 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
     sampling_rule = _parse_json_obj(row.get("sampling_rule"))
     scoring_rule = _parse_json_obj(row.get("scoring_rule"))
     emission_rule = _parse_json_obj(row.get("emission_rule"))
-    submission_fee = validate_submission_fee(_parse_json_obj(row["submission_fee"]))
-    return build_manifest(
+    history = validate_fee_history(_parse_json_obj(row["submission_fee_history"]))
+    submission_fee = fee_at_block(history, 0)
+    manifest = build_manifest(
         campaign_id=row["id"],
         profile_id=row.get("profile_id"),
         baseline_repo=row["baseline_repo"],
@@ -86,6 +87,9 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
             _parse_ts(row["created_at"]) if row.get("created_at") is not None else None
         ),
     )
+
+    manifest.submission_fee_history = history
+    return manifest
 
 
 def insert_profile(name: str, data: dict[str, Any]) -> UUID:
@@ -119,7 +123,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   manifest_hash, customer_signoff, status, bench, engine,
                   priority_metric, success_threshold,
                   workload_pool, sampling_rule, scoring_rule, emission_rule,
-                  submission_fee
+                  submission_fee_history
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
@@ -168,7 +172,12 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                         if manifest.emission_rule is not None
                         else None
                     ),
-                    Json(submission_fee),
+                    Json(
+                        validate_fee_history(
+                            manifest.submission_fee_history
+                            or [{**submission_fee, "effective_from_block": 0}]
+                        )
+                    ),
                 ),
             )
             return cur.fetchone()[0]
@@ -323,7 +332,13 @@ def insert_submission(
             if row is None:
                 return None
             submission_id = row[0]
-            detail: dict[str, Any] = {"commit_block": commit_block, "hotkey": hotkey}
+            # Enroll new rows atomically. Older committed events remain untouched
+            # so deployment does not hide URLs that were already published.
+            detail: dict[str, Any] = {
+                "commit_block": commit_block,
+                "hotkey": hotkey,
+                "patch_reveal_delayed": True,
+            }
             if patch_fingerprint is not None:
                 detail["patch_fingerprint"] = patch_fingerprint
             if payment_block is not None:
@@ -720,8 +735,8 @@ def list_campaign_submissions(
     """One-connection page for ``GET /v1/campaigns/{id}/submissions``.
 
     Returns ``None`` when the campaign is missing. Each item already has
-    ``latest_state`` and ``round`` attached, so the handler does not open
-    extra Neon round-trips for those lookups.
+    ``latest_state``, ``round``, and internal patch visibility fields attached,
+    so the handler does not open extra Neon round-trips for those lookups.
     """
     cid = str(campaign_id)
     with db_connection(readonly=True) as conn:
@@ -748,8 +763,19 @@ def list_campaign_submissions(
                        st.state AS latest_state,
                        re.round_id, re.ordinal AS round_ordinal,
                        re.status AS round_entry_status, re.score AS round_score,
-                       re.disqualify_reason AS round_disqualify_reason
-                FROM submissions s
+                       re.disqualify_reason AS round_disqualify_reason,
+                       re.patch_evaluated_at AS _patch_evaluated_at,
+                       EXISTS (
+                           SELECT 1 FROM submission_events c
+                           WHERE c.submission_id = s.id AND c.state = 'committed'
+                             AND c.detail @> '{"patch_reveal_delayed": true}'::jsonb
+                       ) AS _patch_reveal_delayed
+                FROM (
+                    SELECT * FROM submissions
+                    WHERE campaign_id = %s
+                    ORDER BY committed_at DESC, id DESC
+                    LIMIT %s OFFSET %s
+                ) s
                 LEFT JOIN LATERAL (
                     SELECT e.state
                     FROM submission_events e
@@ -759,7 +785,11 @@ def list_campaign_submissions(
                 ) st ON true
                 LEFT JOIN LATERAL (
                     SELECT e.round_id, r.ordinal, e.status, e.score,
-                           e.disqualify_reason
+                           e.disqualify_reason,
+                           MIN(r.completed_at) FILTER (
+                               WHERE r.status = 'complete'
+                                 AND e.status IN ('scored', 'disqualified')
+                           ) OVER () AS patch_evaluated_at
                     FROM round_entries e
                     JOIN rounds r ON r.id = e.round_id
                     WHERE e.submission_id = s.id AND r.status <> 'void'
@@ -769,9 +799,7 @@ def list_campaign_submissions(
                              r.ordinal DESC
                     LIMIT 1
                 ) re ON true
-                WHERE s.campaign_id = %s
                 ORDER BY s.committed_at DESC, s.id DESC
-                LIMIT %s OFFSET %s
                 """,
                 (cid, int(limit), int(offset)),
             )

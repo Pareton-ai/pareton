@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from gpu.orchestrate import provision_pod, run_bench_on_pod
 from gpu.providers import provider_order
 from gpu.reap import reap
 from gpu.registry import PodRegistry, RegistryEntry, encode_pod_name
+from gpu.static_host import HOST_BUSY_EXIT, IMAGE_RETRY_EXIT, HostBusyError
 from gpu.ssh import SshResult
 from gpu.types import Offer, Pod, PodSpec, SshTarget
 
@@ -479,6 +481,74 @@ def test_read_pod_phase_caps_the_bytes_it_reads(tmp_path: Path):
     assert "/opt/pareton/out/phase.json" in commands[0]
 
 
+def test_read_pod_entry_statuses_sanitizes_untrusted_payload(tmp_path: Path):
+    from gpu.orchestrate import read_pod_entry_statuses
+
+    pod = _fake_pod(tmp_path)
+    payloads: list[str] = []
+
+    def runner(cmd, *, timeout, input_text=None):
+        return SshResult(0, payloads.pop(0), "")
+
+    payloads.append(
+        json.dumps(
+            {
+                "entries": {
+                    "baseline": {"status": "scored", "reason": None},
+                    "0": {"status": "infra_failed", "reason": "docker pull failed"},
+                    "1": {"status": "running"},
+                    "evil key": {"status": "scored"},
+                    "2": {"status": "owned"},  # not in the status vocabulary
+                    "3": "not a dict",
+                    # The harness never streams a candidate verdict of scored:
+                    # forged, and accepting it would settle the challenger.
+                    "4": {"status": "scored"},
+                }
+            }
+        )
+    )
+    assert read_pod_entry_statuses(pod, remote_out="/o", runner=runner) == {
+        "baseline": {"status": "scored", "reason": None},
+        "0": {"status": "infra_failed", "reason": "docker pull failed"},
+        "1": {"status": "running", "reason": None},
+    }
+
+    payloads.append("not json at all")
+    assert read_pod_entry_statuses(pod, remote_out="/o", runner=runner) is None
+
+    # An older harness writes no beacon: no entries, not an error.
+    payloads.append(json.dumps({"phase": "sla_bench"}))
+    assert read_pod_entry_statuses(pod, remote_out="/o", runner=runner) is None
+
+
+def test_pod_phase_poller_relays_entry_statuses_once_per_change(tmp_path: Path):
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    phases: list[str] = []
+    status_calls: list[dict] = []
+    record = {"entries": {"0": {"status": "infra_failed", "reason": "x"}}}
+
+    def runner(cmd, *, timeout, input_text=None):
+        if "entry_status.json" in cmd[-1]:
+            return SshResult(0, json.dumps(record), "")
+        return SshResult(0, json.dumps({"phase": "sla_bench"}), "")
+
+    poller = _PodPhasePoller(
+        pod,
+        remote_out="/o",
+        on_phase=lambda phase, **kw: phases.append(phase),
+        runner=runner,
+        interval_s=60.0,
+        on_entry_status=status_calls.append,
+    )
+    poller.poll_once()
+    poller.poll_once()
+    assert phases == ["sla_bench", "sla_bench"]
+    # Same payload on the second poll: not relayed again.
+    assert status_calls == [{"0": {"status": "infra_failed", "reason": "x"}}]
+
+
 def test_pod_phase_poller_relays_and_survives_ssh_failure(tmp_path: Path):
     from gpu.errors import GpuError
     from gpu.orchestrate import _PodPhasePoller
@@ -520,6 +590,33 @@ def test_pod_phase_poller_does_not_relay_after_stop(tmp_path: Path):
     poller.__exit__(None, None, None)
     poller.poll_once()
     assert seen == []
+
+
+def test_pod_phase_poller_final_read_relays_entry_statuses_after_stop(tmp_path: Path):
+    """The post-exit read lands a terminal status written between polls."""
+    from gpu.orchestrate import _PodPhasePoller
+
+    pod = _fake_pod(tmp_path)
+    seen: list[dict] = []
+    payload = {"entries": {"0": {"status": "running"}}, "at": "t0"}
+
+    def runner(cmd, *, timeout, input_text=None):
+        if "entry_status.json" in cmd[-1]:
+            return SshResult(0, json.dumps(payload), "")
+        return SshResult(0, json.dumps({"phase": "sla_bench"}), "")
+
+    poller = _PodPhasePoller(
+        pod,
+        remote_out="/o",
+        on_phase=lambda *a, **k: None,
+        runner=runner,
+        interval_s=60.0,
+        on_entry_status=seen.append,
+    )
+    poller.__exit__(None, None, None)
+    payload["entries"]["0"]["status"] = "infra_failed"
+    poller.final_read()
+    assert seen[-1]["0"]["status"] == "infra_failed"
 
 
 def test_pod_phase_poller_polls_immediately(tmp_path: Path):
@@ -1832,3 +1929,233 @@ def test_failed_login_raises_rather_than_warning(tmp_path: Path):
             ),
             state_dir=tmp_path / "st",
         )
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+@pytest.mark.parametrize("cleanup_fails", [False, True, "busy"])
+@pytest.mark.parametrize("transport_failure", [None, "pull", "ssh", "busy"])
+def test_static_host_round_cleans_before_pulls_and_after_bench(
+    tmp_path, monkeypatch, exit_code, cleanup_fails, transport_failure
+):
+    provider = FakeProvider()
+    provider.name = "static_ssh"
+    stages = []
+    commands = []
+    cleanups = []
+    alerts = []
+    monkeypatch.setattr(
+        "gpu.orchestrate.obs.static_host_cleanup_failed", lambda **k: alerts.append(k)
+    )
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    monkeypatch.setattr("gpu.orchestrate.push", lambda *a, **k: None)
+
+    def pull_output(*a, **k):
+        stages.append("pull-output")
+        if transport_failure == "pull" and stages.count("pull-output") == 1:
+            raise GpuError("output transfer failed")
+
+    monkeypatch.setattr("gpu.orchestrate.pull", pull_output)
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr("gpu.orchestrate._delete_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "gpu.orchestrate.pull_engine_images",
+        lambda *a, **k: stages.append("pull-images"),
+    )
+
+    def cleanup(*a, **kwargs):
+        cleanups.append(kwargs)
+        stages.append("cleanup")
+        if cleanup_fails and len(cleanups) == 2:
+            if cleanup_fails == "busy":
+                raise NoCapacityError("reaper holds host lock")
+            raise GpuError("candidate image still in use")
+
+    monkeypatch.setattr("gpu.orchestrate._static_host_cleanup", cleanup)
+
+    def runner(cmd, **kwargs):
+        text = " ".join(cmd)
+        commands.append(text)
+        if "python -m bench" in text:
+            assert kwargs["timeout"] == 183
+            stages.append("bench")
+            if transport_failure == "ssh":
+                raise GpuError("SSH connection lost")
+            if transport_failure == "busy":
+                return SshResult(HOST_BUSY_EXIT, "", "")
+            return SshResult(exit_code, "", "")
+        return SshResult(0, "", "")
+
+    expected_error = (
+        pytest.raises(NoCapacityError, match="busy")
+        if transport_failure == "busy"
+        else pytest.raises(GpuError, match="connection lost")
+        if transport_failure == "ssh"
+        else nullcontext()
+    )
+    with expected_error:
+        result = run_bench_on_pod(
+            PodSpec(provider="static_ssh"),
+            request_path=SAMPLE_REQUEST,
+            output_dir=tmp_path / "out",
+            state_dir=tmp_path / "state",
+            provider=provider,
+            runner=runner,
+            bench_timeout_s=123,
+            repetitions=2 if transport_failure == "pull" else 1,
+        )
+        assert result == exit_code
+    expected_stages = ["cleanup", "pull-images", "bench"]
+    if transport_failure not in ("ssh", "busy"):
+        expected_stages += ["pull-output"]
+        if transport_failure == "pull" and exit_code == 0:
+            expected_stages += ["bench", "pull-output"]
+    if transport_failure != "busy":
+        expected_stages += ["cleanup"]
+        assert not cleanups[1]["candidates"]
+        assert cleanups[0]["candidates"].isdisjoint(cleanups[1]["keep"])
+        assert bool(cleanups[1]["collected_output"]) == (transport_failure is None)
+    else:
+        assert len(cleanups) == 1 and not provider.destroy_calls
+    assert len(alerts) == int(cleanup_fails is True and transport_failure != "busy")
+    if cleanup_fails == "busy":
+        assert not provider.destroy_calls
+    assert stages == expected_stages
+    assert cleanups[0]["candidates"]
+    assert cleanups[0].get("collected_output") is None
+    command = next(c for c in commands if "python -m bench" in c)
+    assert "timeout --signal=TERM --kill-after=30s 123s" in command
+    assert (
+        f"flock --no-fork -w 120 -E {HOST_BUSY_EXIT} /opt/pareton/.static-host.lock"
+        in command
+    )
+    assert "exec nohup setsid --wait timeout" in command
+    assert "supervisor.log" in command and "2>&1 < /dev/null" in command
+    from gpu.bootstrap import REMOTE_VENV
+
+    assert f"exec {REMOTE_VENV}/bin/python -m bench" in command
+    assert "/out/static-pt-" in command
+
+
+@pytest.mark.parametrize("conflict", ["local", "remote", "ssh_error", "lock_error"])
+def test_busy_static_host_is_not_bootstrapped_or_cleaned(
+    tmp_path, monkeypatch, conflict
+):
+    provider = FakeProvider()
+    provider.name = "static_ssh"
+    touched = []
+    for name in ("bootstrap_pod", "_delete_remote_env", "_static_host_cleanup"):
+        monkeypatch.setattr(
+            f"gpu.orchestrate.{name}", lambda *a, **k: touched.append(True)
+        )
+
+    if conflict == "local":
+
+        def locked(*a, **k):
+            raise HostBusyError("host lock held")
+
+        monkeypatch.setattr("gpu.orchestrate.host_lock", locked)
+
+    def runner(cmd, **kwargs):
+        code = {"remote": HOST_BUSY_EXIT, "ssh_error": 255, "lock_error": 1}[conflict]
+        return SshResult(code, "", "host lock held")
+
+    with pytest.raises(GpuError) as exc:
+        run_bench_on_pod(
+            PodSpec(provider="static_ssh"),
+            request_path=SAMPLE_REQUEST,
+            output_dir=tmp_path / "out",
+            state_dir=tmp_path / "state",
+            provider=provider,
+            runner=runner,
+        )
+    assert not touched
+    assert isinstance(exc.value, NoCapacityError) == (conflict in ("local", "remote"))
+
+
+@pytest.mark.parametrize("cleanup_exit", [HOST_BUSY_EXIT, 1, 255])
+def test_reaper_racing_bootstrap_defers_only_lock_contention(
+    tmp_path, monkeypatch, cleanup_exit
+):
+    provider = FakeProvider()
+    provider.name = "static_ssh"
+    stages = []
+    monkeypatch.setattr(
+        "gpu.orchestrate.bootstrap_pod",
+        lambda *a, **k: stages.append("bootstrap") or "sha",
+    )
+    monkeypatch.setattr("gpu.orchestrate._write_remote_env", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "gpu.orchestrate._delete_remote_env",
+        lambda *a, **k: stages.append("delete-env"),
+    )
+    monkeypatch.setattr(
+        "gpu.orchestrate.pull_engine_images",
+        lambda *a, **k: pytest.fail("must not pull"),
+    )
+
+    def runner(cmd, **kwargs):
+        if "python3 -m gpu.static_host" in cmd[-1]:
+            assert stages == ["bootstrap"]
+            stages.append("cleanup")
+            return SshResult(cleanup_exit, "", "cleanup busy or failed")
+        return SshResult(0, "", "")  # The initial lock probe succeeds.
+
+    with pytest.raises(GpuError) as exc:
+        run_bench_on_pod(
+            PodSpec(provider="static_ssh"),
+            request_path=SAMPLE_REQUEST,
+            output_dir=tmp_path / "out",
+            state_dir=tmp_path / "state",
+            provider=provider,
+            runner=runner,
+        )
+    assert isinstance(exc.value, NoCapacityError) == (cleanup_exit == HOST_BUSY_EXIT)
+    if cleanup_exit == HOST_BUSY_EXIT:
+        assert stages == ["bootstrap", "cleanup"]
+        assert not provider.destroy_calls
+
+
+def test_image_cleanup_retry_alerts_without_blocking_static_round(
+    tmp_path, monkeypatch
+):
+    provider = FakeProvider()
+    provider.name = "static_ssh"
+    stages = []
+    alerts = []
+    monkeypatch.setattr("gpu.orchestrate.bootstrap_pod", lambda *a, **k: "sha")
+    for name in ("push", "pull", "_write_remote_env", "_delete_remote_env"):
+        monkeypatch.setattr(f"gpu.orchestrate.{name}", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "gpu.orchestrate.pull_engine_images", lambda *a, **k: stages.append("pull")
+    )
+    monkeypatch.setattr(
+        "gpu.orchestrate.obs.static_host_cleanup_failed", lambda **k: alerts.append(k)
+    )
+
+    def runner(cmd, **kwargs):
+        command = " ".join(cmd)
+        if "python3 -m gpu.static_host" in command:
+            stages.append("cleanup")
+            return SshResult(
+                IMAGE_RETRY_EXIT,
+                "",
+                "candidate image cleanup needs retry: image in use",
+            )
+        if "python -m bench" in command:
+            stages.append("bench")
+        return SshResult(0, "", "")
+
+    assert (
+        run_bench_on_pod(
+            PodSpec(provider="static_ssh"),
+            request_path=SAMPLE_REQUEST,
+            output_dir=tmp_path / "out",
+            state_dir=tmp_path / "state",
+            provider=provider,
+            runner=runner,
+        )
+        == 0
+    )
+    assert stages == ["cleanup", "pull", "bench", "cleanup"]
+    assert len(alerts) == 2
+    assert all("image in use" in alert["error"] for alert in alerts)

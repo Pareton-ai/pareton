@@ -17,7 +17,8 @@ Documentation=https://vector.dev/docs/
 [Service]
 Type=simple
 EnvironmentFile=-/opt/pareton/.env
-ExecStart=/usr/bin/vector --config /etc/vector/vector.toml
+# Vector 0.57+ requires explicit opt-in for the trusted config's token reference.
+ExecStart=/usr/bin/vector --dangerously-allow-env-var-interpolation --config /etc/vector/vector.toml
 Restart=always
 RestartSec=5
 Nice=10

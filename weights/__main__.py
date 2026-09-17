@@ -13,7 +13,17 @@ import threading
 
 import config
 from chain.rpc import fetch_metagraph
-from weights.loop import WeightsProcess, cycle_due, last_computed_block
+from observability import probe as obs_probe
+from round.store import (
+    get_latest_chain_set_block,
+    get_latest_completed_round_marker,
+    get_latest_stored_round_marker,
+)
+from weights.loop import (
+    WeightsProcess,
+    cycle_due,
+    new_round_due,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +58,13 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     _configure_logging(args.verbose)
 
+    # Read-only deployment-probe poller (stage-2 spec 7.2): a daemon thread
+    # so a re-verify against the running weights process never restarts it
+    # and never touches the chain mid-cycle.
+    threading.Thread(
+        target=obs_probe.run_probe_loop, args=("pareton-weights",), daemon=True
+    ).start()
+
     drain = threading.Event()
 
     def _request_drain(signum, _frame):
@@ -58,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _request_drain)
 
     process = WeightsProcess(
-        last_block=last_computed_block(),
+        last_stored_round=get_latest_stored_round_marker(),
+        last_chain_set_block=get_latest_chain_set_block(),
         cadence=config.WEIGHTS_CADENCE_BLOCKS,
     )
     wallet = None
@@ -77,16 +95,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 subtensor = _connect_subtensor()
             head = int(subtensor.block)
-            if not args.once and not cycle_due(
-                process.last_block, head, process.cadence
-            ):
+            round_marker = get_latest_completed_round_marker()
+            chain_due = cycle_due(
+                process.last_chain_set_block,
+                head,
+                process.cadence,
+            )
+            round_due = new_round_due(process.last_stored_round, round_marker)
+            if not args.once and not chain_due and not round_due:
                 return
             meta, head, _hash = fetch_metagraph(
                 subtensor,
                 config.NETUID,
                 network=config.SUBTENSOR_NETWORK,
             )
-            if config.WEIGHTS_ENABLED and wallet is None:
+            sign = args.once or chain_due
+            if sign and config.WEIGHTS_ENABLED and wallet is None:
                 wallet = _load_wallet()
             outcome = process.tick(
                 head=head,
@@ -94,8 +118,16 @@ def main(argv: list[str] | None = None) -> int:
                 wallet=wallet,
                 meta=meta,
                 enabled=config.WEIGHTS_ENABLED,
+                round_marker=round_marker,
+                sign=sign,
             )
-            logger.info("weights cycle %s at block %d", outcome, head)
+            logger.info(
+                "weights cycle %s at block %d sign=%s round_trigger=%s",
+                outcome,
+                head,
+                sign,
+                round_due,
+            )
         except Exception:
             logger.exception("weights cycle failed; will retry")
             if subtensor is not None:

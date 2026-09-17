@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -20,6 +23,7 @@ pytestmark = pytest.mark.unit
 
 REAL_BASE = "sha256:" + ("a" * 64)
 REAL_ENGINE = "sha256:" + ("d" * 64)
+SGLANG_COMMIT = "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc"
 
 
 def _patch_store(monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -59,6 +63,313 @@ def test_default_seed_pins_hf_rows_and_stores_no_trace(
     public = m.to_public_dict()
     assert "workload_trace_url" not in public
     assert public["sampling_rule"]["type"] == "hf_rows"
+
+
+def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeypatch):
+    from bench.sampler import SamplerError
+
+    captured = _patch_store(monkeypatch)
+    rule = json.loads(FIXTURE_SAMPLING_RULE.read_text())
+    rule.update(
+        algo_version=3,
+        request_interval_ms=0,
+        enable_thinking=True,
+        n_prompts=4,
+        n_rows=32,
+        revision="a" * 40,
+    )
+
+    def unavailable(*args):
+        raise SamplerError("trajectory input-length coverage unavailable")
+
+    monkeypatch.setattr(seed, "preflight_trajectory_campaign", unavailable)
+    with pytest.raises(SamplerError, match="coverage unavailable"):
+        seed_synthetic_campaign(
+            allow_placeholders=True,
+            status="open",
+            sampling_rule=rule,
+            bench_max_model_len=262144,
+            emission_rule={
+                "name": "linear_decay",
+                "start_weight": 0,
+                "floor_weight": 0,
+                "decay_blocks": 1,
+            },
+        )
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
+def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monkeypatch):
+    from types import SimpleNamespace
+
+    from gate.surface import check_surface
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed, "list_campaigns", lambda **_: [SimpleNamespace(campaign_id=uuid4())]
+    )
+    assert (
+        main(
+            [
+                "--engine",
+                "sglang",
+                "--baseline-commit",
+                SGLANG_COMMIT,
+                "--base-image-digest",
+                REAL_BASE,
+                "--baseline-engine-image-digest",
+                REAL_ENGINE,
+                "--bench-model-repo",
+                "Qwen/Qwen3.8-27B-FP8",
+                "--bench-model-revision",
+                "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+                "--bench-quantization",
+                "fp8",
+                "--gpu-skus",
+                "H200",
+                "--bench-gpu-count",
+                "1",
+                "--bench-serve-args=--mem-fraction-static",
+                "--bench-serve-args=0.80",
+                "--status",
+                "open",
+                "--emission-start-weight",
+                "0",
+                "--emission-floor-weight",
+                "0",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    m = captured["manifest"]
+    assert captured["inserts"] == 1
+    assert m.status == "open"
+    assert m.baseline_repo == "https://github.com/sgl-project/sglang.git"
+    assert m.baseline_commit == SGLANG_COMMIT
+    assert m.allowed_paths == ["python/sglang/**", "rust/**"]
+    assert m.engine["name"] == "sglang"
+    assert m.bench["serve_args"] == ["--mem-fraction-static", "0.80"]
+    assert m.emission_rule["start_weight"] == m.emission_rule["floor_weight"] == 0
+    assert m.customer_signoff.approved_manifest_hash == m.manifest_hash
+    seed.require_correctness_thresholds(m.bench)
+    assert captured["profile_data"]["model"] == "Qwen/Qwen3.8-27B-FP8"
+    assert m.bench["model"]["quantization"] == "fp8"
+    assert captured["profile_data"]["serving_stack"] == "sglang"
+    assert captured["profile_data"]["gpu_count"] == 1
+    for path, allowed in [
+        ("python/sglang/srt/model_executor/model_runner.py", True),
+        ("vllm/worker.py", False),
+        ("python/pyproject.toml", False),
+        ("python/sglang/setup.py", False),
+        ("python/sglang/test/test_utils.py", False),
+        ("test/test_server.py", False),
+        ("rust/sglang-grpc/src/lib.rs", True),
+        ("rust/sglang-radix-tree/src/lib.rs", True),
+        ("rust/sglang-radix-tree/tests/test_utils.rs", False),
+        ("python/sglang/kernels/aot/csrc/gemm/new_kernel.cu", True),
+        ("python/sglang/kernels/aot/include/new_kernel.cuh", True),
+        ("python/sglang/kernels/aot/CMakeLists.txt", True),
+        ("python/sglang/kernels/aot/pyproject.toml", False),
+        ("python/sglang/kernels/aot/tests/test_fp8_gemm.py", False),
+        ("python/sglang/kernels/aot/tests/spatial/test_greenctx_stream.py", False),
+        ("python/sglang/kernels/aot/python/sgl_kernel/test_utils.py", False),
+        (
+            "python/sglang/kernels/aot/python/sgl_kernel/testing/rotary_embedding.py",
+            False,
+        ),
+        ("python/sglang/kernels/aot/python/sgl_kernel/__init__.py", True),
+        ("python/sglang/kernels/aot/cmake/utils.cmake", True),
+        ("CMakeLists.txt", False),
+    ]:
+        patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n".encode()
+        assert (
+            check_surface(
+                patch_bytes=patch,
+                allowed_paths=m.allowed_paths,
+                denied_paths=m.denied_paths,
+            ).ok
+            is allowed
+        )
+
+
+def test_sglang_requires_source_pin_before_writing(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="explicit --baseline-commit"):
+        seed_synthetic_campaign(engine="sglang", allow_placeholders=True)
+    assert captured["profile_data"] is None
+
+
+def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from bench.main import plan_round_starts
+    from bench.trajectory import length_groups
+    from bench.validate import sha256_file, validate_bench_request_dict
+    from worker.round_job import build_round_request
+
+    captured = _patch_store(monkeypatch)
+    preflight = []
+
+    def preview(*args):
+        preflight.append(args)
+        return SimpleNamespace(receipt={"length_groups": length_groups(32)})
+
+    monkeypatch.setattr(seed, "preflight_trajectory_campaign", preview)
+    engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
+    helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
+    # Expand the executable launch helper with Bash, intercepting its final CLI.
+    argv = (
+        subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2"',
+                "capture",
+                str(helper),
+                engine_ref,
+            ],
+            cwd=helper.parent.parent,
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    assert argv[:2] == ["-m", "campaign.seed"]
+    assert main(argv[2:]) == 0
+    manifest = captured["manifest"]
+    (tmp_path / "trace.json").write_text(
+        json.dumps({"requests": [{"prompt": "hi"}] * 32})
+    )
+    request = build_round_request(
+        {
+            "gpu_sku": "RTX5090",
+            "sampled_trace_sha256": sha256_file(tmp_path / "trace.json"),
+            "scoring_rule": manifest.scoring_rule,
+        },
+        manifest,
+        [
+            {"role": "baseline", "engine_image_ref": engine_ref},
+            {"role": "challenger", "engine_image_ref": engine_ref},
+        ],
+        task_id=str(uuid4()),
+        trace_path=str(tmp_path / "trace.json"),
+    )
+    assert captured["inserts"] == 1
+    assert manifest.status == "open"
+    assert manifest.emission_rule == {
+        "name": "linear_decay",
+        "start_weight": 0.2,
+        "floor_weight": 0.0,
+        "decay_blocks": 201600,
+    }
+    assert manifest.allowed_paths == ["python/sglang/**", "rust/**"]
+    assert "**/CMakeLists.txt" not in manifest.denied_paths
+    assert manifest.engine["install_cmd"] == "/usr/local/bin/pareton-install-sglang"
+    assert request["model"]["hf_repo"] == "RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead"
+    assert request["model"]["hf_revision"] == "009632fef96dd349150baa780c984e62e70e91fe"
+    assert request["model"]["quantization"] == "modelopt_mixed"
+    assert request["model"]["max_model_len"] == 262144
+    assert request["hardware"]["gpu_count"] == 4
+    assert request["hardware"]["gpu_sku_expected"] == "RTX5090"
+    assert manifest.gpu_skus == ["RTX5090"]
+    assert manifest.sampling_rule["algo_version"] == 3
+    assert manifest.sampling_rule["n_prompts"] == 32
+    assert manifest.sampling_rule["max_tokens"] == 5120
+    assert manifest.sampling_rule["request_interval_ms"] == 2
+    assert manifest.sampling_rule["enable_thinking"] is False
+    assert manifest.sampling_rule["ignore_eos"] is True
+    assert manifest.scoring_rule["failure_penalty"] == 0.1
+    assert request["scoring_rule"] == manifest.scoring_rule
+    assert preflight == [(manifest.sampling_rule, manifest.bench, manifest.engine)]
+    example = json.loads(
+        (
+            helper.parent.parent
+            / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json"
+        ).read_text()
+    )
+    for key in ("model", "gpu_count", "serve_args", "correctness"):
+        assert example["bench"][key] == manifest.bench[key]
+    assert example["sampling_rule"] == manifest.sampling_rule
+    assert example["scoring_rule"] == manifest.scoring_rule
+    assert example["emission_rule"] == manifest.emission_rule
+    assert example["gpu_skus"] == manifest.gpu_skus
+    groups = length_groups(32)
+    assert [g["name"] for g in groups] == ["4k", "8k", "16k", "32k"]
+    assert [g["max_tokens"] for g in groups] == [4096, 8192, 16384, 32768]
+    assert [g["min_tokens"] for g in groups] == [3687, 7373, 14746, 29492]
+    assert [g["count"] for g in groups] == [8, 8, 8, 8]
+    assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
+    baseline = request["engines"]["baseline"]
+    parsed = validate_bench_request_dict(request)
+    assert parsed.correctness.serve_args == ["--mem-fraction-static", "0.4"]
+    plan = plan_round_starts(
+        parsed.engines, correctness_serve_args=parsed.correctness.serve_args
+    )
+    assert [start.kind for start in plan] == [
+        "baseline",
+        "candidate",
+        "scorer",
+        "drift",
+    ]
+    for start in plan:
+        if start.kind == "scorer":
+            assert start.spec.serve_args[-2:] == ["--mem-fraction-static", "0.4"]
+        else:
+            assert start.spec.serve_args == baseline["serve_args"]
+    assert baseline["name"] == "sglang"
+    assert request["engines"]["candidates"][0]["serve_args"] == baseline["serve_args"]
+    assert baseline["serve_args"] == [
+        "--model-path",
+        "/model",
+        "--context-length",
+        "262144",
+        "--dtype",
+        "bfloat16",
+        "--quantization",
+        "modelopt_mixed",
+        "--trust-remote-code",
+        "--served-model-name",
+        "qwen3.8-27b",
+        "--tp-size",
+        "4",
+        "--kv-cache-dtype",
+        "bfloat16",
+        "--mem-fraction-static",
+        "0.85",
+        "--attention-backend",
+        "flashinfer",
+        "--chunked-prefill-size",
+        "8192",
+        "--mamba-radix-cache-strategy",
+        "extra_buffer",
+        "--max-running-requests",
+        "40",
+        "--reasoning-parser",
+        "qwen3",
+        "--tool-call-parser",
+        "qwen3_coder",
+        "--enable-cache-report",
+    ]
+
+
+def test_seed_cli_pins_path_overrides(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    assert (
+        main(
+            [
+                "--allow-placeholders",
+                "--allowed-path",
+                "vllm/model_executor/**",
+                "--denied-path",
+                "**/test_*.py",
+            ]
+        )
+        == 0
+    )
+    assert captured["manifest"].allowed_paths == ["vllm/model_executor/**"]
+    assert captured["manifest"].denied_paths == ["**/test_*.py"]
 
 
 def test_bench_flags_shape_correctness(monkeypatch: pytest.MonkeyPatch):
@@ -351,12 +662,12 @@ def test_seed_pins_the_emission_rule_from_config(monkeypatch: pytest.MonkeyPatch
     assert m.to_public_dict()["emission_rule"] == m.emission_rule
 
 
-def test_seed_pins_submission_fee_terms(monkeypatch: pytest.MonkeyPatch):
+def test_seed_stores_submission_fee_terms(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(allow_placeholders=True)
     fee = captured["manifest"].submission_fee
     assert fee == {
-        "amount_tao": str(config.SUBMISSION_FEE_TAO),
+        "amount_tao": config.seed_submission_fee_tao(),
         "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
     }
     assert captured["manifest"].to_public_dict()["submission_fee"] == fee

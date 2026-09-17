@@ -9,4 +9,5 @@ COPY bench/__init__.py bench/mock_engine.py /app/bench/
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 EXPOSE 8000
-CMD ["python", "-m", "bench.mock_engine", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["python", "-m", "bench.mock_engine"]
+CMD ["--host", "0.0.0.0", "--port", "8000"]

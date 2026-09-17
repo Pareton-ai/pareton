@@ -38,6 +38,9 @@ class TraceRequest:
     sampling: TraceSampling
     prompt: str | None = None
     prompt_token_ids: list[int] | None = None
+    input_tokens: int | None = None
+    input_ids_sha256: str | None = None
+    input_length_group: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceRequest:
@@ -56,6 +59,9 @@ class TraceRequest:
             prompt_token_ids=None
             if prompt_token_ids is None
             else list(prompt_token_ids),
+            input_tokens=d.get("input_tokens"),
+            input_ids_sha256=d.get("input_ids_sha256"),
+            input_length_group=d.get("input_length_group"),
         )
 
 
@@ -63,11 +69,14 @@ class TraceRequest:
 class TraceMeta:
     name: str
     description: str = ""
+    sampling: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceMeta:
         return cls(
-            name=str(d.get("name", "")), description=str(d.get("description", ""))
+            name=str(d.get("name", "")),
+            description=str(d.get("description", "")),
+            sampling=d.get("sampling"),
         )
 
 
@@ -138,12 +147,15 @@ class EngineSpec:
     pins (``campaign/engine.py``); the harness mounts the host cache there for
     the starts that ask for it. A request that omits it gets the vLLM path,
     the same default ``resolve_engine(None)`` applies campaign-side.
+    ``name`` selects scorer behavior. Legacy requests default to vLLM;
+    SGLang requests must carry ``name="sglang"`` even on a single GPU.
     """
 
     image: str
     serve_args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     cache_dir: str = "/root/.cache/vllm"
+    name: str = "vllm"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> EngineSpec:
@@ -152,6 +164,7 @@ class EngineSpec:
             serve_args=[str(x) for x in (d.get("serve_args") or [])],
             env={str(k): str(v) for k, v in (d.get("env") or {}).items()},
             cache_dir=str(d.get("cache_dir") or "/root/.cache/vllm"),
+            name=str(d.get("name", "vllm")),
         )
 
 
@@ -237,12 +250,14 @@ class CorrectnessConfig:
 
     num_prompts: int
     thresholds: CorrectnessThresholds
+    serve_args: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CorrectnessConfig:
         return cls(
             num_prompts=int(d["num_prompts"]),
             thresholds=CorrectnessThresholds.from_dict(d["thresholds"]),
+            serve_args=list(d.get("serve_args", [])),
         )
 
 
@@ -291,24 +306,40 @@ class BenchRequest:
     sla_bench: SlaBenchConfig
     scoring_rule: dict[str, Any] = field(default_factory=dict)
     hf_token_env: str = "HF_TOKEN"
+    # Which candidate (index into engines.candidates) holds the crown, if any.
+    # A leader infra failure voids the round at ranking time, so the harness
+    # skips the rest of the cohort once that leg fails. None keeps the old
+    # behavior: every candidate is benched.
+    leader_candidate_index: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
         mode = d.get("mode", "all")
         if mode not in ("all", "sla_bench"):
             raise ValueError(f"mode must be one of all|sla_bench, got {mode!r}")
+        engines = EnginesSpec.from_dict(d["engines"])
+        leader_index_raw = d.get("leader_candidate_index")
+        leader_index: int | None = None
+        if leader_index_raw is not None:
+            leader_index = int(leader_index_raw)
+            if leader_index < 0 or leader_index >= len(engines.candidates):
+                raise ValueError(
+                    f"leader_candidate_index {leader_index} out of range for "
+                    f"{len(engines.candidates)} candidate(s)"
+                )
         return cls(
             schema_version=int(d["schema_version"]),
             task_id=str(d["task_id"]),
             mode=mode,  # type: ignore[arg-type]
             model=ModelSpec.from_dict(d["model"]),
             hardware=HardwareSpec.from_dict(d["hardware"]),
-            engines=EnginesSpec.from_dict(d["engines"]),
+            engines=engines,
             workload_trace=WorkloadTraceRef.from_dict(d["workload_trace"]),
             correctness=CorrectnessConfig.from_dict(d["correctness"]),
             sla_bench=SlaBenchConfig.from_dict(d["sla_bench"]),
             scoring_rule=dict(d.get("scoring_rule") or {}),
             hf_token_env=str(d.get("hf_token_env") or "HF_TOKEN"),
+            leader_candidate_index=leader_index,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -337,6 +368,30 @@ class GpuInfo:
 
 
 @dataclass
+class CpuInfo:
+    """The host's CPU, as decisive for a score as the GPU on this workload.
+
+    A campaign runs a handful of concurrent requests for a few dozen output
+    tokens each, so per-step Python dispatch is a large share of wall clock and
+    core count moves every candidate's timings. A miner benchmarking on a
+    different box cannot reconcile their number with ours without it.
+
+    ``available_cores`` is what the process may actually run on, which is lower
+    than ``logical_cores`` under a cpuset. ``quota_cores`` is the cgroup ceiling
+    in whole-core units, and None means uncapped, not zero.
+    """
+
+    model: str
+    logical_cores: int
+    available_cores: int
+    memory_total_mb: int
+    quota_cores: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class EnvironmentInfo:
     gpu: list[GpuInfo]
     driver_version: str
@@ -344,9 +399,12 @@ class EnvironmentInfo:
     docker_version: str
     harness_version: str
     hostname_hash: str
+    # Absent on reports written before CPU was fingerprinted, so readers must
+    # treat it as optional rather than assuming every stored round has one.
+    cpu: CpuInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "gpu": [g.to_dict() for g in self.gpu],
             "driver_version": self.driver_version,
             "cuda_version": self.cuda_version,
@@ -354,6 +412,9 @@ class EnvironmentInfo:
             "harness_version": self.harness_version,
             "hostname_hash": self.hostname_hash,
         }
+        if self.cpu is not None:
+            out["cpu"] = self.cpu.to_dict()
+        return out
 
 
 @dataclass

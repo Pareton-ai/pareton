@@ -1,0 +1,39 @@
+diff --git a/python/sglang/kernels/aot/csrc/moe/moe_sum.cu b/python/sglang/kernels/aot/csrc/moe/moe_sum.cu
+index af8cacf..c720920 100644
+--- a/python/sglang/kernels/aot/csrc/moe/moe_sum.cu
++++ b/python/sglang/kernels/aot/csrc/moe/moe_sum.cu
+@@ -13,7 +13,7 @@ __global__ void moe_sum_kernel(
+     scalar_t* __restrict__ out,          // [..., d]
+     const scalar_t* __restrict__ input,  // [..., topk, d]
+     const int d) {
+-  const int64_t token_idx = blockIdx.x;
++  const int64_t token_idx = blockIdx.x;  // Each block reduces one token's expert outputs.
+   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+     scalar_t x = 0.0;
+ #pragma unroll
+diff --git a/python/sglang/kernels/jit/utils/compile/loader.py b/python/sglang/kernels/jit/utils/compile/loader.py
+index 7b810a4..d0f7068 100644
+--- a/python/sglang/kernels/jit/utils/compile/loader.py
++++ b/python/sglang/kernels/jit/utils/compile/loader.py
+@@ -36,7 +36,7 @@ else:
+ 
+ logger = logging.getLogger(__name__)
+ 
+-_LOCK_FILE = ".lock"
++_LOCK_FILE = ".lock"  # Coordinates concurrent builds in the cache directory.
+ 
+ 
+ # JIT compilation is pure Python/filesystem plumbing (path `.resolve()` calls
+diff --git a/rust/sglang-radix-tree/src/lib.rs b/rust/sglang-radix-tree/src/lib.rs
+index 3f67a7d..1c4aeaf 100644
+--- a/rust/sglang-radix-tree/src/lib.rs
++++ b/rust/sglang-radix-tree/src/lib.rs
+@@ -17,7 +17,7 @@
+ )]
+ 
+ mod components;
+-mod node;
++mod node; // Radix tree node implementation.
+ #[cfg(feature = "python-extension")]
+ mod python_bindings;
+ #[cfg(test)]

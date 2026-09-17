@@ -330,7 +330,7 @@ def weights_computed(
     set_ok: bool | None = None,
     enabled: bool = True,
 ) -> dict[str, Any]:
-    """A ``weight_sets`` row was written. Absence of this event is the stall alert."""
+    """A chain-cadence compute completed. Absence is the stall alert."""
     return _emit(
         "weights_computed",
         computed_at_block=computed_at_block,
@@ -359,6 +359,13 @@ def round_voided(
         round_id=round_id,
         campaign_id=campaign_id,
         void_reason=void_reason,
+    )
+
+
+def static_host_cleanup_failed(*, pod: str, error: str) -> dict[str, Any]:
+    """Static host cleanup needs attention even if the round produced a verdict."""
+    return _emit(
+        "static_host_cleanup_failed", pod=pod, provider="static_ssh", error=error
     )
 
 

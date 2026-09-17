@@ -19,8 +19,9 @@ _SHA256_HEX_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 ALGO_VERSION = 2
-SUPPORTED_ALGO_VERSIONS = frozenset({1, 2})
+SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3})
 CHAT_TEMPLATE_ALGO_VERSION = 2
+TRAJECTORY_ALGO_VERSION = 3
 MAX_PROMPT_CHARS = 8000
 DEFAULT_N_PROMPTS = 32
 DEFAULT_MAX_TOKENS = 128
@@ -33,6 +34,10 @@ _HF_SPLIT_CACHE: dict[tuple[str, str, str, str], Any] = {}
 
 class SamplerError(ValueError):
     """Invalid sampler inputs or generation failure."""
+
+
+class PromptRenderError(SamplerError):
+    """The pinned chat template cannot render the supplied messages."""
 
 
 @dataclass(frozen=True)
@@ -50,8 +55,9 @@ class SampledTrace:
 class PromptFormatter:
     """Deterministic conversion from a dataset user message to model input."""
 
-    render: Callable[[str], str]
+    render: Callable[[str | list[dict[str, str]]], str]
     receipt: dict[str, Any]
+    encode: Callable[[str], list[int]] | None = None
 
 
 def normalize_sha256(value: str) -> str:
@@ -94,6 +100,11 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         raise SamplerError("max_tokens must be >= 1")
     if algo_version not in SUPPORTED_ALGO_VERSIONS:
         raise SamplerError(f"unsupported algo_version: {algo_version}")
+    new_fields = {"request_interval_ms", "enable_thinking"}
+    if algo_version < TRAJECTORY_ALGO_VERSION and new_fields.intersection(rule):
+        raise SamplerError(
+            "request_interval_ms and enable_thinking require algo_version 3"
+        )
     parsed = {
         "type": "hf_rows",
         "seed_block_offset": offset,
@@ -108,6 +119,34 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
     }
     if ignore_eos:
         parsed["ignore_eos"] = True
+    if algo_version == TRAJECTORY_ALGO_VERSION:
+        unknown = (
+            set(rule)
+            - set(parsed)
+            - {"ignore_eos", "enable_thinking", "request_interval_ms"}
+        )
+        if unknown:
+            raise SamplerError(f"unknown version 3 sampling fields: {sorted(unknown)}")
+        for name in ("n_rows", "n_prompts", "max_tokens", "seed_block_offset"):
+            if name in rule and type(rule[name]) is not int:
+                raise SamplerError(f"{name} must be an integer")
+            if name in rule and rule[name] < (0 if name == "seed_block_offset" else 1):
+                raise SamplerError(f"{name} is below its allowed minimum")
+        if type(rule.get("algo_version")) is not int:
+            raise SamplerError("algo_version must be an integer")
+        if n_prompts < 4:
+            raise SamplerError(
+                "algo_version 3 requires at least 4 prompts for context coverage"
+            )
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            raise SamplerError("algo_version 3 requires a full dataset commit revision")
+        interval = rule.get("request_interval_ms", 200)
+        if type(interval) is not int or interval < 0:
+            raise SamplerError("request_interval_ms must be a nonnegative integer")
+        thinking = rule.get("enable_thinking", False)
+        if not isinstance(thinking, bool):
+            raise SamplerError("enable_thinking must be a boolean")
+        parsed.update(request_interval_ms=interval, enable_thinking=thinking)
     return parsed
 
 
@@ -119,7 +158,20 @@ def _call_load_tokenizer_config(**kwargs: Any) -> dict[str, Any]:
         config = json.load(fh)
     if not isinstance(config, dict):
         raise TypeError("tokenizer_config.json must contain an object")
+    if not config.get("chat_template"):
+        path = hf_hub_download(filename="chat_template.jinja", **kwargs)
+        # Preserve the template bytes for the receipt's SHA-256 pin.
+        with open(path, encoding="utf-8", newline="") as fh:
+            config["chat_template"] = fh.read()
     return config
+
+
+def _call_load_tokenizer_json(**kwargs: Any) -> str:
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(filename="tokenizer.json", **kwargs)
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
 
 
 def _resolve_chat_template(config: dict[str, Any]) -> str:
@@ -186,11 +238,17 @@ def build_prompt_formatter(
     model_repo: str | None = None,
     model_revision: str | None = None,
     expected_template_sha256: str | None = None,
-    enable_thinking: bool = CHAT_TEMPLATE_ENABLE_THINKING,
+    enable_thinking: bool | None = None,
     config_loader: Callable[..., dict[str, Any]] | None = None,
+    tokenizer_loader: Callable[..., str] | None = None,
 ) -> PromptFormatter:
     """Build a formatter from the campaign's pinned tokenizer config."""
-    parse_sampling_rule(rule)
+    parsed = parse_sampling_rule(rule)
+    trajectory = parsed["algo_version"] == TRAJECTORY_ALGO_VERSION
+    if enable_thinking is None:
+        enable_thinking = parsed.get("enable_thinking", CHAT_TEMPLATE_ENABLE_THINKING)
+    if trajectory and enable_thinking != parsed["enable_thinking"]:
+        raise SamplerError("thinking mode does not match sampling_rule")
     if not isinstance(enable_thinking, bool):
         raise SamplerError("enable_thinking must be a boolean")
 
@@ -198,6 +256,8 @@ def build_prompt_formatter(
     revision = str(model_revision or "").strip()
     if not repo or not revision:
         raise SamplerError("chat template formatting requires model repo and revision")
+    if trajectory and not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise SamplerError("algo_version 3 requires a full tokenizer commit revision")
     loader = config_loader or _call_load_tokenizer_config
     try:
         config = loader(
@@ -222,7 +282,48 @@ def build_prompt_formatter(
                 f"got {template_sha256}"
             )
 
-    def render(prompt: str) -> str:
+    template_kwargs: dict[str, Any] = {}
+    encode = None
+    tokenizer_receipt = {}
+    if trajectory:
+        import tokenizers
+        from jinja2 import meta
+
+        variables = meta.find_undeclared_variables(compiled.environment.parse(template))
+        if enable_thinking and "enable_thinking" not in variables:
+            raise SamplerError("pinned chat template does not support enable_thinking")
+        for key, value in (("preserve_thinking", True), ("reasoning_effort", "xhigh")):
+            if key in variables:
+                template_kwargs[key] = value
+        try:
+            tokenizer_json = (tokenizer_loader or _call_load_tokenizer_json)(
+                repo_id=repo, revision=revision, token=_hf_token()
+            )
+            tokenizer = tokenizers.Tokenizer.from_str(tokenizer_json)
+            tokenizer.no_truncation()
+            tokenizer.no_padding()
+        except Exception as exc:
+            raise SamplerError(
+                f"failed to load pinned tokenizer: {type(exc).__name__}"
+            ) from exc
+
+        def encode(prompt: str) -> list[int]:
+            # Match the completion servers' default tokenizer postprocessing.
+            # The baseline verifies these IDs before any warmup or measurement.
+            return tokenizer.encode(prompt, add_special_tokens=True).ids
+
+        tokenizer_receipt = {
+            "tokenizer": {
+                "model_repo": repo,
+                "model_revision": revision,
+                "sha256": "sha256:"
+                + hashlib.sha256(tokenizer_json.encode()).hexdigest(),
+                "library_version": tokenizers.__version__,
+                "add_special_tokens": True,
+            }
+        }
+
+    def render(prompt: str | list[dict[str, str]]) -> str:
         try:
             special_tokens = {
                 key: _special_token_value(value)
@@ -230,20 +331,23 @@ def build_prompt_formatter(
                 if key.endswith("_token") or key == "additional_special_tokens"
             }
             rendered = compiled.render(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": prompt}]
+                if isinstance(prompt, str)
+                else prompt,
                 tools=None,
                 documents=None,
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
+                **template_kwargs,
                 **special_tokens,
             )
         except Exception as exc:
-            raise SamplerError(
+            raise PromptRenderError(
                 f"chat template render failed for {repo}@{revision}: "
                 f"{type(exc).__name__}"
             ) from exc
         if not isinstance(rendered, str) or not rendered:
-            raise SamplerError(
+            raise PromptRenderError(
                 f"chat template for {repo}@{revision} rendered an empty prompt"
             )
         return rendered
@@ -257,8 +361,11 @@ def build_prompt_formatter(
                 "sha256": template_sha256,
                 "add_generation_prompt": True,
                 "enable_thinking": enable_thinking,
+                **({"kwargs": template_kwargs} if trajectory else {}),
             },
+            **tokenizer_receipt,
         },
+        encode=encode,
     )
 
 
@@ -443,9 +550,24 @@ def generate_trace(
     prompt_formatter: PromptFormatter | None = None,
     sample_seed_block: int = 0,
     sample_seed_block_hash: str = "",
+    sampling_context: dict[str, Any] | None = None,
+    sampling_receipt: dict[str, Any] | None = None,
 ) -> SampledTrace:
     """Build a trace from hash-selected rows. row_fetcher is injected in tests."""
     parsed = parse_sampling_rule(rule)
+    if parsed["algo_version"] == TRAJECTORY_ALGO_VERSION:
+        from bench.trajectory import generate_trajectory_trace
+
+        return generate_trajectory_trace(
+            rule=parsed,
+            seed_hex=seed_hex,
+            row_fetcher=row_fetcher,
+            formatter=prompt_formatter,
+            context=sampling_context,
+            receipt=sampling_receipt,
+            sample_seed_block=sample_seed_block,
+            sample_seed_block_hash=sample_seed_block_hash,
+        )
     cache: dict[int, str] = {}
 
     def row_ok(idx: int) -> bool:
@@ -518,6 +640,7 @@ def sample_workload(
     campaign_id: str,
     row_fetcher: Callable[[int], dict[str, Any]] | None = None,
     prompt_formatter: PromptFormatter | None = None,
+    sampling_context: dict[str, Any] | None = None,
 ) -> SampledTrace:
     """Generate one round trace from a future-block seed."""
     if commit_block is None:
@@ -536,4 +659,5 @@ def sample_workload(
         prompt_formatter=prompt_formatter,
         sample_seed_block=seed_block,
         sample_seed_block_hash=str(block_hash).strip().lower(),
+        sampling_context=sampling_context,
     )

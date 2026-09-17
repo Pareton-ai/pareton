@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from datetime import datetime
 from functools import partial
-from typing import Any, Callable
+from typing import Any
 
-from campaign.fees import submission_fee_rao
+import config
+from campaign.fees import fee_at_block, submission_fee_rao
 from campaign.store import (
     CampaignHotkeyDisqualified,
     get_campaign,
@@ -24,18 +27,24 @@ from chain.payment import (
     fetch_block_payment_view,
     verify_payment,
 )
-from chain.rpc import fetch_chain_view
+from chain.rpc import fetch_block_datetime, fetch_chain_view
 from gate.integrity import (
     PATCH_HASH_MISMATCH,
     check_integrity,
     patch_fingerprint_bytes,
 )
 from observability import events as obs
-from storage.s3 import fetch_patch_bytes, is_allowed_retrieval_url, patch_url_hotkey
+from storage.s3 import (
+    fetch_patch_bytes,
+    is_allowed_retrieval_url,
+    patch_url_hotkey,
+    private_patch_key,
+)
 
 logger = logging.getLogger(__name__)
 
 BlockFetcher = Callable[[int], BlockPaymentView | None]
+BlockDatetimeFetcher = Callable[[int], datetime | None]
 PatchFetcher = Callable[[str], bytes]
 FailedHashCheck = tuple[str, str, str]
 
@@ -53,11 +62,14 @@ def _hash_check_key(com: PatchCommitment) -> FailedHashCheck:
 def check_fee_proof(
     com: PatchCommitment,
     fetch_block: BlockFetcher | None,
-    submission_fee: dict[str, str],
+    campaign,
 ) -> PaymentCheck:
     """Verify the commitment's fee proof. Only called when the fee is on."""
     if com.payment_block is None or com.payment_tx is None:
         return PaymentCheck.reject("payment_proof_missing")
+    if com.payment_block > com.commit_block:
+        return PaymentCheck.reject("payment_after_commitment")
+    submission_fee = fee_at_block(campaign.submission_fee_history, com.payment_block)
     if payment_ref_consumed(com.payment_block, com.payment_tx):
         return PaymentCheck.reject("payment_ref_already_used")
     if fetch_block is None:
@@ -80,7 +92,9 @@ def ingest_commitment(
     com: PatchCommitment,
     *,
     fetch_block: BlockFetcher | None = None,
+    fetch_commit_datetime: BlockDatetimeFetcher | None = None,
     fetcher: PatchFetcher | None = None,
+    require_private: bool = True,
 ) -> str | None:
     """Insert a submission from a commitment. Returns submission id or None if dupe/invalid."""
     campaign = get_campaign(com.campaign_id)
@@ -100,6 +114,49 @@ def ingest_commitment(
         return None
     if get_submission_for_campaign(com.campaign_id, com.patch_hash) is not None:
         return None
+    if require_private and private_patch_key(com.retrieval_url) is None:
+        logger.info("skip commitment: new submissions require a private patch upload")
+        return None
+    competition_start = config.COMPETITION_START_DATETIME
+    if competition_start is not None:
+        if fetch_commit_datetime is None:
+            logger.warning(
+                "skip commitment: block timestamp unavailable "
+                "campaign=%s commit_block=%d",
+                com.campaign_id,
+                com.commit_block,
+            )
+            return None
+        try:
+            committed_at = fetch_commit_datetime(com.commit_block)
+        # Injected RPC adapters may raise transport-specific exception types.
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "skip commitment: block timestamp lookup failed "
+                "campaign=%s commit_block=%d error=%s",
+                com.campaign_id,
+                com.commit_block,
+                type(exc).__name__,
+            )
+            return None
+        if committed_at is None:
+            logger.warning(
+                "skip commitment: block timestamp unavailable "
+                "campaign=%s commit_block=%d",
+                com.campaign_id,
+                com.commit_block,
+            )
+            return None
+        if committed_at < competition_start:
+            logger.info(
+                "skip commitment before competition start: "
+                "campaign=%s commit_block=%d committed_at=%s start_at=%s",
+                com.campaign_id,
+                com.commit_block,
+                committed_at.isoformat(),
+                competition_start.isoformat(),
+            )
+            return None
     hash_check_key = _hash_check_key(com)
     if hash_check_key in _failed_hash_checks:
         logger.info(
@@ -126,12 +183,20 @@ def ingest_commitment(
         )
         return None
 
-    # No GPU spend without proof the miner paid: reject before insert so a
-    # missing or junk proof cannot burn the first-seen dedupe slot either.
+    # Only validator-configured dev hotkeys may bypass an enabled fee. Reject
+    # missing or junk proofs before they can burn the first-seen dedupe slot.
+    # Exempt submissions do not consume any unverified payment reference.
     payment_block = payment_tx = None
-    submission_fee = campaign.submission_fee
-    if submission_fee_rao(submission_fee) > 0:
-        check = check_fee_proof(com, fetch_block, submission_fee)
+    if com.hotkey not in config.SUBMISSION_FEE_EXEMPT_HOTKEYS:
+        # No proof: the commitment block determines whether a fee was required.
+        # With a proof, always validate it, even if the current fee is zero.
+        fee = fee_at_block(campaign.submission_fee_history, com.commit_block)
+        needs_proof = submission_fee_rao(fee) > 0 or com.payment_block is not None
+        check = (
+            check_fee_proof(com, fetch_block, campaign)
+            if needs_proof
+            else PaymentCheck(ok=True)
+        )
         if not check.ok:
             logger.info(
                 "skip commitment: %s hotkey=%s patch_hash=%s",
@@ -146,6 +211,7 @@ def ingest_commitment(
         retrieval_url=com.retrieval_url,
         expected_patch_hash=com.patch_hash,
         hotkey=com.hotkey,
+        campaign_id=com.campaign_id,
         # scan_chain runs every poll, so one network attempt per scan is enough.
         # fetch_failed remains retryable without tripling a scan's worst case.
         fetcher=fetcher or partial(fetch_patch_bytes, attempts=1),
@@ -218,6 +284,7 @@ def scan_chain(
         ingest = partial(
             ingest_commitment,
             fetch_block=partial(fetch_block_payment_view, subtensor),
+            fetch_commit_datetime=partial(fetch_block_datetime, subtensor),
         )
     meta, revealed, block, _block_hash = fetch_chain_view(
         subtensor, netuid, network=network
@@ -266,4 +333,4 @@ def ingest_mock_commitment(
         retrieval_url=retrieval_url,
         raw="",
     )
-    return ingest_commitment(com)
+    return ingest_commitment(com, require_private=False)

@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from bench import __version__
 from bench.correctness import (
@@ -99,12 +99,21 @@ CORRECTNESS_EXTRA_SERVE_ARGS = [
     "--no-enable-prefix-caching",
     "--no-enable-flashinfer-autotune",
 ]
+# The pinned vLLM generation runner requires an output slot even for echo-only
+# scoring. Reserve it beyond the replay context for a full-length forced input.
+VLLM_SCORER_CONTEXT_HEADROOM = 1
+# At the pinned SGLang commit, max_req_input_len is context_length - 6
+# and inputs must be strictly shorter. Reserve seven slots for a scorer
+# input that fills the replay context, including room for the clamp token.
+SGLANG_SCORER_CONTEXT_HEADROOM = 7
 
 
-def correctness_extra_serve_args(serve_args: list[str]) -> list[str]:
-    """vLLM-only scorer flags. SGLang uses --tp-size and rejects these."""
-    if "--tp-size" in serve_args:
+def correctness_extra_serve_args(engine_name: str) -> list[str]:
+    """Select scorer flags from the pinned engine, independent of CLI aliases."""
+    if engine_name == "sglang":
         return []
+    if engine_name != "vllm":
+        raise ValueError(f"unknown engine name: {engine_name!r}")
     return list(CORRECTNESS_EXTRA_SERVE_ARGS)
 
 
@@ -116,19 +125,46 @@ EXIT_ENGINE = 3
 logger = logging.getLogger("bench")
 
 
-def scorer_engine_spec(spec: EngineSpec) -> EngineSpec:
+def scorer_engine_spec(
+    spec: EngineSpec, *, serve_args: list[str] | None = None
+) -> EngineSpec:
     """The scorer: the campaign's own baseline image plus the scorer flags.
 
     The scorer is per campaign rather than per candidate, and it is derived
     from the pinned baseline rather than named separately, so a campaign
-    manifest carries no scorer field of its own.
+    manifest carries no scorer image of its own. Campaign correctness serving
+    arguments override baseline arguments only for this derived spec.
     """
-    extra = correctness_extra_serve_args(spec.serve_args)
+    extra = correctness_extra_serve_args(spec.name)
+    args = list(spec.serve_args)
+    env = dict(spec.env)
+    if spec.name == "sglang":
+        context_flag = "--context-length"
+        headroom = SGLANG_SCORER_CONTEXT_HEADROOM
+        override_env = "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"
+    else:
+        context_flag = "--max-model-len"
+        headroom = VLLM_SCORER_CONTEXT_HEADROOM
+        override_env = "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
+    # The worker pins a numeric context limit. Cover argparse's = form too,
+    # and preserve duplicate flags' last-value-wins behavior.
+    for i, arg in enumerate(spec.serve_args):
+        if arg == context_flag:
+            args[i + 1] = str(int(spec.serve_args[i + 1]) + headroom)
+        elif arg.startswith(context_flag + "="):
+            args[i] = context_flag + "=" + str(int(arg.partition("=")[2]) + headroom)
+        else:
+            continue
+        # Only the scorer allocates beyond a model's declared context.
+        # Forced input positions still fit the original replay window;
+        # the one sampled token is excluded and never fed back to the model.
+        env[override_env] = "1"
     return EngineSpec(
         image=spec.image,
-        serve_args=list(spec.serve_args) + extra,
-        env=dict(spec.env),
+        serve_args=args + list(serve_args or []) + extra,
+        env=env,
         cache_dir=spec.cache_dir,
+        name=spec.name,
     )
 
 
@@ -158,7 +194,12 @@ class EngineStart:
     steps: int = 0
 
 
-def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[EngineStart]:
+def plan_round_starts(
+    engines: EnginesSpec,
+    *,
+    mode: str = "all",
+    correctness_serve_args: list[str] | None = None,
+) -> list[EngineStart]:
     """Every container this round will start, in order.
 
     The runner consumes this list, so the plan is the only place a start can
@@ -194,7 +235,9 @@ def plan_round_starts(engines: EnginesSpec, *, mode: str = "all") -> list[Engine
             EngineStart(
                 role="scorer",
                 kind="scorer",
-                spec=scorer_engine_spec(engines.baseline),
+                spec=scorer_engine_spec(
+                    engines.baseline, serve_args=correctness_serve_args
+                ),
                 mount_engine_cache=False,
             )
         )
@@ -499,7 +542,11 @@ def run_round(
 ]:
     """Execute the whole round against one pod. Returns the raw material."""
     requests = list(trace.requests)
-    plan = plan_round_starts(req.engines, mode=req.mode)
+    plan = plan_round_starts(
+        req.engines,
+        mode=req.mode,
+        correctness_serve_args=req.correctness.serve_args,
+    )
     layout.append_log(
         {"event": "round_plan", "starts": [s.role for s in plan], "count": len(plan)}
     )
@@ -512,17 +559,57 @@ def run_round(
     baseline_degeneracy = None
     relative_correctness = req.correctness.thresholds.max_mean_logprob_drop is not None
 
+    leader_index = req.leader_candidate_index
+    leader_failed = False
+    # Live per-entry progress, streamed to the worker through
+    # entry_status.json. Terminal failures are reported as legs finish so a
+    # doomed round is visible long before the final report lands.
+    entry_statuses: dict[str, dict[str, Any]] = {}
+
+    def note(key: str, status: str, reason: str | None = None) -> None:
+        entry_statuses[key] = {"status": status, "reason": reason}
+        layout.write_entry_statuses(entry_statuses)
+
+    def preflight(url: str, start: EngineStart) -> None:
+        from bench.workload_preflight import validate_engine_workload
+
+        validate_engine_workload(
+            url,
+            trace,
+            engine_name=start.spec.name,
+            max_model_len=req.model.max_model_len,
+            evidence_dir=layout.sla_bench_dir / start.role,
+            verify_tokenizer=start.kind == "baseline",
+        )
+
     for start in plan:
+        if leader_failed and start.kind == "candidate":
+            # A leader infra failure voids the round at ranking time, so
+            # benching the rest of the cohort only burns pod hours. Record
+            # the remaining entries without starting their engines.
+            skipped = start.candidate_index
+            assert skipped is not None
+            reason = "skipped: leader candidate infra failed"
+            logger.warning("candidate %d %s", skipped, reason)
+            runs.append(
+                _CandidateRun(index=skipped, status="infra_failed", reason=reason)
+            )
+            note(str(skipped), "infra_failed", reason)
+            continue
         if start.kind in ("baseline", "drift"):
+            if start.kind == "baseline":
+                note("baseline", "running")
             phase = BenchPhase.SLA_BENCH
             try:
                 with provider.start(start, phase=phase) as url:
+                    preflight(url, start)
                     replay = run_sla_engine(
                         url,
                         role=start.role,
                         requests=requests,
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
                     )
                     if start.kind == "baseline" and req.mode == "all":
                         natural_stops = capture_baseline_natural_stops(
@@ -544,9 +631,12 @@ def run_round(
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
                 # scored against, so the round cannot continue without it.
+                if start.kind == "baseline":
+                    note("baseline", "infra_failed", str(exc))
                 raise EngineError(str(exc), error_role="baseline") from exc
             if start.kind == "baseline":
                 baseline = replay
+                note("baseline", "scored")
                 # The relative correctness bar needs the baseline's own
                 # outputs through the same scorer (PAR-108). An older campaign
                 # without that bar keeps its original candidate-only path.
@@ -563,14 +653,17 @@ def run_round(
         elif start.kind == "candidate":
             index = start.candidate_index
             assert index is not None
+            note(str(index), "running")
             try:
                 with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
+                    preflight(url, start)
                     replay = run_sla_engine(
                         url,
                         role=start.role,
                         requests=requests,
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
                     )
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and
@@ -580,6 +673,18 @@ def run_round(
                 runs.append(
                     _CandidateRun(index=index, status="disqualified", reason=str(exc))
                 )
+                if leader_index is not None and index == leader_index:
+                    # Settlement remaps an incumbent crash to infra_failed and
+                    # voids the round (entry_results_from_report), so stream
+                    # the same status and skip the legs settlement discards.
+                    note(str(index), "infra_failed", str(exc))
+                    leader_failed = True
+                    logger.warning(
+                        "leader candidate %d failed; skipping remaining candidates",
+                        index,
+                    )
+                else:
+                    note(str(index), "disqualified", str(exc))
                 continue
             except EngineError as exc:
                 # One candidate failing to run is that entry's problem, not
@@ -588,6 +693,13 @@ def run_round(
                 runs.append(
                     _CandidateRun(index=index, status="infra_failed", reason=str(exc))
                 )
+                note(str(index), "infra_failed", str(exc))
+                if leader_index is not None and index == leader_index:
+                    leader_failed = True
+                    logger.warning(
+                        "leader candidate %d failed; skipping remaining candidates",
+                        index,
+                    )
                 continue
             runs.append(_CandidateRun(index=index, status="scored", replay=replay))
             pending.append(
@@ -612,6 +724,7 @@ def run_round(
                         cfg=req.correctness,
                         evidence_dir=layout.correctness_dir,
                         baseline_degeneracy=baseline_degeneracy,
+                        engine_name=start.spec.name,
                     )
             except EngineError as exc:
                 # Correctness is a hard gate, so an unusable scorer means no
@@ -632,6 +745,22 @@ def run_round(
                 raise EngineError(
                     f"scorer could not grade the baseline: {detail}",
                     error_role="scorer",
+                )
+            # Stream candidate verdicts only after the harness has vouched for
+            # its own reference. The abort above voids the round as our fault,
+            # and a disqualification streamed before it would survive the void
+            # and keep the challenger off the queue.
+            for ci, creport in correctness.items():
+                if creport.verdict == "pass":
+                    continue
+                note(
+                    str(ci),
+                    (
+                        "infra_failed"
+                        if creport.verdict == "infra_failed"
+                        else "disqualified"
+                    ),
+                    creport.reason,
                 )
 
     if baseline is None or drift is None:
@@ -752,11 +881,16 @@ def baseline_drift(
     Drift is ``last_baseline_score - first_baseline_score``. The opening
     baseline scores 0.0 against itself under any speedup rule, so the
     difference is exactly the closing run's score. Positive means the pod got
-    faster while the round ran; negative, slower. A round whose drift is too
+    faster while the round ran; negative, slower. The miner reliability
+    deduction does not alter this hardware-drift diagnostic. A round whose drift is too
     large was not measuring the candidates.
     """
     return score_candidate(
-        req.scoring_rule,
+        {
+            key: value
+            for key, value in req.scoring_rule.items()
+            if key != "failure_penalty"
+        },
         baseline=baseline.result.timings,
         candidate=drift.result.timings,
     ).score

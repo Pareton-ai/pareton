@@ -16,6 +16,7 @@ pytestmark = pytest.mark.unit
 from bench.validate import sha256_bytes
 from campaign.engine import preset
 from campaign.models import SLA
+from gpu.errors import NoCapacityError
 from gpu.orchestrate import EXIT_DESTROY_FAILED
 from round.store import (
     VOID_LEADER_IMAGE_MISSING,
@@ -25,11 +26,11 @@ from round.store import (
     VOID_TRACE_UNAVAILABLE,
     infra_failed_follow_up_states,
 )
+from worker import round_job
 from worker.round_job import (
     RoundInfraError,
     bind_report_to_round,
     build_round_request,
-    capacity_retry_delay_s,
     classify_round_failure,
     entry_results_from_report,
     materialize_round_trace,
@@ -141,6 +142,51 @@ def test_build_round_request_maps_candidates_in_entry_order(tmp_path):
     assert "perf_screen" not in req
 
 
+def test_build_round_request_names_the_leader_candidate(tmp_path):
+    """The harness short-circuits a doomed round on this index."""
+    trace = tmp_path / "trace.json"
+    raw = _write_trace(trace)
+    row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    req = build_round_request(
+        row, _campaign(), _entries(), task_id=str(uuid4()), trace_path=str(trace)
+    )
+    # _entries() orders baseline, leader, challenger: the leader is the first
+    # non-baseline entry, so candidate index 0.
+    assert req["leader_candidate_index"] == 0
+
+    no_leader = [e for e in _entries() if e["role"] != "leader"]
+    req = build_round_request(
+        row, _campaign(), no_leader, task_id=str(uuid4()), trace_path=str(trace)
+    )
+    assert req["leader_candidate_index"] is None
+
+
+def test_entry_status_writer_maps_pod_keys_to_entry_ids(monkeypatch):
+    from worker import round_job as rj
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        rj,
+        "update_round_entry_live_status",
+        lambda **kw: calls.append(kw) or True,
+    )
+    write = rj._round_entry_status_writer(_entries())
+    write(
+        {
+            "baseline": {"status": "scored", "reason": None},
+            "0": {"status": "infra_failed", "reason": "docker pull failed"},
+            "1": {"status": "running"},
+            "9": {"status": "scored"},  # no such candidate: dropped
+            "junk": {"status": "scored"},  # not a key the harness sends
+        }
+    )
+    assert calls == [
+        {"entry_id": 1, "status": "scored", "reason": None},
+        {"entry_id": 2, "status": "infra_failed", "reason": "docker pull failed"},
+        {"entry_id": 3, "status": "running", "reason": None},
+    ]
+
+
 def test_build_round_request_forwards_the_relative_quality_bar(tmp_path):
     """A quality bar pinned in the manifest has to reach the pod."""
     trace = tmp_path / "trace.json"
@@ -171,20 +217,42 @@ def test_build_round_request_keeps_exploit_checks_out_of_competition_policy(
     assert "max_mean_logprob_drop" not in thr
 
 
-def test_build_round_request_omits_max_model_len_for_sglang(tmp_path):
+def test_build_round_request_pins_sglang_launch_and_scorer(tmp_path):
+    from bench.main import plan_round_starts
+    from bench.validate import validate_bench_request_dict
+
     trace = tmp_path / "trace.json"
     raw = _write_trace(trace)
     row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    campaign = _campaign(engine=preset("sglang"))
+    campaign.bench["serve_args"] = ["--mem-fraction-static", "0.80"]
     req = build_round_request(
         row,
-        _campaign(engine=preset("sglang")),
+        campaign,
         _entries(),
         task_id=str(uuid4()),
         trace_path=str(trace),
     )
     args = req["engines"]["candidates"][0]["serve_args"]
     assert "--max-model-len" not in args
-    assert "--dtype" in args
+    assert args == [
+        "--model-path",
+        "/model",
+        "--context-length",
+        "8192",
+        "--dtype",
+        "bfloat16",
+        "--mem-fraction-static",
+        "0.80",
+    ]
+    plan = plan_round_starts(validate_bench_request_dict(req).engines)
+    for start in plan:
+        assert start.spec.name == "sglang"
+        assert start.spec.cache_dir == "/root/.cache/sglang"
+        expected_args = list(args)
+        if start.kind == "scorer":
+            expected_args[3] = "8199"
+        assert start.spec.serve_args == expected_args
 
 
 @pytest.mark.parametrize(
@@ -565,6 +633,19 @@ def test_round_infra_error_carries_void_reason():
     assert err.reason == VOID_LEADER_IMAGE_MISSING
 
 
+def test_void_log_includes_infrastructure_detail(monkeypatch, caplog):
+    monkeypatch.setattr(round_job, "void_round", lambda *_a, **_k: True)
+    monkeypatch.setattr(round_job.obs, "round_voided", lambda **_k: None)
+
+    round_job._void(
+        _round_row(),
+        "leader_infra_failed",
+        "docker pull failed: registry timeout",
+    )
+
+    assert "leader_infra_failed: docker pull failed: registry timeout" in caplog.text
+
+
 def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monkeypatch):
     """A disqualified incumbent has no in-round score; the history row must
     still carry the score it won with, from leaders.last_score."""
@@ -670,10 +751,107 @@ def test_remaining_budget_voids_when_the_clock_has_run_out():
     assert leftover > 0
 
 
-def test_capacity_retry_delay_doubles_then_saturates(monkeypatch):
-    monkeypatch.setattr(config, "PROVISION_RETRY_BASE_S", 300)
-    monkeypatch.setattr(config, "PROVISION_RETRY_MAX_S", 3600)
-    assert [capacity_retry_delay_s(n) for n in (0, 1, 2, 3)] == [300, 600, 1200, 2400]
-    # Saturates rather than growing without bound during a long outage.
-    assert capacity_retry_delay_s(4) == 3600
-    assert capacity_retry_delay_s(10_000) == 3600
+@pytest.mark.parametrize("reason", ["no 1x H200", "static GPU host is busy"])
+def test_process_round_defers_on_unavailable_capacity(tmp_path, monkeypatch, reason):
+    """NoCapacityError must reclaim the round, not void it, at a flat delay."""
+    from pathlib import Path
+
+    monkeypatch.setattr(config, "PROVISION_RETRY_S", 1800)
+    campaign = _campaign()
+    seen: list[float] = []
+    voided: list[str] = []
+
+    monkeypatch.setattr(round_job, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(round_job, "list_round_entries", lambda _rid: _entries())
+    monkeypatch.setattr(round_job, "remaining_round_budget_s", lambda *a, **k: 100.0)
+    monkeypatch.setattr(round_job, "set_round_phase", lambda **k: True)
+    monkeypatch.setattr(round_job, "touch_round_heartbeat", lambda **k: True)
+
+    def fake_materialize(_row, _campaign, dest_dir, **_k):
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        trace = dest / "trace.json"
+        _write_trace(trace)
+        return trace
+
+    def fake_build(_row, _campaign, _entries, *, task_id, trace_path):
+        return {"task_id": task_id}
+
+    def capture(_round_id, *, delay_s):
+        seen.append(delay_s)
+        return True
+
+    monkeypatch.setattr(round_job, "materialize_round_trace", fake_materialize)
+    monkeypatch.setattr(round_job, "build_round_request", fake_build)
+    monkeypatch.setattr(round_job, "defer_round_for_capacity", capture)
+    monkeypatch.setattr(
+        round_job, "void_round", lambda *_a, **_k: voided.append("void")
+    )
+
+    def empty_market(*_a, **_k):
+        raise NoCapacityError(reason)
+
+    outcome = round_job.process_round(
+        _round_row(),
+        mock_bench=False,
+        work_root=tmp_path / "work",
+        run_pod_fn=empty_market,
+        resolve_image_fn=lambda _ref: True,
+    )
+
+    assert outcome == "deferred"
+    assert seen == [1800]
+    assert voided == []
+
+
+def test_void_carries_the_detail_into_the_store(monkeypatch):
+    """The reason alone is a bare code; the detail is what answers "why".
+
+    Miners asked what an infra_fail actually was, and the detail existed only
+    in a worker log line until it was persisted.
+    """
+    from worker import round_job
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        round_job,
+        "void_round",
+        lambda rid, reason, detail="": (calls.append((rid, reason, detail)), True)[1],
+    )
+    monkeypatch.setattr(round_job.obs, "round_voided", lambda **_kw: None)
+
+    round_job._void(
+        {"id": "r1", "campaign_id": "c1", "ordinal": 7},
+        "pod_failed",
+        "provider returned 503 after 3 retries",
+    )
+    assert calls == [("r1", "pod_failed", "provider returned 503 after 3 retries")]
+
+
+def test_void_without_a_detail_still_records_the_reason(monkeypatch):
+    from worker import round_job
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        round_job,
+        "void_round",
+        lambda rid, reason, detail="": (calls.append((rid, reason, detail)), True)[1],
+    )
+    monkeypatch.setattr(round_job.obs, "round_voided", lambda **_kw: None)
+
+    round_job._void({"id": "r1", "campaign_id": "c1", "ordinal": 7}, "round_timeout")
+    assert calls == [("r1", "round_timeout", "")]
+
+
+def test_an_already_settled_round_is_not_voided_again(monkeypatch):
+    """void_round returning False means another writer settled it first."""
+    from worker import round_job
+
+    seen: list[str] = []
+    monkeypatch.setattr(round_job, "void_round", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        round_job.obs, "round_voided", lambda **_kw: seen.append("emitted")
+    )
+
+    round_job._void({"id": "r1", "campaign_id": "c1", "ordinal": 7}, "pod_failed", "x")
+    assert seen == []

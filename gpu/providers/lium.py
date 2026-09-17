@@ -163,14 +163,14 @@ class LiumProvider:
 
     def search(self, spec: PodSpec) -> list[Offer]:
         want = max(1, int(spec.gpu_count or 1))
-        executors = self._client.ls(gpu_count=want)
+        # Unfiltered: ls(gpu_count=want) hides the larger nodes we fall back to.
+        executors = self._client.ls()
         out: list[Offer] = []
         for ex in executors:
             if not bool(_attr(ex, "docker_in_docker", False)):
                 continue
             gpu_count = int(_attr(ex, "gpu_count", 0) or 0)
-            # Discrete SKUs: require exact count (same as Shadeform).
-            if gpu_count != want:
+            if gpu_count < want:
                 continue
             gpu_type = _normalize_gpu_type(str(_attr(ex, "gpu_type", "") or ""))
             if spec.gpu_type and not _gpu_type_matches(
@@ -198,13 +198,14 @@ class LiumProvider:
                     },
                 )
             )
-        # Download speed dominates pod cost for weight/image pulls; price stays a
-        # hard cap above and only breaks ties. Unknown speed (0.0) sorts last.
+        # Smallest sufficient node first: an oversized one bills every GPU.
+        # Then download speed dominates pod cost for weight/image pulls; price
+        # stays a hard cap above and only breaks ties. Unknown speed sorts last.
         out.sort(
             key=lambda o: (
+                o.gpu_count,
                 -float(o.raw["download_mbps"]),
                 o.hourly_price_cents,
-                o.gpu_count,
             )
         )
         if out:

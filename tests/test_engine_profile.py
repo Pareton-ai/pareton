@@ -77,11 +77,11 @@ def test_engine_none_matches_known_pre_engine_hash():
     """Golden hash: locks the pin set against accidental future drift.
 
     Rebaselined when the submission window left the pin set, the round revamp
-    changed scoring, and campaign submission fees became required.
+    changed scoring. Submission fees must never change this hash.
     """
     fields = freeze_manifest_fields(**_fields_kwargs(campaign_id=None, profile_id=None))
     assert compute_manifest_hash(fields) == (
-        "sha256:5e2322da0dc073d919ec4f98caa710c0fdbc243e63c340197c8549beccb14707"
+        "sha256:36b3877597c061ebd8ec09a0d8e4c47ba19babed71fcd0174bdd4faf55a9fa67"
     )
 
 

@@ -24,18 +24,26 @@ answer on every absolute bar. Two mandatory harness checks identify it:
 They are exploit checks, not competition parameters, and therefore do not
 live in the campaign manifest or bench request. For an ordinary completion,
 the checks grade the whole output. For a forced-length completion, the pinned
-baseline is replayed once with EOS handling restored. Absolute checks grade
-the candidate only through that trusted, prompt-specific stop boundary, while
-the complete forced output must not be more degenerate than the baseline's
-complete output. Candidate-reported stop positions are never used.
+baseline is replayed once with EOS handling restored. Its natural response must
+be non-degenerate, but its token count can cut into repetition in a different
+forced response. A flagged prefix is allowed only when it is also a prefix of
+a measured forced baseline output. Forced-length runs deliberately prioritize
+decode measurement: full-output repetition is diagnostic only, regardless of
+whether the baseline repeats. This allows cheap repeating filler after a valid
+prefix. Logprob checks still grade the whole captured output, but do not replace
+the disabled tail loop defense.
 
 The manifest-pinned ``max_mean_logprob_drop`` separately catches a candidate
 that degrades the model and still clears the absolute floor.
 
 When the relative bar is enabled, the baseline is queued under
 ``BASELINE_INDEX`` and graded first so that reference exists. A baseline that
-cannot be graded fails the round, never a candidate. Campaigns without that
-bar retain the pre-PAR-108 grading path.
+cannot be graded fails the round, never a candidate. A prompt is excluded for
+every engine when *any* measured baseline completion on that prompt is
+degenerate, not only the latency-median natural-stop text. The median-only
+check misses the case where the pinned image loops on a sibling repetition
+and the prompt stays in the set as a coin-flip disqualifier (PAR-121).
+Campaigns without the relative bar retain the pre-PAR-108 grading path.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -58,7 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from bench.http import post_completion
+from bench.http import post_completion, post_json
 from bench.lifecycle import EngineError
 from bench.mock_engine import response_shape_fingerprint
 from bench.schemas import CorrectnessConfig, CorrectnessReport, TraceRequest
@@ -85,6 +93,11 @@ DEGENERACY_NGRAM = 16
 DEGENERACY_MIN_CHARS = 64
 DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
 DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
+# A larger exclusion set no longer provides a representative correctness
+# sample. This is a harness invariant rather than campaign policy.
+MAX_BASELINE_PROMPT_DROPS = 4
+# Reasoning models close their thinking with this tag before the final answer.
+REASONING_END = "</think>"
 
 
 @dataclass(frozen=True)
@@ -221,6 +234,7 @@ class _PositionScore:
     text_offset: int
     logprob: float
     top1: str | None
+    token_id: int | None = None
 
 
 def _score_at(
@@ -476,7 +490,53 @@ def degeneracy_reason(
     The thresholds are harness invariants rather than campaign policy. A miner
     cannot opt out through a legacy manifest or tune a competition around the
     exact exploit boundary.
+
+    Thinking and the final answer are graded separately, split at the first
+    ``</think>``. A reasoning model often restates its last thought as a short
+    answer, and graded as one text that restatement reads as a repeated span.
+    Output that never closes its thinking is graded whole, so a loop inside
+    thinking is still caught. Only the first tag splits: later tags stay in the
+    answer, so scattered tags cannot cut a loop into pieces too short to grade.
+    Precomputed ratios describe the whole text, so they are ignored on a split.
     """
+    thinking, tag, answer = text.partition(REASONING_END)
+    if tag:
+        for label, part in (("thinking", thinking), ("answer", answer)):
+            reason = _text_degeneracy_reason(part)
+            if reason is not None:
+                return f"{label}: {reason}"
+        return None
+    return _text_degeneracy_reason(
+        text, distinct_ratio=distinct_ratio, repeated_span_ratio=repeated_span_ratio
+    )
+
+
+def graded_ratios(text: str) -> tuple[float, float]:
+    """(lowest distinct n-gram ratio, highest repeated-span ratio) as graded.
+
+    Uses the same split as ``degeneracy_reason``, so the relative bar compares
+    a candidate and its baseline part by part. Text without ``</think>`` is
+    measured whole, exactly as before. Parts shorter than
+    ``DEGENERACY_MIN_CHARS`` carry no signal and are skipped.
+    """
+    thinking, tag, answer = text.partition(REASONING_END)
+    if not tag:
+        return distinct_ngram_ratio(text), longest_repeated_substring_ratio(text)
+    parts = [part for part in (thinking, answer) if len(part) >= DEGENERACY_MIN_CHARS]
+    if not parts:
+        return 1.0, 0.0
+    return (
+        min(distinct_ngram_ratio(part) for part in parts),
+        max(longest_repeated_substring_ratio(part) for part in parts),
+    )
+
+
+def _text_degeneracy_reason(
+    text: str,
+    *,
+    distinct_ratio: float | None = None,
+    repeated_span_ratio: float | None = None,
+) -> str | None:
     if len(text) < DEGENERACY_MIN_CHARS:
         return None
     ratio = distinct_ratio if distinct_ratio is not None else distinct_ngram_ratio(text)
@@ -515,9 +575,9 @@ def relative_degeneracy_reason(
     """
     if len(text) < DEGENERACY_MIN_CHARS:
         return None
-    distinct = (
-        distinct_ratio if distinct_ratio is not None else distinct_ngram_ratio(text)
-    )
+    if distinct_ratio is None or repeated_span_ratio is None:
+        distinct_ratio, repeated_span_ratio = graded_ratios(text)
+    distinct = distinct_ratio
     if (
         distinct < DEGENERACY_MIN_DISTINCT_NGRAM_RATIO
         and distinct < baseline_distinct_ratio
@@ -526,11 +586,7 @@ def relative_degeneracy_reason(
             f"distinct {DEGENERACY_NGRAM}-gram ratio {distinct:.3f} below "
             f"baseline {baseline_distinct_ratio:.3f} over {len(text)} chars"
         )
-    repeated = (
-        repeated_span_ratio
-        if repeated_span_ratio is not None
-        else longest_repeated_substring_ratio(text)
-    )
+    repeated = repeated_span_ratio
     if (
         repeated >= DEGENERACY_MAX_REPEATED_SPAN_RATIO
         and repeated > baseline_repeated_span_ratio
@@ -572,6 +628,20 @@ class BaselineDegeneracyReference:
     natural_stop_tokens: int
     full_distinct_ngram_ratio: float
     full_repeated_span_ratio: float
+    forced_output_samples: tuple[str, ...] = ()
+
+
+class BaselineDegeneracyReferences(dict[str, BaselineDegeneracyReference]):
+    """Usable references plus audited reasons for intentional omissions."""
+
+    def __init__(
+        self,
+        references: Mapping[str, BaselineDegeneracyReference],
+        *,
+        dropped: Mapping[str, str],
+    ) -> None:
+        super().__init__(references)
+        self.dropped = dict(dropped)
 
 
 @dataclass
@@ -621,13 +691,44 @@ def capture_outputs(
     return captured
 
 
+def _record_baseline_prompt_drop(
+    dropped: dict[str, str], request_id: str, reason: str
+) -> None:
+    drop_reason = f"baseline natural output is degenerate: {reason}"
+    dropped[request_id] = drop_reason
+    if len(dropped) > MAX_BASELINE_PROMPT_DROPS:
+        raise EngineError(
+            f"baseline natural output is degenerate for {len(dropped)} "
+            "correctness prompts, above the harness limit of "
+            f"{MAX_BASELINE_PROMPT_DROPS} (latest {request_id!r}: {reason})"
+        )
+    logger.warning("dropping correctness prompt %r: %s", request_id, drop_reason)
+
+
 def build_baseline_degeneracy_references(
     outputs: list[CapturedOutput],
     natural_stops: Mapping[str, NaturalStopReference],
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
-) -> dict[str, BaselineDegeneracyReference]:
-    """Build prompt-specific bounds from every measured baseline repetition."""
+) -> BaselineDegeneracyReferences:
+    """Build bounds for prompts with a usable baseline natural-stop output.
+
+    The drop reads every measured baseline completion, not only
+    ``stop.text``. On a trace without ``ignore_eos``, ``stop.text`` is the
+    latency-median SLA rep; a looping sibling rep then loosens the relative
+    bar (max span / min distinct) while the prompt stays live. Candidates
+    are graded on their own median rep, so a 2-in-3 loop on an unstable
+    prompt is a terminal DQ. Dropping the prompt when the pinned image
+    itself looped is the signal that separates those coin-flips from a
+    patch-attributable 2/3-or-3/3 against a 0/3 baseline.
+
+    When the natural stop came from the ``ignore_eos`` probe
+    (``NaturalStopReference.probed``), SLA samples are forced-length
+    and may loop after EOS. Only ``stop.text`` decides the drop; byte
+    equality with the median SLA output is not a path signal. Retain all
+    measured forced samples for prefix matching, including non-median paths.
+    """
     references: dict[str, BaselineDegeneracyReference] = {}
+    dropped: dict[str, str] = {}
     for captured in outputs:
         stop = natural_stops.get(captured.request_id)
         if stop is None:
@@ -640,12 +741,6 @@ def build_baseline_degeneracy_references(
                 "baseline natural-stop reference is empty for correctness request "
                 f"{captured.request_id!r}"
             )
-        natural_reason = degeneracy_reason(stop.text)
-        if natural_reason is not None:
-            raise EngineError(
-                f"baseline natural output {captured.request_id!r} is degenerate: "
-                f"{natural_reason}"
-            )
         samples = (
             (captured.output_text,)
             if output_samples is None
@@ -656,16 +751,50 @@ def build_baseline_degeneracy_references(
                 "baseline output samples missing correctness request "
                 f"{captured.request_id!r}"
             )
+        inspected = [stop.text]
+        # probed=True means the extra ignore_eos=false replay. Those
+        # SLA siblings are forced-length; a post-EOS loop is allowed
+        # and must not drop the prompt, even if the probe text happens
+        # to match the median SLA output byte-for-byte.
+        if not stop.probed:
+            inspected.extend(samples)
+        sample_reason = None
+        for text in inspected:
+            sample_reason = degeneracy_reason(text)
+            if sample_reason is not None:
+                break
+        if sample_reason is not None:
+            _record_baseline_prompt_drop(dropped, captured.request_id, sample_reason)
+            continue
+        sample_ratios = [graded_ratios(text) for text in samples]
         references[captured.request_id] = BaselineDegeneracyReference(
             natural_stop_tokens=stop.completion_tokens,
-            full_distinct_ngram_ratio=min(
-                distinct_ngram_ratio(text) for text in samples
-            ),
-            full_repeated_span_ratio=max(
-                longest_repeated_substring_ratio(text) for text in samples
-            ),
+            full_distinct_ngram_ratio=min(ratio[0] for ratio in sample_ratios),
+            full_repeated_span_ratio=max(ratio[1] for ratio in sample_ratios),
+            forced_output_samples=tuple(samples) if stop.probed else (),
         )
-    return references
+    return BaselineDegeneracyReferences(references, dropped=dropped)
+
+
+def _baseline_drop_reason(
+    references: Mapping[str, BaselineDegeneracyReference], request_id: str
+) -> str | None:
+    if not isinstance(references, BaselineDegeneracyReferences):
+        return None
+    return references.dropped.get(request_id)
+
+
+def _retained_prompt_count(
+    outputs: list[CapturedOutput],
+    references: Mapping[str, BaselineDegeneracyReference] | None,
+) -> int:
+    if references is None:
+        return len(outputs)
+    return sum(
+        1
+        for output in outputs
+        if _baseline_drop_reason(references, output.request_id) is None
+    )
 
 
 def score_captured_output(
@@ -673,13 +802,22 @@ def score_captured_output(
     captured: CapturedOutput,
     *,
     request_timeout_s: float = 300.0,
-) -> tuple[list[_PositionScore], int]:
+    engine_name: str = "vllm",
+    prefix_token_limit: int | None = None,
+) -> tuple[list[_PositionScore], int, str]:
     """Scored token positions in the candidate's forced output.
 
-    Returns the scorer's token-aligned positions and the size of the forced
-    span. Both come from the scorer, so the candidate cannot choose where the
-    trusted baseline stop boundary lands in its own text.
+    Returns token-aligned positions, the forced span size and its decoded
+    prefix through the trusted stop limit. The candidate cannot choose where
+    that baseline stop boundary lands in its own text.
     """
+    if engine_name == "sglang":
+        return _score_sglang_output(
+            scorer_url,
+            captured,
+            timeout=request_timeout_s,
+            prefix_token_limit=prefix_token_limit,
+        )
     full = captured.prompt + captured.output_text
     resp = post_completion(
         scorer_url,
@@ -697,12 +835,165 @@ def score_captured_output(
         continuation=captured.output_text,
     )
     if not scores:
-        return [], 0
+        return [], 0, ""
     # Positions in the forced span are contiguous, and a position is only
     # dropped when the scorer returned no logprob for it, so first..last spans
     # everything the scorer saw of this output.
     span = scores[-1].position - scores[0].position + 1
-    return scores, span
+    prefix = captured.output_text
+    if prefix_token_limit is not None:
+        prefix_scores = scores[:prefix_token_limit]
+        prefix = "".join(p.token for p in prefix_scores)
+        if prefix_scores and prefix_scores[-1].text_offset >= len(captured.prompt):
+            # A token straddling the prompt boundary can absorb leading output
+            # whitespace. Slice the original text so exact prefix matches survive.
+            last = prefix_scores[-1]
+            end = last.text_offset + len(last.token) - len(captured.prompt)
+            prefix = captured.output_text[:end]
+    return scores, span, prefix
+
+
+def _sglang_prefix(
+    base_url: str,
+    prompt_ids: list[int],
+    continuation_ids: list[int],
+    continuation: str,
+    *,
+    limit: int | None,
+    timeout: float,
+) -> str:
+    """Decode in prompt context, preserving spaces and complete UTF-8 characters."""
+    prefix_ids = continuation_ids if limit is None else continuation_ids[:limit]
+    resp = post_json(
+        base_url,
+        "/detokenize",
+        {
+            "tokens": [
+                prompt_ids,
+                prompt_ids + continuation_ids,
+                prompt_ids + prefix_ids,
+            ],
+            "skip_special_tokens": False,
+        },
+        timeout=timeout,
+    )
+    texts = resp.get("text")
+    if (
+        not isinstance(texts, list)
+        or len(texts) != 3
+        or any(not isinstance(t, str) for t in texts)
+    ):
+        raise EngineError("SGLang detokenize response is missing text")
+    prompt, full, prefix = texts
+    if not full.startswith(prompt) or full[len(prompt) :] != continuation:
+        raise EngineError(
+            "SGLang token IDs did not reconstruct the forced continuation"
+        )
+    if not prefix.startswith(prompt):
+        raise EngineError("SGLang decoded prefix does not match the forced output")
+    prefix = prefix[len(prompt) :]
+    if not continuation.startswith(prefix):
+        # A trusted token stop can bisect one UTF-8 character. Exclude the
+        # decoder placeholder for that incomplete trailing character.
+        if prefix.endswith("\ufffd") and continuation.startswith(prefix[:-1]):
+            prefix = prefix[:-1]
+        else:
+            raise EngineError("SGLang decoded prefix does not match the forced output")
+    return prefix
+
+
+def _score_sglang_output(
+    base_url: str,
+    captured: CapturedOutput,
+    *,
+    timeout: float,
+    prefix_token_limit: int | None,
+) -> tuple[list[_PositionScore], int, str]:
+    """Force exact token IDs; per-token decoded strings can corrupt UTF-8."""
+    tokenized = post_json(
+        base_url,
+        "/tokenize",
+        {"prompt": [captured.prompt, captured.prompt + captured.output_text]},
+        timeout=timeout,
+    ).get("tokens")
+    if (
+        not isinstance(tokenized, list)
+        or len(tokenized) != 2
+        or any(
+            not isinstance(ids, list)
+            or not ids
+            or any(type(t) is not int or t < 0 for t in ids)
+            for ids in tokenized
+        )
+    ):
+        raise EngineError("SGLang tokenize response has invalid token IDs")
+    prompt_ids, full_ids = tokenized
+    cut = len(prompt_ids)
+    if full_ids[:cut] != prompt_ids:
+        # BPE can merge a leading output newline with trailing prompt newlines.
+        # Keep the prompt the engine saw, and encode only the continuation
+        # without inserting BOS/EOS. The decoded sequence is verified below.
+        continuation_ids = post_json(
+            base_url,
+            "/tokenize",
+            {"prompt": captured.output_text, "add_special_tokens": False},
+            timeout=timeout,
+        ).get("tokens")
+        if (
+            not isinstance(continuation_ids, list)
+            or not continuation_ids
+            or any(type(t) is not int or t < 0 for t in continuation_ids)
+        ):
+            raise EngineError("SGLang tokenize response has invalid continuation IDs")
+        full_ids = prompt_ids + continuation_ids
+    if len(full_ids) <= cut:
+        raise EngineError("SGLang tokenize response has no continuation IDs")
+    continuation_ids = full_ids[cut:]
+    prefix = _sglang_prefix(
+        base_url,
+        prompt_ids,
+        continuation_ids,
+        captured.output_text,
+        limit=prefix_token_limit,
+        timeout=timeout,
+    )
+    resp = post_json(
+        base_url,
+        "/generate",
+        {
+            "input_ids": full_ids,
+            # scorer_engine_spec reserves input headroom beyond the replay
+            # context so this full sequence and the clamp token both fit.
+            "sampling_params": {"temperature": 0.0, "max_new_tokens": 1},
+            "return_logprob": True,
+            "logprob_start_len": 0,
+            "return_text_in_logprobs": True,
+        },
+        timeout=timeout,
+    )
+    meta = resp.get("meta_info")
+    rows = meta.get("input_token_logprobs") if isinstance(meta, dict) else None
+    if not isinstance(rows, list) or len(rows) != len(full_ids):
+        raise EngineError("SGLang input logprobs do not cover the forced token IDs")
+    scores = []
+    for i, (expected_id, row) in enumerate(zip(full_ids, rows)):
+        if (
+            not isinstance(row, list)
+            or len(row) != 3
+            or type(row[1]) is not int
+            or row[1] != expected_id
+            or not isinstance(row[2], str)
+        ):
+            raise EngineError("SGLang input logprob token IDs are misaligned")
+        if i < cut or row[0] is None:
+            continue
+        if type(row[0]) not in (int, float) or not math.isfinite(row[0]):
+            raise EngineError("SGLang returned an invalid input logprob")
+        scores.append(
+            _PositionScore(i, row[2], -1, float(row[0]), None, token_id=expected_id)
+        )
+    # Only input positions are scored. Any generated clamp token is excluded.
+    return scores, len(continuation_ids), prefix
 
 
 def grade_candidate(
@@ -714,6 +1005,7 @@ def grade_candidate(
     request_timeout_s: float = 300.0,
     baseline_mean_logprob: float | None = None,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
+    engine_name: str = "vllm",
 ) -> CorrectnessReport:
     """Teacher-force one engine's captured outputs through the scorer.
 
@@ -732,6 +1024,7 @@ def grade_candidate(
     thr = cfg.thresholds
     logprobs: list[float] = []
     span_positions = 0
+    num_prompts = 0
     empty: list[str] = []
     degenerate: str | None = None
 
@@ -739,27 +1032,49 @@ def grade_candidate(
     partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
     with partial.open("w", encoding="utf-8") as ef:
         for captured in outputs:
-            if not captured.output_text:
-                empty.append(captured.request_id)
-                continue
-            positions, span = score_captured_output(
-                scorer_url, captured, request_timeout_s=request_timeout_s
-            )
-            scored = [position.logprob for position in positions]
-            logprobs.extend(scored)
-            span_positions += span
-            distinct_ratio = distinct_ngram_ratio(captured.output_text)
-            repeated_span_ratio = longest_repeated_substring_ratio(captured.output_text)
             reference = (
                 None
                 if baseline_degeneracy is None
                 else baseline_degeneracy.get(captured.request_id)
             )
             if baseline_degeneracy is not None and reference is None:
-                raise EngineError(
-                    "baseline degeneracy reference missing correctness request "
-                    f"{captured.request_id!r}"
+                drop_reason = _baseline_drop_reason(
+                    baseline_degeneracy, captured.request_id
                 )
+                if drop_reason is None:
+                    raise EngineError(
+                        "baseline degeneracy reference missing correctness request "
+                        f"{captured.request_id!r}"
+                    )
+                ef.write(
+                    json.dumps(
+                        {
+                            "request_id": captured.request_id,
+                            "dropped": True,
+                            "drop_reason": drop_reason,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                continue
+            num_prompts += 1
+            if not captured.output_text:
+                empty.append(captured.request_id)
+                continue
+            positions, span, scored_prefix = score_captured_output(
+                scorer_url,
+                captured,
+                request_timeout_s=request_timeout_s,
+                engine_name=engine_name,
+                prefix_token_limit=None
+                if reference is None
+                else reference.natural_stop_tokens,
+            )
+            scored = [position.logprob for position in positions]
+            logprobs.extend(scored)
+            span_positions += span
+            distinct_ratio, repeated_span_ratio = graded_ratios(captured.output_text)
             if reference is None:
                 prefix_text = captured.output_text
                 prefix_distinct_ratio = distinct_ratio
@@ -771,12 +1086,8 @@ def grade_candidate(
                 )
                 relative_degenerate = None
             else:
-                prefix_text = "".join(
-                    position.token
-                    for position in positions[: reference.natural_stop_tokens]
-                )
-                prefix_distinct_ratio = distinct_ngram_ratio(prefix_text)
-                prefix_repeated_span_ratio = longest_repeated_substring_ratio(
+                prefix_text = scored_prefix
+                prefix_distinct_ratio, prefix_repeated_span_ratio = graded_ratios(
                     prefix_text
                 )
                 this_degenerate = degeneracy_reason(
@@ -791,7 +1102,29 @@ def grade_candidate(
                     distinct_ratio=distinct_ratio,
                     repeated_span_ratio=repeated_span_ratio,
                 )
-                if this_degenerate is None:
+            prefix_degenerate = this_degenerate
+            forced_tail = reference is not None and bool(
+                reference.forced_output_samples
+            )
+            exemptions = []
+            if (
+                this_degenerate is not None
+                and reference is not None
+                and any(
+                    text.startswith(prefix_text)
+                    for text in reference.forced_output_samples
+                )
+            ):
+                # The probe can take a different path and stop later than a
+                # forced response. Do not reject a prefix the baseline emitted.
+                exemptions.append("prefix_matches_forced_baseline")
+                this_degenerate = None
+            if relative_degenerate is not None:
+                if forced_tail:
+                    # Deliberate throughput policy for ignore_eos traces, not
+                    # evidence that this continuation is safe or meaningful.
+                    exemptions.append("forced_tail_diagnostic_only")
+                elif this_degenerate is None:
                     this_degenerate = relative_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
@@ -825,6 +1158,11 @@ def grade_candidate(
                             else reference.full_repeated_span_ratio
                         ),
                         "relative_degenerate": relative_degenerate,
+                        "degeneracy_scope": "natural_prefix"
+                        if forced_tail
+                        else "full_output",
+                        "prefix_degenerate": prefix_degenerate,
+                        "degeneracy_exemptions": exemptions,
                         "degenerate": this_degenerate,
                     },
                     sort_keys=True,
@@ -837,7 +1175,7 @@ def grade_candidate(
     if empty:
         return CorrectnessReport(
             verdict="fail_correctness",
-            num_prompts=len(outputs),
+            num_prompts=num_prompts,
             num_positions_scored=len(logprobs),
             mean_logprob=0.0,
             min_logprob=0.0,
@@ -850,7 +1188,7 @@ def grade_candidate(
     if not logprobs:
         return CorrectnessReport(
             verdict="infra_failed",
-            num_prompts=len(outputs),
+            num_prompts=num_prompts,
             num_positions_scored=0,
             mean_logprob=0.0,
             min_logprob=0.0,
@@ -918,7 +1256,7 @@ def grade_candidate(
     )
     return CorrectnessReport(
         verdict=verdict,
-        num_prompts=len(outputs),
+        num_prompts=num_prompts,
         num_positions_scored=len(logprobs),
         mean_logprob=mean_lp,
         min_logprob=min_lp,
@@ -937,6 +1275,7 @@ def grade_all(
     evidence_dir: Path,
     request_timeout_s: float = 300.0,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
+    engine_name: str = "vllm",
 ) -> dict[int, CorrectnessReport]:
     """Grade everything queued against one already-running scorer.
 
@@ -968,6 +1307,7 @@ def grade_all(
                 request_timeout_s=request_timeout_s,
                 baseline_mean_logprob=None if is_baseline else baseline_mean,
                 baseline_degeneracy=baseline_degeneracy,
+                engine_name=engine_name,
             )
         except EngineError as exc:
             # The text being forced through the scorer is whatever an engine
@@ -977,7 +1317,7 @@ def grade_all(
             logger.warning("scoring %s failed: %s", item.evidence_name, exc)
             report = CorrectnessReport(
                 verdict="infra_failed",
-                num_prompts=len(item.outputs),
+                num_prompts=_retained_prompt_count(item.outputs, baseline_degeneracy),
                 num_positions_scored=0,
                 mean_logprob=0.0,
                 min_logprob=0.0,

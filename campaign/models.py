@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from bench.score import failure_penalty
 
 # Priority metrics a campaign can optimize for (BD memo vocabulary).
 PRIORITY_METRICS = frozenset(
@@ -43,6 +44,7 @@ def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             f"scoring_rule.name must be one of {sorted(SCORING_RULE_NAMES)}, "
             f"got {rule.get('name')!r}"
         )
+    failure_penalty(rule)
     out = {k: rule[k] for k in sorted(rule) if k != "name"}
     return {"name": name, **out}
 
@@ -199,9 +201,9 @@ class CampaignManifest:
     status: str  # draft | open | closed
     priority_metric: str  # one of PRIORITY_METRICS
     success_threshold: str  # human-readable win condition for the pilot
-    # Fee paid for each patch submission. Every campaign pins the exact amount
-    # and recipient.
+    # Initial fee for a new campaign; persisted history is outside the hash.
     submission_fee: dict[str, str]
+    submission_fee_history: list[dict[str, Any]] | None = None
     bench: dict[str, Any] | None = None
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
@@ -250,6 +252,8 @@ class CampaignManifest:
             "scoring_rule": dict(self.scoring_rule),
             "emission_rule": self.emission_rule,
             "submission_fee": self.submission_fee,
+            "submission_fee_history": self.submission_fee_history
+            or [{**self.submission_fee, "effective_from_block": 0}],
         }
         if self.workload_pool is not None:
             out["workload_pool"] = list(self.workload_pool)

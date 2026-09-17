@@ -15,7 +15,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
-from bench.sampler import parse_sampling_rule
+from bench.sampler import TRAJECTORY_ALGO_VERSION, parse_sampling_rule
+from bench.trajectory import (
+    preflight_trajectory_campaign,
+    sampling_context_for_campaign,
+)
 from campaign.engine import ENGINE_PRESETS
 from campaign.engine import preset as engine_preset
 from campaign.fees import validate_submission_fee
@@ -198,6 +202,7 @@ def build_seed_bench_spec(
     gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     serve_args: list[str] | None = None,
     correctness_num_prompts: int | None = None,
+    correctness_serve_args: list[str] | None = None,
     correctness_thresholds: dict | None = None,
 ) -> dict:
     # Every campaign pins its own correctness thresholds. The values default
@@ -207,6 +212,8 @@ def build_seed_bench_spec(
     correctness: dict = {"thresholds": _correctness_thresholds(correctness_thresholds)}
     if correctness_num_prompts is not None:
         correctness["num_prompts"] = int(correctness_num_prompts)
+    if correctness_serve_args is not None:
+        correctness["serve_args"] = list(correctness_serve_args)
     return {
         "model": {
             "hf_repo": model_repo,
@@ -224,8 +231,8 @@ def build_seed_bench_spec(
 
 def seed_synthetic_campaign(
     *,
-    baseline_repo: str = DEFAULT_BASELINE_REPO,
-    baseline_commit: str = DEFAULT_BASELINE_COMMIT,
+    baseline_repo: str | None = None,
+    baseline_commit: str | None = None,
     base_image_digest: str = DEFAULT_BASE_IMAGE_DIGEST,
     force: bool = False,
     bench_model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -237,6 +244,7 @@ def seed_synthetic_campaign(
     bench_gpu_count: int = DEFAULT_BENCH_GPU_COUNT,
     bench_serve_args: list[str] | None = None,
     bench_correctness_num_prompts: int | None = None,
+    bench_correctness_serve_args: list[str] | None = None,
     bench_correctness_thresholds: dict | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
@@ -249,6 +257,8 @@ def seed_synthetic_campaign(
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
     engine: str | None = None,
+    allowed_paths: list[str] | None = None,
+    denied_paths: list[str] | None = None,
 ) -> str:
     # Normalize before floor lookup / profile insert (build_manifest also validates).
     priority_metric = validate_priority_metric(priority_metric)
@@ -256,6 +266,36 @@ def seed_synthetic_campaign(
     # None (not "vllm") is the default: it keeps engine out of the manifest pin
     # set, so re-seeding an existing campaign reproduces its original hash.
     engine_profile = None if engine is None else engine_preset(engine)
+    engine_name = (engine_profile or {}).get("name", "vllm")
+    if engine_name == "sglang":
+        baseline_repo = baseline_repo or "https://github.com/sgl-project/sglang.git"
+        if not baseline_commit:
+            raise ValueError("--engine sglang requires an explicit --baseline-commit")
+        default_allowed = ["python/sglang/**", "rust/**"]
+        default_denied = [
+            # AOT CMake definitions register custom kernel sources. The allowed
+            # roots still exclude the repository's deployment/build tooling.
+            *(p for p in config.DEFAULT_DENIED_PATHS if p != "**/CMakeLists.txt"),
+            "test/**",
+            "benchmark/**",
+            "python/sglang/test/**",
+            "python/sglang/kernels/aot/tests/**",
+            "python/sglang/kernels/aot/python/sgl_kernel/test_utils.py",
+            "python/sglang/kernels/aot/python/sgl_kernel/testing/**",
+            "rust/**/tests/**",
+            "rust/**/benches/**",
+        ]
+    else:
+        baseline_repo = baseline_repo or DEFAULT_BASELINE_REPO
+        baseline_commit = baseline_commit or DEFAULT_BASELINE_COMMIT
+        default_allowed = config.DEFAULT_ALLOWED_PATHS
+        default_denied = config.DEFAULT_DENIED_PATHS
+    allowed = list(default_allowed if allowed_paths is None else allowed_paths)
+    denied = list(default_denied if denied_paths is None else denied_paths)
+    if not allowed or any(not path.strip() for path in [*allowed, *denied]):
+        raise ValueError(
+            "patch paths must be non-empty globs, with at least one allowed path"
+        )
     skus = _normalize_gpu_skus(
         list(DEFAULT_GPU_SKUS) if gpu_skus is None else list(gpu_skus)
     )
@@ -278,20 +318,6 @@ def seed_synthetic_campaign(
             print(f"open campaign already exists: {cid}")
             return str(cid)
 
-    profile_id = insert_profile(
-        name="pareton-synthetic-v0",
-        data={
-            "model": "Qwen2.5-72B-Instruct",
-            "quantization": "FP8",
-            "serving_stack": "vLLM",
-            "tensor_parallel": 8,
-            "hardware": list(skus),
-            "priority_metric": priority_metric,
-            "success_threshold": success_threshold,
-            "fixture": True,
-        },
-    )
-
     campaign_id = uuid4()
     now = datetime.now(timezone.utc)
     # no_bench: intake/build e2e tests must not auto-enqueue real GPU bench jobs.
@@ -308,6 +334,7 @@ def seed_synthetic_campaign(
             gpu_count=bench_gpu_count,
             serve_args=bench_serve_args,
             correctness_num_prompts=bench_correctness_num_prompts,
+            correctness_serve_args=bench_correctness_serve_args,
             correctness_thresholds=bench_correctness_thresholds,
         )
     )
@@ -315,7 +342,7 @@ def seed_synthetic_campaign(
     emission = _emission_rule(emission_rule)
     fee = validate_submission_fee(
         {
-            "amount_tao": config.SUBMISSION_FEE_TAO,
+            "amount_tao": config.seed_submission_fee_tao(),
             "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
         }
     )
@@ -326,6 +353,29 @@ def seed_synthetic_campaign(
 
     pool = list(workload_pool) if workload_pool is not None else None
     scoring = validate_scoring_rule(scoring_rule)
+
+    if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
+        sampling_context_for_campaign(bench, engine_profile)
+        if status == "open":
+            preview = preflight_trajectory_campaign(rule, bench, engine_profile)
+            print(
+                "Verified trajectory coverage: "
+                + json.dumps(preview.receipt["length_groups"])
+            )
+
+    profile_id = insert_profile(
+        name="pareton-synthetic-v0",
+        data={
+            "model": bench_model_repo,
+            "quantization": bench_quantization,
+            "serving_stack": engine_name,
+            "gpu_count": bench_gpu_count,
+            "hardware": list(skus),
+            "priority_metric": priority_metric,
+            "success_threshold": success_threshold,
+            "fixture": True,
+        },
+    )
 
     fields_manifest = build_manifest(
         campaign_id=campaign_id,
@@ -343,8 +393,8 @@ def seed_synthetic_campaign(
         ),
         scoring_config_sha256=None,
         scoring_config_url=None,
-        allowed_paths=list(config.DEFAULT_ALLOWED_PATHS),
-        denied_paths=list(config.DEFAULT_DENIED_PATHS),
+        allowed_paths=allowed,
+        denied_paths=denied,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         status=status,
@@ -379,8 +429,8 @@ def seed_synthetic_campaign(
         ),
         scoring_config_sha256=None,
         scoring_config_url=None,
-        allowed_paths=list(config.DEFAULT_ALLOWED_PATHS),
-        denied_paths=list(config.DEFAULT_DENIED_PATHS),
+        allowed_paths=allowed,
+        denied_paths=denied,
         priority_metric=priority_metric,
         success_threshold=success_threshold,
         status=status,
@@ -403,8 +453,28 @@ def seed_synthetic_campaign(
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Seed synthetic Pareton Stage 0 campaign")
-    p.add_argument("--baseline-repo", default=DEFAULT_BASELINE_REPO)
-    p.add_argument("--baseline-commit", default=DEFAULT_BASELINE_COMMIT)
+    p.add_argument(
+        "--baseline-repo",
+        default=None,
+        help="Source repository (default: engine upstream)",
+    )
+    p.add_argument(
+        "--baseline-commit",
+        default=None,
+        help="Pinned source commit (required for SGLang)",
+    )
+    p.add_argument(
+        "--allowed-path",
+        action="append",
+        default=None,
+        help="Allowed patch glob (repeatable; replaces engine defaults)",
+    )
+    p.add_argument(
+        "--denied-path",
+        action="append",
+        default=None,
+        help="Denied patch glob (repeatable; replaces engine defaults)",
+    )
     p.add_argument("--base-image-digest", default=DEFAULT_BASE_IMAGE_DIGEST)
     p.add_argument("--bench-model-repo", default=DEFAULT_BENCH_MODEL_REPO)
     p.add_argument("--bench-model-revision", default=DEFAULT_BENCH_MODEL_REVISION)
@@ -416,6 +486,12 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-quantization",
         default=None,
         help="Model quantization passed to the engine (example: fp8)",
+    )
+    p.add_argument(
+        "--bench-correctness-serve-args",
+        action="append",
+        default=None,
+        help="Scorer-only serving argument, appended after baseline args (repeatable; use = for flags)",
     )
     p.add_argument(
         "--bench-correctness-num-prompts",
@@ -480,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
         "--bench-serve-args",
         action="append",
         default=None,
-        help="Extra serve arg (repeatable); prepended after --model /model pins",
+        help="Extra serve arg (repeatable); appended after engine-specific model pins",
     )
     p.add_argument(
         "--force",
@@ -598,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_gpu_count=args.bench_gpu_count,
             bench_serve_args=args.bench_serve_args,
             bench_correctness_num_prompts=args.bench_correctness_num_prompts,
+            bench_correctness_serve_args=args.bench_correctness_serve_args,
             bench_correctness_thresholds=correctness_thresholds,
             workload_pool=pool,
             sampling_rule=rule,
@@ -610,6 +687,8 @@ def main(argv: list[str] | None = None) -> int:
             status=args.status,
             no_bench=args.no_bench,
             engine=args.engine,
+            allowed_paths=args.allowed_path,
+            denied_paths=args.denied_path,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)

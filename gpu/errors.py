@@ -12,7 +12,7 @@ class ProvisionError(GpuError):
 
 
 class NoCapacityError(ProvisionError):
-    """No provider had an offer matching the spec.
+    """No matching offer is available, or the configured static host is busy.
 
     Nothing was rented, so there is no partial state to clean up and the same
     request can succeed unchanged once the market has stock. Callers treat this

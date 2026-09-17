@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -38,6 +39,25 @@ POLL_INTERVAL_S: int = int(os.environ.get("PARETON_POLL_INTERVAL_S", "30"))
 CHAIN_RETRY_ATTEMPTS: int = int(os.environ.get("PARETON_CHAIN_RETRY_ATTEMPTS", "3"))
 CHAIN_RETRY_DELAY_S: int = int(os.environ.get("PARETON_CHAIN_RETRY_DELAY_S", "30"))
 
+
+def _optional_utc_datetime(raw: str) -> datetime | None:
+    """Parse an optional ISO-8601 instant and normalize it to UTC."""
+    value = raw.strip()
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("competition start datetime must include a UTC offset")
+    return parsed.astimezone(timezone.utc)
+
+
+# Validator-wide intake floor for the competition relaunch. The watcher checks
+# the timestamp of a commitment's chain block, never its local observation time,
+# so an old commitment cannot become eligible merely because it is seen later.
+COMPETITION_START_DATETIME: datetime | None = _optional_utc_datetime(
+    os.environ.get("PARETON_COMPETITION_START_DATETIME", "")
+)
+
 # Must stay well under the dashboard stale window (~60s) and PAR-48 reclaim.
 JOB_HEARTBEAT_INTERVAL_S: float = float(
     os.environ.get("PARETON_JOB_HEARTBEAT_INTERVAL_S", "12")
@@ -53,6 +73,14 @@ S3_PREFIX: str = os.environ.get("PARETON_S3_PREFIX", "stage0")
 S3_REGION: str = os.environ.get("PARETON_S3_REGION", "us-east-2")
 S3_PUBLIC_BASE_URL: str = os.environ.get("PARETON_S3_PUBLIC_BASE_URL", "")
 PRESIGN_EXPIRES_S: int = int(os.environ.get("PARETON_PRESIGN_EXPIRES_S", "3600"))
+UPLOAD_AUTH_TTL_S: int = int(os.environ.get("PARETON_UPLOAD_AUTH_TTL_S", "300"))
+if UPLOAD_AUTH_TTL_S <= 0:
+    raise ValueError("PARETON_UPLOAD_AUTH_TTL_S must be positive")
+PATCH_REVEAL_DELAY_S: int = int(
+    os.environ.get("PARETON_PATCH_REVEAL_DELAY_S", "172800")
+)
+if PATCH_REVEAL_DELAY_S < 0:
+    raise ValueError("PARETON_PATCH_REVEAL_DELAY_S must be nonnegative")
 
 # Patch fetch bounds
 PATCH_MAX_BYTES: int = int(
@@ -88,6 +116,26 @@ WORK_DIR: Path = Path(
 BUILD_LOG_DIR: Path = Path(
     os.environ.get("PARETON_BUILD_LOG_DIR", "/var/log/pareton/builds")
 ).resolve()
+# Docker build and cleanup share this lock. Keeping it under WORK_DIR avoids a
+# second host path and works for both the production root user and local dev.
+BUILDER_LOCK_PATH: Path = Path(
+    os.environ.get("PARETON_BUILDER_LOCK_PATH", str(WORK_DIR / "builder-storage.lock"))
+).resolve()
+BUILDER_NAME: str = os.environ.get("PARETON_BUILDER_NAME", "default").strip()
+DOCKER_DAEMON_CONFIG_PATH: Path = Path(
+    os.environ.get("PARETON_DOCKER_DAEMON_CONFIG_PATH", "/etc/docker/daemon.json")
+).resolve()
+# Persistent builder disk policy. Candidate images are durable in GHCR, while
+# active campaign baselines and their BuildKit ccache mounts stay local.
+BUILDER_DOCKER_ROOT: Path = Path(
+    os.environ.get("PARETON_BUILDER_DOCKER_ROOT", "/var/lib/docker")
+).resolve()
+BUILDER_CLEANUP_HIGH_WATER_PERCENT: float = float(
+    os.environ.get("PARETON_BUILDER_CLEANUP_HIGH_WATER_PERCENT", "75")
+)
+BUILDER_CLEANUP_HARD_WATER_PERCENT: float = float(
+    os.environ.get("PARETON_BUILDER_CLEANUP_HARD_WATER_PERCENT", "90")
+)
 
 # Bench harness (engine lifecycle). Overridable per-call; defaults for fresh pods.
 BENCH_HEALTH_TIMEOUT_S: float = float(
@@ -236,14 +284,8 @@ ROUND_MAX_WAIT_S: int = int(os.environ.get("PARETON_ROUND_MAX_WAIT_S", "21600"))
 ROUND_STALE_S: int = int(os.environ.get("PARETON_ROUND_STALE_S", "1800"))
 ROUND_MAX_DURATION_S: int = int(os.environ.get("PARETON_ROUND_MAX_DURATION_S", "21600"))
 OVERTAKE_EPSILON: float = float(os.environ.get("PARETON_OVERTAKE_EPSILON", "0.01"))
-# An out-of-stock market defers a round instead of voiding it. The delay
-# doubles per attempt, so a long outage costs a few provider calls per hour.
-PROVISION_RETRY_BASE_S: int = int(
-    os.environ.get("PARETON_PROVISION_RETRY_BASE_S", "300")
-)
-PROVISION_RETRY_MAX_S: int = int(
-    os.environ.get("PARETON_PROVISION_RETRY_MAX_S", "3600")
-)
+# Flat, not exponential: a growing backoff strands a round after capacity returns.
+PROVISION_RETRY_S: int = int(os.environ.get("PARETON_PROVISION_RETRY_S", "1800"))
 # Drift is in the same units as the crown decision. The overtake moat is 0.01,
 # so a round voids only when the machine moved five times that margin.
 BASELINE_DRIFT_CEILING: float = float(
@@ -292,9 +334,18 @@ GPU_PROVIDERS: list[str] = _load_gpu_providers()
 GPU_PROVIDER: str = GPU_PROVIDERS[0] if GPU_PROVIDERS else "lium"
 GPU_PROVIDER_FALLBACKS: list[str] = list(GPU_PROVIDERS[1:])
 
-# Default copied into campaign fixtures at seed time. Miners fetch the pinned
-# campaign terms from the API and never read this environment value.
-SUBMISSION_FEE_TAO: str = os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.0005").strip()
+
+def seed_submission_fee_tao() -> str:
+    """Legacy environment input, read only when seeding a campaign."""
+    return os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.15").strip()
+
+
+# Validator-controlled, exact SS58 hotkey matches. Empty means everyone pays.
+SUBMISSION_FEE_EXEMPT_HOTKEYS: frozenset[str] = frozenset(
+    hotkey.strip()
+    for hotkey in os.environ.get("PARETON_SUBMISSION_FEE_EXEMPT_HOTKEYS", "").split(",")
+    if hotkey.strip()
+)
 PAYMENT_RECIPIENT_ADDRESS: str = os.environ.get(
     "PARETON_PAYMENT_RECIPIENT_ADDRESS",
     "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",

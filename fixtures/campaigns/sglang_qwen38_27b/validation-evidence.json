@@ -1,0 +1,469 @@
+{
+  "validated_harness_commit": "bd5aae39fce676d69daee80ee6e3e4e42e663826",
+  "upstream_commit": "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc",
+  "images": {
+    "build_base_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:97e1f4e868fc988355f91bb20a6d6f3a9b90c3a901d030730a2646ecbdf00688",
+    "engine_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+    "probe_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:6280aeb5d3c7c0383c6830ed29f3d1c4c02b5da4e534404bd248a1a8c5aa5873",
+    "probe_patch_sha256": "b6bf2cc50994218e504745fa0cc77c16dc1aca4dbb335c84e18c67864b3a3d34"
+  },
+  "model": {
+    "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+    "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "dtype": "bfloat16",
+    "quantization": "fp8",
+    "max_model_len": 8192
+  },
+  "native_build": {
+    "max_jobs": 1,
+    "timeout_s": 7200,
+    "started_at": "2026-09-09T19:56:50Z",
+    "finished_at": "2026-09-09T20:04:41Z",
+    "rust_marker": 41,
+    "baseline_ccache": {
+      "direct_cache_hit": 394,
+      "local_storage_hit": 394,
+      "local_storage_read_hit": 788,
+      "cache_miss": 1,
+      "direct_cache_miss": 1,
+      "local_storage_miss": 1,
+      "local_storage_read_miss": 2,
+      "local_storage_write": 2,
+      "preprocessed_cache_miss": 1
+    },
+    "miner_ccache": {
+      "cache_miss": 6,
+      "direct_cache_miss": 6,
+      "local_storage_miss": 6,
+      "local_storage_read_miss": 12,
+      "preprocessed_cache_miss": 6,
+      "direct_cache_hit": 114,
+      "local_storage_hit": 114,
+      "local_storage_read_hit": 228
+    },
+    "patch_gate": {
+      "ok": true,
+      "state": "surface_ok",
+      "reason": "",
+      "evidence": {
+        "files": [
+          "python/sglang/kernels/aot/CMakeLists.txt",
+          "python/sglang/kernels/aot/csrc/common_extension.cc",
+          "python/sglang/kernels/aot/csrc/pareton_probe.cu",
+          "python/sglang/kernels/jit/csrc/pareton_probe.cuh",
+          "python/sglang/pareton_build_probe.py",
+          "rust/sglang-radix-tree/src/python_bindings.rs"
+        ],
+        "file_count": 6
+      }
+    },
+    "builder_gc_runtime_verification": {
+      "docker_version": "27.3.1",
+      "configured_builder_gc": null,
+      "active_gc_policy_count": 0,
+      "daemon_changed": false,
+      "source": "https://github.com/moby/moby/blob/v27.3.1/builder/builder-next/controller.go#L401-L438"
+    },
+    "native_install_seconds": 341.3,
+    "log_sha256": {
+      "baseline": "sha256:c4f146cb3630a5a64684641af03c2f126b722a73fe124e0bd5c4f27ac599a11a",
+      "miner": "sha256:98c29ead5707cff409d103c1d0be6efb4dbf75548a0bcecc6277f5d50bbb2d15"
+    },
+    "serving_recipe_commit": "4e55f2419b9a37c9f665e4141aef322702f8c98b",
+    "serving_recipe_matches_validated_harness": true
+  },
+  "native_gpu_probes": {
+    "cuda_registered_kernel": "passed",
+    "sglang_jit_kernel": "passed",
+    "rust_extension": "passed",
+    "elements": 1027,
+    "gpu": "NVIDIA H200",
+    "sgl_kernel_path": "/opt/venv/lib/python3.12/site-packages/sgl_kernel/__init__.py"
+  },
+  "context_boundary": {
+    "model": "Qwen/Qwen3.8-27B-FP8",
+    "model_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+    "engine_image": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+    "replay_context": 8192,
+    "scorer_serve_args": [
+      "--model-path",
+      "/model",
+      "--context-length",
+      "8199",
+      "--dtype",
+      "bfloat16",
+      "--quantization",
+      "fp8",
+      "--tp-size",
+      "1",
+      "--mem-fraction-static",
+      "0.80",
+      "--max-running-requests",
+      "32"
+    ],
+    "context_override": "1",
+    "input_positions": 8192,
+    "scored_positions": 8191,
+    "last_token_logprob": -0.029635736718773842,
+    "output_tokens": 1,
+    "verdict": "pass"
+  },
+  "round": {
+    "started_at": "2026-09-09T20:26:58Z",
+    "finished_at": "2026-09-09T20:44:25Z",
+    "verdict": "pass",
+    "candidate_status": "scored",
+    "candidate_score": 0.0,
+    "correctness": {
+      "verdict": "pass",
+      "num_prompts": 32,
+      "num_positions_scored": 1218,
+      "mean_logprob": -0.1012187749349487,
+      "min_logprob": -8.62443733215332,
+      "quantile_logprob": -8.460378646850586,
+      "coverage_ratio": 1.0,
+      "evidence": "evidence/correctness/candidate_0.jsonl",
+      "reason": null
+    },
+    "baseline_scored_positions": 1475,
+    "baseline_span_positions": 1475,
+    "baseline_coverage_ratio": 1.0,
+    "baseline_drift": 0.002900362485335871,
+    "drift_ceiling": 0.05,
+    "reproducibility_ceiling": 0.335,
+    "cross_rep_variance": {
+      "baseline": {
+        "p99_ttft_ms_rel_range": 0.04220675697396834,
+        "p99_itl_ms_rel_range": 0.052024627248017714,
+        "p99_e2e_ms_rel_range": 0.0178123759833927
+      },
+      "candidate": {
+        "p99_ttft_ms_rel_range": 0.01633658833343819,
+        "p99_itl_ms_rel_range": 0.059123027939023604,
+        "p99_e2e_ms_rel_range": 0.027807272198802583
+      },
+      "baseline-drift": {
+        "p99_ttft_ms_rel_range": 0.1498176908862087,
+        "p99_itl_ms_rel_range": 0.03669751862238833,
+        "p99_e2e_ms_rel_range": 0.015228982262748159
+      }
+    },
+    "metrics": {
+      "baseline": {
+        "ttft_ms": {
+          "p50": 57.870000000000005,
+          "p95": 87.15389999999996,
+          "p99": 118.26803000000001
+        },
+        "itl_ms": {
+          "p50": 10.476,
+          "p95": 45.75225,
+          "p99": 48.36594
+        },
+        "e2e_ms": {
+          "p50": 590.633,
+          "p95": 1028.66995,
+          "p99": 1081.81076
+        },
+        "output_tokens_per_s": 219.38406030084053,
+        "requests_per_s": 4.6529889630581405,
+        "sla_goodput_ratio": 0.78125
+      },
+      "candidate": {
+        "ttft_ms": {
+          "p50": 58.7845,
+          "p95": 86.50599999999997,
+          "p99": 116.52739000000001
+        },
+        "itl_ms": {
+          "p50": 10.402,
+          "p95": 12.573299999999968,
+          "p99": 48.83849999999999
+        },
+        "e2e_ms": {
+          "p50": 569.008,
+          "p95": 756.6904999999999,
+          "p99": 994.2935000000003
+        },
+        "output_tokens_per_s": 183.73559040397532,
+        "requests_per_s": 4.734599462306402,
+        "sla_goodput_ratio": 0.8125
+      },
+      "baseline-drift": {
+        "ttft_ms": {
+          "p50": 55.315,
+          "p95": 87.83579999999998,
+          "p99": 116.55753
+        },
+        "itl_ms": {
+          "p50": 10.41,
+          "p95": 12.728049999999998,
+          "p99": 47.07103
+        },
+        "e2e_ms": {
+          "p50": 560.311,
+          "p95": 740.15285,
+          "p99": 992.0026000000003
+        },
+        "output_tokens_per_s": 186.68789258243729,
+        "requests_per_s": 4.7412798116174555,
+        "sla_goodput_ratio": 0.875
+      }
+    },
+    "rank_decision": {
+      "void_reason": null,
+      "event": null,
+      "leader_submission_id": null,
+      "leader_score": null,
+      "prev_submission_id": null,
+      "prev_score": null,
+      "overtake_threshold": 0.0
+    },
+    "report_sha256": "sha256:c81ad14faed0beff79e1ff9ae4efa012c4be7c90a087b1ecc07ee3afac86b192",
+    "inputs_fingerprint": {
+      "baseline_image_digest": "sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+      "candidate_image_digest": [
+        "sha256:6280aeb5d3c7c0383c6830ed29f3d1c4c02b5da4e534404bd248a1a8c5aa5873"
+      ],
+      "model_repo": "Qwen/Qwen3.8-27B-FP8",
+      "model_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "model_weights_sha256": "sha256:4fb25b66505ec5721297febf7c61b9a242b136731eeeab01b8e87b9e829cf1de",
+      "trace_sha256": "sha256:bca27c74eec91e7899dc6e11d2718bc9ee48dccaaed2e756ca3734377d22f7bb",
+      "request_sha256": "sha256:92455fb8e1fc5eb08b999dcfcca4b2e81825f121a4ed695db536d994b5bbeefb"
+    },
+    "environment": {
+      "gpu": [
+        {
+          "index": 0,
+          "name": "NVIDIA H200",
+          "vbios": "96.00.A5.00.03",
+          "memory_mb": 143771
+        }
+      ],
+      "driver_version": "580.178.04",
+      "cuda_version": "13.0",
+      "docker_version": "27.3.1",
+      "harness_version": "0.1.0",
+      "hostname_hash": "sha256:881469154f6a6764db969620b2733bcb97e185aee8e08e2527700037ad8e8ec7",
+      "cpu": {
+        "model": "INTEL(R) XEON(R) PLATINUM 8592+",
+        "logical_cores": 24,
+        "available_cores": 24,
+        "memory_total_mb": 241609,
+        "quota_cores": 24.0
+      }
+    },
+    "replay_evidence": {
+      "baseline": [
+        {
+          "repetition": "warmup",
+          "sha256": "sha256:3575d9b999009d40cce1726e15bca806dd1b1e8aa6fe8874424962955dd5ed23"
+        },
+        {
+          "repetition": "warmup_2",
+          "sha256": "sha256:d752cf83eeef148e62196b13b7184a24f9508947b3c6b016fb475ef0c1c31cf9"
+        },
+        {
+          "repetition": "rep_1",
+          "sha256": "sha256:062aa431d52806f760a8cd28aaf373d6162e2a59490c70407b1518ec172ad44d"
+        },
+        {
+          "repetition": "rep_2",
+          "sha256": "sha256:e6dc9bf1acb80001dbd8942c9557b75c423a22b43bd96077070de0c1c367dbda"
+        },
+        {
+          "repetition": "rep_3",
+          "sha256": "sha256:93ac711281333acc1481a21fb78474c1839a4521a22845e91ab02687d0d2d7ad"
+        }
+      ],
+      "candidate-0": [
+        {
+          "repetition": "warmup",
+          "sha256": "sha256:00a37e7cc493e6a940d2a5b17dfa51fe548322d98cc72bafc0c8af7367c03dcf"
+        },
+        {
+          "repetition": "warmup_2",
+          "sha256": "sha256:d7c00d42a9d220a584592224f24adfbd1773e5d020ebc57b3bdb6a7b35c114ee"
+        },
+        {
+          "repetition": "rep_1",
+          "sha256": "sha256:2ed9051d71651e3dc28118657bd6674ba80b665a37db57d063b967fae0ca6a4f"
+        },
+        {
+          "repetition": "rep_2",
+          "sha256": "sha256:7e1525cc504bea171e97da59de95f744081147de0fe59d0ef26abc0441ef8afe"
+        },
+        {
+          "repetition": "rep_3",
+          "sha256": "sha256:a1e39d06dab5a176c58c82529f509e4c37acea02d1c282c3a71e26429e888210"
+        }
+      ],
+      "baseline-drift": [
+        {
+          "repetition": "warmup",
+          "sha256": "sha256:3a3b0a9c7624c44f233bdaf8979cc4387017f3d00d21ac82a5b31980457cebf2"
+        },
+        {
+          "repetition": "warmup_2",
+          "sha256": "sha256:8724c0a4559774859777adc180ad2588addd6bd29c21814a5e2ced7981471144"
+        },
+        {
+          "repetition": "rep_1",
+          "sha256": "sha256:43a1ee5c909ceb59f78d898c135d6818483dfbbb32fe0bca827ecdf531180553"
+        },
+        {
+          "repetition": "rep_2",
+          "sha256": "sha256:359a73a8c12ec2d5ddac7e58673db1341794be99fdf60cb22da287ecef4c0965"
+        },
+        {
+          "repetition": "rep_3",
+          "sha256": "sha256:20d364a1dca273d707c41adb2126092851c37d55bafbc37d1ca6ca7ad75eddeb"
+        }
+      ]
+    }
+  },
+  "resources": {
+    "run_elapsed_seconds": 1355.078198,
+    "total_validation_elapsed_seconds": 2027.319433,
+    "prior_attempts": [
+      {
+        "name": "attempt-1",
+        "run": {
+          "started_at": "2026-09-09T20:05:58.008768+00:00",
+          "finished_at": "2026-09-09T20:16:52.329872+00:00",
+          "exit_code": 1,
+          "error": "IsADirectoryError: [Errno 21] Is a directory: '/opt/pareton-sglang-validation-20260909/out/sglang-native-fp8/gpu-probes.log'"
+        },
+        "teardown": {
+          "checked_at": "2026-09-09T20:16:52.329390+00:00",
+          "allocation": {
+            "pod_id": "3e512a69-c2db-4165-ab3a-421bb9831637",
+            "pod_name": "pt-20260909200558-3h-7d101736",
+            "volume_id": "0f509d10-bd83-4338-8402-8d85204e0d1a",
+            "executor_id": "421675e1-9352-4931-9ca8-cf552e9a4fba",
+            "hourly_price_cents": 300,
+            "ready_at": "2026-09-09T20:06:26.007119+00:00"
+          },
+          "pod_absent": true,
+          "volume_absent": true,
+          "remaining_pod_count": 1,
+          "remaining_volume_count": 0
+        },
+        "elapsed_seconds": 654.321104
+      },
+      {
+        "name": "attempt-2",
+        "run": {
+          "started_at": "2026-09-09T20:19:32.745097+00:00",
+          "finished_at": "2026-09-09T20:19:50.665228+00:00",
+          "exit_code": 1,
+          "error": "PodStartError: Pod lunar-orbit-bf (26718c0f-9262-47bf-a0f8-4ed97c3d1383) will not start: status CREATION_FAILED (seen: PENDING \u2192 CREATION_FAILED)"
+        },
+        "teardown": {
+          "checked_at": "2026-09-09T20:22:49.369745+00:00",
+          "allocation": {
+            "pod_id": "26718c0f-9262-47bf-a0f8-4ed97c3d1383",
+            "volume_id": "bbb31da5-4b87-4ca1-b6e7-651ce8212b82",
+            "executor_id": "421675e1-9352-4931-9ca8-cf552e9a4fba",
+            "provisioning_status": "CREATION_FAILED"
+          },
+          "pod_absent": true,
+          "volume_absent": true,
+          "remaining_pod_count": 2,
+          "remaining_volume_count": 1
+        },
+        "elapsed_seconds": 17.920131
+      }
+    ],
+    "approved_max_hours": 3,
+    "checked_at": "2026-09-09T20:44:32.409492+00:00",
+    "allocation": {
+      "pod_id": "e29bd5a4-f0c0-4ccb-89ef-18f911b779c3",
+      "pod_name": "pt-20260909202158-2.5h-4a1eb5ac",
+      "volume_id": "53e41f49-ab1f-4f57-b848-b5b398fca10e",
+      "executor_id": "6e9bcda6-38df-4ed1-a456-73be66aa11d8",
+      "hourly_price_cents": 300,
+      "ready_at": "2026-09-09T20:22:24.381529+00:00"
+    },
+    "pod_absent": true,
+    "volume_absent": true,
+    "remaining_pod_count": 1,
+    "remaining_volume_count": 0
+  },
+  "sampling_receipt": {
+    "type": "hf_rows",
+    "algo_version": 2,
+    "dataset": "nebius/SWE-agent-trajectories",
+    "revision": "68195a1450865274106246d0d0296a1d6807b88e",
+    "config": "default",
+    "split": "train",
+    "n_rows": 80036,
+    "n_prompts": 32,
+    "max_tokens": 5120,
+    "seed_block_offset": 10,
+    "sample_seed_block": 1000010,
+    "sample_seed_block_hash": "0xabababababababababababababababababababababababababababababababab",
+    "seed_hex": "7fe17327f4dc3a6bdea99987d1134dba76bd53732e06742e35d9ab071ae47b93",
+    "row_indices": [
+      73772,
+      267,
+      54623,
+      4244,
+      25296,
+      57884,
+      183,
+      5081,
+      28840,
+      48760,
+      66011,
+      64348,
+      36646,
+      74105,
+      36025,
+      61701,
+      2691,
+      5164,
+      834,
+      45442,
+      79363,
+      7444,
+      23889,
+      15987,
+      50019,
+      37368,
+      65311,
+      68067,
+      1716,
+      29307,
+      43285,
+      23183
+    ],
+    "sampled_trace_sha256": "sha256:bca27c74eec91e7899dc6e11d2718bc9ee48dccaaed2e756ca3734377d22f7bb",
+    "chat_template": {
+      "model_repo": "Qwen/Qwen3.8-27B-FP8",
+      "model_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "sha256": "sha256:c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "add_generation_prompt": true,
+      "enable_thinking": false
+    }
+  },
+  "campaign_database_writes": 0,
+  "offline_validation": {
+    "python": "3.12",
+    "passed": 1261,
+    "skipped": 41,
+    "warnings": 2,
+    "both_database_urls_disabled": true,
+    "ruff_format_files": 180,
+    "vllm_comparison_base": "055a60223d29b17f0778c63c5d805d5cab378e88",
+    "vllm_differential_matches": {
+      "vllm_dockerfiles": 36,
+      "vllm_scorer_specs": 4,
+      "vllm_worker_requests": 8,
+      "vllm_seed_manifests": 4,
+      "vllm_http_requests": 24,
+      "vllm_correctness_cases": 56,
+      "vllm_sla_roles": 3
+    }
+  }
+}

@@ -180,6 +180,7 @@ def _fire(
     delay = req.arrival_offset_ms / 1000.0 - (time.monotonic() - t0)
     if delay > 0:
         time.sleep(delay)
+    dispatch = time.monotonic()
     try:
         res = post_completion_stream(
             base_url,
@@ -191,6 +192,20 @@ def _fire(
             ignore_eos=req.sampling.ignore_eos,
             timeout=timeout_s,
         )
+        if req.input_tokens is not None and res.prompt_tokens != req.input_tokens:
+            raise EngineError(
+                f"request {req.id}: engine input token count {res.prompt_tokens} differs from trace {req.input_tokens}"
+            )
+        if (
+            req.sampling.ignore_eos
+            or (req.input_tokens is not None and res.finish_reason == "length")
+        ) and res.completion_tokens != req.max_tokens:
+            raise EngineError(
+                f"request {req.id}: engine did not honor the pinned output allowance "
+                f"({res.completion_tokens} != {req.max_tokens})"
+            )
+        dispatch = res.dispatch_monotonic_s or dispatch
+        completed = res.completion_monotonic_s or time.monotonic()
         row = {
             "rep": rep,
             "engine_role": role,
@@ -206,6 +221,7 @@ def _fire(
             "error": None,
         }
     except EngineError as exc:
+        completed = time.monotonic()
         row = {
             "rep": rep,
             "engine_role": role,
@@ -222,6 +238,12 @@ def _fire(
         }
         if not is_warmup:
             errs.append(f"{role}/rep{rep}/{req.id}: {exc}")
+    row.update(
+        dispatch_offset_ms=round((dispatch - t0) * 1000, 3),
+        completion_offset_ms=round((completed - t0) * 1000, 3),
+        input_tokens=req.input_tokens,
+        max_tokens=req.max_tokens,
+    )
     with lock:
         out.append(row)
 
@@ -292,12 +314,19 @@ class EngineReplay:
 
 @dataclass(frozen=True)
 class NaturalStopReference:
-    """Where the pinned baseline stopped when EOS handling was enabled."""
+    """Where the pinned baseline stopped when EOS handling was enabled.
+
+    ``probed`` is True only for the extra ignore_eos=false replay. That
+    path's SLA siblings are forced-length and may loop after EOS; they
+    must not decide the drop. Byte-equality of ``text`` with the median
+    SLA output is not a substitute: a probe can coincidentally match.
+    """
 
     request_id: str
     completion_tokens: int
     finish_reason: str | None
     text: str
+    probed: bool = False
 
 
 def capture_baseline_natural_stops(
@@ -331,8 +360,14 @@ def capture_baseline_natural_stops(
         references[req.id] = NaturalStopReference(
             request_id=req.id,
             completion_tokens=timing.completion_tokens,
+            # None is the copy-path fingerprint in evidence. A real
+            # ignore_eos probe writes the probe row's finish_reason
+            # (typically "stop"). Round 10 hf-003 has null here: the
+            # 78-token text is the latency-median SLA output, not a
+            # separate forced-length replay.
             finish_reason=None,
             text=text,
+            probed=False,
         )
 
     if forced:
@@ -360,6 +395,7 @@ def capture_baseline_natural_stops(
                     else str(row["finish_reason"])
                 ),
                 text=str(row.get("text") or ""),
+                probed=True,
             )
 
     missing = [req.id for req in requests if req.id not in references]
@@ -381,6 +417,7 @@ def capture_baseline_natural_stops(
                         "request_id": ref.request_id,
                         "completion_tokens": ref.completion_tokens,
                         "finish_reason": ref.finish_reason,
+                        "probed": ref.probed,
                         "text": ref.text,
                     },
                     sort_keys=True,
@@ -399,6 +436,7 @@ def _run_engine(
     cfg: SlaBenchConfig,
     engine_evidence_dir: Path,
     timeout_s: float,
+    warmup_repetitions: int,
 ) -> tuple[list[dict], list[dict]]:
     """Warmup + N measured reps for one engine.
 
@@ -408,15 +446,17 @@ def _run_engine(
     # trace, so a partial warmup leaves the first measured rep cold on
     # engines with prefix caching and inflates cross-rep variance past the
     # reproducibility bar.
-    warm_rows, _, _ = _replay(
-        base_url,
-        requests,
-        role=role,
-        rep=0,
-        is_warmup=True,
-        timeout_s=timeout_s,
-    )
-    _write_rep(engine_evidence_dir / WARMUP_DIRNAME, warm_rows, 0.0)
+    for warmup in range(warmup_repetitions):
+        warm_rows, _, _ = _replay(
+            base_url,
+            requests,
+            role=role,
+            rep=0,
+            is_warmup=True,
+            timeout_s=timeout_s,
+        )
+        dirname = WARMUP_DIRNAME if warmup == 0 else f"warmup_{warmup + 1}"
+        _write_rep(engine_evidence_dir / dirname, warm_rows, 0.0)
 
     rep_metrics: list[dict] = []
     measured: list[dict] = []
@@ -448,6 +488,12 @@ def _median_rep_row(rows: list[dict]) -> dict:
     Picking one real repetition keeps ``(ttft, itl, tokens, text)`` a
     self-consistent set. Averaging would blend ITL vectors of different lengths
     and pair timings with text that never occurred together.
+
+    The selected text is the entire graded artifact
+    (``capture_outputs`` and, when ``ignore_eos`` is off,
+    ``capture_baseline_natural_stops``). A looping sibling rep is
+    invisible here; ``build_baseline_degeneracy_references`` has to
+    look at ``output_samples`` to see it.
     """
     ordered = sorted(rows, key=lambda r: float(r["e2e_ms"]))
     return ordered[(len(ordered) - 1) // 2]
@@ -489,12 +535,13 @@ def run_sla_engine(
     cfg: SlaBenchConfig,
     evidence_dir: Path,
     request_timeout_s: float = 120.0,
+    engine_name: str = "vllm",
 ) -> EngineReplay:
     """Replay the trace against one healthy engine and persist its evidence.
 
     Every engine in a round goes through this one path: the baseline, each
-    candidate, and the closing drift baseline. Nothing here varies by engine
-    or by role, so every image in the round is measured the same way.
+    candidate, and the closing drift baseline. Warmup depends only on the
+    campaign's engine, so every image in the round is measured the same way.
     """
     if not requests:
         raise EngineError("sla_bench: empty workload trace")
@@ -502,6 +549,10 @@ def run_sla_engine(
         _require_text_prompt(req)
 
     engine_evidence_dir = evidence_dir / role
+    # SGLang/Qwen needs both a cold-prefix and a cached-prefix warmup. On H200,
+    # one full warmup still left a ~3s stall at the start of the next replay;
+    # subsequent replays were stable. Warm both paths before measuring, for
+    # baseline and candidates alike, without changing the reproducibility bar.
     rep_metrics, measured = _run_engine(
         base_url,
         role=role,
@@ -509,6 +560,7 @@ def run_sla_engine(
         cfg=cfg,
         engine_evidence_dir=engine_evidence_dir,
         timeout_s=request_timeout_s,
+        warmup_repetitions=2 if engine_name == "sglang" else 1,
     )
     metrics = _engine_metrics_from_reps(rep_metrics)
 
