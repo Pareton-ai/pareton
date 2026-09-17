@@ -127,11 +127,12 @@ def test_fee_update_rejects_invalid_chain_height(block):
 
 
 @pytest.mark.parametrize("amount", ["0.15", "0.0001", "0"])
-def test_immediate_fee_update_preserves_terms_and_rejects_same_block(
+def test_next_block_fee_update_preserves_terms_and_rejects_same_block(
     monkeypatch, amount
 ):
     from contextlib import contextmanager
     from campaign import set_fee
+    from campaign.fees import fee_at_block
 
     history = [{**FEE, "effective_from_block": 0}]
 
@@ -167,8 +168,10 @@ def test_immediate_fee_update_preserves_terms_and_rejects_same_block(
     monkeypatch.setattr(set_fee, "db_connection", connect)
     result = set_fee.set_fee("campaign", amount, current_block=900)
     assert cur.written == [*history, result]
-    assert result["effective_from_block"] == 900
+    assert result["effective_from_block"] == 901
     assert result["amount_tao"] == amount
+    assert fee_at_block(cur.written, 900) == FEE
+    assert fee_at_block(cur.written, 901) == {**FEE, "amount_tao": amount}
     history.append(result)
     with pytest.raises(ValueError, match="retry after the chain advances"):
         set_fee.set_fee("campaign", "0.2", current_block=900)
@@ -247,7 +250,7 @@ def test_set_fee_cli_uses_observed_block_without_activation_argument(
 
     def publish(campaign_id, amount, *, current_block):
         calls.append((campaign_id, amount, current_block))
-        return {**FEE, "amount_tao": amount, "effective_from_block": current_block}
+        return {**FEE, "amount_tao": amount, "effective_from_block": current_block + 1}
 
     monkeypatch.setattr(bt, "Subtensor", subtensor)
     monkeypatch.setattr(set_fee, "set_fee", publish)
@@ -255,7 +258,7 @@ def test_set_fee_cli_uses_observed_block_without_activation_argument(
     args = ["--campaign-id", campaign_id, "--amount-tao", "0.15"]
     assert set_fee.main(args) == 0
     assert calls == [(campaign_id, "0.15", 900)]
-    assert "Published 0.15 TAO from block 900" in capsys.readouterr().out
+    assert "Published 0.15 TAO from block 901" in capsys.readouterr().out
     with pytest.raises(SystemExit) as exc:
         set_fee.main([*args, "--effective-from-block", "1000"])
     assert exc.value.code == 2
