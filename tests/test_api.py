@@ -19,6 +19,7 @@ V1_CACHE_CONTROL_EXPECTED = "public, max-age=30, stale-while-revalidate=300"
 def client(monkeypatch):
     from api import server
 
+    monkeypatch.setattr(server, "_campaign_fee_highest_block", 0)
     monkeypatch.setattr(
         server,
         "list_campaigns",
@@ -1452,3 +1453,70 @@ def test_campaign_fee_lookup_fails_closed_when_chain_is_unavailable(
     monkeypatch.setattr(bt, "Subtensor", unavailable)
     assert client.get("/v1/campaigns/c1").status_code == 503
     assert client.get("/v1/campaigns").status_code == 503
+
+
+def test_campaign_fee_watermark_stops_rpc_until_a_new_activation(monkeypatch, client):
+    from contextlib import contextmanager
+    import bittensor as bt
+    from api import server
+
+    fee = {"amount_tao": "0.05", "recipient": "5Recipient"}
+    history = [
+        {**fee, "effective_from_block": 0},
+        {**fee, "amount_tao": "0.15", "effective_from_block": 1000},
+    ]
+    campaign = SimpleNamespace(
+        submission_fee_history=history,
+        to_public_dict=lambda: {"campaign_id": "c1", "submission_fee_history": history},
+    )
+    unchanged = SimpleNamespace(
+        submission_fee_history=[history[0]],
+        to_public_dict=lambda: {
+            "campaign_id": "c2",
+            "submission_fee_history": [history[0]],
+        },
+    )
+    monkeypatch.setattr(
+        server, "list_campaigns", lambda status=None: [campaign, unchanged]
+    )
+    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
+    heights = iter([999, 1000, 1100])
+    calls = []
+
+    @contextmanager
+    def subtensor(**_kwargs):
+        calls.append(True)
+        yield SimpleNamespace(block=next(heights))
+
+    monkeypatch.setattr(bt, "Subtensor", subtensor)
+    assert (
+        client.get("/v1/campaigns/c1").json()["submission_fee"]["amount_tao"] == "0.05"
+    )
+    assert (
+        client.get("/v1/campaigns").json()["campaigns"][0]["submission_fee"][
+            "amount_tao"
+        ]
+        == "0.15"
+    )
+    assert len(calls) == 2
+
+    def unavailable(**_kwargs):
+        pytest.fail("settled histories must not contact the chain")
+
+    monkeypatch.setattr(bt, "Subtensor", unavailable)
+    for _ in range(3):
+        assert (
+            client.get("/v1/campaigns/c1").json()["submission_fee"]["amount_tao"]
+            == "0.15"
+        )
+        response = client.get("/v1/campaigns").json()["campaigns"]
+        assert [c["submission_fee"]["amount_tao"] for c in response] == ["0.15", "0.05"]
+    assert len(calls) == 2
+    monkeypatch.setattr(bt, "Subtensor", subtensor)
+    history.append({**fee, "amount_tao": "0.2", "effective_from_block": 1100})
+    assert (
+        client.get("/v1/campaigns/c1").json()["submission_fee"]["amount_tao"] == "0.2"
+    )
+    assert len(calls) == 3
+    assert client.get("/v1/campaigns").status_code == 200
+    assert len(calls) == 3

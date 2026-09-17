@@ -462,12 +462,20 @@ def health():
     return {"ok": True, "service": "pareton", "stage": 0}
 
 
+# Process-local lower bound, not an estimate of the current chain height.
+# Once all scheduled fees are active, their selection needs no further RPC.
+_campaign_fee_highest_block = 0
+
+
 def _campaign_fee_block() -> int:
+    global _campaign_fee_highest_block
     import bittensor as bt
 
     try:
         with bt.Subtensor(network=config.SUBTENSOR_NETWORK) as subtensor:
-            return int(subtensor.block)
+            block = int(subtensor.block)
+        _campaign_fee_highest_block = max(_campaign_fee_highest_block, block)
+        return _campaign_fee_highest_block
     except Exception as exc:
         raise HTTPException(
             status_code=503, detail="campaign fee chain height unavailable"
@@ -482,7 +490,11 @@ def _public_campaign(c, *, fee_block: int | None = None):
     block = (
         fee_block
         if fee_block is not None
-        else (_campaign_fee_block() if len(history) > 1 else 0)
+        else (
+            _campaign_fee_block()
+            if history[-1]["effective_from_block"] > _campaign_fee_highest_block
+            else _campaign_fee_highest_block
+        )
     )
     result["submission_fee"] = fee_at_block(history, block)
     result["submission_fee_at_block"] = block
@@ -495,10 +507,12 @@ def campaigns(status: str | None = Query(default=None)):
     block = (
         _campaign_fee_block()
         if any(
-            c.submission_fee_history and len(c.submission_fee_history) > 1
+            c.submission_fee_history
+            and c.submission_fee_history[-1]["effective_from_block"]
+            > _campaign_fee_highest_block
             for c in items
         )
-        else 0
+        else _campaign_fee_highest_block
     )
     return {"campaigns": [_public_campaign(c, fee_block=block) for c in items]}
 
