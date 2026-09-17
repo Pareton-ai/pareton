@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from .engine import validate_engine
+from .fees import validate_submission_fee
 from .models import (
     CampaignManifest,
     CustomerSignoff,
@@ -54,6 +55,7 @@ def freeze_manifest_fields(
     sampling_rule: dict[str, Any] | None = None,
     scoring_rule: dict[str, Any] | None = None,
     emission_rule: dict[str, Any] | None = None,
+    submission_fee: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
 
@@ -70,6 +72,7 @@ def freeze_manifest_fields(
     rule: the pay schedule is the most important term a miner competes under,
     so it must not be able to change under them silently. Absent means the
     campaign pays nothing.
+    ``submission_fee`` is deliberately excluded: fees have block-effective history.
 
     The submission window used to be pinned here as ``window``. It was dropped
     with the feature, so campaigns hashed before that no longer recompute to
@@ -149,6 +152,7 @@ def build_manifest(
     sampling_rule: dict[str, Any] | None = None,
     scoring_rule: dict[str, Any] | None = None,
     emission_rule: dict[str, Any] | None = None,
+    submission_fee: dict[str, Any],
     created_at: datetime | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
@@ -173,6 +177,7 @@ def build_manifest(
         sampling_rule=sampling_rule,
         scoring_rule=scoring_rule,
         emission_rule=emission_rule,
+        submission_fee=submission_fee,
     )
     mh = manifest_hash or compute_manifest_hash(fields)
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
@@ -183,6 +188,7 @@ def build_manifest(
     rule_obj = fields.get("sampling_rule")
     scoring_obj = fields["scoring_rule"]
     emission_obj = fields.get("emission_rule")
+    submission_fee_obj = validate_submission_fee(submission_fee)
     return CampaignManifest(
         campaign_id=campaign_id,
         profile_id=profile_id,
@@ -212,5 +218,6 @@ def build_manifest(
         sampling_rule=dict(rule_obj) if isinstance(rule_obj, dict) else None,
         scoring_rule=dict(scoring_obj),
         emission_rule=dict(emission_obj) if isinstance(emission_obj, dict) else None,
+        submission_fee=dict(submission_fee_obj),
         created_at=created_at,
     )

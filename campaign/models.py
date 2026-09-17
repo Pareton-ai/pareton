@@ -201,6 +201,9 @@ class CampaignManifest:
     status: str  # draft | open | closed
     priority_metric: str  # one of PRIORITY_METRICS
     success_threshold: str  # human-readable win condition for the pilot
+    # Initial fee for a new campaign; persisted history is outside the hash.
+    submission_fee: dict[str, str]
+    submission_fee_history: list[dict[str, Any]] | None = None
     bench: dict[str, Any] | None = None
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
@@ -248,6 +251,9 @@ class CampaignManifest:
             "engine": self.engine,
             "scoring_rule": dict(self.scoring_rule),
             "emission_rule": self.emission_rule,
+            "submission_fee": self.submission_fee,
+            "submission_fee_history": self.submission_fee_history
+            or [{**self.submission_fee, "effective_from_block": 0}],
         }
         if self.workload_pool is not None:
             out["workload_pool"] = list(self.workload_pool)

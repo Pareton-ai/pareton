@@ -194,6 +194,9 @@ def _patch_db(monkeypatch, row: dict[str, Any] | None):
 
 def _campaign_row(status: str) -> dict[str, Any]:
     return {
+        "submission_fee_history": [
+            {"amount_tao": "0", "recipient": "5Test", "effective_from_block": 0}
+        ],
         "id": "0f9a1b2c-0000-4000-8000-000000000001",
         "profile_id": None,
         "baseline_repo": "https://github.com/vllm-project/vllm",
@@ -217,6 +220,7 @@ def _campaign_row(status: str) -> dict[str, Any]:
         "workload_pool": None,
         "sampling_rule": None,
         "scoring_rule": {"name": "median_e2e_speedup"},
+        "submission_fee": {"amount_tao": "0.0005", "recipient": "5Recipient"},
         "created_at": None,
     }
 

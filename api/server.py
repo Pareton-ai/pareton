@@ -462,10 +462,21 @@ def health():
     return {"ok": True, "service": "pareton", "stage": 0}
 
 
+def _public_campaign(c):
+    from campaign.fees import validate_fee_history
+
+    result = c.to_public_dict()
+    latest = validate_fee_history(result["submission_fee_history"])[-1]
+    result["submission_fee"] = {
+        "amount_tao": latest["amount_tao"],
+        "recipient": latest["recipient"],
+    }
+    return result
+
+
 @app.get("/v1/campaigns")
 def campaigns(status: str | None = Query(default=None)):
-    items = list_campaigns(status=status)
-    return {"campaigns": [c.to_public_dict() for c in items]}
+    return {"campaigns": [_public_campaign(c) for c in list_campaigns(status=status)]}
 
 
 @app.get("/v1/campaigns/{campaign_id}")
@@ -473,7 +484,7 @@ def campaign_detail(campaign_id: str):
     c = get_campaign(campaign_id)
     if c is None:
         raise HTTPException(status_code=404, detail="campaign not found")
-    return c.to_public_dict()
+    return _public_campaign(c)
 
 
 @app.get(

@@ -46,29 +46,25 @@ the diff to public storage and returns a permanent URL without an expiry.
 See [patch visibility](docs/patch-visibility.md) for the upload contract,
 deployment prerequisites, and a local patch-hash command.
 
-## Dev submission fee exemptions
+## Campaign submission fees
 
-Validators can exempt specific dev hotkeys from the TAO submission fee in
-`/opt/pareton/.env`:
+The campaign API publishes `submission_fee` with an exact decimal `amount_tao`
+and `recipient`. `miner/commit_patch.py` shows both and asks `y/N` before upload
+or payment. Scripted submitters must add `--yes`; use `--max-fee-tao 0.15` to cap
+a new payment. Missing or invalid fees and an unexpected recipient stop the CLI.
+`--dry-run` and `--payment-block` / `--payment-tx` never prompt for a new payment.
+Miners do not set a fee environment variable.
 
-```dotenv
-PARETON_SUBMISSION_FEE_EXEMPT_HOTKEYS=HOTKEY_SS58_1,HOTKEY_SS58_2
-```
+Neon stores append-only fee history for each campaign. The watcher checks the fee
+at the payment's block, including when retrying an unconsumed payment reference.
+Fees are outside `manifest_hash`. See [fee rollout and scheduling](docs/campaign-fees.md).
 
-Use full, case-sensitive hotkey addresses, not coldkeys or wallet names.
-Whitespace around entries is ignored; an empty list exempts nobody. Restart
-`pareton-watcher` after changing it. Keep `PARETON_SUBMISSION_FEE_TAO` at the
-normal fee on the validator; all other submission checks still apply to devs.
-
-An allowlisted dev skips the miner CLI's transfer using its existing fee setting:
-
-```sh
-PARETON_SUBMISSION_FEE_TAO=0 python miner/commit_patch.py <your usual arguments>
-```
-
-This submits without a payment proof. Setting the miner's fee to zero does not
-grant an exemption: the validator checks its own configured list against the
-on-chain submitting hotkey. Exempt submissions do not consume payment references.
+Validators can exempt exact dev hotkeys using
+`PARETON_SUBMISSION_FEE_EXEMPT_HOTKEYS=HOTKEY_SS58_1,HOTKEY_SS58_2` in
+`/opt/pareton/.env`, then restart `pareton-watcher`. These exemptions apply only
+at the validator: all integrity checks remain, and exempt commitments do not
+consume unverified payment references. The public miner CLI still follows the
+campaign fee; local environment overrides cannot grant or request an exemption.
 
 ## Layout
 

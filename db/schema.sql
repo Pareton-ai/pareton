@@ -1,9 +1,9 @@
 -- Pareton schema (Neon Postgres): Stage 0 + rounds.
 -- Source of truth for campaigns, submissions, provenance events, gate jobs,
 -- rounds, round entries, and leaders.
--- Single canonical schema file: no migration files while the project is pre-launch.
+-- Hand-run production deltas live in db/migrations; deploy does not migrate.
 -- Apply wholesale to a fresh database: psql "$PARETON_DATABASE_URL" -f db/schema.sql
--- Schema changes pre-launch: edit this file and apply the delta by hand.
+-- Existing databases: run the required db/migrations deltas before reapplying.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -14,6 +14,78 @@ CREATE TABLE IF NOT EXISTS profiles (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Install fee schema objects atomically. Existing databases must be migrated first.
+BEGIN;
+DO $$
+BEGIN
+  IF to_regclass('campaigns') IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('campaigns')
+      AND attname = 'submission_fee_history' AND NOT attisdropped
+  ) THEN
+    RAISE EXCEPTION 'run db/migrations/20260917_campaign_fee_history.sql before reapplying db/schema.sql';
+  END IF;
+END;
+$$;
+
+-- Fee amounts are decimal strings, never JSON floating-point numbers. NUMERIC
+-- has no scale here: a NUMERIC(p,9) cast would silently round fractional RAO.
+CREATE OR REPLACE FUNCTION valid_campaign_fee_history(history JSONB)
+RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+  entry JSONB;
+  amount NUMERIC;
+  block NUMERIC;
+  previous_block NUMERIC := -1;
+BEGIN
+  IF history IS NULL OR jsonb_typeof(history) <> 'array'
+     OR jsonb_array_length(history) = 0 THEN
+    RETURN FALSE;
+  END IF;
+  FOR entry IN SELECT value FROM jsonb_array_elements(history) LOOP
+    IF jsonb_typeof(entry) <> 'object'
+       OR NOT (entry ?& ARRAY['amount_tao', 'recipient', 'effective_from_block'])
+       OR (entry - ARRAY['amount_tao', 'recipient', 'effective_from_block']) <> '{}'::jsonb
+       OR jsonb_typeof(entry->'amount_tao') <> 'string'
+       OR (entry->>'amount_tao') !~ '^[0-9]+(\.[0-9]+)?$'
+       OR jsonb_typeof(entry->'recipient') <> 'string'
+       OR (entry->>'recipient') !~ '^[^[:space:]]+$'
+       OR jsonb_typeof(entry->'effective_from_block') <> 'number'
+       OR (entry->>'effective_from_block') !~ '^[0-9]+$' THEN
+      RETURN FALSE;
+    END IF;
+    amount := (entry->>'amount_tao')::NUMERIC;
+    block := (entry->>'effective_from_block')::NUMERIC;
+    IF amount < 0 OR amount * 1000000000 <> trunc(amount * 1000000000)
+       OR amount * 1000000000 > 18446744073709551615
+       OR block <> trunc(block) OR block <= previous_block
+       OR block > 9223372036854775807
+       OR (previous_block = -1 AND block <> 0) THEN
+      RETURN FALSE;
+    END IF;
+    previous_block := block;
+  END LOOP;
+  RETURN TRUE;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RETURN FALSE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION preserve_campaign_fee_history()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.submission_fee_history IS NOT NULL AND
+     (jsonb_array_length(NEW.submission_fee_history) < jsonb_array_length(OLD.submission_fee_history)
+      OR EXISTS (
+        SELECT 1 FROM jsonb_array_elements(OLD.submission_fee_history) WITH ORDINALITY old_fee(value, idx)
+        WHERE NEW.submission_fee_history -> (idx::int - 1) IS DISTINCT FROM value
+      )) THEN
+    RAISE EXCEPTION 'campaign fee history is append-only';
+  END IF;
+  RETURN NEW;
+END;
+$$;
 
 CREATE TABLE IF NOT EXISTS campaigns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -61,10 +133,19 @@ CREATE TABLE IF NOT EXISTS campaigns (
   -- NULL means the campaign pays nothing and is left out of the weight
   -- vector, which keeps campaigns pinned before emission rules on their hash.
   emission_rule JSONB,
+  -- Mutable block-effective fees, excluded from manifest_hash.
+  submission_fee_history JSONB NOT NULL
+    CHECK (valid_campaign_fee_history(submission_fee_history)),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (manifest_hash)
 );
+
+DROP TRIGGER IF EXISTS campaigns_fee_history_append_only ON campaigns;
+CREATE TRIGGER campaigns_fee_history_append_only
+BEFORE UPDATE OF submission_fee_history ON campaigns
+FOR EACH ROW EXECUTE FUNCTION preserve_campaign_fee_history();
+COMMIT;
 
 CREATE INDEX IF NOT EXISTS campaigns_status_idx ON campaigns (status);
 CREATE INDEX IF NOT EXISTS campaigns_profile_id_idx ON campaigns (profile_id);

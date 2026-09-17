@@ -1,7 +1,7 @@
 """Seed a Pareton-owned synthetic campaign for Stage 0.
 
 Usage:
-    PARETON_DATABASE_URL=... python -m campaign.seed
+    PARETON_DATABASE_URL=... python -m campaign.seed --submission-fee-tao 0.15
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from bench.trajectory import (
 )
 from campaign.engine import ENGINE_PRESETS
 from campaign.engine import preset as engine_preset
+from campaign.fees import TRUSTED_PAYMENT_RECIPIENT, validate_submission_fee
 from campaign.manifest import build_manifest
 from campaign.models import (
     SLA,
@@ -255,6 +256,7 @@ def seed_synthetic_campaign(
     gpu_skus: list[str] | None = None,
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
+    submission_fee_tao: str,
     engine: str | None = None,
     allowed_paths: list[str] | None = None,
     denied_paths: list[str] | None = None,
@@ -339,6 +341,17 @@ def seed_synthetic_campaign(
     )
 
     emission = _emission_rule(emission_rule)
+    fee = validate_submission_fee(
+        {
+            "amount_tao": submission_fee_tao,
+            "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
+        }
+    )
+
+    if fee["recipient"] != TRUSTED_PAYMENT_RECIPIENT:
+        raise ValueError(
+            "submission fee recipient must match the locally trusted miner recipient"
+        )
 
     if status == "open":
         require_correctness_thresholds(bench)
@@ -398,6 +411,7 @@ def seed_synthetic_campaign(
         sampling_rule=rule,
         scoring_rule=scoring,
         emission_rule=emission,
+        submission_fee=fee,
     )
 
     signoff = CustomerSignoff(
@@ -434,6 +448,7 @@ def seed_synthetic_campaign(
         sampling_rule=rule,
         scoring_rule=scoring,
         emission_rule=emission,
+        submission_fee=fee,
     )
 
     inserted = insert_campaign(manifest)
@@ -552,7 +567,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--force",
         action="store_true",
-        help="Insert even if an open campaign already exists (only applies with --status open)",
+        help=(
+            "Insert even if an open campaign already exists "
+            "(only applies with --status open)"
+        ),
     )
     p.add_argument(
         "--gpu-skus",
@@ -562,6 +580,11 @@ def main(argv: list[str] | None = None) -> int:
             "GPU SKU for the campaign (repeatable). Default: single "
             f"{DEFAULT_GPU_SKUS[0]} (first live campaign should stay single-SKU)"
         ),
+    )
+    p.add_argument(
+        "--submission-fee-tao",
+        required=True,
+        help="Required initial campaign fee as an exact TAO decimal (no environment default)",
     )
     p.add_argument(
         "--status",
@@ -674,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
             gpu_skus=args.gpu_skus,
             status=args.status,
             no_bench=args.no_bench,
+            submission_fee_tao=args.submission_fee_tao,
             engine=args.engine,
             allowed_paths=args.allowed_path,
             denied_paths=args.denied_path,

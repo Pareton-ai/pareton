@@ -37,6 +37,7 @@ def test_manifest_hash_stable():
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
     )
     h1 = compute_manifest_hash(fields)
     h2 = compute_manifest_hash(fields)
@@ -62,6 +63,7 @@ def test_build_manifest_normalizes_commit_case():
         denied_paths=[],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
     )
     assert m.baseline_commit == "a" * 40
 
@@ -83,6 +85,7 @@ def _manifest_kwargs(**overrides):
         denied_paths=["tests/**"],
         priority_metric="throughput",
         success_threshold=">=10% at SLA",
+        submission_fee={"amount_tao": "0", "recipient": "5Test"},
     )
     kwargs.update(overrides)
     return kwargs

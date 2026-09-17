@@ -33,6 +33,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import config  # noqa: E402
+from campaign.fees import (  # noqa: E402
+    TRUSTED_PAYMENT_RECIPIENT,
+    fee_at_block,
+    validate_fee_history,
+    submission_fee_rao,
+    validate_submission_fee,
+)
 from chain.commitment import encode_patch_commitment, fetch_metagraph  # noqa: E402
 from storage.s3 import patch_url_hotkey, private_patch_key  # noqa: E402
 from storage.upload_auth import upload_message  # noqa: E402
@@ -175,7 +182,34 @@ def _say(msg: str, *, file=None) -> None:
     out.flush()
 
 
-def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int, int]:
+def _confirm_payment(*, yes: bool) -> bool:
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        print(
+            "error: fee confirmation requires an interactive terminal or --yes",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        confirmed = input("Pay this fee and submit the patch? [y/N] ")
+    except EOFError:
+        confirmed = ""
+    return confirmed.strip().lower() in {"y", "yes"}
+
+
+def _checked_fee(campaign: dict, cap: int | None) -> dict[str, str]:
+    fee = validate_submission_fee(campaign["submission_fee"])
+    if fee["recipient"] != TRUSTED_PAYMENT_RECIPIENT:
+        raise ValueError(
+            "campaign fee recipient differs from the locally trusted recipient"
+        )
+    if cap is not None and submission_fee_rao(fee) > cap:
+        raise ValueError("campaign fee exceeds --max-fee-tao")
+    return fee
+
+
+def _pay_fee(subtensor, wallet, *, fee_tao: str, recipient: str) -> tuple[int, int]:
     """Send the fee from the coldkey and return the proof reference."""
     import bittensor as bt
 
@@ -189,7 +223,7 @@ def _pay_fee(subtensor, wallet, *, fee_tao: float, recipient: str) -> tuple[int,
         "After it, the transfer runs silently (this can take a minute)."
     )
     result = subtensor.execute(
-        bt.Transfer(dest_ss58=recipient, amount_tao=str(fee_tao)), wallet
+        bt.Transfer(dest_ss58=recipient, amount_tao=fee_tao), wallet
     )
     if not getattr(result, "success", False):
         message = getattr(result, "message", None) or getattr(result, "error", result)
@@ -258,6 +292,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Print commitment payload without submitting on-chain",
     )
     p.add_argument(
+        "--max-fee-tao", help="Refuse a new payment above this exact TAO cap"
+    )
+    p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the API-declared submission fee without an interactive prompt",
+    )
+    p.add_argument(
         "--payment-block",
         type=int,
         default=None,
@@ -311,6 +353,46 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: failed to fetch campaign: {exc}", file=sys.stderr)
         return 1
     baseline_commit = campaign["baseline_commit"]
+    try:
+        fee = validate_submission_fee(campaign["submission_fee"])
+    except KeyError:
+        print(
+            "error: campaign API returned no submission_fee; refusing to guess",
+            file=sys.stderr,
+        )
+        return 1
+    except ValueError as exc:
+        print(f"error: invalid campaign submission_fee: {exc}", file=sys.stderr)
+        return 1
+    fee_tao = fee["amount_tao"]
+    fee_amount_rao = submission_fee_rao(fee)
+    recipient = fee["recipient"]
+
+    if recipient != TRUSTED_PAYMENT_RECIPIENT:
+        print(
+            "error: campaign fee recipient differs from the locally trusted recipient",
+            file=sys.stderr,
+        )
+        return 1
+    cap = None
+    if args.max_fee_tao is not None:
+        try:
+            cap = submission_fee_rao(
+                {"amount_tao": args.max_fee_tao, "recipient": recipient}
+            )
+        except ValueError as exc:
+            print(f"error: invalid --max-fee-tao: {exc}", file=sys.stderr)
+            return 1
+        if args.payment_block is None and fee_amount_rao > cap:
+            print("error: campaign fee exceeds --max-fee-tao", file=sys.stderr)
+            return 1
+
+    _say(f"Campaign submission fee: {fee_tao} TAO")
+    _say(f"Payment recipient: {recipient}")
+    if fee_amount_rao > 0 and args.payment_block is None and not args.dry_run:
+        if not _confirm_payment(yes=args.yes):
+            _say("Submission cancelled before upload or payment.")
+            return 1
 
     if args.retrieval_url:
         retrieval_url = args.retrieval_url
@@ -352,19 +434,11 @@ def main(argv: list[str] | None = None) -> int:
         "patch_hash": patch_hash,
         "retrieval_url": retrieval_url,
     }
-    fee_tao = config.SUBMISSION_FEE_TAO
-    recipient = config.PAYMENT_RECIPIENT_ADDRESS
-    if args.payment_block is not None and fee_tao <= 0:
-        print(
-            "error: --payment-block/--payment-tx require PARETON_SUBMISSION_FEE_TAO > 0",
-            file=sys.stderr,
-        )
-        return 1
     try:
         payload = encode_patch_commitment(**payload_args)
         # Size the payload against a worst-case proof before any money moves.
         probe = payload
-        if fee_tao > 0:
+        if fee_amount_rao > 0 or args.payment_block is not None:
             probe = encode_patch_commitment(
                 **payload_args,
                 payment_block=_PREFLIGHT_BLOCK,
@@ -376,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
-        if fee_tao > 0 and args.payment_block is not None:
+        if args.payment_block is not None:
             payload = encode_patch_commitment(
                 **payload_args,
                 payment_block=args.payment_block,
@@ -384,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         _say(f"Commitment payload ({len(payload.encode())} bytes):")
         print(payload)
-        if fee_tao > 0:
+        if fee_amount_rao > 0 or args.payment_block is not None:
             if args.payment_block is not None:
                 _say(
                     f"Dry run: would reuse payment "
@@ -404,15 +478,44 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    # Pay only after the hotkey is known registered: an unregistered hotkey
-    # cannot commit, and the fee would be spent for nothing. Reuse flags let
-    # a miner retry the commitment after a transfer that already landed.
+    # Refresh after upload/registration, before any new transfer. Even an
+    # initially free campaign may now require a fee.
     payment_block = payment_tx = None
-    if fee_tao > 0:
-        if args.payment_block is not None:
-            payment_block, payment_tx = args.payment_block, args.payment_tx
-            _say(f"Reusing payment {payment_block}-{payment_tx}.")
-        else:
+    if args.payment_block is not None:
+        payment_block, payment_tx = args.payment_block, args.payment_tx
+        _say(f"Reusing payment {payment_block}-{payment_tx}.")
+    else:
+        try:
+            campaign = _http_json(
+                "GET", f"{args.api_base.rstrip('/')}/v1/campaigns/{args.campaign_id}"
+            )
+            refreshed_fee = _checked_fee(campaign, cap)
+            fee_amount_rao = submission_fee_rao(refreshed_fee)
+            if fee_amount_rao > 0:
+                validate_fee_history(campaign["submission_fee_history"])
+                # A zero-to-positive change also needs a proof size preflight.
+                _commitment_fields(
+                    encode_patch_commitment(
+                        **payload_args,
+                        payment_block=_PREFLIGHT_BLOCK,
+                        payment_tx=_PREFLIGHT_TX,
+                    ),
+                    timelock=args.timelock,
+                )
+        except Exception as exc:
+            print(
+                f"error: fee refresh failed; no payment sent ({exc})", file=sys.stderr
+            )
+            return 1
+        if refreshed_fee != fee:
+            _say(f"Campaign submission fee changed: {refreshed_fee['amount_tao']} TAO")
+            _say(f"Payment recipient: {refreshed_fee['recipient']}")
+            if fee_amount_rao > 0 and not _confirm_payment(yes=args.yes):
+                _say("Submission cancelled before payment.")
+                return 1
+        fee = refreshed_fee
+        fee_tao, recipient = fee["amount_tao"], fee["recipient"]
+        if fee_amount_rao > 0:
             try:
                 payment_block, payment_tx = _pay_fee(
                     subtensor, wallet, fee_tao=fee_tao, recipient=recipient
@@ -421,9 +524,38 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
             _say(
-                f"💸 Paid {fee_tao} TAO to {recipient} "
-                f"(payment {payment_block}-{payment_tx})."
+                f"💸 Paid {fee_tao} TAO to {recipient} (payment {payment_block}-{payment_tx})."
             )
+            # Inclusion can cross an activation boundary while the transfer is
+            # pending. Check fresh history at the actual block, not today's quote.
+            try:
+                paid_campaign = _http_json(
+                    "GET",
+                    f"{args.api_base.rstrip('/')}/v1/campaigns/{args.campaign_id}",
+                )
+                required_fee = fee_at_block(
+                    paid_campaign["submission_fee_history"], payment_block
+                )
+            except Exception as exc:
+                print(
+                    f"error: payment {payment_block}-{payment_tx} landed but fee verification failed ({exc}). "
+                    f"No commitment sent. Verify the payment before retrying with --payment-block {payment_block} "
+                    f"--payment-tx {payment_tx}; do not pay again blindly.",
+                    file=sys.stderr,
+                )
+                return 1
+            if (
+                required_fee["recipient"] != recipient
+                or submission_fee_rao(required_fee) > fee_amount_rao
+            ):
+                print(
+                    f"error: payment {payment_block}-{payment_tx} does not meet the campaign fee at its inclusion block "
+                    f"({required_fee['amount_tao']} TAO). No commitment sent. Do not reuse this proof for this campaign. "
+                    "Review the transfer before making a new full payment; separate top-ups cannot be combined.",
+                    file=sys.stderr,
+                )
+                return 1
+    if payment_block is not None:
         payload_args["payment_block"] = payment_block
         payload_args["payment_tx"] = payment_tx
 

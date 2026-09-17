@@ -25,7 +25,7 @@ def _com(**overrides) -> PatchCommitment:
         uid=1,
         hotkey="hk1",
         coldkey="ck1",
-        commit_block=10,
+        commit_block=1000,
         campaign_id="11111111-1111-4111-8111-111111111111",
         baseline_commit="a" * 40,
         patch_hash=hash_patch_bytes(PATCH),
@@ -59,7 +59,9 @@ START = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def test_ingest_rejects_commitment_before_competition_start(monkeypatch, inserted):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
 
     sid = watcher.ingest_commitment(
@@ -75,7 +77,9 @@ def test_ingest_rejects_commitment_before_competition_start(monkeypatch, inserte
 def test_ingest_accepts_commitment_at_or_after_competition_start(
     monkeypatch, inserted, offset_s
 ):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
 
     sid = watcher.ingest_commitment(
@@ -93,7 +97,9 @@ def test_ingest_accepts_commitment_at_or_after_competition_start(
 def test_ingest_fails_closed_when_competition_block_time_is_unavailable(
     monkeypatch, inserted, fetch_commit_datetime
 ):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     monkeypatch.setattr(config, "COMPETITION_START_DATETIME", START)
 
     sid = watcher.ingest_commitment(_com(), fetch_commit_datetime=fetch_commit_datetime)
@@ -164,6 +170,20 @@ FEE_TAO = 0.05
 FEE_RAO = 50_000_000
 
 
+def _open_campaign(*, amount_tao: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        status="open",
+        submission_fee={"amount_tao": amount_tao, "recipient": RECIPIENT},
+        submission_fee_history=[
+            {
+                "amount_tao": amount_tao,
+                "recipient": RECIPIENT,
+                "effective_from_block": 0,
+            }
+        ],
+    )
+
+
 def _transfer(*, signer="ck1", dest=RECIPIENT, amount=FEE_RAO) -> dict:
     return {
         "address": signer,
@@ -205,7 +225,9 @@ def _paid_view(
 def inserted(monkeypatch):
     """Open campaign + captured insert kwargs, with no DB behind either."""
     monkeypatch.setattr(
-        watcher, "get_campaign", lambda _cid: SimpleNamespace(status="open")
+        watcher,
+        "get_campaign",
+        lambda _cid: _open_campaign(amount_tao=str(FEE_TAO)),
     )
     monkeypatch.setattr(watcher, "payment_ref_consumed", lambda _b, _t: False)
     seen: dict = {}
@@ -222,14 +244,12 @@ def inserted(monkeypatch):
     return seen
 
 
-@pytest.fixture()
-def fee_on(monkeypatch):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", FEE_TAO)
-    monkeypatch.setattr(config, "PAYMENT_RECIPIENT_ADDRESS", RECIPIENT)
-
-
 def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher,
+        "get_campaign",
+        lambda _cid: _open_campaign(amount_tao="0"),
+    )
     sid = watcher.ingest_commitment(_com())
     assert sid == "sid"
     assert inserted["payment_block"] is None
@@ -250,7 +270,9 @@ def test_ingest_without_fee_needs_no_payment_proof(monkeypatch, inserted):
 def test_new_commitments_reject_public_or_cross_campaign_uploads(
     monkeypatch, inserted, url
 ):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     monkeypatch.setattr(
         watcher, "fetch_patch_bytes", lambda *a, **k: pytest.fail("unauthorized read")
     )
@@ -259,7 +281,9 @@ def test_new_commitments_reject_public_or_cross_campaign_uploads(
 
 
 def test_ingest_rejects_fingerprint_duplicate(monkeypatch, inserted):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     monkeypatch.setattr(
         watcher,
         "insert_submission",
@@ -269,7 +293,9 @@ def test_ingest_rejects_fingerprint_duplicate(monkeypatch, inserted):
 
 
 def test_ingest_caches_raw_hash_mismatch_before_insert(monkeypatch, inserted):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     attempt_limits: list[int | None] = []
 
     def _fetch(_url, *, attempts=None):
@@ -284,7 +310,9 @@ def test_ingest_caches_raw_hash_mismatch_before_insert(monkeypatch, inserted):
 
 
 def test_ingest_retries_fetch_failure_on_later_scan(monkeypatch, inserted):
-    monkeypatch.setattr(config, "SUBMISSION_FEE_TAO", 0)
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
     attempt_limits: list[int | None] = []
 
     def _fetch(_url, *, attempts=None):
@@ -299,6 +327,10 @@ def test_ingest_retries_fetch_failure_on_later_scan(monkeypatch, inserted):
 
 
 def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0")
+    )
+
     def _blocked(**_kwargs):
         raise CampaignHotkeyDisqualified("blocked")
 
@@ -306,16 +338,14 @@ def test_ingest_skips_campaign_disqualified_hotkey(monkeypatch, inserted):
     assert watcher.ingest_commitment(_com()) is None
 
 
-def test_ingest_with_fee_rejects_missing_proof(fee_on, inserted):
+def test_ingest_with_fee_rejects_missing_proof(inserted):
     sid = watcher.ingest_commitment(_com())
     assert sid is None
     assert inserted == {}
 
 
 @pytest.mark.parametrize("proof", [{}, {"payment_block": 900, "payment_tx": 2}])
-def test_exempt_hotkey_skips_fee_without_consuming_proof(
-    monkeypatch, fee_on, inserted, proof
-):
+def test_exempt_hotkey_skips_fee_without_consuming_proof(monkeypatch, inserted, proof):
     monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", {"hk1", "dev2"})
     monkeypatch.setattr(
         watcher, "check_fee_proof", lambda *_: pytest.fail("exempt fee checked")
@@ -327,21 +357,19 @@ def test_exempt_hotkey_skips_fee_without_consuming_proof(
 
 
 @pytest.mark.parametrize("exempt", [{"hk2"}, {"ck1"}, {"HK1"}, {"hk"}])
-def test_fee_exemption_requires_exact_submitting_hotkey(
-    monkeypatch, fee_on, inserted, exempt
-):
+def test_fee_exemption_requires_exact_submitting_hotkey(monkeypatch, inserted, exempt):
     monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", exempt)
     assert watcher.ingest_commitment(_com()) is None
     assert inserted == {}
 
 
-def test_exempt_hotkey_still_requires_patch_integrity(monkeypatch, fee_on, inserted):
+def test_exempt_hotkey_still_requires_patch_integrity(monkeypatch, inserted):
     monkeypatch.setattr(config, "SUBMISSION_FEE_EXEMPT_HOTKEYS", {"hk1"})
     assert watcher.ingest_commitment(_com(), fetcher=lambda _: b"wrong patch") is None
     assert inserted == {}
 
 
-def test_ingest_with_fee_accepts_verified_proof(fee_on, inserted):
+def test_ingest_with_fee_accepts_verified_proof(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=2),
         fetch_block=lambda _b: _paid_view(index=2),
@@ -351,7 +379,7 @@ def test_ingest_with_fee_accepts_verified_proof(fee_on, inserted):
     assert inserted["payment_tx"] == 2
 
 
-def test_ingest_with_fee_rejects_reused_proof(monkeypatch, fee_on, inserted):
+def test_ingest_with_fee_rejects_reused_proof(monkeypatch, inserted):
     monkeypatch.setattr(watcher, "payment_ref_consumed", lambda _b, _t: True)
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
@@ -361,7 +389,7 @@ def test_ingest_with_fee_rejects_reused_proof(monkeypatch, fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_payment_from_another_miner(fee_on, inserted):
+def test_ingest_with_fee_rejects_payment_from_another_miner(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(signer="ck-of-someone-else"),
@@ -370,7 +398,7 @@ def test_ingest_with_fee_rejects_payment_from_another_miner(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_underpayment(fee_on, inserted):
+def test_ingest_with_fee_rejects_underpayment(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(amount=FEE_RAO - 1),
@@ -379,7 +407,7 @@ def test_ingest_with_fee_rejects_underpayment(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_wrong_recipient(fee_on, inserted):
+def test_ingest_with_fee_rejects_wrong_recipient(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(dest="5SomeoneElse"),
@@ -388,7 +416,7 @@ def test_ingest_with_fee_rejects_wrong_recipient(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_failed_transfer(fee_on, inserted):
+def test_ingest_with_fee_rejects_failed_transfer(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: _paid_view(succeeded=False),
@@ -397,7 +425,7 @@ def test_ingest_with_fee_rejects_failed_transfer(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_unreadable_payment_block(fee_on, inserted):
+def test_ingest_with_fee_rejects_unreadable_payment_block(inserted):
     sid = watcher.ingest_commitment(
         _com(payment_block=900, payment_tx=0),
         fetch_block=lambda _b: None,
@@ -406,8 +434,58 @@ def test_ingest_with_fee_rejects_unreadable_payment_block(fee_on, inserted):
     assert inserted == {}
 
 
-def test_ingest_with_fee_rejects_when_chain_is_unreachable(fee_on, inserted):
+def test_ingest_with_fee_rejects_when_chain_is_unreachable(inserted):
     # No fetcher wired means the proof cannot be checked, so nothing proceeds.
     sid = watcher.ingest_commitment(_com(payment_block=900, payment_tx=0))
     assert sid is None
     assert inserted == {}
+
+
+@pytest.mark.parametrize(
+    "payment_block,amount_rao,accepted",
+    [
+        (899, FEE_RAO, True),
+        (900, FEE_RAO, False),
+        (900, 150_000_000, True),
+    ],
+)
+def test_fee_change_mid_campaign_uses_payment_block(
+    monkeypatch, inserted, payment_block, amount_rao, accepted
+):
+    campaign = _open_campaign(amount_tao=str(FEE_TAO))
+    campaign.submission_fee_history.append(
+        {
+            "amount_tao": "0.15",
+            "recipient": RECIPIENT,
+            "effective_from_block": 900,
+        }
+    )
+    monkeypatch.setattr(watcher, "get_campaign", lambda _cid: campaign)
+    result = watcher.ingest_commitment(
+        _com(payment_block=payment_block, payment_tx=0),
+        fetch_block=lambda _b: _paid_view(amount=amount_rao),
+    )
+    assert (result == "sid") is accepted
+
+
+def test_unconsumed_reused_payment_must_meet_target_campaign_fee(monkeypatch, inserted):
+    monkeypatch.setattr(
+        watcher, "get_campaign", lambda _cid: _open_campaign(amount_tao="0.15")
+    )
+    assert (
+        watcher.ingest_commitment(
+            _com(payment_block=900, payment_tx=0),
+            fetch_block=lambda _b: _paid_view(),
+        )
+        is None
+    )
+    assert not inserted
+
+
+def test_payment_after_commitment_is_rejected(inserted):
+    result = watcher.ingest_commitment(
+        _com(payment_block=1001, payment_tx=0),
+        fetch_block=lambda _b: _paid_view(),
+    )
+    assert result is None
+    assert not inserted

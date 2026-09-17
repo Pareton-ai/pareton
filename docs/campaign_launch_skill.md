@@ -1,7 +1,7 @@
 ---
 name: campaign-launch
 description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with pinned emissions."
-version: 3.1.0
+version: 3.2.0
 category: ops
 metadata:
   hermes:
@@ -327,6 +327,27 @@ configuration before opening, using the normal deployment process.
 
 ## 4. Open the Qwen campaign
 
+### Initial submission fee
+
+Before seeding, verify the validator has the fee-history schema and code from
+PR #126. For an existing Neon database, apply the hand-run migration using the
+[fee rollout instructions](campaign-fees.md); deployment alone does not migrate.
+The migration's closed/open backfill policy applies only to existing rows.
+
+Choose the initial fee for this campaign explicitly. Pass
+`--submission-fee-tao DECIMAL` to `python -m campaign.seed`; the SGLang helper
+requires it as its second argument. The CLI option is required, with no default
+or environment fallback. Seed rejects fractional RAO and a
+configured recipient that differs from the recipient pinned in the miner before
+writing the campaign or its profile. It inserts the initial block-zero fee with
+the campaign, so an open campaign has the intended fee immediately.
+
+Set the intended initial fee during seeding. Use `campaign.set_fee` only for later
+changes; it publishes a new fee immediately without re-seeding the campaign.
+Fee amounts and history are excluded from `manifest_hash`; never re-seed or
+rewrite a live campaign's signed terms to change its fee.
+
+
 The launch helper targets four RTX 5090 GPUs, `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`, context length
 262144, 32 requests spaced 2 ms apart and up to 5120 output tokens. Sampler
 version 3 uses complete conversation prefixes across four groups with eight
@@ -464,7 +485,8 @@ expired resources with matching names, even when static SSH is selected.
 After successful image and GPU checks, run this once with the published engine ref:
 
 ```bash
-bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF"
+INITIAL_FEE_TAO=0.15
+bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO"
 ```
 
 It uses `--status open --emission-start-weight 0.20 --emission-floor-weight 0 --force`.
@@ -479,6 +501,64 @@ rows, so that sequence does not promote a draft.
 
 Verify the returned ID through `GET /v1/campaigns/<id>`. Check the source and model
 revisions, both image digests, engine, patch surface, sampling rule, correctness
-bars, status, the 10% starting emission rule and customer signoff. Keep the
+bars, status, the 20% starting emission rule, initial fee history and customer signoff. Keep the
 existing campaign and its manifest unchanged. Do not claim the new campaign is live until that readback
 succeeds and the deployed worker supports its engine request fields.
+
+
+Use the exact campaign UUID printed by seed for fee readback. With the existing
+validator environment loaded and its virtualenv active:
+
+```bash
+read -r -p 'New campaign UUID from seed output: ' CAMPAIGN_ID
+export CAMPAIGN_ID
+python - <<'PYTHON'
+import os
+from campaign.fees import TRUSTED_PAYMENT_RECIPIENT
+from campaign.store import get_campaign
+campaign = get_campaign(os.environ["CAMPAIGN_ID"])
+if campaign is None:
+    raise SystemExit("Campaign not found")
+print(campaign.submission_fee_history)
+assert campaign.submission_fee_history[0]["effective_from_block"] == 0
+assert campaign.submission_fee_history[0]["recipient"] == TRUSTED_PAYMENT_RECIPIENT
+PYTHON
+INITIAL_FEE_TAO=$(python - "$INITIAL_FEE_TAO" <<'PYTHON'
+import sys
+from campaign.fees import TRUSTED_PAYMENT_RECIPIENT, validate_submission_fee
+print(validate_submission_fee({
+    "amount_tao": sys.argv[1], "recipient": TRUSTED_PAYMENT_RECIPIENT,
+})["amount_tao"])
+PYTHON
+)
+curl -fsS "https://api.pareton.ai/v1/campaigns/$CAMPAIGN_ID" \
+  | jq -e --arg amount "$INITIAL_FEE_TAO" \
+    '.submission_fee.amount_tao == $amount and
+     .submission_fee.recipient == "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K"'
+```
+
+Use the canonical decimal printed by seed (for example, `0.1500` becomes `0.15`)
+for the API comparison. Verify the fee on the campaign page as well. Announce the
+fee and tell scripted submitters to add `--yes`, optionally with
+`--max-fee-tao 0.15`. Miners do not set fee environment variables.
+
+### Subsequent fee changes
+
+Use `campaign.set_fee` on the validator for an existing campaign, including a
+draft that already has an initial fee. Do not run the seed helper again: it
+creates another campaign. Fee changes take effect at the chain block observed by
+the command; no activation block argument or future scheduling is supported.
+
+```bash
+python -m campaign.set_fee --campaign-id "$CAMPAIGN_ID" \
+  --amount-tao 0.20
+curl -fsS "https://api.pareton.ai/v1/campaigns/$CAMPAIGN_ID" \
+  | jq '{submission_fee, submission_fee_history}'
+```
+
+Confirm that the API quotes the newly published fee. The command needs Subtensor
+access once per update to record the change's block; campaign API reads use only
+Neon. Earlier payments retain the fee from their payment block. A second change
+in the same block is rejected; retry after the chain advances. Changes preserve
+existing history, manifest hashes and signoffs. A transfer included after a fee
+increase must meet the increased fee, even if the miner saw an earlier quote.

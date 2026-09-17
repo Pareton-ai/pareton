@@ -50,7 +50,7 @@ def test_default_seed_pins_hf_rows_and_stores_no_trace(
     monkeypatch: pytest.MonkeyPatch,
 ):
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
     assert captured["inserts"] == 1
     m = captured["manifest"]
     assert m.workload_trace_url is None
@@ -85,6 +85,7 @@ def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeyp
     monkeypatch.setattr(seed, "preflight_trajectory_campaign", unavailable)
     with pytest.raises(SamplerError, match="coverage unavailable"):
         seed_synthetic_campaign(
+            submission_fee_tao="0.15",
             allow_placeholders=True,
             status="open",
             sampling_rule=rule,
@@ -112,6 +113,8 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
     assert (
         main(
             [
+                "--submission-fee-tao",
+                "0.15",
                 "--engine",
                 "sglang",
                 "--baseline-commit",
@@ -197,7 +200,9 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
 def test_sglang_requires_source_pin_before_writing(monkeypatch):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="explicit --baseline-commit"):
-        seed_synthetic_campaign(engine="sglang", allow_placeholders=True)
+        seed_synthetic_campaign(
+            submission_fee_tao="0.15", engine="sglang", allow_placeholders=True
+        )
     assert captured["profile_data"] is None
 
 
@@ -225,10 +230,11 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3"',
                 "capture",
                 str(helper),
                 engine_ref,
+                "0.23",
             ],
             cwd=helper.parent.parent,
         )
@@ -258,6 +264,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     )
     assert captured["inserts"] == 1
     assert manifest.status == "open"
+    assert manifest.submission_fee["amount_tao"] == "0.23"
     assert manifest.emission_rule == {
         "name": "linear_decay",
         "start_weight": 0.2,
@@ -359,6 +366,8 @@ def test_seed_cli_pins_path_overrides(monkeypatch):
     assert (
         main(
             [
+                "--submission-fee-tao",
+                "0.15",
                 "--allow-placeholders",
                 "--allowed-path",
                 "vllm/model_executor/**",
@@ -375,6 +384,7 @@ def test_seed_cli_pins_path_overrides(monkeypatch):
 def test_bench_flags_shape_correctness(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(
+        submission_fee_tao="0.15",
         allow_placeholders=True,
         bench_quantization="fp8",
         bench_correctness_num_prompts=16,
@@ -391,7 +401,7 @@ def test_bench_flags_shape_correctness(monkeypatch: pytest.MonkeyPatch):
 def test_correctness_thresholds_are_always_pinned(monkeypatch: pytest.MonkeyPatch):
     """The shared scorer's bars live in the manifest, never in the pod's env."""
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
     bench = captured["manifest"].bench
     assert bench["model"]["quantization"] is None
     assert set(bench["correctness"]["thresholds"]) == {
@@ -464,6 +474,7 @@ def test_bad_sampling_rule_raises_before_insert(monkeypatch: pytest.MonkeyPatch)
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="unsupported sampling_rule.type"):
         seed_synthetic_campaign(
+            submission_fee_tao="0.15",
             allow_placeholders=True,
             sampling_rule={"type": "fixed_trace"},
         )
@@ -485,6 +496,7 @@ def test_placeholder_digest_refused(
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="placeholder digests refused"):
         seed_synthetic_campaign(
+            submission_fee_tao="0.15",
             base_image_digest=base,
             baseline_engine_image_digest=engine,
         )
@@ -493,7 +505,7 @@ def test_placeholder_digest_refused(
 
 def test_main_allow_placeholders_smoke(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
-    rc = main(["--allow-placeholders"])
+    rc = main(["--submission-fee-tao", "0.15", "--allow-placeholders"])
     assert rc == 0
     assert captured["inserts"] == 1
     assert captured["manifest"].sampling_rule["type"] == "hf_rows"
@@ -504,6 +516,8 @@ def test_main_sampling_rule_flag_wired(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     rc = main(
         [
+            "--submission-fee-tao",
+            "0.15",
             "--base-image-digest",
             REAL_BASE,
             "--baseline-engine-image-digest",
@@ -523,7 +537,7 @@ def test_seed_pins_the_priority_metric_and_threshold_text(
     monkeypatch: pytest.MonkeyPatch,
 ):
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
     m = captured["manifest"]
     assert m.priority_metric == "gpu_hours"
     assert "10%" in m.success_threshold
@@ -533,20 +547,25 @@ def test_seed_defaults_to_the_median_e2e_speedup_rule(
     monkeypatch: pytest.MonkeyPatch,
 ):
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
     assert captured["manifest"].scoring_rule == {"name": "median_e2e_speedup"}
 
 
 def test_seed_rejects_an_unknown_scoring_rule(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="scoring_rule.name must be one of"):
-        seed_synthetic_campaign(allow_placeholders=True, scoring_rule={"name": "vibes"})
+        seed_synthetic_campaign(
+            submission_fee_tao="0.15",
+            allow_placeholders=True,
+            scoring_rule={"name": "vibes"},
+        )
     assert captured["inserts"] == 0
 
 
 def test_seed_profile_uses_cli_metrics(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(
+        submission_fee_tao="0.15",
         allow_placeholders=True,
         priority_metric="latency",
         success_threshold=">=5% p99 ITL at SLA",
@@ -559,7 +578,7 @@ def test_seed_profile_uses_cli_metrics(monkeypatch: pytest.MonkeyPatch):
 
 def test_seed_defaults_to_draft_single_hopper_sku(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
     m = captured["manifest"]
     assert m.status == "draft"
     assert m.gpu_skus == ["H200-SXM-141GB"]
@@ -569,6 +588,7 @@ def test_seed_defaults_to_draft_single_hopper_sku(monkeypatch: pytest.MonkeyPatc
 def test_seed_gpu_skus_and_status_override(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     seed_synthetic_campaign(
+        submission_fee_tao="0.15",
         allow_placeholders=True,
         gpu_skus=["H200-SXM-141GB", "B200"],
         status="draft",
@@ -582,14 +602,18 @@ def test_seed_gpu_skus_and_status_override(monkeypatch: pytest.MonkeyPatch):
 def test_seed_rejects_empty_gpu_skus(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="gpu_skus must contain"):
-        seed_synthetic_campaign(allow_placeholders=True, gpu_skus=["  ", ""])
+        seed_synthetic_campaign(
+            submission_fee_tao="0.15", allow_placeholders=True, gpu_skus=["  ", ""]
+        )
     assert captured["inserts"] == 0
 
 
 def test_seed_rejects_invalid_status(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="status must be one of"):
-        seed_synthetic_campaign(allow_placeholders=True, status="live")
+        seed_synthetic_campaign(
+            submission_fee_tao="0.15", allow_placeholders=True, status="live"
+        )
     assert captured["inserts"] == 0
 
 
@@ -600,7 +624,9 @@ def test_draft_seed_ignores_existing_open(monkeypatch: pytest.MonkeyPatch):
         campaign_id = "already-open"
 
     monkeypatch.setattr(seed, "list_campaigns", lambda status="open": [_Existing()])
-    seed_synthetic_campaign(allow_placeholders=True, status="draft")
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15", allow_placeholders=True, status="draft"
+    )
     assert captured["inserts"] == 1
     assert captured["manifest"].status == "draft"
 
@@ -612,7 +638,9 @@ def test_open_seed_short_circuits_without_force(monkeypatch: pytest.MonkeyPatch)
         campaign_id = "already-open"
 
     monkeypatch.setattr(seed, "list_campaigns", lambda status="open": [_Existing()])
-    cid = seed_synthetic_campaign(allow_placeholders=True, status="open")
+    cid = seed_synthetic_campaign(
+        submission_fee_tao="0.15", allow_placeholders=True, status="open"
+    )
     assert cid == "already-open"
     assert captured["inserts"] == 0
 
@@ -621,6 +649,8 @@ def test_main_gpu_skus_status_wired(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     rc = main(
         [
+            "--submission-fee-tao",
+            "0.15",
             "--allow-placeholders",
             "--gpu-skus",
             "H200-SXM-141GB",
@@ -635,7 +665,9 @@ def test_main_gpu_skus_status_wired(monkeypatch: pytest.MonkeyPatch):
 
 def test_no_bench_seed_omits_bench(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True, no_bench=True)
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15", allow_placeholders=True, no_bench=True
+    )
     m = captured["manifest"]
     assert m.bench is None
     assert m.to_public_dict()["bench"] is None
@@ -643,7 +675,7 @@ def test_no_bench_seed_omits_bench(monkeypatch: pytest.MonkeyPatch):
 
 def test_main_no_bench_wired(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
-    rc = main(["--allow-placeholders", "--no-bench"])
+    rc = main(["--submission-fee-tao", "0.15", "--allow-placeholders", "--no-bench"])
     assert rc == 0
     assert captured["manifest"].bench is None
 
@@ -651,7 +683,7 @@ def test_main_no_bench_wired(monkeypatch: pytest.MonkeyPatch):
 def test_seed_pins_the_emission_rule_from_config(monkeypatch: pytest.MonkeyPatch):
     """Every seeded campaign carries a pay schedule, signed into the hash."""
     captured = _patch_store(monkeypatch)
-    seed_synthetic_campaign(allow_placeholders=True)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
     m = captured["manifest"]
     assert m.emission_rule == {
         "name": "linear_decay",
@@ -662,13 +694,26 @@ def test_seed_pins_the_emission_rule_from_config(monkeypatch: pytest.MonkeyPatch
     assert m.to_public_dict()["emission_rule"] == m.emission_rule
 
 
+def test_seed_stores_submission_fee_terms(monkeypatch: pytest.MonkeyPatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(submission_fee_tao="0.15", allow_placeholders=True)
+    fee = captured["manifest"].submission_fee
+    assert fee == {
+        "amount_tao": "0.15",
+        "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
+    }
+    assert captured["manifest"].to_public_dict()["submission_fee"] == fee
+
+
 def test_seed_rejects_an_emission_rule_that_over_commits_the_subnet(
     monkeypatch: pytest.MonkeyPatch,
 ):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="emission_rule.start_weight must be in"):
         seed_synthetic_campaign(
-            allow_placeholders=True, emission_rule={"start_weight": 1.5}
+            submission_fee_tao="0.15",
+            allow_placeholders=True,
+            emission_rule={"start_weight": 1.5},
         )
     assert captured["inserts"] == 0
 
@@ -686,6 +731,8 @@ def test_main_emission_flags_wired(monkeypatch: pytest.MonkeyPatch):
     captured = _patch_store(monkeypatch)
     rc = main(
         [
+            "--submission-fee-tao",
+            "0.15",
             "--allow-placeholders",
             "--emission-start-weight",
             "0.25",
@@ -699,3 +746,51 @@ def test_main_emission_flags_wired(monkeypatch: pytest.MonkeyPatch):
     assert rule["decay_blocks"] == 100800
     # An override fills one term; the rest still come from the seed defaults.
     assert rule["floor_weight"] == config.EMISSION_FLOOR_WEIGHT
+
+
+def test_explicit_seed_fee_is_stored_exactly(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    assert main(["--allow-placeholders", "--submission-fee-tao", "0.120000001"]) == 0
+    fee = captured["manifest"].to_public_dict()["submission_fee_history"]
+    assert fee[0]["amount_tao"] == "0.120000001"
+    assert fee[0]["effective_from_block"] == 0
+
+
+@pytest.mark.parametrize("amount", ["", "nan", "-1", "0.0000000001"])
+def test_seed_rejects_invalid_explicit_fee_before_database_writes(monkeypatch, amount):
+    captured = _patch_store(monkeypatch)
+    assert main(["--allow-placeholders", "--submission-fee-tao", amount]) == 1
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
+def test_seed_rejects_recipient_the_miner_would_refuse(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(config, "PAYMENT_RECIPIENT_ADDRESS", "5Unexpected")
+    assert main(["--allow-placeholders", "--submission-fee-tao", "0.15"]) == 1
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
+def test_launch_helper_requires_explicit_initial_fee():
+    helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
+    result = subprocess.run(
+        ["bash", str(helper), "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "INITIAL_FEE_TAO" in result.stderr
+
+
+def test_seed_requires_fee_even_if_removed_environment_variable_is_set(
+    monkeypatch, capsys
+):
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setenv("PARETON_SUBMISSION_FEE_TAO", "0.15")
+    with pytest.raises(SystemExit) as exc:
+        main(["--allow-placeholders"])
+    assert exc.value.code == 2
+    assert "--submission-fee-tao" in capsys.readouterr().err
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None

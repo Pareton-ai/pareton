@@ -26,3 +26,10 @@ def test_submission_fee_exempt_hotkeys(monkeypatch, raw, expected):
         monkeypatch.setenv(key, raw)
     settings = runpy.run_path(str(config.REPO_ROOT / "config.py"))
     assert settings["SUBMISSION_FEE_EXEMPT_HOTKEYS"] == expected
+
+
+def test_removed_fee_environment_has_no_config_setting(monkeypatch):
+    monkeypatch.setenv("PARETON_SUBMISSION_FEE_TAO", "not-a-fee")
+    settings = runpy.run_path(str(config.REPO_ROOT / "config.py"))
+    assert "SUBMISSION_FEE_TAO" not in settings
+    assert "seed_submission_fee_tao" not in settings

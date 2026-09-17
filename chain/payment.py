@@ -11,12 +11,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-RAO_PER_TAO = 1_000_000_000
 # bt.Transfer wraps these; both move free balance to `dest`.
 TRANSFER_FUNCTIONS = frozenset({"transfer_keep_alive", "transfer_allow_death"})
 
@@ -40,11 +38,6 @@ class BlockPaymentView:
 
     extrinsics: list[Any]
     events: list[Any]
-
-
-def fee_rao(fee_tao: float | str) -> int:
-    """Fee as integer RAO. Amounts are only ever compared as integers."""
-    return int(Decimal(str(fee_tao)) * RAO_PER_TAO)
 
 
 def _ss58(value: Any) -> str | None:

@@ -214,7 +214,17 @@ def test_miner_reports_api_errors_without_exposing_put_authorization(
                 request.full_url, status, "Forbidden", {}, io.BytesIO(body.encode())
             )
         if method == "GET":
-            return io.BytesIO(json.dumps({"baseline_commit": "a" * 40}).encode())
+            return io.BytesIO(
+                json.dumps(
+                    {
+                        "baseline_commit": "a" * 40,
+                        "submission_fee": {
+                            "amount_tao": "0.15",
+                            "recipient": commit_patch.TRUSTED_PAYMENT_RECIPIENT,
+                        },
+                    }
+                ).encode()
+            )
         if method == "POST":
             return io.BytesIO(
                 json.dumps(
@@ -230,7 +240,15 @@ def test_miner_reports_api_errors_without_exposing_put_authorization(
     monkeypatch.setattr(commit_patch.urllib.request, "urlopen", urlopen)
     assert (
         commit_patch.main(
-            ["--campaign-id", CID, "--patch", str(patch), "--wallet-name", "test"]
+            [
+                "--campaign-id",
+                CID,
+                "--patch",
+                str(patch),
+                "--wallet-name",
+                "test",
+                "--yes",
+            ]
         )
         == 1
     )

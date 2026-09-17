@@ -13,7 +13,6 @@ from chain.payment import (
     PaymentCheck,
     extract_transfer,
     extrinsic_succeeded,
-    fee_rao,
     fetch_block_payment_view,
     verify_payment,
 )
@@ -85,15 +84,6 @@ def _check(
     return verify_payment(
         extrinsics=extrinsics, events=events, extrinsic_index=index, **kwargs
     )
-
-
-@pytest.mark.parametrize(
-    ("fee_tao", "expected"),
-    [("0.05", 50_000_000), (0.05, 50_000_000), (0.1, 100_000_000), (1, 10**9)],
-)
-def test_fee_rao_is_exact_integer(fee_tao, expected):
-    # Amounts are compared in integer RAO, never as float TAO.
-    assert fee_rao(fee_tao) == expected
 
 
 def test_extract_transfer_reads_signer_dest_amount():

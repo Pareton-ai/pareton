@@ -45,6 +45,25 @@ def test_campaigns_cache_control(client: TestClient):
     )
 
 
+def test_campaign_routes_expose_submission_fee(monkeypatch, client):
+    from api import server
+
+    fee = {"amount_tao": "0.0005", "recipient": "5Recipient"}
+    campaign = SimpleNamespace(
+        submission_fee_history=[{**fee, "effective_from_block": 0}],
+        to_public_dict=lambda: {
+            "campaign_id": "c1",
+            "submission_fee": fee,
+            "submission_fee_history": [{**fee, "effective_from_block": 0}],
+        },
+    )
+    monkeypatch.setattr(server, "list_campaigns", lambda status=None: [campaign])
+    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
+
+    assert client.get("/v1/campaigns").json()["campaigns"][0]["submission_fee"] == fee
+    assert client.get("/v1/campaigns/c1").json()["submission_fee"] == fee
+
+
 def test_campaign_detail_db_unavailable_is_503(monkeypatch, client: TestClient):
     from api import server
     from db.exceptions import DatabaseUnavailable
@@ -1379,3 +1398,31 @@ def test_weights_all_zero_row_is_404_not_pay_nobody(monkeypatch, client: TestCli
     assert "uids" not in resp.json()
     assert "weights" not in resp.json()
     assert resp.headers.get("Cache-Control") == "no-store"
+
+
+@pytest.mark.parametrize("amount", ["0.15", "0.01", "0"])
+def test_campaign_fee_routes_quote_latest_fee_without_chain(
+    monkeypatch, client, amount
+):
+    import bittensor as bt
+    from api import server
+
+    history = [
+        {"amount_tao": "0.05", "recipient": "5Recipient", "effective_from_block": 0},
+        {"amount_tao": amount, "recipient": "5Recipient", "effective_from_block": 1000},
+    ]
+    campaign = SimpleNamespace(
+        submission_fee_history=history,
+        to_public_dict=lambda: {"campaign_id": "c1", "submission_fee_history": history},
+    )
+    monkeypatch.setattr(server, "list_campaigns", lambda status=None: [campaign])
+    monkeypatch.setattr(server, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(bt, "Subtensor", lambda **_kw: pytest.fail("API chain lookup"))
+    for _ in range(3):
+        listing = client.get("/v1/campaigns")
+        detail = client.get("/v1/campaigns/c1")
+        assert listing.status_code == detail.status_code == 200
+        for result in (listing.json()["campaigns"][0], detail.json()):
+            assert result["submission_fee"]["amount_tao"] == amount
+            assert result["submission_fee_history"] == history
+            assert "submission_fee_at_block" not in result
