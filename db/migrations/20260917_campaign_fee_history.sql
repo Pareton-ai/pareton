@@ -1,8 +1,8 @@
 -- Run BEFORE deploying this branch. Does not change manifest hashes or signoffs.
--- Backfills all existing campaigns at the current 0.15 TAO fee from block zero.
--- For a campaign with older unpaid commitments to preserve, replace its genesis
--- amount and append the historical changes with their actual effective blocks
--- BEFORE running this migration. Do not guess historical activation heights.
+-- Initial migration policy only: closed campaigns receive 0.1 TAO; the open
+-- RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead campaign receives 0.15 TAO.
+-- These genesis entries start at block zero; they are not reconstructed prices.
+-- Existing histories are preserved. Unmapped campaigns abort the transaction.
 BEGIN;
 LOCK TABLE campaigns IN SHARE ROW EXCLUSIVE MODE;
 -- Fee amounts are decimal strings, never JSON floating-point numbers. NUMERIC
@@ -64,11 +64,26 @@ END;
 $$;
 
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS submission_fee_history JSONB;
-UPDATE campaigns SET submission_fee_history = '[{
-  "amount_tao": "0.15",
-  "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
-  "effective_from_block": 0
-}]'::jsonb WHERE submission_fee_history IS NULL;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM campaigns
+    WHERE submission_fee_history IS NULL
+      AND NOT (
+        status = 'closed'
+        OR (status = 'open' AND COALESCE(bench #>> '{model,hf_repo}', '') =
+            'RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead')
+      )
+  ) THEN
+    RAISE EXCEPTION 'initial fee backfill only covers closed campaigns and the open RadixArk campaign; explicitly configure other campaigns first';
+  END IF;
+END;
+$$;
+UPDATE campaigns SET submission_fee_history = jsonb_build_array(jsonb_build_object(
+  'amount_tao', CASE WHEN status = 'closed' THEN '0.1' ELSE '0.15' END,
+  'recipient', '5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K',
+  'effective_from_block', 0
+)) WHERE submission_fee_history IS NULL;
 ALTER TABLE campaigns ALTER COLUMN submission_fee_history SET NOT NULL;
 ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_submission_fee_history_check;
 ALTER TABLE campaigns ADD CONSTRAINT campaigns_submission_fee_history_check

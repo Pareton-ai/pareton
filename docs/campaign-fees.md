@@ -34,16 +34,18 @@ psql "$PARETON_DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f db/migrations/20260917_campaign_fee_history.sql
 ```
 
-The migration backfills existing campaigns, including the live SGLang Qwen3.8
-campaign, at **0.15 TAO** with the known recipient. It never changes manifest
-hashes or signoffs. It is safe to rerun and leaves existing histories intact.
-The old code ignores the new column, so migrating before merge is compatible.
+The initial migration assigns **0.1 TAO to closed campaigns** and **0.15 TAO to
+the open `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` campaign**, matched by
+`bench.model.hf_repo`. These are explicit initial backfill amounts, effective
+from block zero, rather than reconstructed historical prices. This policy
+applies only to the migration; future seeds and fee changes keep their existing
+behavior.
 
-The genesis backfill assumes 0.15 TAO for all historical blocks. Before rollout,
-check for unconsumed payments that must retain older global fees. If any exist,
-backfill their campaigns with the actual historical amounts and activation
-blocks instead. Do this in the migration transaction before enforcing immutable
-history; do not invent block boundaries or rewrite history after launch.
+Existing fee histories, manifest hashes, and signoffs remain unchanged, including
+on reruns. If a campaign without fee history is draft or an open campaign for
+another model, the migration aborts the transaction instead of guessing a fee.
+Configure its initial history explicitly before rerunning. The old code ignores
+the new column, so migrating before merge is compatible.
 
 Save and compare `id`, `manifest_hash`, and `customer_signoff` before and after the
 migration. Verify the actual live campaign ID and fee rather than using the old
