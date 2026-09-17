@@ -85,9 +85,8 @@ bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" 0.15
 
 The initial fee is inserted with the campaign at block zero. Do not schedule it
 after opening with `campaign.set_fee`, which only changes a fee at a future block.
-`--submission-fee-tao` overrides `PARETON_SUBMISSION_FEE_TAO`, which remains a
-legacy seed-only input (default 0.15). It is never
-read by the miner or watcher to determine a runtime payment. The seed recipient
+`--submission-fee-tao` is required. There is no environment fallback or default
+amount; remove the obsolete global fee variable from the validator environment. The seed recipient
 must match the recipient pinned in `campaign/fees.py` for the public CLI.
 
 ## Miner announcement

@@ -1,7 +1,7 @@
 """Seed a Pareton-owned synthetic campaign for Stage 0.
 
 Usage:
-    PARETON_DATABASE_URL=... python -m campaign.seed
+    PARETON_DATABASE_URL=... python -m campaign.seed --submission-fee-tao 0.15
 """
 
 from __future__ import annotations
@@ -256,7 +256,7 @@ def seed_synthetic_campaign(
     gpu_skus: list[str] | None = None,
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
-    submission_fee_tao: str | None = None,
+    submission_fee_tao: str,
     engine: str | None = None,
     allowed_paths: list[str] | None = None,
     denied_paths: list[str] | None = None,
@@ -343,11 +343,7 @@ def seed_synthetic_campaign(
     emission = _emission_rule(emission_rule)
     fee = validate_submission_fee(
         {
-            "amount_tao": (
-                config.seed_submission_fee_tao()
-                if submission_fee_tao is None
-                else submission_fee_tao
-            ),
+            "amount_tao": submission_fee_tao,
             "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
         }
     )
@@ -587,7 +583,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--submission-fee-tao",
-        help="Initial campaign fee as an exact TAO decimal; overrides the legacy seed environment input",
+        required=True,
+        help="Required initial campaign fee as an exact TAO decimal (no environment default)",
     )
     p.add_argument(
         "--status",

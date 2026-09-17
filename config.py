@@ -335,11 +335,6 @@ GPU_PROVIDER: str = GPU_PROVIDERS[0] if GPU_PROVIDERS else "lium"
 GPU_PROVIDER_FALLBACKS: list[str] = list(GPU_PROVIDERS[1:])
 
 
-def seed_submission_fee_tao() -> str:
-    """Legacy environment input, read only when seeding a campaign."""
-    return os.environ.get("PARETON_SUBMISSION_FEE_TAO", "0.15").strip()
-
-
 # Validator-controlled, exact SS58 hotkey matches. Empty means everyone pays.
 SUBMISSION_FEE_EXEMPT_HOTKEYS: frozenset[str] = frozenset(
     hotkey.strip()

@@ -336,8 +336,8 @@ The migration's closed/open backfill policy applies only to existing rows.
 
 Choose the initial fee for this campaign explicitly. Pass
 `--submission-fee-tao DECIMAL` to `python -m campaign.seed`; the SGLang helper
-requires it as its second argument. The option overrides any legacy
-`PARETON_SUBMISSION_FEE_TAO` seed input. Seed rejects fractional RAO and a
+requires it as its second argument. The CLI option is required, with no default
+or environment fallback. Seed rejects fractional RAO and a
 configured recipient that differs from the recipient pinned in the miner before
 writing the campaign or its profile. It inserts the initial block-zero fee with
 the campaign, so an open campaign has the intended fee immediately.
