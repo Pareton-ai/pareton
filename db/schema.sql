@@ -3,7 +3,7 @@
 -- rounds, round entries, and leaders.
 -- Hand-run production deltas live in db/migrations; deploy does not migrate.
 -- Apply wholesale to a fresh database: psql "$PARETON_DATABASE_URL" -f db/schema.sql
--- Schema changes pre-launch: edit this file and apply the delta by hand.
+-- Existing databases: run the required db/migrations deltas before reapplying.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -15,8 +15,19 @@ CREATE TABLE IF NOT EXISTS profiles (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Keep the fee schema upgrade atomic for existing campaigns.
+-- Install fee schema objects atomically. Existing databases must be migrated first.
 BEGIN;
+DO $$
+BEGIN
+  IF to_regclass('campaigns') IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('campaigns')
+      AND attname = 'submission_fee_history' AND NOT attisdropped
+  ) THEN
+    RAISE EXCEPTION 'run db/migrations/20260917_campaign_fee_history.sql before reapplying db/schema.sql';
+  END IF;
+END;
+$$;
 
 -- Fee amounts are decimal strings, never JSON floating-point numbers. NUMERIC
 -- has no scale here: a NUMERIC(p,9) cast would silently round fractional RAO.
@@ -130,36 +141,6 @@ CREATE TABLE IF NOT EXISTS campaigns (
   UNIQUE (manifest_hash)
 );
 
--- CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
--- Use the same initial upgrade as the hand-run migration: closed = 0.1 TAO,
--- open RadixArk = 0.15 TAO, and preserve every existing history. Unsupported
--- unconfigured campaigns abort rather than leaving unreadable NULL fees.
-LOCK TABLE campaigns IN SHARE ROW EXCLUSIVE MODE;
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS submission_fee_history JSONB;
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM campaigns
-    WHERE submission_fee_history IS NULL
-      AND NOT (
-        status = 'closed'
-        OR (status = 'open' AND COALESCE(bench #>> '{model,hf_repo}', '') =
-            'RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead')
-      )
-  ) THEN
-    RAISE EXCEPTION 'initial fee backfill only covers closed campaigns and the open RadixArk campaign; explicitly configure other campaigns first';
-  END IF;
-END;
-$$;
-UPDATE campaigns SET submission_fee_history = jsonb_build_array(jsonb_build_object(
-  'amount_tao', CASE WHEN status = 'closed' THEN '0.1' ELSE '0.15' END,
-  'recipient', '5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K',
-  'effective_from_block', 0
-)) WHERE submission_fee_history IS NULL;
-ALTER TABLE campaigns ALTER COLUMN submission_fee_history SET NOT NULL;
-ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_submission_fee_history_check;
-ALTER TABLE campaigns ADD CONSTRAINT campaigns_submission_fee_history_check
-  CHECK (valid_campaign_fee_history(submission_fee_history));
 DROP TRIGGER IF EXISTS campaigns_fee_history_append_only ON campaigns;
 CREATE TRIGGER campaigns_fee_history_append_only
 BEFORE UPDATE OF submission_fee_history ON campaigns
