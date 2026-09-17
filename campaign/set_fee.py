@@ -22,7 +22,7 @@ def set_fee(campaign_id: str, amount_tao: str, *, current_block: int) -> dict:
     fee = validate_submission_fee(
         {"amount_tao": amount_tao, "recipient": TRUSTED_PAYMENT_RECIPIENT}
     )
-    entry = {**fee, "effective_from_block": current_block}
+    entry = {**fee, "effective_from_block": current_block + 1}
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
