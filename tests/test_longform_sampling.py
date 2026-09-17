@@ -1,4 +1,4 @@
-"""LongWriter input isolation, replay, qualification and natural output contracts."""
+"""LongWriter history tiers, replay, qualification and natural output contracts."""
 
 import copy
 import json
@@ -40,7 +40,7 @@ def rule(**kw):
         "n_rows": 40,
         "n_prompts": 4,
         "max_tokens": 10,
-        "min_reference_tokens": 8,
+        "followup_prompt": "another",
         "min_output_tokens": 6,
         "enable_thinking": False,
         "request_interval_ms": 2,
@@ -64,7 +64,9 @@ def formatter(workload_rule=None):
     )
 
 
-def row(i, references=8):
+def row(i, references=None):
+    if references is None:
+        references = (1900, 3800, 7600, 15200)[i % 4] - 6
     return {
         "messages": [
             {"role": "user", "content": f"prompt{i}"},
@@ -81,7 +83,7 @@ def fields():
             "model": {
                 "hf_repo": "test/model",
                 "hf_revision": "b" * 40,
-                "max_model_len": 8192,
+                "max_model_len": 32768,
             },
             "baseline_engine_image_digest": "sha256:" + "e" * 64,
         },
@@ -102,16 +104,19 @@ def sample(**kwargs):
     )
 
 
-def test_original_short_prompts_no_reference_no_padding_no_forced_tail():
+def test_source_exchange_and_followup_fill_tiers_without_padding_or_forcing():
     sampled = sample()
     trace = validate_workload_trace_dict(json.loads(sampled.body))
     assert [r.arrival_offset_ms for r in trace.requests] == [0, 2, 4, 6]
     for request, index in zip(trace.requests, sampled.row_indices, strict=True):
-        assert request.prompt == f"user prompt{index} assistant"
-        assert request.input_tokens == 3
-        assert request.input_length_group is None
+        assert request.prompt == formatter().render(
+            row(index)["messages"] + [{"role": "user", "content": "another"}]
+        )
+        assert request.input_tokens == (1900, 3800, 7600, 15200)[index % 4]
+        assert request.input_length_group == ("2k", "4k", "8k", "16k")[index % 4]
         assert request.max_tokens == 10
         assert request.sampling.ignore_eos is False
+    assert {r.input_length_group for r in trace.requests} == {"2k", "4k", "8k", "16k"}
     assert sampled.receipt["enable_thinking"] is False
     fetched = []
     rebuilt = sample(
@@ -158,6 +163,8 @@ def test_replay_rejects_changed_source_or_contract(change):
         {"eligible_row_indices": [3, 2, 1, 0]},
         {"min_reference_tokens": True},
         {"min_tokens": 8},
+        {"n_prompts": 6},
+        {"followup_prompt": ""},
         {"qualification": {}},
     ],
 )
@@ -166,13 +173,13 @@ def test_rule_rejects_forcing_and_invalid_qualification(kw):
         parse_sampling_rule(rule(**kw))
 
 
-def test_reference_filter_and_duplicate_prompts_cannot_silently_shorten_workload():
+def test_missing_tiers_and_duplicate_prompts_cannot_silently_shorten_workload():
     with pytest.raises(SamplerError, match="insufficient distinct"):
         sample(row_fetcher=lambda i: row(i, references=7))
     with pytest.raises(SamplerError, match="insufficient distinct"):
         sample(row_fetcher=lambda i: row(0))
-    chosen = sample(rule=rule(eligible_row_indices=[2, 4, 6, 8]))
-    assert set(chosen.row_indices) == {2, 4, 6, 8}
+    chosen = sample(rule=rule(eligible_row_indices=[0, 1, 2, 3]))
+    assert set(chosen.row_indices) == {0, 1, 2, 3}
 
 
 def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
@@ -187,7 +194,7 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     sampled = sample(
         rule=r,
         prompt_formatter=formatter(r),
-        row_fetcher=lambda i: row(i, 5120),
+        row_fetcher=row,
         sampling_context=sampling_context_for_campaign(f["bench"], f["engine"]),
     )
     trace = validate_workload_trace_dict(json.loads(sampled.body))
@@ -235,8 +242,10 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     def post(url, path, body, **kw):
         calls.append(body)
         assert body["ignore_eos"] is False and "min_tokens" not in body
-        assert "ref" not in body["prompt"] and "THINK" not in body["prompt"]
-        return response()
+        assert "ref" in body["prompt"] and "THINK" not in body["prompt"]
+        result = response()
+        result["usage"]["prompt_tokens"] = len(formatter().encode(body["prompt"]))
+        return result
 
     monkeypatch.setattr("bench.qualify_longform.post_json", post)
     qualified = qualify(
@@ -265,7 +274,14 @@ def test_short_outputs_leave_evidence_but_no_launch_rule(tmp_path, monkeypatch):
         "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
     )
     monkeypatch.setattr(
-        "bench.qualify_longform.post_json", lambda *a, **k: response(2, "stop")
+        "bench.qualify_longform.post_json",
+        lambda url, path, body, **k: {
+            **response(2, "stop"),
+            "usage": {
+                "completion_tokens": 2,
+                "prompt_tokens": len(formatter().encode(body["prompt"])),
+            },
+        },
     )
     with pytest.raises(SamplerError, match="no launch rule written"):
         qualify(
@@ -348,7 +364,7 @@ def test_trace_validation_rejects_changed_generation_contract(mutation):
     elif mutation == "arrival":
         request["arrival_offset_ms"] = 9
     else:
-        request["input_tokens"] = 8192
+        request["input_tokens"] = 32768
     with pytest.raises(RequestValidationError):
         validate_workload_trace_dict(trace)
 
@@ -360,7 +376,7 @@ def test_round_creation_and_worker_replay_preserve_qualified_rows(
     campaign = SimpleNamespace(
         campaign_id=uuid4(),
         gpu_skus=["RTX5090"],
-        sampling_rule=rule(eligible_row_indices=[2, 4, 6, 8]),
+        sampling_rule=rule(eligible_row_indices=[0, 1, 2, 3]),
         scoring_rule={"name": "median_e2e_speedup", "failure_penalty": 0.1},
         bench=f["bench"],
         engine=f["engine"],
@@ -379,10 +395,95 @@ def test_round_creation_and_worker_replay_preserve_qualified_rows(
     )
     trace = validate_workload_trace_dict(json.loads(path.read_bytes()))
     assert trace.meta.sampling["min_output_tokens"] == 6
-    assert set(result["sampling_receipt"]["row_indices"]) == {2, 4, 6, 8}
+    assert set(result["sampling_receipt"]["row_indices"]) == {0, 1, 2, 3}
     assert all(not request.sampling.ignore_eos for request in trace.requests)
     campaign.bench["model"]["max_model_len"] *= 2
     with pytest.raises(RoundInfraError, match="sampling receipt"):
         materialize_round_trace(
             result, campaign, tmp_path, row_fetcher=row, prompt_formatter=formatter()
+        )
+
+
+def test_qualification_requires_long_outputs_in_every_tier(tmp_path, monkeypatch):
+    fmt = formatter()
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
+    )
+    calls = []
+
+    def post(url, path, body, **kw):
+        size = len(fmt.encode(body["prompt"]))
+        calls.append(size)
+        result = response(2, "stop") if size > 10000 else response()
+        result["usage"]["prompt_tokens"] = size
+        return result
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    with pytest.raises(SamplerError, match="input tiers"):
+        qualify(
+            fields=fields(),
+            base_url="http://baseline",
+            output_dir=tmp_path,
+            pool_size=4,
+            max_rows=40,
+            row_fetcher=row,
+            formatter=fmt,
+        )
+    assert len([size for size in calls if size <= 10000]) == 6
+    assert len([size for size in calls if size > 10000]) == 10
+    assert not (tmp_path / "sampling_rule.json").exists()
+
+
+@pytest.mark.parametrize("mutation", ["label", "quota", "metadata", "followup"])
+def test_tier_contract_and_followup_are_bound_to_trace_or_receipt(mutation):
+    sampled = sample()
+    trace = json.loads(sampled.body)
+    if mutation == "followup":
+        with pytest.raises(SamplerError, match="receipt"):
+            sample(
+                rule=rule(followup_prompt="changed"), sampling_receipt=sampled.receipt
+            )
+        return
+    if mutation == "label":
+        trace["requests"][0]["input_length_group"] = "32k"
+    elif mutation == "quota":
+        for request in trace["requests"]:
+            request.update(input_tokens=1900, input_length_group="2k")
+    else:
+        del trace["meta"]["sampling"]["length_groups"]
+    with pytest.raises(RequestValidationError):
+        validate_workload_trace_dict(trace)
+
+
+def test_cpu_preview_matches_round_sampling_and_exposes_messages(tmp_path, monkeypatch):
+    from bench.preview_longform import preview
+    from bench.sampler import compute_sample_seed
+
+    monkeypatch.setattr(
+        "bench.preview_longform.build_prompt_formatter", lambda *a, **k: formatter()
+    )
+    monkeypatch.setattr("bench.preview_longform.fetch_hf_row", lambda r, i: row(i))
+    campaign_id = uuid4()
+    root = tmp_path / "preview"
+    actual = preview(
+        fields=fields(),
+        output_dir=root,
+        campaign_id=campaign_id,
+        seed_block=10,
+        block_hash="a" * 64,
+    )
+    expected = sample(
+        seed_hex=compute_sample_seed(block_hash="a" * 64, campaign_id=campaign_id),
+        sample_seed_block=10,
+        sample_seed_block_hash="a" * 64,
+    )
+    assert actual.body == expected.body
+    assert actual.receipt == expected.receipt
+    assert len((root / "index.tsv").read_text().splitlines()) == 5
+    for i in range(4):
+        messages = json.loads((root / f"hf-{i:03d}.messages.json").read_text())
+        assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+        assert messages[-1]["content"] == "another"
+        assert (root / f"hf-{i:03d}.prompt.txt").read_text() == formatter().render(
+            messages
         )

@@ -67,10 +67,11 @@ needed.
 - Use the workload and hardware settings from
   [the campaign fixture](../../fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json),
   including its pinned RadixArk model: four RTX5090 GPUs, 262144 context configuration,
-  32 sampled LongWriter requests with their original input lengths, and three timing
+  32 sampled LongWriter follow-ups with eight inputs per 2k, 4k, 8k and 16k tier, and three timing
   repetitions by default.
 - Disable thinking and respect EOS for baseline, candidate and drift requests.
-  The 5120-token allowance is a ceiling. Source references never enter the prompt.
+  The 5120-token allowance is a ceiling. Each source user/assistant exchange
+  is input history followed by the pinned request for a new long-form work.
   The qualified source pool requires at least 5000 generated tokens without forced
   continuation; all measured baseline and drift repetitions must meet that floor.
   Full-output correctness remains enabled. A short baseline response fails the

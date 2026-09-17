@@ -12,6 +12,7 @@ from pathlib import Path
 import config
 from bench.longform import require_qualification
 from bench.sampler import (
+    LONGFORM_ALGO_VERSION,
     build_prompt_formatter,
     fetch_hf_row,
     generate_trace,
@@ -45,7 +46,7 @@ rule = parse_sampling_rule(
     if len(sys.argv) > 2
     else fields["sampling_rule"]
 )
-if rule["algo_version"] == 4:
+if rule["algo_version"] == LONGFORM_ALGO_VERSION:
     require_qualification(rule, bench, fields["engine"])
 
 

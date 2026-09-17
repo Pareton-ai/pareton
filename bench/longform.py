@@ -1,4 +1,4 @@
-"""Version 4: original writing requests with held-out long reference answers."""
+"""Version 4: tiered LongWriter follow-ups with natural EOS stopping."""
 
 from __future__ import annotations
 
@@ -9,6 +9,38 @@ from typing import Any
 
 from bench.sampler import PromptRenderError, SampledTrace, SamplerError, encode_trace
 from bench.trajectory import token_ids_sha256
+
+DEFAULT_FOLLOWUP_PROMPT = (
+    "Write a new, original, self-contained long-form work. Use the previous "
+    "response as an example of depth and detail, but choose a different topic "
+    "from coding, fiction, non-fiction, science, history, astronomy, or internet "
+    "culture. Surprise me. Produce the complete work, not an outline, summary, "
+    "or discussion of what you would write. Aim for approximately 4,000-6,000 words."
+)
+
+
+def length_groups(n_prompts):
+    """Keep 90-100% input bands, with equal quotas at 2K, 4K, 8K and 16K."""
+    return [
+        {
+            "name": f"{target // 1024}k",
+            "min_tokens": (target * 9 + 9) // 10,
+            "max_tokens": target,
+            "count": n_prompts // 4,
+        }
+        for target in (2048, 4096, 8192, 16384)
+    ]
+
+
+def input_group(input_tokens):
+    return next(
+        (
+            g["name"]
+            for g in length_groups(4)
+            if g["min_tokens"] <= input_tokens <= g["max_tokens"]
+        ),
+        None,
+    )
 
 
 def digest(value: Any) -> str:
@@ -27,14 +59,17 @@ def parse_longform_fields(rule, parsed):
         raise SamplerError("long-form sampling requires normal EOS stopping")
     if parsed["enable_thinking"]:
         raise SamplerError("long-form sampling requires enable_thinking=false")
-    result = {}
-    for name, default in (("min_reference_tokens", 5120), ("min_output_tokens", 5000)):
-        value = rule.get(name, default)
-        if type(value) is not int or value < 1:
-            raise SamplerError(f"{name} must be a positive integer")
-        result[name] = value
-    if result["min_output_tokens"] > parsed["max_tokens"]:
+    if parsed["n_prompts"] < 4 or parsed["n_prompts"] % 4:
+        raise SamplerError("algo_version 4 requires n_prompts to be a multiple of 4")
+    prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise SamplerError("followup_prompt must be nonempty text")
+    minimum = rule.get("min_output_tokens", 5000)
+    if type(minimum) is not int or minimum < 1:
+        raise SamplerError("min_output_tokens must be a positive integer")
+    if minimum > parsed["max_tokens"]:
         raise SamplerError("min_output_tokens exceeds max_tokens")
+    result = {"followup_prompt": prompt, "min_output_tokens": minimum}
     if "eligible_row_indices" in rule:
         rows = rule["eligible_row_indices"]
         if (
@@ -107,8 +142,8 @@ def require_qualification(rule, bench, engine):
         )
 
 
-def candidate_for_row(row_index, row, formatter, rule, context):
-    """Return only the user request; reference text never enters the prompt."""
+def source_messages(row, rule):
+    """Use the source exchange as history and append the pinned user follow-up."""
     messages = row.get("messages") if isinstance(row, dict) else None
     if (
         not isinstance(messages, list)
@@ -121,26 +156,48 @@ def candidate_for_row(row_index, row, formatter, rule, context):
         )
     ):
         return None
-    reference = messages[1]["content"]
-    reference_tokens = len(formatter.encode(reference))
-    if reference_tokens < rule["min_reference_tokens"]:
+    return [{"role": m["role"], "content": m["content"]} for m in messages] + [
+        {"role": "user", "content": rule["followup_prompt"]}
+    ]
+
+
+def candidate_for_row(row_index, row, formatter, rule, context):
+    messages = source_messages(row, rule)
+    if messages is None:
         return None
-    prompt = formatter.render([{"role": "user", "content": messages[0]["content"]}])
+    prompt = formatter.render(messages)
     ids = formatter.encode(prompt)
+    group = input_group(len(ids))
     if (
-        not ids
+        group is None
         or len(ids) > context["max_input_tokens"]
         or len(ids) + rule["max_tokens"] + context["engine_reserve"]
         > context["max_model_len"]
     ):
         return None
+    history_answer = messages[1]["content"]
     return {
         "row_index": row_index,
         "prompt": prompt,
         "input_tokens": len(ids),
         "input_ids_sha256": token_ids_sha256(ids),
-        "reference_tokens": reference_tokens,
-        "reference_sha256": "sha256:" + hashlib.sha256(reference.encode()).hexdigest(),
+        "history_answer_tokens": len(formatter.encode(history_answer)),
+        "history_answer_sha256": "sha256:"
+        + hashlib.sha256(history_answer.encode()).hexdigest(),
+        "input_length_group": group,
+    }
+
+
+def request_for_candidate(candidate, rule, index):
+    return {
+        "id": f"hf-{index:03d}",
+        "arrival_offset_ms": index * rule["request_interval_ms"],
+        "prompt": candidate["prompt"],
+        "max_tokens": rule["max_tokens"],
+        "sampling": {"temperature": 0.0, "top_p": 1.0},
+        "input_tokens": candidate["input_tokens"],
+        "input_ids_sha256": candidate["input_ids_sha256"],
+        "input_length_group": candidate["input_length_group"],
     }
 
 
@@ -189,6 +246,8 @@ def generate_longform_trace(
             )
         ):
             raise SamplerError("invalid long-form receipt row selections")
+    groups = length_groups(rule["n_prompts"])
+    remaining = {g["name"]: g["count"] for g in groups}
     selected, seen_prompts = [], set()
     for index in indices:
         try:
@@ -205,27 +264,22 @@ def generate_longform_trace(
             if receipt is not None:
                 raise SamplerError("long-form receipt selected an ineligible row")
             continue
+        group = candidate["input_length_group"]
+        if remaining[group] == 0:
+            if receipt is not None:
+                raise SamplerError("long-form receipt exceeds its input tier quota")
+            continue
+        remaining[group] -= 1
         selected.append(candidate)
         seen_prompts.add(candidate["input_ids_sha256"])
         if len(selected) == rule["n_prompts"]:
             break
     if len(selected) != rule["n_prompts"]:
         raise SamplerError(
-            "insufficient distinct long-form prompts; no shorter fallback"
+            f"insufficient distinct long-form prompts; missing by input tier: {remaining}; "
+            "no shorter fallback"
         )
-    requests, selections = [], []
-    for i, item in enumerate(selected):
-        request = {
-            "id": f"hf-{i:03d}",
-            "arrival_offset_ms": i * rule["request_interval_ms"],
-            "prompt": item["prompt"],
-            "max_tokens": rule["max_tokens"],
-            "sampling": {"temperature": 0.0, "top_p": 1.0},
-            "input_tokens": item["input_tokens"],
-            "input_ids_sha256": item["input_ids_sha256"],
-        }
-        requests.append(request)
-        selections.append({k: v for k, v in item.items() if k != "prompt"})
+    requests = [request_for_candidate(item, rule, i) for i, item in enumerate(selected)]
     workload = {
         "algo_version": 4,
         "enable_thinking": False,
@@ -233,6 +287,7 @@ def generate_longform_trace(
         "request_interval_ms": rule["request_interval_ms"],
         "max_tokens": rule["max_tokens"],
         "min_output_tokens": rule["min_output_tokens"],
+        "length_groups": groups,
     }
     validate_longform_trace(requests, workload)
     body = encode_trace(
@@ -251,7 +306,9 @@ def generate_longform_trace(
         "sample_seed_block_hash": sample_seed_block_hash.strip().lower(),
         "seed_hex": seed,
         "row_indices": [p["row_index"] for p in selected],
-        "requests": selections,
+        "requests": [
+            {k: v for k, v in item.items() if k != "prompt"} for item in selected
+        ],
         "sampled_trace_sha256": sha,
     }
     if receipt is not None and result != receipt:
@@ -281,6 +338,14 @@ def validate_longform_trace(requests, sampling):
             raise SamplerError(f"invalid long-form {key}")
     if sampling["min_output_tokens"] > sampling["max_tokens"]:
         raise SamplerError("long-form output threshold exceeds allowance")
+    groups = length_groups(len(requests))
+    if (
+        len(requests) < 4
+        or len(requests) % 4
+        or sampling.get("length_groups") != groups
+    ):
+        raise SamplerError("invalid long-form input tier contract")
+    counts = {g["name"]: 0 for g in groups}
     for i, request in enumerate(requests):
         size = request.get("input_tokens")
         if (
@@ -308,6 +373,12 @@ def validate_longform_trace(requests, sampling):
             raise SamplerError(
                 "invalid long-form request or forced generation settings"
             )
+        group = input_group(size)
+        if group is None or request.get("input_length_group") != group:
+            raise SamplerError("long-form request is outside its input tier")
+        counts[group] += 1
+    if counts != {g["name"]: g["count"] for g in groups}:
+        raise SamplerError("long-form trace does not fill every input tier")
 
 
 def preflight_longform_campaign(rule, bench, engine):

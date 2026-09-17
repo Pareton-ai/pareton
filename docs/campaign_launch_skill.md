@@ -350,10 +350,12 @@ rewrite a live campaign's signed terms to change its fee.
 
 The launch helper targets four RTX 5090 GPUs, `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`,
 a 262144-token context, and 32 requests spaced 2 ms apart. Sampler version 4
-uses original user requests from the pinned
+uses conversation history from the pinned
 [zai-org/LongWriter-6k](https://huggingface.co/datasets/zai-org/LongWriter-6k)
-dataset. Reference answers are used only to filter source rows and never become
-model input. Prompts are not padded to the earlier SWE history tiers.
+dataset. Each original user/assistant exchange is followed by a new user request
+for a complete long-form work. Each round has eight inputs per tier: 2k, 4k, 8k
+and 16k, measured within 90-100% of the tier ceiling. There is no 32k tier,
+padding or truncation.
 
 Thinking is disabled. EOS is respected, and 5120 is an output ceiling, not a
 minimum generation length. The failure coefficient remains 0.1. Before opening,

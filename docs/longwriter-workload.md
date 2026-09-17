@@ -2,16 +2,31 @@
 
 The Qwen SGLang launch helper uses `zai-org/LongWriter-6k` at revision
 `0db15c0624f19d63e2efe1021595af933cc5b6cc` (6000 rows). Sampler version 4
-reads the `messages` user/assistant pair. It renders only the original user
-request with the pinned model template and thinking disabled. It measures real
-input lengths without padding or the SWE trajectory sampler's fixed input tiers.
+renders the original `user` and `assistant` messages as conversation history,
+then appends the pinned `followup_prompt` as a new user turn. The follow-up asks
+for a new complete work of approximately 4,000-6,000 words. Thinking is disabled.
+The source answer is context, not a reference target for the new response.
+
+Each 32-request round contains eight inputs in each tier. Length includes the
+entire rendered conversation and generation prefix, measured by the pinned
+model tokenizer:
+
+| Tier | Input tokens | Requests |
+| --- | --- | --- |
+| 2k | 1844-2048 | 8 |
+| 4k | 3687-4096 | 8 |
+| 8k | 7373-8192 | 8 |
+| 16k | 14746-16384 | 8 |
+
+Rows outside these bands are skipped. Source messages are never padded or
+truncated. There is no 32k tier or fallback when a tier cannot be filled.
 Versions 1 through 3 keep their existing behavior and receipt formats.
 
 The model, engine, hardware, serving arguments, 32-request workload, 2 ms
 arrivals, fees and emissions remain as configured in the seed helper.
 `max_tokens=5120` remains a ceiling. Requests respect EOS and never set a
-minimum generation length. Long reference answers are a source filter, not
-evidence that the deployed model will generate long answers.
+minimum generation length. A long source answer does not establish that the
+model will produce a long new response.
 
 ## Qualify the source pool
 
@@ -25,14 +40,17 @@ python -m bench.qualify_longform \
   --base-url http://127.0.0.1:8000 \
   --engine-ref "$NATIVE_ENGINE_REF" \
   --output-dir /workspace/longwriter-qualification \
-  --pool-size 128 --repetitions 2
+  --pool-size 64 --repetitions 2
 ```
 
 The qualifier checks input tokenization and capacity against the server. The
 operator must ensure the endpoint runs the specified trusted image and serving
 settings; the HTTP API does not attest to the image digest. It scans rows in a
-fixed hash order, skips malformed rows and short reference answers, and rejects
-duplicate rendered prompts. Each accepted row must produce at least 5000 tokens
+fixed hash order, skips malformed rows and inputs outside the tier bands, and
+rejects duplicate rendered prompts. The default pool contains 64 rows, with 16
+qualified rows per tier. An explicit pool size must be a multiple of four and
+at least 32. Extra rows in one tier cannot replace missing rows in another.
+Each accepted row must produce at least 5000 tokens
 in every repetition, with nonempty text that passes the harness's repetition
 checks. Generation stops normally or reaches its 5120-token ceiling. Reaching
 the ceiling without suppressing EOS qualifies the row, but does not establish
@@ -80,7 +98,37 @@ qualification before inserting a profile or campaign. A different model, image,
 serving configuration or sampling rule requires requalification.
 
 Rounds sample distinct rows from the frozen eligible pool using the chain seed.
-Receipts pin selected rows, reference hashes, rendered input token hashes,
+Receipts pin selected rows, the follow-up, history answer hashes, rendered input token hashes,
 tokenizer/template metadata and the trace hash. Worker replay fetches only the
 selected rows and fails if the source or rendering contract changes. No database
 migration is required, and existing campaigns are not rewritten.
+
+## Inspect inputs on a CPU VM
+
+From an installed repository checkout, run:
+
+```bash
+python -m bench.preview_longform --output-dir /workspace/longwriter-preview
+column -t -s "$(printf '\t')" /workspace/longwriter-preview/index.tsv
+less /workspace/longwriter-preview/hf-001.messages.json
+less /workspace/longwriter-preview/hf-031.prompt.txt
+```
+
+The command uses the same seed calculation, formatter and sampler as campaign
+rounds, then verifies exact receipt replay. The default seed is a deterministic
+demo. To reproduce a particular round, pass its `--campaign-id`, `--seed-block`,
+`--block-hash`, campaign fields and qualified `--sampling-rule` file.
+The output directory must be new. This CPU command downloads only source data
+and tokenizer files, not model weights, and performs no inference or DB writes.
+
+`index.tsv` lists input tier, total input tokens, and `history_answer_tokens`.
+The latter counts the source assistant message now included in the input; it
+is not a generated output length. Each request has both a `.messages.json` file
+with its three roles and a `.prompt.txt` file with the exact rendered model input.
+`workload_trace.json` and `sampling_receipt.json` retain the full replay contract.
+
+A CPU audit of all 6000 source rows with the pinned Qwen tokenizer and this
+follow-up found 185 eligible 2k, 506 eligible 4k, 216 eligible 8k and 25 eligible
+16k inputs. A 32-request trace filled every tier and replayed exactly. These
+counts establish input availability only. The 16k pool has limited diversity;
+GPU qualification must still establish how many rows generate long responses.

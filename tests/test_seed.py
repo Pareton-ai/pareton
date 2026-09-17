@@ -154,7 +154,7 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
         "bench.sampler.build_prompt_formatter", lambda r, **kw: formatter(r)
     )
     monkeypatch.setattr(
-        "bench.sampler.fetch_hf_row", lambda r, i: row(i, references=5120)
+        "bench.sampler.fetch_hf_row", lambda r, i: row(i)
     )
     argv = (
         subprocess.check_output(

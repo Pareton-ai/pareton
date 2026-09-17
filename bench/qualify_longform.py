@@ -17,8 +17,10 @@ from bench.lifecycle import EngineError
 from bench.longform import (
     candidate_for_row,
     digest,
+    length_groups,
     ordered_rows,
     qualification_contract,
+    request_for_candidate,
     sampling_context_for_campaign,
 )
 from bench.sampler import (
@@ -27,10 +29,9 @@ from bench.sampler import (
     SamplerError,
     build_prompt_formatter,
     fetch_hf_row,
-    generate_trace,
     parse_sampling_rule,
 )
-from bench.validate import validate_workload_trace_dict
+from bench.schemas import WorkloadTrace
 from bench.workload_preflight import validate_engine_workload
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ def qualify(
     fields,
     base_url,
     output_dir,
-    pool_size=128,
+    pool_size=None,
     max_rows=6000,
     repetitions=2,
     timeout=600,
@@ -97,10 +98,16 @@ def qualify(
     rule = parse_sampling_rule(fields["sampling_rule"])
     if rule["algo_version"] != LONGFORM_ALGO_VERSION:
         raise SamplerError("qualification requires algo_version 4")
+    if pool_size is None:
+        pool_size = 2 * rule["n_prompts"]
     if repetitions < 2 or pool_size < rule["n_prompts"] or max_rows < pool_size:
         raise SamplerError(
             "qualification needs >=2 repetitions and max_rows >= pool_size >= n_prompts"
         )
+    if pool_size % 4:
+        raise SamplerError("version 4 pool_size must be a multiple of 4")
+    quotas = {group["name"]: group["count"] for group in length_groups(pool_size)}
+    qualified_counts = dict.fromkeys(quotas, 0)
     # Requalification starts from source, not a previous winning subset.
     rule.pop("qualification", None)
     rule.pop("eligible_row_indices", None)
@@ -140,18 +147,20 @@ def qualify(
                 continue
             if candidate is None or candidate["input_ids_sha256"] in seen:
                 continue
+            group = candidate["input_length_group"]
+            if qualified_counts[group] == quotas[group]:
+                continue
             seen.add(candidate["input_ids_sha256"])
-            # Reuse the real trace and engine preflight contracts, including
-            # server tokenizer verification. No historical answer is sent.
-            one_rule = {**rule, "n_prompts": 1, "eligible_row_indices": [row_index]}
-            sampled = generate_trace(
-                rule=one_rule,
-                seed_hex=seed,
-                row_fetcher=lambda _, row=row: row,
-                prompt_formatter=formatter,
-                sampling_context=context,
+            # Preflight one already-rendered candidate, using the same request
+            # builder as rounds. Round-wide tier quotas apply to the saved pool,
+            # not this internal single-request capacity/tokenization check.
+            trace = WorkloadTrace.from_dict(
+                {
+                    "schema_version": 1,
+                    "meta": {"sampling": {"context": context}},
+                    "requests": [request_for_candidate(candidate, rule, 0)],
+                }
             )
-            trace = validate_workload_trace_dict(json.loads(sampled.body))
             validate_engine_workload(
                 base_url,
                 trace,
@@ -185,6 +194,7 @@ def qualify(
                             "repetition": rep,
                             "input_ids_sha256": candidate["input_ids_sha256"],
                             "input_tokens": candidate["input_tokens"],
+                            "input_length_group": group,
                             **result,
                         },
                         ensure_ascii=False,
@@ -197,6 +207,7 @@ def qualify(
                     break
             if accepted:
                 qualified.append(row_index)
+                qualified_counts[group] += 1
                 logger.info(
                     "Qualified row %s (%s/%s)", row_index, len(qualified), pool_size
                 )
@@ -205,6 +216,7 @@ def qualify(
     if len(qualified) < pool_size:
         raise SamplerError(
             f"only {len(qualified)}/{pool_size} prompts qualified; evidence saved, no launch rule written"
+            f"; input tiers: {qualified_counts}, required: {quotas}"
         )
     rule["eligible_row_indices"] = sorted(qualified)
     rule["qualification"] = {
@@ -223,6 +235,7 @@ def qualify(
         "ignore_eos": False,
         "enable_thinking": False,
         "sampling_rule_sha256": digest(rule),
+        "qualified_rows_by_input_tier": qualified_counts,
         "scope": "sequential natural-output qualification; full concurrent GPU round still required",
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -247,7 +260,11 @@ def main(argv=None):
         default=Path("fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json"),
     )
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--pool-size", type=int, default=128)
+    parser.add_argument(
+        "--pool-size",
+        type=int,
+        help="Default: twice n_prompts, split equally across four input tiers",
+    )
     parser.add_argument("--max-rows", type=int, default=6000)
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=600)

@@ -25,7 +25,7 @@ TRAJECTORY_ALGO_VERSION = 3
 LONGFORM_ALGO_VERSION = 4
 LONGFORM_RULE_FIELDS = frozenset(
     {
-        "min_reference_tokens",
+        "followup_prompt",
         "min_output_tokens",
         "eligible_row_indices",
         "qualification",
