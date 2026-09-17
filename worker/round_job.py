@@ -166,8 +166,8 @@ def materialize_round_trace(
                         for key in (
                             "request_interval_ms",
                             "enable_thinking",
-                            "min_reference_tokens",
                             "min_output_tokens",
+                            "followup_prompt",
                             "eligible_row_indices",
                             "qualification",
                         )

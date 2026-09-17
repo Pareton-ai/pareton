@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from test_correctness import SAMPLE_TRACE, _cfg
 from test_http import _FakeResp, _sse
+from test_longform_sampling import rule, sample
 
 from bench.correctness import (
     BaselineDegeneracyReference,
@@ -171,3 +172,70 @@ def test_request_eos_policy_survives_capture(tmp_path, ignore_eos):
     assert captured[0].output_samples == ("first", "answer", "third")
     with pytest.raises(EngineError, match="output samples missing"):
         capture_outputs(prompts, timings={}, outputs=outputs, output_samples={})
+
+
+@pytest.mark.parametrize("loop_tier", [None, "2k", "4k", "8k", "16k"])
+def test_tiered_followups_grade_new_outputs_not_history(
+    monkeypatch, tmp_path, loop_tier
+):
+    sampled = sample(rule=rule(max_tokens=5120, min_output_tokens=5000))
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_bytes(sampled.body)
+    prompts = select_correctness_prompts(
+        trace_path=trace_path, expected_sha256=sha256_file(trace_path), num_prompts=4
+    )
+    requests = json.loads(sampled.body)["requests"]
+    tiers = {request["id"]: request["input_length_group"] for request in requests}
+    clean = _clean_long()
+    outputs = {prompt.id: clean for prompt in prompts}
+    # These fixture histories repeat heavily in every tier. They must never
+    # contaminate either the baseline drop policy or candidate repetition grade.
+    assert all(degeneracy_reason(prompt.prompt) for prompt in prompts)
+    assert all(not prompt.ignore_eos for prompt in prompts)
+    baseline = capture_outputs(prompts, timings={}, outputs=outputs)
+    references = build_baseline_degeneracy_references(
+        baseline,
+        {
+            prompt.id: NaturalStopReference(prompt.id, 5120, "length", clean)
+            for prompt in prompts
+        },
+        {prompt.id: (clean,) * 3 for prompt in prompts},
+    )
+    assert not references.dropped
+    samples = {
+        prompt.id: (
+            clean,
+            clean,
+            " apple" * 5120 if tiers[prompt.id] == loop_tier else clean,
+        )
+        for prompt in prompts
+    }
+    captured = capture_outputs(
+        prompts, timings={}, outputs=outputs, output_samples=samples
+    )
+    scored = []
+
+    def score(_url, output, **kwargs):
+        scored.append(output.prompt)
+        return [SimpleNamespace(logprob=-0.1)] * 5120, 5120, output.output_text
+
+    monkeypatch.setattr("bench.correctness.score_captured_output", score)
+    evidence = tmp_path / "candidate.jsonl"
+    report = grade_candidate(
+        "unused",
+        captured,
+        cfg=_cfg(num_prompts=4),
+        evidence_path=evidence,
+        baseline_degeneracy=references,
+    )
+    assert report.verdict == ("pass" if loop_tier is None else "fail_correctness")
+    assert scored == [prompt.prompt for prompt in prompts]
+    rows = [json.loads(line) for line in evidence.read_text().splitlines()]
+    assert len(rows) == 4
+    for row in rows:
+        assert row["degeneracy_scope"] == "full_output"
+        assert row["degeneracy_exemptions"] == []
+        failed_reps = [
+            rep["rep"] for rep in row["repetition_degeneracy"] if rep["degenerate"]
+        ]
+        assert failed_reps == ([3] if tiers[row["request_id"]] == loop_tier else [])

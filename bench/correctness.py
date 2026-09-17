@@ -616,7 +616,11 @@ def quantile_low(values: list[float], quantile: float) -> float:
 
 @dataclass(frozen=True)
 class CapturedOutput:
-    """One request's output as the candidate actually produced it."""
+    """One request's generated continuation, separate from its rendered prompt.
+
+    Conversation history belongs in ``prompt``. Repetition checks inspect only
+    ``output_text`` and ``output_samples``, including for tiered follow-ups.
+    """
 
     request_id: str
     prompt: str

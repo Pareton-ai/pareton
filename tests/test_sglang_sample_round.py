@@ -34,7 +34,7 @@ def test_sample_request_matches_production_launch_and_scorer(
     )
     model_cache.mkdir(parents=True)
     template = (
-        "{% for m in messages %}{{ m.content }}{% endfor %}"
+        "{% for m in messages %}{{ m.content }} {% endfor %}"
         "{% if enable_thinking %}<think>{% endif %}\r\n"
     )
     tokenizer_config = {"model": "nvfp4"}
@@ -88,7 +88,10 @@ def test_sample_request_matches_production_launch_and_scorer(
         lambda rule, i: {
             "messages": [
                 {"role": "user", "content": f"prompt{i}"},
-                {"role": "assistant", "content": "ref " * 5120},
+                {
+                    "role": "assistant",
+                    "content": "ref " * ((1900, 3800, 7600, 15200)[i % 4] - 6),
+                },
             ]
         },
     )
