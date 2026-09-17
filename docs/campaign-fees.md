@@ -6,11 +6,10 @@ The first entry starts at block zero. Both Python and Postgres reject non-whole
 RAO amounts. No fee field participates in `manifest_hash`; signed hashes and
 customer signoffs remain unchanged when fees change.
 
-The API publishes the fee active at the chain height it reads, plus history and
-`submission_fee_at_block`. A single genesis entry needs no chain lookup. Once a
-campaign has scheduled changes, chain lookup failure returns HTTP 503 rather than
-guessing the active fee. Both list and detail routes use this rule. The API
-service therefore needs access to the configured Subtensor network.
+The API publishes the latest stored fee and its history, using only Neon. There
+are no campaign-endpoint chain calls, watermark, or `submission_fee_at_block`.
+Fee updates take effect immediately at the block observed by the admin command;
+future activation blocks are not supported.
 
 The watcher selects by **payment block**, not ingestion time. For example, if
 0.15 TAO starts at block 1000, a 0.05 TAO transfer at block 999 remains valid when
@@ -24,10 +23,10 @@ a proof are free only if the campaign fee was zero at their commitment block.
 Auto-deploy can reach production about a minute after a merge. **Apply the
 migration before merging**, or pause `pareton-deploy.timer` until migration and
 deployment finish. `ops/deploy.sh` does not migrate. Use the dedicated migration
-for the existing VPS. `db/schema.sql` also performs this additive fee upgrade
-when reapplied: it adds the column, backfills supported rows, and installs the
-constraints and trigger in one transaction. It does not infer fees for other
-campaigns; the same unmapped-campaign guard applies.
+for the existing VPS. `db/schema.sql` defines the final schema for fresh databases.
+Existing databases must run the migration before reapplying it; the schema reports
+that prerequisite if the fee column is missing. Only the migration assigns the
+initial backfill amounts.
 
 From a checkout containing the reviewed migration, with the production database
 URL already loaded securely:
@@ -61,24 +60,29 @@ sudo systemctl is-active pareton-api pareton-watcher pareton-deploy.timer
 ```
 
 If the timer was paused, restart it once the migration and release are verified.
-Do not revert to the global-fee watcher after scheduling differing campaign fees;
+Do not revert to the global-fee watcher after publishing differing campaign fees;
 its verification rules no longer match. The migration itself is additive.
 
 ## Change a fee
 
-Run from the deployed checkout with validator database access. Select a future
-activation height at least 100 blocks ahead of the current chain head and after
-all previously scheduled changes:
+Run from the deployed checkout with validator database and Subtensor access:
 
 ```sh
-python -m campaign.set_fee --campaign-id "$CAMPAIGN_ID" \
-  --amount-tao 0.20 --effective-from-block "$ACTIVATION_BLOCK"
+python -m campaign.set_fee --campaign-id "$CAMPAIGN_ID" --amount-tao 0.20
 ```
 
-The command locks the campaign row, validates the amount, and appends history in
-one transaction. Existing entries cannot be changed or removed. Only trusted
+The command reads the current chain height, locks the campaign row, validates the
+amount, and appends the new fee with that block in one transaction. The API quotes
+it immediately. Existing entries cannot be changed or removed. A second update
+in the same block is rejected; retry after the chain advances. Only trusted
 operators should have write access; the database cannot independently verify
 chain height for arbitrary administrative SQL. Use this command for changes.
+
+A payment included before the change retains its original terms. A transfer
+included at or after the change must meet the new fee. The miner refreshes the
+API quote before paying and validates fresh history at the actual payment block
+before submitting a commitment; it never automatically sends a second payment.
+
 For a new campaign, pass `--submission-fee-tao DECIMAL` to `python -m campaign.seed`,
 or supply the second argument to the launch helper:
 
@@ -86,8 +90,8 @@ or supply the second argument to the launch helper:
 bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" 0.15
 ```
 
-The initial fee is inserted with the campaign at block zero. Do not schedule it
-after opening with `campaign.set_fee`, which only changes a fee at a future block.
+The initial fee is inserted with the campaign at block zero. Choose it during
+seeding; use `campaign.set_fee` for subsequent immediate changes.
 `--submission-fee-tao` is required. There is no environment fallback or default
 amount; remove the obsolete global fee variable from the validator environment. The seed recipient
 must match the recipient pinned in `campaign/fees.py` for the public CLI.

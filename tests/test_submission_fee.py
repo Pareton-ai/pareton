@@ -118,15 +118,18 @@ def test_negative_zero_is_canonical_zero():
     assert validate_submission_fee({**FEE, "amount_tao": "-0"})["amount_tao"] == "0"
 
 
-@pytest.mark.parametrize("activation", [899, 999])
-def test_scheduler_rejects_retroactive_or_near_term_fee_changes(activation):
-    from campaign.set_fee import schedule_fee
+@pytest.mark.parametrize("block", [0, -1, True, 1.5, 2**63])
+def test_fee_update_rejects_invalid_chain_height(block):
+    from campaign.set_fee import set_fee
 
-    with pytest.raises(ValueError, match="at least 100 blocks"):
-        schedule_fee("unused", "0.15", activation, current_block=900)
+    with pytest.raises(ValueError, match="positive integer"):
+        set_fee("unused", "0.15", current_block=block)
 
 
-def test_scheduler_appends_fee_without_rewriting_terms(monkeypatch):
+@pytest.mark.parametrize("amount", ["0.15", "0.0001", "0"])
+def test_immediate_fee_update_preserves_terms_and_rejects_same_block(
+    monkeypatch, amount
+):
     from contextlib import contextmanager
     from campaign import set_fee
 
@@ -162,10 +165,14 @@ def test_scheduler_appends_fee_without_rewriting_terms(monkeypatch):
         yield Conn()
 
     monkeypatch.setattr(set_fee, "db_connection", connect)
-    result = set_fee.schedule_fee("campaign", "0.15", 1000, current_block=900)
+    result = set_fee.set_fee("campaign", amount, current_block=900)
     assert cur.written == [*history, result]
-    assert result["effective_from_block"] == 1000
-    assert result["amount_tao"] == "0.15"
+    assert result["effective_from_block"] == 900
+    assert result["amount_tao"] == amount
+    history.append(result)
+    with pytest.raises(ValueError, match="retry after the chain advances"):
+        set_fee.set_fee("campaign", "0.2", current_block=900)
+    assert cur.written == history
 
 
 @pytest.mark.parametrize(
@@ -222,3 +229,34 @@ def test_insert_preserves_valid_history_or_defaults_none(monkeypatch, supplied):
     monkeypatch.setattr(store, "db_connection", connection)
     assert store.insert_campaign(manifest) == manifest.campaign_id
     assert recorded == [history]
+
+
+def test_set_fee_cli_uses_observed_block_without_activation_argument(
+    monkeypatch, capsys
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import bittensor as bt
+    from campaign import set_fee
+
+    @contextmanager
+    def subtensor(**_kwargs):
+        yield SimpleNamespace(block=900)
+
+    calls = []
+
+    def publish(campaign_id, amount, *, current_block):
+        calls.append((campaign_id, amount, current_block))
+        return {**FEE, "amount_tao": amount, "effective_from_block": current_block}
+
+    monkeypatch.setattr(bt, "Subtensor", subtensor)
+    monkeypatch.setattr(set_fee, "set_fee", publish)
+    campaign_id = str(uuid4())
+    args = ["--campaign-id", campaign_id, "--amount-tao", "0.15"]
+    assert set_fee.main(args) == 0
+    assert calls == [(campaign_id, "0.15", 900)]
+    assert "Published 0.15 TAO from block 900" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        set_fee.main([*args, "--effective-from-block", "1000"])
+    assert exc.value.code == 2
+    assert len(calls) == 1

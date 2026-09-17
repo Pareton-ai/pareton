@@ -462,59 +462,21 @@ def health():
     return {"ok": True, "service": "pareton", "stage": 0}
 
 
-# Process-local lower bound, not an estimate of the current chain height.
-# Once all scheduled fees are active, their selection needs no further RPC.
-_campaign_fee_highest_block = 0
-
-
-def _campaign_fee_block() -> int:
-    global _campaign_fee_highest_block
-    import bittensor as bt
-
-    try:
-        with bt.Subtensor(network=config.SUBTENSOR_NETWORK) as subtensor:
-            block = int(subtensor.block)
-        _campaign_fee_highest_block = max(_campaign_fee_highest_block, block)
-        return _campaign_fee_highest_block
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503, detail="campaign fee chain height unavailable"
-        ) from exc
-
-
-def _public_campaign(c, *, fee_block: int | None = None):
-    from campaign.fees import fee_at_block
+def _public_campaign(c):
+    from campaign.fees import validate_fee_history
 
     result = c.to_public_dict()
-    history = result["submission_fee_history"]
-    block = (
-        fee_block
-        if fee_block is not None
-        else (
-            _campaign_fee_block()
-            if history[-1]["effective_from_block"] > _campaign_fee_highest_block
-            else _campaign_fee_highest_block
-        )
-    )
-    result["submission_fee"] = fee_at_block(history, block)
-    result["submission_fee_at_block"] = block
+    latest = validate_fee_history(result["submission_fee_history"])[-1]
+    result["submission_fee"] = {
+        "amount_tao": latest["amount_tao"],
+        "recipient": latest["recipient"],
+    }
     return result
 
 
 @app.get("/v1/campaigns")
 def campaigns(status: str | None = Query(default=None)):
-    items = list_campaigns(status=status)
-    block = (
-        _campaign_fee_block()
-        if any(
-            c.submission_fee_history
-            and c.submission_fee_history[-1]["effective_from_block"]
-            > _campaign_fee_highest_block
-            for c in items
-        )
-        else _campaign_fee_highest_block
-    )
-    return {"campaigns": [_public_campaign(c, fee_block=block) for c in items]}
+    return {"campaigns": [_public_campaign(c) for c in list_campaigns(status=status)]}
 
 
 @app.get("/v1/campaigns/{campaign_id}")

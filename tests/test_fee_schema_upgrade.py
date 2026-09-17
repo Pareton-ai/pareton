@@ -1,4 +1,4 @@
-"""Reapply the full schema to pre-fee campaigns in an isolated test-DB schema."""
+"""Require migration before reapplying the schema to pre-fee campaigns."""
 
 from pathlib import Path
 from uuid import uuid4
@@ -59,12 +59,21 @@ def _legacy_campaign(cur, status, manifest_hash):
     )
 
 
-def test_schema_upgrades_populated_pre_fee_campaigns_and_keeps_them_readable(schema_db):
+def test_migration_then_schema_keeps_populated_campaigns_readable(schema_db):
     schema_db.execute(
         "ALTER TABLE campaigns DROP COLUMN submission_fee_history CASCADE"
     )
     _legacy_campaign(schema_db, "closed", "closed-original")
     _legacy_campaign(schema_db, "open", "open-original")
+    with pytest.raises(psycopg2.Error, match="run db/migrations"):
+        schema_db.execute(SCHEMA_SQL)
+    schema_db.execute("ROLLBACK")
+    schema_db.execute(
+        (
+            Path(__file__).parents[1]
+            / "db/migrations/20260917_campaign_fee_history.sql"
+        ).read_text()
+    )
     schema_db.execute(SCHEMA_SQL)
     schema_db.execute("SELECT * FROM campaigns ORDER BY manifest_hash")
     rows = schema_db.fetchall()
@@ -96,14 +105,14 @@ def test_fresh_schema_reapplication_succeeds(schema_db):
     assert schema_db.fetchone()["is_nullable"] == "NO"
 
 
-def test_unmapped_campaign_rolls_back_schema_fee_upgrade(schema_db):
+def test_unmigrated_campaign_rejects_schema_reapplication(schema_db):
     schema_db.execute(
         "ALTER TABLE campaigns DROP COLUMN submission_fee_history CASCADE"
     )
     _legacy_campaign(schema_db, "draft", "draft-original")
-    with pytest.raises(psycopg2.Error, match="initial fee backfill only covers"):
+    with pytest.raises(psycopg2.Error, match="run db/migrations"):
         schema_db.execute(SCHEMA_SQL)
-    schema_db.connection.rollback()
+    schema_db.execute("ROLLBACK")
     schema_db.execute("""SELECT column_name FROM information_schema.columns
         WHERE table_schema = current_schema() AND table_name = 'campaigns'
         AND column_name = 'submission_fee_history'""")

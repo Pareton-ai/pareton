@@ -342,9 +342,8 @@ configured recipient that differs from the recipient pinned in the miner before
 writing the campaign or its profile. It inserts the initial block-zero fee with
 the campaign, so an open campaign has the intended fee immediately.
 
-Do not call `campaign.set_fee` after seeding to establish the initial fee. That
-command schedules a future change at least 100 blocks ahead and would leave the
-old seed fee active in the meantime. Use it for later changes as documented below.
+Set the intended initial fee during seeding. Use `campaign.set_fee` only for later
+changes; it publishes a new fee immediately without re-seeding the campaign.
 Fee amounts and history are excluded from `manifest_hash`; never re-seed or
 rewrite a live campaign's signed terms to change its fee.
 
@@ -547,31 +546,19 @@ fee and tell scripted submitters to add `--yes`, optionally with
 
 Use `campaign.set_fee` on the validator for an existing campaign, including a
 draft that already has an initial fee. Do not run the seed helper again: it
-creates another campaign. Choose an activation block at least 100 blocks ahead
-at execution and after any scheduled entries. This example leaves 200 blocks:
+creates another campaign. Fee changes take effect at the chain block observed by
+the command; no activation block argument or future scheduling is supported.
 
 ```bash
-ACTIVATION_BLOCK=$(python - <<'PYTHON'
-import os
-import bittensor as bt
-import config
-from campaign.store import get_campaign
-campaign = get_campaign(os.environ["CAMPAIGN_ID"])
-if campaign is None:
-    raise SystemExit("Campaign not found")
-with bt.Subtensor(network=config.SUBTENSOR_NETWORK) as subtensor:
-    head = int(subtensor.block)
-last = campaign.submission_fee_history[-1]["effective_from_block"]
-print(max(head + 200, last + 1))
-PYTHON
-)
 python -m campaign.set_fee --campaign-id "$CAMPAIGN_ID" \
-  --amount-tao 0.20 --effective-from-block "$ACTIVATION_BLOCK"
+  --amount-tao 0.20
 curl -fsS "https://api.pareton.ai/v1/campaigns/$CAMPAIGN_ID" \
-  | jq '{submission_fee, submission_fee_history, submission_fee_at_block}'
+  | jq '{submission_fee, submission_fee_history}'
 ```
 
-Run promptly; recalculate if the safety margin expires. Confirm the new entry is
-present, then verify `submission_fee` switches at activation. Earlier payments
-retain the fee from their payment block. Scheduling preserves existing history,
-manifest hashes and signoffs; the API needs Subtensor access once changes exist.
+Confirm that the API quotes the newly published fee. The command needs Subtensor
+access once per update to record the change's block; campaign API reads use only
+Neon. Earlier payments retain the fee from their payment block. A second change
+in the same block is rejected; retry after the chain advances. Changes preserve
+existing history, manifest hashes and signoffs. A transfer included after a fee
+increase must meet the increased fee, even if the miner saw an earlier quote.
