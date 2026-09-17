@@ -31,6 +31,15 @@ from worker.round_job import RoundInfraError, materialize_round_trace
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture
+def baseline_identity(monkeypatch):
+    identity = {"engine_ref": "sha256:" + "e" * 64, "container_id": "baseline"}
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image", lambda **kw: dict(identity)
+    )
+    return identity
+
+
 def rule(**kw):
     return {
         "type": "hf_rows",
@@ -231,7 +240,7 @@ def test_qualification_distinguishes_early_eos_from_natural_generation_at_the_ca
 
 
 def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, baseline_identity
 ):
     f = fields()
     calls = []
@@ -251,6 +260,8 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     qualified = qualify(
         fields=f,
         base_url="http://baseline",
+        container="baseline",
+        engine_ref="sha256:" + "e" * 64,
         output_dir=tmp_path,
         pool_size=4,
         max_rows=40,
@@ -269,7 +280,9 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
         require_qualification(qualified, f["bench"], f["engine"])
 
 
-def test_short_outputs_leave_evidence_but_no_launch_rule(tmp_path, monkeypatch):
+def test_short_outputs_leave_evidence_but_no_launch_rule(
+    tmp_path, monkeypatch, baseline_identity
+):
     monkeypatch.setattr(
         "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
     )
@@ -287,6 +300,8 @@ def test_short_outputs_leave_evidence_but_no_launch_rule(tmp_path, monkeypatch):
         qualify(
             fields=fields(),
             base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
             output_dir=tmp_path,
             pool_size=4,
             max_rows=4,
@@ -404,7 +419,9 @@ def test_round_creation_and_worker_replay_preserve_qualified_rows(
         )
 
 
-def test_qualification_requires_long_outputs_in_every_tier(tmp_path, monkeypatch):
+def test_qualification_requires_long_outputs_in_every_tier(
+    tmp_path, monkeypatch, baseline_identity
+):
     fmt = formatter()
     monkeypatch.setattr(
         "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
@@ -423,6 +440,8 @@ def test_qualification_requires_long_outputs_in_every_tier(tmp_path, monkeypatch
         qualify(
             fields=fields(),
             base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
             output_dir=tmp_path,
             pool_size=4,
             max_rows=40,

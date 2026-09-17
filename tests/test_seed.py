@@ -305,11 +305,15 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
                 "capture",
                 str(helper),
                 engine_ref,
                 "0.23",
+                str(
+                    helper.parent.parent
+                    / "fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json"
+                ),
             ],
             cwd=helper.parent.parent,
         )

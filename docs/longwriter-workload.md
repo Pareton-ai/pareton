@@ -30,22 +30,36 @@ model will produce a long new response.
 
 ## Qualify the source pool
 
-Start a trusted baseline endpoint with the exact model, published image and
-serving arguments from `ops/seed-sglang-qwen38-27b.sh`. The endpoint must expose
-`/v1/completions`, `/tokenize` and `/server_info`. Use a dedicated endpoint:
+Run qualification on the Linux Docker host serving the trusted baseline, using
+the exact model, published image and serving arguments from
+`ops/seed-sglang-qwen38-27b.sh`. Publish the container port on loopback, for example
+`-p 127.0.0.1:8000:8000`, and pass that container's name or ID. The endpoint must
+expose `/v1/completions`, `/tokenize` and `/server_info`. Use a dedicated endpoint:
 qualification submits real inference work. From the repository root:
 
 ```bash
 python -m bench.qualify_longform \
   --base-url http://127.0.0.1:8000 \
+  --container "$BASELINE_CONTAINER" \
   --engine-ref "$NATIVE_ENGINE_REF" \
   --output-dir /workspace/longwriter-qualification \
   --pool-size 64 --repetitions 2
 ```
 
-The qualifier checks input tokenization and capacity against the server. The
-operator must ensure the endpoint runs the specified trusted image and serving
-settings; the HTTP API does not attest to the image digest. It scans rows in a
+The qualifier inspects the running container through the local Docker socket
+(`/var/run/docker.sock`). It verifies that the loopback endpoint matches a
+published TCP port and that the container's image ID has the requested immutable
+repository digest. The recorded image reference comes from inspected image
+metadata. Missing digests, mismatches, stopped containers, host networking,
+remote endpoints and HTTP proxy routing fail qualification. Container identity,
+start time and image are checked again before the qualified rule is written.
+Run as a user with access to that socket; remote Docker contexts and SSH tunnels
+are not supported by this verification path.
+
+The evidence records the inspected container and image identity. This trusts the
+local Docker host and does not provide hardware attestation. The operator must
+still use the campaign's pinned model and serving settings; the qualifier checks
+input tokenization and capacity against the server. It scans rows in a
 fixed hash order, skips malformed rows and inputs outside the tier bands, and
 rejects duplicate rendered prompts. The default pool contains 64 rows, with 16
 qualified rows per tier. An explicit pool size must be a multiple of four and
@@ -65,8 +79,9 @@ size qualify, evidence is retained but no launch rule is written. Use a fresh
 directory for another attempt; failures never silently fall back to short rows.
 
 This is sequential output qualification. It does not validate concurrent
-latency, full correctness, or candidate performance. Run the standalone sample
-with the qualified rule and a fresh directory:
+latency, full correctness, or candidate performance. Stop the qualification
+baseline container to release the GPUs, then run the standalone sample with
+the qualified rule and a fresh directory:
 
 ```bash
 bash ops/sglang-sample-round/run.sh \
@@ -91,11 +106,11 @@ bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO" \
   /workspace/longwriter-qualification/sampling_rule.json
 ```
 
-The optional third argument selects the qualified rule. The two-argument form
-still reads the fixture rule, which is an unqualified template until replaced
-with qualification output. Open-campaign preflight rejects missing or stale
-qualification before inserting a profile or campaign. A different model, image,
-serving configuration or sampling rule requires requalification.
+All three arguments are required, including the qualified rule file. The fixture
+rule remains a source template for qualification and CPU previews. Open-campaign
+preflight rejects missing or stale qualification before inserting a profile or
+campaign. A different model, image, serving configuration or sampling rule
+requires requalification.
 
 Rounds sample distinct rows from the frozen eligible pool using the chain seed.
 Receipts pin selected rows, the follow-up, history answer hashes, rendered input token hashes,

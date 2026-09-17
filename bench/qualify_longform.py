@@ -9,7 +9,11 @@ import argparse
 import hashlib
 import json
 import logging
+import re
+import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import getproxies, proxy_bypass
 
 from bench.correctness import degeneracy_reason
 from bench.http import post_json
@@ -35,6 +39,109 @@ from bench.schemas import WorkloadTrace
 from bench.workload_preflight import validate_engine_workload
 
 logger = logging.getLogger(__name__)
+
+
+def verify_baseline_image(*, engine_ref, base_url, container):
+    """Bind a loopback endpoint to an image inspected on the local Docker daemon."""
+    if not re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", engine_ref):
+        raise EngineError(
+            "qualification requires a published image reference by digest"
+        )
+    try:
+        url = urlsplit(base_url)
+        port = url.port or 80
+    except ValueError as exc:
+        raise EngineError("invalid qualification endpoint") from exc
+    if (
+        url.scheme != "http"
+        or url.hostname != "127.0.0.1"
+        or url.path not in ("", "/")
+        or url.query
+        or url.fragment
+        or url.username is not None
+        or url.password is not None
+    ):
+        raise EngineError(
+            "qualification requires a direct http://127.0.0.1:PORT endpoint on the Docker host"
+        )
+    if getproxies().get("http") and not proxy_bypass("127.0.0.1"):
+        raise EngineError("qualification endpoint must bypass HTTP proxies")
+
+    def inspect(kind, identifier):
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "--host",
+                    "unix:///var/run/docker.sock",
+                    kind,
+                    "inspect",
+                    "--",
+                    identifier,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            items = json.loads(result.stdout)
+            if (
+                not isinstance(items, list)
+                or len(items) != 1
+                or not isinstance(items[0], dict)
+            ):
+                raise ValueError("invalid inspect output")
+            return items[0]
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            raise EngineError(
+                f"cannot verify baseline {kind} through local Docker inspection"
+            ) from exc
+
+    running = inspect("container", container)
+    state = running.get("State") or {}
+    if (
+        state.get("Running") is not True
+        or state.get("Paused")
+        or state.get("Restarting")
+    ):
+        raise EngineError("qualification baseline container is not running normally")
+    if (running.get("HostConfig") or {}).get("NetworkMode") == "host":
+        raise EngineError(
+            "host-network endpoints cannot be bound to a unique baseline container"
+        )
+    ports = (running.get("NetworkSettings") or {}).get("Ports") or {}
+    bindings = [
+        key
+        for key, entries in ports.items()
+        if key.endswith("/tcp")
+        for entry in entries or []
+        if entry.get("HostIp") in ("127.0.0.1", "0.0.0.0")
+        and entry.get("HostPort") == str(port)
+    ]
+    if len(bindings) != 1:
+        raise EngineError(
+            "base-url does not match the baseline container's published port"
+        )
+    image_id = running.get("Image")
+    if not isinstance(image_id, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", image_id
+    ):
+        raise EngineError("baseline container has no verifiable image ID")
+    image = inspect("image", image_id)
+    digests = image.get("RepoDigests") or []
+    if image.get("Id") != image_id or engine_ref not in digests:
+        raise EngineError("serving baseline image digest does not match --engine-ref")
+    if not running.get("Id") or not state.get("StartedAt"):
+        raise EngineError("baseline container lacks stable identity metadata")
+    return {
+        "engine_ref": next(ref for ref in digests if ref == engine_ref),
+        "image_id": image_id,
+        "container_id": running["Id"],
+        "started_at": state["StartedAt"],
+        "restart_count": running.get("RestartCount"),
+        "base_url": base_url.rstrip("/"),
+        "container_port": bindings[0],
+    }
 
 
 def evaluate_response(response, rule, input_tokens):
@@ -87,6 +194,8 @@ def qualify(
     *,
     fields,
     base_url,
+    container,
+    engine_ref,
     output_dir,
     pool_size=None,
     max_rows=6000,
@@ -111,7 +220,11 @@ def qualify(
     # Requalification starts from source, not a previous winning subset.
     rule.pop("qualification", None)
     rule.pop("eligible_row_indices", None)
-    bench, engine = fields["bench"], fields["engine"]
+    identity = verify_baseline_image(
+        engine_ref=engine_ref, base_url=base_url, container=container
+    )
+    bench = {**fields["bench"], "baseline_engine_image_digest": identity["engine_ref"]}
+    engine = fields["engine"]
     model = bench["model"]
     context = sampling_context_for_campaign(bench, engine)
     formatter = formatter or build_prompt_formatter(
@@ -135,6 +248,7 @@ def qualify(
                     "engine": engine,
                     "sampling_rule": rule,
                     "formatter": formatter.receipt,
+                    "baseline_identity": identity,
                 }
             )
             + "\n"
@@ -218,6 +332,15 @@ def qualify(
             f"only {len(qualified)}/{pool_size} prompts qualified; evidence saved, no launch rule written"
             f"; input tiers: {qualified_counts}, required: {quotas}"
         )
+    if (
+        verify_baseline_image(
+            engine_ref=engine_ref, base_url=base_url, container=identity["container_id"]
+        )
+        != identity
+    ):
+        raise EngineError(
+            "baseline container changed during qualification; no launch rule written"
+        )
     rule["eligible_row_indices"] = sorted(qualified)
     rule["qualification"] = {
         "contract_sha256": qualification_contract(rule, bench, engine),
@@ -247,7 +370,12 @@ def main(argv=None):
     parser.add_argument(
         "--base-url",
         required=True,
-        help="Trusted running baseline endpoint; match the campaign's model and serve args",
+        help="Direct http://127.0.0.1:PORT endpoint on the local Linux Docker host",
+    )
+    parser.add_argument(
+        "--container",
+        required=True,
+        help="Running baseline Docker container name or ID",
     )
     parser.add_argument(
         "--engine-ref",
@@ -271,11 +399,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     fields = json.loads(args.campaign_fields.read_text())
-    fields["bench"]["baseline_engine_image_digest"] = args.engine_ref
     try:
         qualify(
             fields=fields,
             base_url=args.base_url,
+            container=args.container,
+            engine_ref=args.engine_ref,
             output_dir=args.output_dir,
             pool_size=args.pool_size,
             max_rows=args.max_rows,

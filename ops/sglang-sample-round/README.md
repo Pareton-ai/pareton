@@ -37,13 +37,13 @@ cd /workspace/pareton-sample-source
 nohup bash ops/sglang-sample-round/run.sh \
   /workspace/pareton-sample-round-longwriter \
   /workspace/longwriter-qualification/sampling_rule.json \
-  > /workspace/pareton-sample-round-nvfp4.log 2>&1 < /dev/null &
-tail -f /workspace/pareton-sample-round-nvfp4.log
+  > /workspace/pareton-sample-round-longwriter.log 2>&1 < /dev/null &
+tail -f /workspace/pareton-sample-round-longwriter.log
 ```
 
-The runner uses `/workspace/pareton-sample-round-nvfp4` for its virtual environment,
+The runner uses `/workspace/pareton-sample-round-longwriter` for its virtual environment,
 request, trace, build log and reports. Pass a different output directory as its
-first argument and the qualified sampling rule as its second argument. Rerunning with the same
+first argument and the qualified sampling rule as its second argument. Both are required. Rerunning with the same
 directory reuses the sampled trace and writes a new timestamped report directory.
 Use a fresh directory when switching models, including from the NVIDIA NVFP4
 checkpoint; existing traces and receipts belong to their original model pin.
