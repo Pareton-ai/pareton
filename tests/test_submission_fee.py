@@ -166,3 +166,59 @@ def test_scheduler_appends_fee_without_rewriting_terms(monkeypatch):
     assert cur.written == [*history, result]
     assert result["effective_from_block"] == 1000
     assert result["amount_tao"] == "0.15"
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [],
+        [{**FEE, "amount_tao": "0.15", "effective_from_block": 0}],
+        [{**FEE, "recipient": "different", "effective_from_block": 0}],
+    ],
+)
+def test_insert_rejects_empty_or_conflicting_history_before_db(monkeypatch, history):
+    from campaign import store
+
+    manifest = build_manifest(**_manifest_kwargs())
+    manifest.submission_fee_history = history
+    monkeypatch.setattr(
+        store, "db_connection", lambda: pytest.fail("database accessed")
+    )
+    with pytest.raises(ValueError):
+        store.insert_campaign(manifest)
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_insert_preserves_valid_history_or_defaults_none(monkeypatch, supplied):
+    from contextlib import contextmanager
+    from campaign import store
+
+    manifest = build_manifest(**_manifest_kwargs())
+    history = [{**FEE, "effective_from_block": 0}]
+    if supplied:
+        history.append({**FEE, "amount_tao": "0.15", "effective_from_block": 100})
+        manifest.submission_fee_history = [
+            {**history[0], "amount_tao": "0.0005000"},
+            history[1],
+        ]
+    recorded = []
+
+    class Cursor:
+        def execute(self, _sql, params):
+            recorded.append(params[-1].adapted)
+
+        def fetchone(self):
+            return [manifest.campaign_id]
+
+    class Connection:
+        @contextmanager
+        def cursor(self):
+            yield Cursor()
+
+    @contextmanager
+    def connection():
+        yield Connection()
+
+    monkeypatch.setattr(store, "db_connection", connection)
+    assert store.insert_campaign(manifest) == manifest.campaign_id
+    assert recorded == [history]

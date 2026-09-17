@@ -524,6 +524,14 @@ print(campaign.submission_fee_history)
 assert campaign.submission_fee_history[0]["effective_from_block"] == 0
 assert campaign.submission_fee_history[0]["recipient"] == TRUSTED_PAYMENT_RECIPIENT
 PYTHON
+INITIAL_FEE_TAO=$(python - "$INITIAL_FEE_TAO" <<'PYTHON'
+import sys
+from campaign.fees import TRUSTED_PAYMENT_RECIPIENT, validate_submission_fee
+print(validate_submission_fee({
+    "amount_tao": sys.argv[1], "recipient": TRUSTED_PAYMENT_RECIPIENT,
+})["amount_tao"])
+PYTHON
+)
 curl -fsS "https://api.pareton.ai/v1/campaigns/$CAMPAIGN_ID" \
   | jq -e --arg amount "$INITIAL_FEE_TAO" \
     '.submission_fee.amount_tao == $amount and

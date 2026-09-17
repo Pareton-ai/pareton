@@ -237,6 +237,13 @@ def _fee_cli_stubs(monkeypatch, tmp_path, *, execute, submit=None):
         "_http_json",
         lambda *_a, **_k: {
             "baseline_commit": "a" * 40,
+            "submission_fee_history": [
+                {
+                    "amount_tao": "0.05",
+                    "recipient": cp.TRUSTED_PAYMENT_RECIPIENT,
+                    "effective_from_block": 0,
+                }
+            ],
             "submission_fee": {
                 "amount_tao": "0.05",
                 "recipient": "5CiieAa5nzSMbw4LPkh2hqv9rfMPZX9ZfEcSjh3SYWNBzk3K",
@@ -708,3 +715,141 @@ def test_dry_run_and_reuse_never_prompt_or_pay(monkeypatch, tmp_path, flags):
     argv = [arg for arg in _fee_cli_argv(patch) if arg != "--yes"]
     assert cp.main([*argv, *flags]) == 0
     assert "pay" not in order
+
+
+def _campaign_fee_response(cp, amount, history=None):
+    fee = {"amount_tao": amount, "recipient": cp.TRUSTED_PAYMENT_RECIPIENT}
+    return {
+        "baseline_commit": "a" * 40,
+        "submission_fee": fee,
+        "submission_fee_history": history or [{**fee, "effective_from_block": 0}],
+    }
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_zero_fee_needs_no_confirmation(monkeypatch, tmp_path, interactive):
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch, tmp_path, execute=lambda *_a, **_k: pytest.fail("payment")
+    )
+    monkeypatch.setattr(
+        cp, "_http_json", lambda *_a, **_k: _campaign_fee_response(cp, "0")
+    )
+    monkeypatch.setattr(cp.sys.stdin, "isatty", lambda: interactive)
+    monkeypatch.setattr("builtins.input", lambda *_a: pytest.fail("confirmation"))
+    argv = _fee_cli_argv(patch)
+    argv.remove("--yes")
+    assert cp.main(argv) == 0
+    assert order == ["commit"]
+
+
+@pytest.mark.parametrize("answer,expected", [("y", 0), ("n", 1)])
+def test_changed_fee_requires_renewed_consent(monkeypatch, tmp_path, answer, expected):
+    from types import SimpleNamespace
+
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch,
+        tmp_path,
+        execute=lambda *_a, **_k: SimpleNamespace(success=True, extrinsic_id="900-2"),
+    )
+    responses = iter(
+        [
+            _campaign_fee_response(cp, "0.05"),
+            _campaign_fee_response(cp, "0.15"),
+            _campaign_fee_response(cp, "0.15"),
+        ]
+    )
+    monkeypatch.setattr(cp, "_http_json", lambda *_a, **_k: next(responses))
+    monkeypatch.setattr(cp.sys.stdin, "isatty", lambda: True)
+    answers = iter(["y", answer])
+    monkeypatch.setattr(
+        "builtins.input", lambda *_a: order.append("confirm") or next(answers)
+    )
+    argv = _fee_cli_argv(patch)
+    argv.remove("--yes")
+    assert cp.main(argv) == expected
+    assert order == ["confirm", "confirm"] + (
+        ["pay", "commit"] if expected == 0 else []
+    )
+
+
+@pytest.mark.parametrize("invalid", ["cap", "recipient", "missing", "history"])
+def test_refreshed_fee_fails_closed(monkeypatch, tmp_path, invalid):
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch, tmp_path, execute=lambda *_a, **_k: pytest.fail("payment")
+    )
+    refreshed = _campaign_fee_response(cp, "0.15" if invalid == "cap" else "0.05")
+    if invalid == "recipient":
+        refreshed["submission_fee"]["recipient"] = "wrong"
+    elif invalid == "missing":
+        del refreshed["submission_fee"]
+    elif invalid == "history":
+        refreshed["submission_fee_history"] = []
+    responses = iter([_campaign_fee_response(cp, "0.05"), refreshed])
+    monkeypatch.setattr(cp, "_http_json", lambda *_a, **_k: next(responses))
+    assert cp.main([*_fee_cli_argv(patch), "--max-fee-tao", "0.1"]) == 1
+    assert order == []
+
+
+@pytest.mark.parametrize("block,expected", [(899, 0), (900, 1)])
+def test_payment_inclusion_uses_fresh_history(
+    monkeypatch, tmp_path, capsys, block, expected
+):
+    from types import SimpleNamespace
+
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch,
+        tmp_path,
+        execute=lambda *_a, **_k: SimpleNamespace(
+            success=True, extrinsic_id=f"{block}-2"
+        ),
+    )
+    history = [
+        {
+            "amount_tao": "0.05",
+            "recipient": cp.TRUSTED_PAYMENT_RECIPIENT,
+            "effective_from_block": 0,
+        },
+        {
+            "amount_tao": "0.15",
+            "recipient": cp.TRUSTED_PAYMENT_RECIPIENT,
+            "effective_from_block": 900,
+        },
+    ]
+    responses = iter(
+        [
+            _campaign_fee_response(cp, "0.05"),
+            _campaign_fee_response(cp, "0.05"),
+            _campaign_fee_response(cp, "0.15", history),
+        ]
+    )
+    monkeypatch.setattr(cp, "_http_json", lambda *_a, **_k: next(responses))
+    assert cp.main(_fee_cli_argv(patch)) == expected
+    assert order == (["pay", "commit"] if expected == 0 else ["pay"])
+    if expected:
+        assert "new full payment" in capsys.readouterr().err
+
+
+def test_yes_accepts_refreshed_fee_within_cap(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    cp, patch, order = _fee_cli_stubs(
+        monkeypatch,
+        tmp_path,
+        execute=lambda *_a, **_k: SimpleNamespace(success=True, extrinsic_id="900-2"),
+    )
+    responses = iter(
+        [
+            _campaign_fee_response(cp, "0.05"),
+            _campaign_fee_response(cp, "0.15"),
+            _campaign_fee_response(cp, "0.15"),
+        ]
+    )
+    monkeypatch.setattr(cp, "_http_json", lambda *_a, **_k: next(responses))
+    monkeypatch.setattr("builtins.input", lambda *_a: pytest.fail("confirmation"))
+    paid = []
+    monkeypatch.setattr(
+        cp, "_pay_fee", lambda *_a, **kw: paid.append(kw["fee_tao"]) or (900, 2)
+    )
+    assert cp.main([*_fee_cli_argv(patch), "--max-fee-tao", "0.15"]) == 0
+    assert paid == ["0.15"]
+    assert order == ["commit"]

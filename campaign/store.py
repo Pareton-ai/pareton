@@ -111,6 +111,13 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
         Json(manifest.customer_signoff.to_dict()) if manifest.customer_signoff else None
     )
     submission_fee = validate_submission_fee(manifest.submission_fee)
+    history = validate_fee_history(
+        [{**submission_fee, "effective_from_block": 0}]
+        if manifest.submission_fee_history is None
+        else manifest.submission_fee_history
+    )
+    if fee_at_block(history, 0) != submission_fee:
+        raise ValueError("submission_fee must match the block-zero fee history entry")
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -172,12 +179,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                         if manifest.emission_rule is not None
                         else None
                     ),
-                    Json(
-                        validate_fee_history(
-                            manifest.submission_fee_history
-                            or [{**submission_fee, "effective_from_block": 0}]
-                        )
-                    ),
+                    Json(history),
                 ),
             )
             return cur.fetchone()[0]
