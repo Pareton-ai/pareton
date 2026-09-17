@@ -23,8 +23,11 @@ a proof are free only if the campaign fee was zero at their commitment block.
 
 Auto-deploy can reach production about a minute after a merge. **Apply the
 migration before merging**, or pause `pareton-deploy.timer` until migration and
-deployment finish. `ops/deploy.sh` does not migrate. Reapplying `db/schema.sql`
-does not add columns to existing campaigns.
+deployment finish. `ops/deploy.sh` does not migrate. Use the dedicated migration
+for the existing VPS. `db/schema.sql` also performs this additive fee upgrade
+when reapplied: it adds the column, backfills supported rows, and installs the
+constraints and trigger in one transaction. It does not infer fees for other
+campaigns; the same unmapped-campaign guard applies.
 
 From a checkout containing the reviewed migration, with the production database
 URL already loaded securely:
