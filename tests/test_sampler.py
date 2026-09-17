@@ -122,7 +122,7 @@ def test_sampler_accepts_legacy_and_current_algorithm_versions():
 
 def test_sampler_rejects_an_unreleased_algorithm_version():
     with pytest.raises(SamplerError, match="unsupported algo_version"):
-        parse_sampling_rule(_rule(algo_version=4))
+        parse_sampling_rule(_rule(algo_version=5))
 
 
 def _chat_rule() -> dict:

@@ -1,4 +1,4 @@
-"""Check version 3 tokenization and capacity before warming an engine."""
+"""Check token-counted workload tokenization and capacity before engine warmup."""
 
 from __future__ import annotations
 

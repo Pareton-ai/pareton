@@ -63,7 +63,7 @@ log "Candidate build completed"
 
 phase=sampling
 log "Preparing sampled workload and benchmark request"
-python "$script_root/prepare.py" "$run_root"
+python "$script_root/prepare.py" "$run_root" "${2:-$repo_root/fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json}"
 output_dir="$run_root/output-$(date -u +%Y%m%dT%H%M%SZ)"
 phase=benchmark
 log "Starting baseline, candidate, correctness scorer, and baseline drift replay"

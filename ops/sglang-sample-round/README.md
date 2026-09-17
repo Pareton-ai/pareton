@@ -35,18 +35,22 @@ mkdir -p /workspace/pareton-sample-source
 tar -xzf /workspace/pareton-sample-source.tar.gz -C /workspace/pareton-sample-source
 cd /workspace/pareton-sample-source
 nohup bash ops/sglang-sample-round/run.sh \
+  /workspace/pareton-sample-round-longwriter \
+  /workspace/longwriter-qualification/sampling_rule.json \
   > /workspace/pareton-sample-round-nvfp4.log 2>&1 < /dev/null &
 tail -f /workspace/pareton-sample-round-nvfp4.log
 ```
 
 The runner uses `/workspace/pareton-sample-round-nvfp4` for its virtual environment,
 request, trace, build log and reports. Pass a different output directory as its
-first argument to generate a fresh sample directory. Rerunning with the same
+first argument and the qualified sampling rule as its second argument. Rerunning with the same
 directory reuses the sampled trace and writes a new timestamped report directory.
 Use a fresh directory when switching models, including from the NVIDIA NVFP4
 checkpoint; existing traces and receipts belong to their original model pin.
-Also use a fresh directory when changing sampling settings. Existing traces are
-reused as written, including their thinking mode and EOS behavior.
+Also use a fresh directory when changing sampling settings. Reuse verifies the
+saved receipt and trace against the current pins and source rows; a stale forced
+trace cannot be replayed as a LongWriter workload. First run the
+[LongWriter qualifier](../../docs/longwriter-workload.md) against the trusted baseline.
 
 The VM needs Python 3 with venv support, Git, Docker with the NVIDIA runtime,
 `flock`, and four available RTX5090 GPUs. Run as root. Internet access is required
@@ -63,15 +67,14 @@ needed.
 - Use the workload and hardware settings from
   [the campaign fixture](../../fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json),
   including its pinned RadixArk model: four RTX5090 GPUs, 262144 context configuration,
-  32 sampled prompts across the 4K/8K/16K/32K input tiers, and three timing
+  32 sampled LongWriter requests with their original input lengths, and three timing
   repetitions by default.
-- Preserve the dataset system prompts and disable thinking. Timed baseline,
-  candidate and drift requests use `ignore_eos=true` and must each emit 5120
-  tokens to provide a sustained decode workload. A separate baseline probe records
-  natural response lengths, and the harness saves correctness evidence alongside
-  timing results. Treat these as synthetic throughput measurements, not a measure
-  of long-form answer quality or production qualification. The score remains E2E
-  speedup and includes time to first token.
+- Disable thinking and respect EOS for baseline, candidate and drift requests.
+  The 5120-token allowance is a ceiling. Source references never enter the prompt.
+  The qualified source pool requires at least 5000 generated tokens without forced
+  continuation; all measured baseline and drift repetitions must meet that floor.
+  Full-output correctness remains enabled. A short baseline response fails the
+  workload instead of extending its tail or awarding a candidate speedup.
 - Use the campaign's `modelopt_mixed` loader: NVFP4 MLP layers, FP8 attention
   and an unquantized BF16 output head.
 - Run baseline, candidate, NVFP4 correctness scoring, and baseline drift replay.

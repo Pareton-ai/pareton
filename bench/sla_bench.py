@@ -22,7 +22,7 @@ import logging
 import statistics
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from bench.http import post_completion_stream
@@ -310,6 +310,7 @@ class EngineReplay:
     result: EngineSlaResult
     outputs: dict[str, str]
     output_samples: dict[str, tuple[str, ...]]
+    completion_token_samples: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -604,6 +605,14 @@ def run_sla_engine(
         result=result,
         outputs=outputs,
         output_samples=_output_samples(measured),
+        completion_token_samples={
+            rid: tuple(
+                int(row["completion_tokens"])
+                for row in measured
+                if row["request_id"] == rid
+            )
+            for rid in timings
+        },
     )
 
 

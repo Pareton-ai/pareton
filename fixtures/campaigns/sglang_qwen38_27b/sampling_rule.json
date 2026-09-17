@@ -1,15 +1,16 @@
 {
-  "algo_version": 3,
+  "algo_version": 4,
   "config": "default",
-  "dataset": "nebius/SWE-agent-trajectories",
+  "dataset": "zai-org/LongWriter-6k",
   "enable_thinking": false,
-  "ignore_eos": true,
   "max_tokens": 5120,
   "n_prompts": 32,
-  "n_rows": 80036,
+  "n_rows": 6000,
   "request_interval_ms": 2,
-  "revision": "68195a1450865274106246d0d0296a1d6807b88e",
+  "revision": "0db15c0624f19d63e2efe1021595af933cc5b6cc",
   "seed_block_offset": 10,
   "split": "train",
-  "type": "hf_rows"
+  "type": "hf_rows",
+  "min_reference_tokens": 5120,
+  "min_output_tokens": 5000
 }

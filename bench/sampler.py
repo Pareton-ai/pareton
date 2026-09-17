@@ -19,9 +19,18 @@ _SHA256_HEX_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 ALGO_VERSION = 2
-SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3})
+SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3, 4})
 CHAT_TEMPLATE_ALGO_VERSION = 2
 TRAJECTORY_ALGO_VERSION = 3
+LONGFORM_ALGO_VERSION = 4
+LONGFORM_RULE_FIELDS = frozenset(
+    {
+        "min_reference_tokens",
+        "min_output_tokens",
+        "eligible_row_indices",
+        "qualification",
+    }
+)
 MAX_PROMPT_CHARS = 8000
 DEFAULT_N_PROMPTS = 32
 DEFAULT_MAX_TOKENS = 128
@@ -119,14 +128,17 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
     }
     if ignore_eos:
         parsed["ignore_eos"] = True
-    if algo_version == TRAJECTORY_ALGO_VERSION:
+    if algo_version >= TRAJECTORY_ALGO_VERSION:
         unknown = (
             set(rule)
             - set(parsed)
             - {"ignore_eos", "enable_thinking", "request_interval_ms"}
+            - (LONGFORM_RULE_FIELDS if algo_version == LONGFORM_ALGO_VERSION else set())
         )
         if unknown:
-            raise SamplerError(f"unknown version 3 sampling fields: {sorted(unknown)}")
+            raise SamplerError(
+                f"unknown version {algo_version} sampling fields: {sorted(unknown)}"
+            )
         for name in ("n_rows", "n_prompts", "max_tokens", "seed_block_offset"):
             if name in rule and type(rule[name]) is not int:
                 raise SamplerError(f"{name} must be an integer")
@@ -134,12 +146,14 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
                 raise SamplerError(f"{name} is below its allowed minimum")
         if type(rule.get("algo_version")) is not int:
             raise SamplerError("algo_version must be an integer")
-        if n_prompts < 4:
+        if algo_version == TRAJECTORY_ALGO_VERSION and n_prompts < 4:
             raise SamplerError(
                 "algo_version 3 requires at least 4 prompts for context coverage"
             )
         if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
-            raise SamplerError("algo_version 3 requires a full dataset commit revision")
+            raise SamplerError(
+                f"algo_version {algo_version} requires a full dataset commit revision"
+            )
         interval = rule.get("request_interval_ms", 200)
         if type(interval) is not int or interval < 0:
             raise SamplerError("request_interval_ms must be a nonnegative integer")
@@ -147,7 +161,20 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(thinking, bool):
             raise SamplerError("enable_thinking must be a boolean")
         parsed.update(request_interval_ms=interval, enable_thinking=thinking)
+    if algo_version == LONGFORM_ALGO_VERSION:
+        from bench.longform import parse_longform_fields
+
+        parsed.update(parse_longform_fields(rule, parsed))
     return parsed
+
+
+def sampling_context_for_rule(rule, bench, engine=None):
+    """Resolve capacity without imposing SWE history tiers on writing prompts."""
+    if rule["algo_version"] == LONGFORM_ALGO_VERSION:
+        from bench.longform import sampling_context_for_campaign
+    else:
+        from bench.trajectory import sampling_context_for_campaign
+    return sampling_context_for_campaign(bench, engine)
 
 
 def _call_load_tokenizer_config(**kwargs: Any) -> dict[str, Any]:
@@ -244,7 +271,7 @@ def build_prompt_formatter(
 ) -> PromptFormatter:
     """Build a formatter from the campaign's pinned tokenizer config."""
     parsed = parse_sampling_rule(rule)
-    trajectory = parsed["algo_version"] == TRAJECTORY_ALGO_VERSION
+    trajectory = parsed["algo_version"] >= TRAJECTORY_ALGO_VERSION
     if enable_thinking is None:
         enable_thinking = parsed.get("enable_thinking", CHAT_TEMPLATE_ENABLE_THINKING)
     if trajectory and enable_thinking != parsed["enable_thinking"]:
@@ -257,7 +284,9 @@ def build_prompt_formatter(
     if not repo or not revision:
         raise SamplerError("chat template formatting requires model repo and revision")
     if trajectory and not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
-        raise SamplerError("algo_version 3 requires a full tokenizer commit revision")
+        raise SamplerError(
+            "token-counted sampling requires a full tokenizer commit revision"
+        )
     loader = config_loader or _call_load_tokenizer_config
     try:
         config = loader(
@@ -555,6 +584,19 @@ def generate_trace(
 ) -> SampledTrace:
     """Build a trace from hash-selected rows. row_fetcher is injected in tests."""
     parsed = parse_sampling_rule(rule)
+    if parsed["algo_version"] == LONGFORM_ALGO_VERSION:
+        from bench.longform import generate_longform_trace
+
+        return generate_longform_trace(
+            rule=parsed,
+            seed_hex=seed_hex,
+            row_fetcher=row_fetcher,
+            formatter=prompt_formatter,
+            context=sampling_context,
+            receipt=sampling_receipt,
+            sample_seed_block=sample_seed_block,
+            sample_seed_block_hash=sample_seed_block_hash,
+        )
     if parsed["algo_version"] == TRAJECTORY_ALGO_VERSION:
         from bench.trajectory import generate_trajectory_trace
 

@@ -611,6 +611,9 @@ def run_round(
                         evidence_dir=layout.sla_bench_dir,
                         engine_name=start.spec.name,
                     )
+                    from bench.longform import validate_natural_baseline
+
+                    validate_natural_baseline(trace, replay)
                     if start.kind == "baseline" and req.mode == "all":
                         natural_stops = capture_baseline_natural_stops(
                             url,
