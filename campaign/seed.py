@@ -22,7 +22,7 @@ from bench.trajectory import (
 )
 from campaign.engine import ENGINE_PRESETS
 from campaign.engine import preset as engine_preset
-from campaign.fees import validate_submission_fee
+from campaign.fees import TRUSTED_PAYMENT_RECIPIENT, validate_submission_fee
 from campaign.manifest import build_manifest
 from campaign.models import (
     SLA,
@@ -256,6 +256,7 @@ def seed_synthetic_campaign(
     gpu_skus: list[str] | None = None,
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
+    submission_fee_tao: str | None = None,
     engine: str | None = None,
     allowed_paths: list[str] | None = None,
     denied_paths: list[str] | None = None,
@@ -342,10 +343,19 @@ def seed_synthetic_campaign(
     emission = _emission_rule(emission_rule)
     fee = validate_submission_fee(
         {
-            "amount_tao": config.seed_submission_fee_tao(),
+            "amount_tao": (
+                config.seed_submission_fee_tao()
+                if submission_fee_tao is None
+                else submission_fee_tao
+            ),
             "recipient": config.PAYMENT_RECIPIENT_ADDRESS,
         }
     )
+
+    if fee["recipient"] != TRUSTED_PAYMENT_RECIPIENT:
+        raise ValueError(
+            "submission fee recipient must match the locally trusted miner recipient"
+        )
 
     if status == "open":
         require_correctness_thresholds(bench)
@@ -576,6 +586,10 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p.add_argument(
+        "--submission-fee-tao",
+        help="Initial campaign fee as an exact TAO decimal; overrides the legacy seed environment input",
+    )
+    p.add_argument(
         "--status",
         default=DEFAULT_STATUS,
         choices=sorted(KNOWN_SEED_STATUSES),
@@ -686,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
             gpu_skus=args.gpu_skus,
             status=args.status,
             no_bench=args.no_bench,
+            submission_fee_tao=args.submission_fee_tao,
             engine=args.engine,
             allowed_paths=args.allowed_path,
             denied_paths=args.denied_path,

@@ -9,13 +9,22 @@
 # SGLang loads its per-layer quantization with modelopt_mixed.
 # Reserve scorer memory for full-input logprobs (logprob_start_len=0).
 set -euo pipefail
-engine_ref=${1:?Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF}
+if [[ $# -ne 2 ]]; then
+  echo 'Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF INITIAL_FEE_TAO' >&2
+  echo 'Creates a new campaign. For an existing campaign use python -m campaign.set_fee.' >&2
+  exit 2
+fi
+engine_ref=$1
+initial_fee_tao=$2
 if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
   echo 'Pass the full published SGLang engine reference by digest' >&2
   exit 2
 fi
 
+# Store the initial fee with the open row, with no delayed activation window.
+# seed validates whole RAO and the locally trusted recipient before insertion.
 python -m campaign.seed \
+  --submission-fee-tao "$initial_fee_tao" \
   --engine sglang \
   --baseline-repo https://github.com/sgl-project/sglang.git \
   --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \

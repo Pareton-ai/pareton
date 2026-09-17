@@ -76,7 +76,17 @@ The command locks the campaign row, validates the amount, and appends history in
 one transaction. Existing entries cannot be changed or removed. Only trusted
 operators should have write access; the database cannot independently verify
 chain height for arbitrary administrative SQL. Use this command for changes.
-`PARETON_SUBMISSION_FEE_TAO` remains a seed-only input (default 0.15). It is never
+For a new campaign, pass `--submission-fee-tao DECIMAL` to `python -m campaign.seed`,
+or supply the second argument to the launch helper:
+
+```sh
+bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" 0.15
+```
+
+The initial fee is inserted with the campaign at block zero. Do not schedule it
+after opening with `campaign.set_fee`, which only changes a fee at a future block.
+`--submission-fee-tao` overrides `PARETON_SUBMISSION_FEE_TAO`, which remains a
+legacy seed-only input (default 0.15). It is never
 read by the miner or watcher to determine a runtime payment. The seed recipient
 must match the recipient pinned in `campaign/fees.py` for the public CLI.
 

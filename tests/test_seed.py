@@ -225,10 +225,11 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3"',
                 "capture",
                 str(helper),
                 engine_ref,
+                "0.23",
             ],
             cwd=helper.parent.parent,
         )
@@ -258,6 +259,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     )
     assert captured["inserts"] == 1
     assert manifest.status == "open"
+    assert manifest.submission_fee["amount_tao"] == "0.23"
     assert manifest.emission_rule == {
         "name": "linear_decay",
         "start_weight": 0.2,
@@ -710,3 +712,39 @@ def test_main_emission_flags_wired(monkeypatch: pytest.MonkeyPatch):
     assert rule["decay_blocks"] == 100800
     # An override fills one term; the rest still come from the seed defaults.
     assert rule["floor_weight"] == config.EMISSION_FLOOR_WEIGHT
+
+
+def test_explicit_seed_fee_overrides_legacy_environment(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setenv("PARETON_SUBMISSION_FEE_TAO", "9.99")
+    assert main(["--allow-placeholders", "--submission-fee-tao", "0.120000001"]) == 0
+    fee = captured["manifest"].to_public_dict()["submission_fee_history"]
+    assert fee[0]["amount_tao"] == "0.120000001"
+    assert fee[0]["effective_from_block"] == 0
+
+
+@pytest.mark.parametrize("amount", ["", "nan", "-1", "0.0000000001"])
+def test_seed_rejects_invalid_explicit_fee_before_database_writes(monkeypatch, amount):
+    captured = _patch_store(monkeypatch)
+    assert main(["--allow-placeholders", "--submission-fee-tao", amount]) == 1
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
+def test_seed_rejects_recipient_the_miner_would_refuse(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(config, "PAYMENT_RECIPIENT_ADDRESS", "5Unexpected")
+    assert main(["--allow-placeholders", "--submission-fee-tao", "0.15"]) == 1
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
+def test_launch_helper_requires_explicit_initial_fee():
+    helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
+    result = subprocess.run(
+        ["bash", str(helper), "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "INITIAL_FEE_TAO" in result.stderr
