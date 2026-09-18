@@ -43,7 +43,7 @@ python -m bench.qualify_longform \
   --container "$BASELINE_CONTAINER" \
   --engine-ref "$NATIVE_ENGINE_REF" \
   --output-dir /workspace/longwriter-qualification \
-  --pool-size 64 --repetitions 2
+  --pool-size 64 --repetitions 2 --concurrency 4
 ```
 
 The qualifier inspects the running container through the local Docker socket
@@ -59,9 +59,15 @@ are not supported by this verification path.
 The evidence records the inspected container and image identity. This trusts the
 local Docker host and does not provide hardware attestation. The operator must
 still use the campaign's pinned model and serving settings; the qualifier checks
-input tokenization and capacity against the server. It scans rows in a
+input tokenization and capacity against the server. It indexes source rows in a
 fixed hash order, skips malformed rows and inputs outside the tier bands, and
-rejects duplicate rendered prompts. The default pool contains 64 rows, with 16
+rejects duplicate rendered prompts. It qualifies tiers in descending order
+(16k, 8k, 4k, 2k), using batches of at most `--concurrency` rows (default 4).
+Repetitions for each row remain sequential. After each batch it stops if the
+remaining rows cannot fill that tier. Per-response logs report token counts and
+rejection reasons; evidence writes are serialized. Use `--concurrency 1` for
+serial qualification. Changing concurrency does not alter the source prompts
+or relax the output checks. The default pool contains 64 rows, with 16
 qualified rows per tier. An explicit pool size must be a multiple of four and
 at least 32. Extra rows in one tier cannot replace missing rows in another.
 Each accepted row must produce at least 5000 tokens
@@ -78,8 +84,8 @@ the full correctness benchmark before launch. If fewer than the requested pool
 size qualify, evidence is retained but no launch rule is written. Use a fresh
 directory for another attempt; failures never silently fall back to short rows.
 
-This is sequential output qualification. It does not validate concurrent
-latency, full correctness, or candidate performance. Stop the qualification
+This is bounded-concurrency output qualification. It does not validate the
+full campaign arrival pattern, latency, correctness, or candidate performance. Stop the qualification
 baseline container to release the GPUs, then run the standalone sample with
 the qualified rule and a fresh directory:
 

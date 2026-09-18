@@ -448,7 +448,7 @@ def test_qualification_requires_long_outputs_in_every_tier(
             row_fetcher=row,
             formatter=fmt,
         )
-    assert len([size for size in calls if size <= 10000]) == 6
+    assert len([size for size in calls if size <= 10000]) == 0
     assert len([size for size in calls if size > 10000]) == 10
     assert not (tmp_path / "sampling_rule.json").exists()
 
@@ -506,3 +506,112 @@ def test_cpu_preview_matches_round_sampling_and_exposes_messages(tmp_path, monke
         assert (root / f"hf-{i:03d}.prompt.txt").read_text() == formatter().render(
             messages
         )
+
+
+def test_qualification_concurrency_is_bounded_and_evidence_is_complete(
+    tmp_path, monkeypatch, baseline_identity
+):
+    import threading
+    from collections import Counter
+
+    fmt = formatter()
+    barrier = threading.Barrier(2, timeout=5)
+    lock = threading.Lock()
+    active = peak = 0
+    tiers = []
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
+    )
+
+    def post(url, path, body, **kw):
+        nonlocal active, peak
+        size = len(fmt.encode(body["prompt"]))
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            tiers.append(size)
+        try:
+            barrier.wait()
+            result = response()
+            result["usage"]["prompt_tokens"] = size
+            return result
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    qualified = qualify(
+        fields=fields(),
+        base_url="http://baseline",
+        container="baseline",
+        engine_ref="sha256:" + "e" * 64,
+        output_dir=tmp_path,
+        pool_size=8,
+        max_rows=40,
+        concurrency=2,
+        row_fetcher=row,
+        formatter=fmt,
+    )
+    assert peak == 2
+    assert tiers == [15200] * 4 + [7600] * 4 + [3800] * 4 + [1900] * 4
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "qualification.jsonl").read_text().splitlines()
+    ]
+    assert records[0]["concurrency"] == 2
+    assert len(records) == 17
+    assert Counter(record["row_index"] for record in records[1:]) == {
+        index: 2 for index in qualified["eligible_row_indices"]
+    }
+    assert all(record["rejection"] is None for record in records[1:])
+    assert json.loads((tmp_path / "summary.json").read_text())["concurrency"] == 2
+
+
+def test_qualification_stops_when_scarce_tier_cannot_fill(
+    tmp_path, monkeypatch, baseline_identity
+):
+    f = fields()
+    f["sampling_rule"] = rule(n_rows=100, n_prompts=32)
+    fmt = formatter()
+    calls = []
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
+    )
+
+    def post(url, path, body, **kw):
+        size = len(fmt.encode(body["prompt"]))
+        calls.append(size)
+        result = response(2, "stop")
+        result["usage"]["prompt_tokens"] = size
+        return result
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    with pytest.raises(SamplerError, match="16k cannot fill 16 slots"):
+        qualify(
+            fields=f,
+            base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
+            output_dir=tmp_path,
+            pool_size=64,
+            max_rows=100,
+            concurrency=1,
+            row_fetcher=row,
+            formatter=fmt,
+        )
+    assert calls == [15200] * 10
+    assert not (tmp_path / "sampling_rule.json").exists()
+
+
+@pytest.mark.parametrize("concurrency", [0, -1, True, 1.5])
+def test_qualification_rejects_invalid_concurrency(tmp_path, concurrency):
+    with pytest.raises(SamplerError, match="concurrency"):
+        qualify(
+            fields=fields(),
+            base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
+            output_dir=tmp_path,
+            concurrency=concurrency,
+        )
+    assert not (tmp_path / "qualification.jsonl").exists()
