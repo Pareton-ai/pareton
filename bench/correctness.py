@@ -1089,15 +1089,38 @@ def grade_candidate(
                     repetition_checks.append({"rep": rep, "degenerate": reason})
                     if reason is not None and repetition_degenerate is None:
                         repetition_degenerate = f"rep {rep}: {reason}"
-            positions, span, scored_prefix = score_captured_output(
-                scorer_url,
-                captured,
-                request_timeout_s=request_timeout_s,
-                engine_name=engine_name,
-                prefix_token_limit=None
-                if reference is None
-                else reference.natural_stop_tokens,
-            )
+            if repetition_degenerate is not None and degenerate is None:
+                degenerate = f"{captured.request_id}: {repetition_degenerate}"
+            try:
+                positions, span, scored_prefix = score_captured_output(
+                    scorer_url,
+                    captured,
+                    request_timeout_s=request_timeout_s,
+                    engine_name=engine_name,
+                    prefix_token_limit=None
+                    if reference is None
+                    else reference.natural_stop_tokens,
+                )
+            except EngineError as exc:
+                if degenerate is None:
+                    raise
+                # A scorer failure cannot erase an established text failure.
+                # Finalize the evidence for that verdict, including the request
+                # whose scoring failed, without inventing missing token scores.
+                ef.write(
+                    json.dumps(
+                        {
+                            "request_id": captured.request_id,
+                            "ignore_eos": captured.ignore_eos,
+                            "repetition_degeneracy": repetition_checks,
+                            "degenerate": repetition_degenerate,
+                            "scorer_error": str(exc),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                break
             scored = [position.logprob for position in positions]
             logprobs.extend(scored)
             span_positions += span
@@ -1224,7 +1247,7 @@ def grade_candidate(
 
     if not logprobs:
         return CorrectnessReport(
-            verdict="infra_failed",
+            verdict="fail_correctness" if degenerate is not None else "infra_failed",
             num_prompts=num_prompts,
             num_positions_scored=0,
             mean_logprob=0.0,
@@ -1232,7 +1255,11 @@ def grade_candidate(
             quantile_logprob=0.0,
             coverage_ratio=0.0,
             evidence=rel_evidence,
-            reason="scorer produced no logprobs for any captured output",
+            reason=(
+                f"degenerate output ({degenerate})"
+                if degenerate is not None
+                else "scorer produced no logprobs for any captured output"
+            ),
         )
 
     # Coverage is how much of what the scorer saw it managed to score. Both

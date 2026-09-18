@@ -239,3 +239,60 @@ def test_tiered_followups_grade_new_outputs_not_history(
             rep["rep"] for rep in row["repetition_degeneracy"] if rep["degenerate"]
         ]
         assert failed_reps == ([3] if tiers[row["request_id"]] == loop_tier else [])
+
+
+@pytest.mark.parametrize("failure_request", ["r1", "r2"])
+@pytest.mark.parametrize("kind", ["natural-loop", "clean", "forced-loop"])
+def test_known_repetition_failure_survives_scorer_error(
+    monkeypatch, tmp_path, failure_request, kind
+):
+    from bench.correctness import PendingCorrectness, grade_all
+
+    prompts = [
+        PromptCase(rid, "Write", ignore_eos=kind == "forced-loop")
+        for rid in ("r1", "r2")
+    ]
+    captured = capture_outputs(
+        prompts,
+        timings={},
+        outputs={rid: "A clean answer." for rid in ("r1", "r2")},
+        output_samples={
+            "r1": (
+                "A clean answer.",
+                " apple" * 200 if kind != "clean" else "Another answer.",
+            ),
+            "r2": ("A clean answer.",),
+        },
+    )
+    monkeypatch.setattr(
+        "bench.correctness.probe_logprob_capability", lambda *a, **kw: {}
+    )
+
+    def score(_url, output, **kwargs):
+        if output.request_id == failure_request:
+            raise EngineError("simulated scorer failure")
+        return [SimpleNamespace(logprob=-0.1)], 1, output.output_text
+
+    monkeypatch.setattr("bench.correctness.score_captured_output", score)
+    healthy = capture_outputs(
+        [PromptCase("r3", "Write")], timings={}, outputs={"r3": "A clean answer."}
+    )
+    reports = grade_all(
+        "unused",
+        [PendingCorrectness(0, captured), PendingCorrectness(1, healthy)],
+        cfg=_cfg(num_prompts=2),
+        evidence_dir=tmp_path,
+    )
+    assert reports[1].verdict == "pass"
+    report = reports[0]
+    expected = "fail_correctness" if kind == "natural-loop" else "infra_failed"
+    assert report.verdict == expected
+    if kind == "natural-loop":
+        assert "r1" in report.reason and "rep 2" in report.reason
+        path = tmp_path / "candidate_0.jsonl"
+        assert report.evidence.endswith(path.name)
+        assert not path.with_suffix(".jsonl.partial").exists()
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        assert rows[0]["repetition_degeneracy"][1]["degenerate"]
+        assert rows[-1]["request_id"] == failure_request
+        assert rows[-1]["scorer_error"] == "simulated scorer failure"
