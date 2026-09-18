@@ -64,7 +64,7 @@ def parse_longform_fields(rule, parsed):
     prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip():
         raise SamplerError("followup_prompt must be nonempty text")
-    minimum = rule.get("min_output_tokens", 5000)
+    minimum = rule.get("min_output_tokens", 3000)
     if type(minimum) is not int or minimum < 1:
         raise SamplerError("min_output_tokens must be a positive integer")
     if minimum > parsed["max_tokens"]:
@@ -85,14 +85,20 @@ def parse_longform_fields(rule, parsed):
         result["eligible_row_indices"] = list(rows)
     if "qualification" in rule:
         q = rule["qualification"]
+        # Preserve older artifacts; their optional evidence hash is diagnostic only.
         if (
             not isinstance(q, dict)
-            or set(q) != {"contract_sha256", "evidence_sha256", "repetitions"}
+            or set(q)
+            not in (
+                {"contract_sha256", "repetitions"},
+                {"contract_sha256", "evidence_sha256", "repetitions"},
+            )
             or type(q["repetitions"]) is not int
             or q["repetitions"] < 2
             or any(
                 not re.fullmatch(r"sha256:[0-9a-f]{64}", str(q[k]))
                 for k in ("contract_sha256", "evidence_sha256")
+                if k in q
             )
             or "eligible_row_indices" not in result
         ):
@@ -134,6 +140,7 @@ def qualification_contract(rule, bench, engine):
 
 
 def require_qualification(rule, bench, engine):
+    """Check a trusted operator's rule for stale settings, not authenticity."""
     q = rule.get("qualification")
     if not q or q["contract_sha256"] != qualification_contract(rule, bench, engine):
         raise SamplerError(

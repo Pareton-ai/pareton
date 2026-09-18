@@ -120,7 +120,7 @@
     "seed_block_offset": 10,
     "split": "train",
     "type": "hf_rows",
-    "min_output_tokens": 5000,
+    "min_output_tokens": 3000,
     "followup_prompt": "Write a new, original, self-contained long-form work. Use the previous response as an example of depth and detail, but choose a different topic from coding, fiction, non-fiction, science, history, astronomy, or internet culture. Surprise me. Produce the complete work, not an outline, summary, or discussion of what you would write. Aim for approximately 4,000-6,000 words."
   }
 }

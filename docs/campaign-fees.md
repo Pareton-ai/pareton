@@ -87,7 +87,8 @@ For a new campaign, pass `--submission-fee-tao DECIMAL` to `python -m campaign.s
 or supply the second argument to the launch helper:
 
 ```sh
-bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" 0.15
+bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" 0.15 \
+  /workspace/longwriter-qualification/sampling_rule.json
 ```
 
 The initial fee is inserted with the campaign at block zero. Choose it during

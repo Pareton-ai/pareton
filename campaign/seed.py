@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
-from bench.longform import preflight_longform_campaign
+from bench.longform import preflight_longform_campaign, require_qualification
 from bench.sampler import (
     LONGFORM_ALGO_VERSION,
     TRAJECTORY_ALGO_VERSION,
@@ -377,6 +377,7 @@ def seed_synthetic_campaign(
         from bench.longform import sampling_context_for_campaign as longform_context
 
         longform_context(bench, engine_profile)
+        require_qualification(rule, bench, engine_profile)
         if status == "open":
             preview = preflight_longform_campaign(rule, bench, engine_profile)
             print(f"Verified {len(preview.row_indices)} qualified long-form prompts")

@@ -361,7 +361,7 @@ Thinking is disabled. EOS is respected, and 5120 is an output ceiling, not a
 minimum generation length. The failure coefficient remains 0.1. Before opening,
 qualify a source-row pool on the trusted baseline and use that sampling rule
 with the seed helper. See [LongWriter qualification](longwriter-workload.md).
-The qualifier requires at least 5000 generated tokens in each repeated response,
+The qualifier requires at least 3000 generated tokens in each repeated response,
 without forcing continuation. A response that reaches the 5120 ceiling is eligible;
 this demonstrates sustained natural generation up to the cap, not natural EOS
 beyond it. Baseline and drift replay enforce the length floor again under the

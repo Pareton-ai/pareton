@@ -9,7 +9,13 @@ import argparse
 import hashlib
 import json
 import logging
+import re
+import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
+from urllib.request import getproxies, proxy_bypass
 
 from bench.correctness import degeneracy_reason
 from bench.http import post_json
@@ -35,6 +41,109 @@ from bench.schemas import WorkloadTrace
 from bench.workload_preflight import validate_engine_workload
 
 logger = logging.getLogger(__name__)
+
+
+def verify_baseline_image(*, engine_ref, base_url, container):
+    """Bind a loopback endpoint to an image inspected on the local Docker daemon."""
+    if not re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", engine_ref):
+        raise EngineError(
+            "qualification requires a published image reference by digest"
+        )
+    try:
+        url = urlsplit(base_url)
+        port = url.port or 80
+    except ValueError as exc:
+        raise EngineError("invalid qualification endpoint") from exc
+    if (
+        url.scheme != "http"
+        or url.hostname != "127.0.0.1"
+        or url.path not in ("", "/")
+        or url.query
+        or url.fragment
+        or url.username is not None
+        or url.password is not None
+    ):
+        raise EngineError(
+            "qualification requires a direct http://127.0.0.1:PORT endpoint on the Docker host"
+        )
+    if getproxies().get("http") and not proxy_bypass("127.0.0.1"):
+        raise EngineError("qualification endpoint must bypass HTTP proxies")
+
+    def inspect(kind, identifier):
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "--host",
+                    "unix:///var/run/docker.sock",
+                    kind,
+                    "inspect",
+                    "--",
+                    identifier,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            items = json.loads(result.stdout)
+            if (
+                not isinstance(items, list)
+                or len(items) != 1
+                or not isinstance(items[0], dict)
+            ):
+                raise ValueError("invalid inspect output")
+            return items[0]
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            raise EngineError(
+                f"cannot verify baseline {kind} through local Docker inspection"
+            ) from exc
+
+    running = inspect("container", container)
+    state = running.get("State") or {}
+    if (
+        state.get("Running") is not True
+        or state.get("Paused")
+        or state.get("Restarting")
+    ):
+        raise EngineError("qualification baseline container is not running normally")
+    if (running.get("HostConfig") or {}).get("NetworkMode") == "host":
+        raise EngineError(
+            "host-network endpoints cannot be bound to a unique baseline container"
+        )
+    ports = (running.get("NetworkSettings") or {}).get("Ports") or {}
+    bindings = [
+        key
+        for key, entries in ports.items()
+        if key.endswith("/tcp")
+        for entry in entries or []
+        if entry.get("HostIp") in ("127.0.0.1", "0.0.0.0")
+        and entry.get("HostPort") == str(port)
+    ]
+    if len(bindings) != 1:
+        raise EngineError(
+            "base-url does not match the baseline container's published port"
+        )
+    image_id = running.get("Image")
+    if not isinstance(image_id, str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", image_id
+    ):
+        raise EngineError("baseline container has no verifiable image ID")
+    image = inspect("image", image_id)
+    digests = image.get("RepoDigests") or []
+    if image.get("Id") != image_id or engine_ref not in digests:
+        raise EngineError("serving baseline image digest does not match --engine-ref")
+    if not running.get("Id") or not state.get("StartedAt"):
+        raise EngineError("baseline container lacks stable identity metadata")
+    return {
+        "engine_ref": next(ref for ref in digests if ref == engine_ref),
+        "image_id": image_id,
+        "container_id": running["Id"],
+        "started_at": state["StartedAt"],
+        "restart_count": running.get("RestartCount"),
+        "base_url": base_url.rstrip("/"),
+        "container_port": bindings[0],
+    }
 
 
 def evaluate_response(response, rule, input_tokens):
@@ -87,14 +196,19 @@ def qualify(
     *,
     fields,
     base_url,
+    container,
+    engine_ref,
     output_dir,
     pool_size=None,
     max_rows=6000,
     repetitions=2,
+    concurrency=4,
     timeout=600,
     row_fetcher=None,
     formatter=None,
 ):
+    if type(concurrency) is not int or concurrency < 1:
+        raise SamplerError("concurrency must be a positive integer")
     rule = parse_sampling_rule(fields["sampling_rule"])
     if rule["algo_version"] != LONGFORM_ALGO_VERSION:
         raise SamplerError("qualification requires algo_version 4")
@@ -111,7 +225,11 @@ def qualify(
     # Requalification starts from source, not a previous winning subset.
     rule.pop("qualification", None)
     rule.pop("eligible_row_indices", None)
-    bench, engine = fields["bench"], fields["engine"]
+    identity = verify_baseline_image(
+        engine_ref=engine_ref, base_url=base_url, container=container
+    )
+    bench = {**fields["bench"], "baseline_engine_image_digest": identity["engine_ref"]}
+    engine = fields["engine"]
     model = bench["model"]
     context = sampling_context_for_campaign(bench, engine)
     formatter = formatter or build_prompt_formatter(
@@ -135,22 +253,36 @@ def qualify(
                     "engine": engine,
                     "sampling_rule": rule,
                     "formatter": formatter.receipt,
+                    "baseline_identity": identity,
+                    "concurrency": concurrency,
                 }
             )
             + "\n"
         )
-        for row_index in ordered_rows(rule, seed)[:max_rows]:
+        evidence.flush()
+        candidates = {group: [] for group in quotas}
+        indices = ordered_rows(rule, seed)[:max_rows]
+        logger.info("Indexing %s source rows before GPU qualification", len(indices))
+        for scanned, row_index in enumerate(indices, 1):
             row = fetcher(row_index)
             try:
                 candidate = candidate_for_row(row_index, row, formatter, rule, context)
             except PromptRenderError:
-                continue
-            if candidate is None or candidate["input_ids_sha256"] in seen:
-                continue
+                candidate = None
+            if candidate is not None and candidate["input_ids_sha256"] not in seen:
+                seen.add(candidate["input_ids_sha256"])
+                candidates[candidate["input_length_group"]].append(candidate)
+            if scanned % 500 == 0:
+                logger.info("Indexed %s/%s source rows", scanned, len(indices))
+        logger.info(
+            "Eligible inputs by tier: %s",
+            {g: len(rows) for g, rows in candidates.items()},
+        )
+        evidence_lock = threading.Lock()
+
+        def qualify_candidate(candidate):
+            row_index = candidate["row_index"]
             group = candidate["input_length_group"]
-            if qualified_counts[group] == quotas[group]:
-                continue
-            seen.add(candidate["input_ids_sha256"])
             # Preflight one already-rendered candidate, using the same request
             # builder as rounds. Round-wide tier quotas apply to the saved pool,
             # not this internal single-request capacity/tokenization check.
@@ -186,48 +318,92 @@ def qualify(
                     timeout=timeout,
                 )
                 result = evaluate_response(response, rule, candidate["input_tokens"])
-                evidence.write(
-                    json.dumps(
-                        {
-                            "type": "response",
-                            "row_index": row_index,
-                            "repetition": rep,
-                            "input_ids_sha256": candidate["input_ids_sha256"],
-                            "input_tokens": candidate["input_tokens"],
-                            "input_length_group": group,
-                            **result,
-                        },
-                        ensure_ascii=False,
+                with evidence_lock:
+                    evidence.write(
+                        json.dumps(
+                            {
+                                "type": "response",
+                                "row_index": row_index,
+                                "repetition": rep,
+                                "input_ids_sha256": candidate["input_ids_sha256"],
+                                "input_tokens": candidate["input_tokens"],
+                                "input_length_group": group,
+                                **result,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                     )
-                    + "\n"
+                    evidence.flush()
+                logger.info(
+                    "Row %s tier=%s repetition=%s/%s tokens=%s result=%s",
+                    row_index,
+                    group,
+                    rep + 1,
+                    repetitions,
+                    result["completion_tokens"],
+                    result["rejection"] or "pass",
                 )
-                evidence.flush()
                 if result["rejection"]:
                     accepted = False
                     break
-            if accepted:
-                qualified.append(row_index)
-                qualified_counts[group] += 1
-                logger.info(
-                    "Qualified row %s (%s/%s)", row_index, len(qualified), pool_size
-                )
-            if len(qualified) == pool_size:
-                break
-    if len(qualified) < pool_size:
-        raise SamplerError(
-            f"only {len(qualified)}/{pool_size} prompts qualified; evidence saved, no launch rule written"
-            f"; input tiers: {qualified_counts}, required: {quotas}"
+            return accepted
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            # Finish the scarce longest tier before spending GPU time on others.
+            for group in reversed(quotas):
+                pool = candidates[group]
+                offset = 0
+                while qualified_counts[group] < quotas[group]:
+                    remaining = len(pool) - offset
+                    if qualified_counts[group] + remaining < quotas[group]:
+                        raise SamplerError(
+                            f"input tiers: {group} cannot fill {quotas[group]} slots "
+                            f"({qualified_counts[group]} qualified, {remaining} untried); "
+                            "evidence saved, no launch rule written"
+                        )
+                    size = min(concurrency, quotas[group] - qualified_counts[group])
+                    batch = pool[offset : offset + size]
+                    offset += len(batch)
+                    logger.info(
+                        "Qualifying tier=%s batch=%s accepted=%s/%s",
+                        group,
+                        len(batch),
+                        qualified_counts[group],
+                        quotas[group],
+                    )
+                    # Consume results in source order, independent of completion timing.
+                    for candidate, accepted in zip(
+                        batch, executor.map(qualify_candidate, batch), strict=True
+                    ):
+                        if accepted:
+                            qualified.append(candidate["row_index"])
+                            qualified_counts[group] += 1
+                            logger.info(
+                                "Qualified row %s (%s/%s)",
+                                candidate["row_index"],
+                                len(qualified),
+                                pool_size,
+                            )
+    if (
+        verify_baseline_image(
+            engine_ref=engine_ref, base_url=base_url, container=identity["container_id"]
+        )
+        != identity
+    ):
+        raise EngineError(
+            "baseline container changed during qualification; no launch rule written"
         )
     rule["eligible_row_indices"] = sorted(qualified)
     rule["qualification"] = {
         "contract_sha256": qualification_contract(rule, bench, engine),
-        "evidence_sha256": "sha256:"
-        + hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
         "repetitions": repetitions,
     }
     rule = parse_sampling_rule(rule)
     rule_path.write_text(json.dumps(rule, indent=2) + "\n")
     summary = {
+        "evidence_sha256": "sha256:"
+        + hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
         "qualified_rows": len(qualified),
         "repetitions": repetitions,
         "min_output_tokens": rule["min_output_tokens"],
@@ -236,7 +412,8 @@ def qualify(
         "enable_thinking": False,
         "sampling_rule_sha256": digest(rule),
         "qualified_rows_by_input_tier": qualified_counts,
-        "scope": "sequential natural-output qualification; full concurrent GPU round still required",
+        "concurrency": concurrency,
+        "scope": "bounded-concurrency natural-output qualification; full concurrent GPU round still required",
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return rule
@@ -247,7 +424,12 @@ def main(argv=None):
     parser.add_argument(
         "--base-url",
         required=True,
-        help="Trusted running baseline endpoint; match the campaign's model and serve args",
+        help="Direct http://127.0.0.1:PORT endpoint on the local Linux Docker host",
+    )
+    parser.add_argument(
+        "--container",
+        required=True,
+        help="Running baseline Docker container name or ID",
     )
     parser.add_argument(
         "--engine-ref",
@@ -267,19 +449,27 @@ def main(argv=None):
     )
     parser.add_argument("--max-rows", type=int, default=6000)
     parser.add_argument("--repetitions", type=int, default=2)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="Maximum simultaneous candidate requests (default: 4)",
+    )
     parser.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     fields = json.loads(args.campaign_fields.read_text())
-    fields["bench"]["baseline_engine_image_digest"] = args.engine_ref
     try:
         qualify(
             fields=fields,
             base_url=args.base_url,
+            container=args.container,
+            engine_ref=args.engine_ref,
             output_dir=args.output_dir,
             pool_size=args.pool_size,
             max_rows=args.max_rows,
             repetitions=args.repetitions,
+            concurrency=args.concurrency,
             timeout=args.timeout,
         )
     except (SamplerError, EngineError) as exc:

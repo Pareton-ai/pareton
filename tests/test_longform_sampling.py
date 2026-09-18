@@ -1,6 +1,7 @@
 """LongWriter history tiers, replay, qualification and natural output contracts."""
 
 import copy
+import hashlib
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,6 +30,15 @@ from round.create import try_create_round
 from worker.round_job import RoundInfraError, materialize_round_trace
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture
+def baseline_identity(monkeypatch):
+    identity = {"engine_ref": "sha256:" + "e" * 64, "container_id": "baseline"}
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image", lambda **kw: dict(identity)
+    )
+    return identity
 
 
 def rule(**kw):
@@ -191,6 +201,11 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     assert f["sampling_rule"] == r
     assert r["dataset"] == "zai-org/LongWriter-6k"
     assert r["max_tokens"] == 5120
+    assert r["min_output_tokens"] == 3000
+    omitted_floor = {
+        key: value for key, value in r.items() if key != "min_output_tokens"
+    }
+    assert parse_sampling_rule(omitted_floor)["min_output_tokens"] == 3000
     sampled = sample(
         rule=r,
         prompt_formatter=formatter(r),
@@ -200,6 +215,7 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     trace = validate_workload_trace_dict(json.loads(sampled.body))
     assert len(trace.requests) == 32
     assert trace.meta.sampling["enable_thinking"] is False
+    assert trace.meta.sampling["min_output_tokens"] == 3000
     assert all(
         not r.sampling.ignore_eos and r.max_tokens == 5120 for r in trace.requests
     )
@@ -231,7 +247,7 @@ def test_qualification_distinguishes_early_eos_from_natural_generation_at_the_ca
 
 
 def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, baseline_identity
 ):
     f = fields()
     calls = []
@@ -251,6 +267,8 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     qualified = qualify(
         fields=f,
         base_url="http://baseline",
+        container="baseline",
+        engine_ref="sha256:" + "e" * 64,
         output_dir=tmp_path,
         pool_size=4,
         max_rows=40,
@@ -260,6 +278,12 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     )
     assert len(calls) == 8
     assert len(qualified["eligible_row_indices"]) == 4
+    assert "evidence_sha256" not in qualified["qualification"]
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["evidence_sha256"] == (
+        "sha256:"
+        + hashlib.sha256((tmp_path / "qualification.jsonl").read_bytes()).hexdigest()
+    )
     assert qualified["qualification"]["contract_sha256"] == qualification_contract(
         qualified, f["bench"], f["engine"]
     )
@@ -269,7 +293,9 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
         require_qualification(qualified, f["bench"], f["engine"])
 
 
-def test_short_outputs_leave_evidence_but_no_launch_rule(tmp_path, monkeypatch):
+def test_short_outputs_leave_evidence_but_no_launch_rule(
+    tmp_path, monkeypatch, baseline_identity
+):
     monkeypatch.setattr(
         "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
     )
@@ -287,6 +313,8 @@ def test_short_outputs_leave_evidence_but_no_launch_rule(tmp_path, monkeypatch):
         qualify(
             fields=fields(),
             base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
             output_dir=tmp_path,
             pool_size=4,
             max_rows=4,
@@ -298,12 +326,17 @@ def test_short_outputs_leave_evidence_but_no_launch_rule(tmp_path, monkeypatch):
 
 
 def test_every_measured_baseline_repetition_must_stay_long():
-    trace = validate_workload_trace_dict(json.loads(sample().body))
+    r = rule(max_tokens=5120, min_output_tokens=3000)
+    trace = validate_workload_trace_dict(json.loads(sample(rule=r).body))
+    assert evaluate_response(response(3000, "stop"), r, 3)["rejection"] is None
+    assert (
+        evaluate_response(response(2999, "stop"), r, 3)["rejection"] == "short_output"
+    )
     replay = SimpleNamespace(
-        completion_token_samples={r.id: (10, 10, 10) for r in trace.requests}
+        completion_token_samples={r.id: (5120, 3000, 4000) for r in trace.requests}
     )
     validate_natural_baseline(trace, replay)
-    replay.completion_token_samples[trace.requests[0].id] = (10, 2, 10)
+    replay.completion_token_samples[trace.requests[0].id] = (5120, 2999, 4000)
     with pytest.raises(EngineError, match="requalify"):
         validate_natural_baseline(trace, replay)
 
@@ -404,7 +437,9 @@ def test_round_creation_and_worker_replay_preserve_qualified_rows(
         )
 
 
-def test_qualification_requires_long_outputs_in_every_tier(tmp_path, monkeypatch):
+def test_qualification_requires_long_outputs_in_every_tier(
+    tmp_path, monkeypatch, baseline_identity
+):
     fmt = formatter()
     monkeypatch.setattr(
         "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
@@ -423,13 +458,15 @@ def test_qualification_requires_long_outputs_in_every_tier(tmp_path, monkeypatch
         qualify(
             fields=fields(),
             base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
             output_dir=tmp_path,
             pool_size=4,
             max_rows=40,
             row_fetcher=row,
             formatter=fmt,
         )
-    assert len([size for size in calls if size <= 10000]) == 6
+    assert len([size for size in calls if size <= 10000]) == 0
     assert len([size for size in calls if size > 10000]) == 10
     assert not (tmp_path / "sampling_rule.json").exists()
 
@@ -487,3 +524,112 @@ def test_cpu_preview_matches_round_sampling_and_exposes_messages(tmp_path, monke
         assert (root / f"hf-{i:03d}.prompt.txt").read_text() == formatter().render(
             messages
         )
+
+
+def test_qualification_concurrency_is_bounded_and_evidence_is_complete(
+    tmp_path, monkeypatch, baseline_identity
+):
+    import threading
+    from collections import Counter
+
+    fmt = formatter()
+    barrier = threading.Barrier(2, timeout=5)
+    lock = threading.Lock()
+    active = peak = 0
+    tiers = []
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
+    )
+
+    def post(url, path, body, **kw):
+        nonlocal active, peak
+        size = len(fmt.encode(body["prompt"]))
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            tiers.append(size)
+        try:
+            barrier.wait()
+            result = response()
+            result["usage"]["prompt_tokens"] = size
+            return result
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    qualified = qualify(
+        fields=fields(),
+        base_url="http://baseline",
+        container="baseline",
+        engine_ref="sha256:" + "e" * 64,
+        output_dir=tmp_path,
+        pool_size=8,
+        max_rows=40,
+        concurrency=2,
+        row_fetcher=row,
+        formatter=fmt,
+    )
+    assert peak == 2
+    assert tiers == [15200] * 4 + [7600] * 4 + [3800] * 4 + [1900] * 4
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "qualification.jsonl").read_text().splitlines()
+    ]
+    assert records[0]["concurrency"] == 2
+    assert len(records) == 17
+    assert Counter(record["row_index"] for record in records[1:]) == {
+        index: 2 for index in qualified["eligible_row_indices"]
+    }
+    assert all(record["rejection"] is None for record in records[1:])
+    assert json.loads((tmp_path / "summary.json").read_text())["concurrency"] == 2
+
+
+def test_qualification_stops_when_scarce_tier_cannot_fill(
+    tmp_path, monkeypatch, baseline_identity
+):
+    f = fields()
+    f["sampling_rule"] = rule(n_rows=100, n_prompts=32)
+    fmt = formatter()
+    calls = []
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
+    )
+
+    def post(url, path, body, **kw):
+        size = len(fmt.encode(body["prompt"]))
+        calls.append(size)
+        result = response(2, "stop")
+        result["usage"]["prompt_tokens"] = size
+        return result
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    with pytest.raises(SamplerError, match="16k cannot fill 16 slots"):
+        qualify(
+            fields=f,
+            base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
+            output_dir=tmp_path,
+            pool_size=64,
+            max_rows=100,
+            concurrency=1,
+            row_fetcher=row,
+            formatter=fmt,
+        )
+    assert calls == [15200] * 10
+    assert not (tmp_path / "sampling_rule.json").exists()
+
+
+@pytest.mark.parametrize("concurrency", [0, -1, True, 1.5])
+def test_qualification_rejects_invalid_concurrency(tmp_path, concurrency):
+    with pytest.raises(SamplerError, match="concurrency"):
+        qualify(
+            fields=fields(),
+            base_url="http://baseline",
+            container="baseline",
+            engine_ref="sha256:" + "e" * 64,
+            output_dir=tmp_path,
+            concurrency=concurrency,
+        )
+    assert not (tmp_path / "qualification.jsonl").exists()

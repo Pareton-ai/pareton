@@ -101,8 +101,12 @@ def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeyp
     assert captured["profile_data"] is None
 
 
+@pytest.mark.parametrize("status", ["draft", "open", "closed"])
+@pytest.mark.parametrize("stale", [False, True])
 def test_longform_qualification_is_required_before_campaign_or_profile_insert(
     monkeypatch,
+    status,
+    stale,
 ):
     from bench.sampler import SamplerError
 
@@ -113,11 +117,17 @@ def test_longform_qualification_is_required_before_campaign_or_profile_insert(
             / "fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json"
         ).read_text()
     )
+    if stale:
+        rule["eligible_row_indices"] = list(range(32))
+        rule["qualification"] = {
+            "contract_sha256": "sha256:" + "a" * 64,
+            "repetitions": 2,
+        }
     with pytest.raises(SamplerError, match="baseline qualification"):
         seed_synthetic_campaign(
             submission_fee_tao="0.15",
             allow_placeholders=True,
-            status="open",
+            status=status,
             sampling_rule=rule,
             bench_max_model_len=262144,
         )
@@ -125,8 +135,10 @@ def test_longform_qualification_is_required_before_campaign_or_profile_insert(
     assert captured["profile_data"] is None
 
 
+@pytest.mark.parametrize("legacy_evidence_hash", [False, True])
+@pytest.mark.parametrize("status", ["draft", "open", "closed"])
 def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, legacy_evidence_hash, status
 ):
     from bench.longform import qualification_contract
     from bench.sampler import parse_sampling_rule
@@ -145,9 +157,10 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
         "contract_sha256": qualification_contract(
             rule, fields["bench"], fields["engine"]
         ),
-        "evidence_sha256": "sha256:" + "a" * 64,
         "repetitions": 2,
     }
+    if legacy_evidence_hash:
+        rule["qualification"]["evidence_sha256"] = "sha256:" + "a" * 64
     path = tmp_path / "qualified sampling rule.json"
     path.write_text(json.dumps(rule))
     monkeypatch.setattr(
@@ -172,6 +185,7 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
         .rstrip("\0")
         .split("\0")
     )
+    argv[argv.index("--status") + 1] = status
     assert main(argv[2:]) == 0
     assert captured["manifest"].sampling_rule == rule
     assert captured["inserts"] == 1
@@ -297,6 +311,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
         return SimpleNamespace(row_indices=tuple(range(32)))
 
     monkeypatch.setattr(seed, "preflight_longform_campaign", preview)
+    monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
     engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
     helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
     # Expand the executable launch helper with Bash, intercepting its final CLI.
@@ -305,11 +320,15 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
                 "capture",
                 str(helper),
                 engine_ref,
                 "0.23",
+                str(
+                    helper.parent.parent
+                    / "fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json"
+                ),
             ],
             cwd=helper.parent.parent,
         )
@@ -363,7 +382,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert manifest.sampling_rule["enable_thinking"] is False
     assert not manifest.sampling_rule.get("ignore_eos", False)
     assert manifest.sampling_rule["dataset"] == "zai-org/LongWriter-6k"
-    assert manifest.sampling_rule["min_output_tokens"] == 5000
+    assert manifest.sampling_rule["min_output_tokens"] == 3000
     assert manifest.scoring_rule["failure_penalty"] == 0.1
     assert request["scoring_rule"] == manifest.scoring_rule
     assert preflight == [(manifest.sampling_rule, manifest.bench, manifest.engine)]

@@ -37,13 +37,13 @@ cd /workspace/pareton-sample-source
 nohup bash ops/sglang-sample-round/run.sh \
   /workspace/pareton-sample-round-longwriter \
   /workspace/longwriter-qualification/sampling_rule.json \
-  > /workspace/pareton-sample-round-nvfp4.log 2>&1 < /dev/null &
-tail -f /workspace/pareton-sample-round-nvfp4.log
+  > /workspace/pareton-sample-round-longwriter.log 2>&1 < /dev/null &
+tail -f /workspace/pareton-sample-round-longwriter.log
 ```
 
-The runner uses `/workspace/pareton-sample-round-nvfp4` for its virtual environment,
+The runner uses `/workspace/pareton-sample-round-longwriter` for its virtual environment,
 request, trace, build log and reports. Pass a different output directory as its
-first argument and the qualified sampling rule as its second argument. Rerunning with the same
+first argument and the qualified sampling rule as its second argument. Both are required. Rerunning with the same
 directory reuses the sampled trace and writes a new timestamped report directory.
 Use a fresh directory when switching models, including from the NVIDIA NVFP4
 checkpoint; existing traces and receipts belong to their original model pin.
@@ -72,7 +72,7 @@ needed.
 - Disable thinking and respect EOS for baseline, candidate and drift requests.
   The 5120-token allowance is a ceiling. Each source user/assistant exchange
   is input history followed by the pinned request for a new long-form work.
-  The qualified source pool requires at least 5000 generated tokens without forced
+  The qualified source pool requires at least 3000 generated tokens without forced
   continuation; all measured baseline and drift repetitions must meet that floor.
   Full-output correctness remains enabled. A short baseline response fails the
   workload instead of extending its tail or awarding a candidate speedup.
