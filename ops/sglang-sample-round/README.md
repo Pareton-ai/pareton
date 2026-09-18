@@ -72,7 +72,7 @@ needed.
 - Disable thinking and respect EOS for baseline, candidate and drift requests.
   The 5120-token allowance is a ceiling. Each source user/assistant exchange
   is input history followed by the pinned request for a new long-form work.
-  The qualified source pool requires at least 5000 generated tokens without forced
+  The qualified source pool requires at least 3000 generated tokens without forced
   continuation; all measured baseline and drift repetitions must meet that floor.
   Full-output correctness remains enabled. A short baseline response fails the
   workload instead of extending its tail or awarding a candidate speedup.

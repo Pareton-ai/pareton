@@ -200,6 +200,11 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     assert f["sampling_rule"] == r
     assert r["dataset"] == "zai-org/LongWriter-6k"
     assert r["max_tokens"] == 5120
+    assert r["min_output_tokens"] == 3000
+    omitted_floor = {
+        key: value for key, value in r.items() if key != "min_output_tokens"
+    }
+    assert parse_sampling_rule(omitted_floor)["min_output_tokens"] == 3000
     sampled = sample(
         rule=r,
         prompt_formatter=formatter(r),
@@ -209,6 +214,7 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     trace = validate_workload_trace_dict(json.loads(sampled.body))
     assert len(trace.requests) == 32
     assert trace.meta.sampling["enable_thinking"] is False
+    assert trace.meta.sampling["min_output_tokens"] == 3000
     assert all(
         not r.sampling.ignore_eos and r.max_tokens == 5120 for r in trace.requests
     )
@@ -313,12 +319,17 @@ def test_short_outputs_leave_evidence_but_no_launch_rule(
 
 
 def test_every_measured_baseline_repetition_must_stay_long():
-    trace = validate_workload_trace_dict(json.loads(sample().body))
+    r = rule(max_tokens=5120, min_output_tokens=3000)
+    trace = validate_workload_trace_dict(json.loads(sample(rule=r).body))
+    assert evaluate_response(response(3000, "stop"), r, 3)["rejection"] is None
+    assert (
+        evaluate_response(response(2999, "stop"), r, 3)["rejection"] == "short_output"
+    )
     replay = SimpleNamespace(
-        completion_token_samples={r.id: (10, 10, 10) for r in trace.requests}
+        completion_token_samples={r.id: (5120, 3000, 4000) for r in trace.requests}
     )
     validate_natural_baseline(trace, replay)
-    replay.completion_token_samples[trace.requests[0].id] = (10, 2, 10)
+    replay.completion_token_samples[trace.requests[0].id] = (5120, 2999, 4000)
     with pytest.raises(EngineError, match="requalify"):
         validate_natural_baseline(trace, replay)
 

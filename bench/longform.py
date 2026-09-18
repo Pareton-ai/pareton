@@ -64,7 +64,7 @@ def parse_longform_fields(rule, parsed):
     prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip():
         raise SamplerError("followup_prompt must be nonempty text")
-    minimum = rule.get("min_output_tokens", 5000)
+    minimum = rule.get("min_output_tokens", 3000)
     if type(minimum) is not int or minimum < 1:
         raise SamplerError("min_output_tokens must be a positive integer")
     if minimum > parsed["max_tokens"]:

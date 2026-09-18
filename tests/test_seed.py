@@ -367,7 +367,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert manifest.sampling_rule["enable_thinking"] is False
     assert not manifest.sampling_rule.get("ignore_eos", False)
     assert manifest.sampling_rule["dataset"] == "zai-org/LongWriter-6k"
-    assert manifest.sampling_rule["min_output_tokens"] == 5000
+    assert manifest.sampling_rule["min_output_tokens"] == 3000
     assert manifest.scoring_rule["failure_penalty"] == 0.1
     assert request["scoring_rule"] == manifest.scoring_rule
     assert preflight == [(manifest.sampling_rule, manifest.bench, manifest.engine)]

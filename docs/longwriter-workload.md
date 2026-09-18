@@ -70,7 +70,7 @@ serial qualification. Changing concurrency does not alter the source prompts
 or relax the output checks. The default pool contains 64 rows, with 16
 qualified rows per tier. An explicit pool size must be a multiple of four and
 at least 32. Extra rows in one tier cannot replace missing rows in another.
-Each accepted row must produce at least 5000 tokens
+Each accepted row must produce at least 3000 tokens
 in every repetition, with nonempty text that passes the harness's repetition
 checks. Generation stops normally or reaches its 5120-token ceiling. Reaching
 the ceiling without suppressing EOS qualifies the row, but does not establish
