@@ -1,6 +1,7 @@
 """LongWriter history tiers, replay, qualification and natural output contracts."""
 
 import copy
+import hashlib
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -277,6 +278,12 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     )
     assert len(calls) == 8
     assert len(qualified["eligible_row_indices"]) == 4
+    assert "evidence_sha256" not in qualified["qualification"]
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["evidence_sha256"] == (
+        "sha256:"
+        + hashlib.sha256((tmp_path / "qualification.jsonl").read_bytes()).hexdigest()
+    )
     assert qualified["qualification"]["contract_sha256"] == qualification_contract(
         qualified, f["bench"], f["engine"]
     )

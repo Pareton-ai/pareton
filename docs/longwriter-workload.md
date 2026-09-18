@@ -77,9 +77,13 @@ the ceiling without suppressing EOS qualifies the row, but does not establish
 where it would naturally end with a larger allowance.
 
 `qualification.jsonl` records the contract and generated responses for review.
-`sampling_rule.json` pins the accepted row indices and hashes the evidence and
-campaign settings. `summary.json` records the scope of the run. There is no
-automatic semantic-quality judge in this step; review the saved outputs and run
+`sampling_rule.json` pins the accepted row indices and hashes the campaign settings.
+`summary.json` records the scope of the run and an evidence hash for manual audit.
+Downstream checks detect stale settings; they do not authenticate the qualification
+or verify the evidence file. Use a rule produced by the trusted operator's qualifier.
+Older rules containing `qualification.evidence_sha256` remain accepted; that field
+is diagnostic only. There is no automatic semantic-quality judge in this step;
+review the saved outputs and run
 the full correctness benchmark before launch. If fewer than the requested pool
 size qualify, evidence is retained but no launch rule is written. Use a fresh
 directory for another attempt; failures never silently fall back to short rows.
@@ -113,10 +117,10 @@ bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO" \
 ```
 
 All three arguments are required, including the qualified rule file. The fixture
-rule remains a source template for qualification and CPU previews. Open-campaign
-preflight rejects missing or stale qualification before inserting a profile or
-campaign. A different model, image, serving configuration or sampling rule
-requires requalification.
+rule remains a source template for qualification and CPU previews. Every v4
+campaign status, including draft, rejects missing or stale qualification before
+inserting a profile or campaign. A different model, image, serving configuration
+or sampling rule requires requalification.
 
 Rounds sample distinct rows from the frozen eligible pool using the chain seed.
 Receipts pin selected rows, the follow-up, history answer hashes, rendered input token hashes,

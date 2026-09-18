@@ -397,13 +397,13 @@ def qualify(
     rule["eligible_row_indices"] = sorted(qualified)
     rule["qualification"] = {
         "contract_sha256": qualification_contract(rule, bench, engine),
-        "evidence_sha256": "sha256:"
-        + hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
         "repetitions": repetitions,
     }
     rule = parse_sampling_rule(rule)
     rule_path.write_text(json.dumps(rule, indent=2) + "\n")
     summary = {
+        "evidence_sha256": "sha256:"
+        + hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
         "qualified_rows": len(qualified),
         "repetitions": repetitions,
         "min_output_tokens": rule["min_output_tokens"],
