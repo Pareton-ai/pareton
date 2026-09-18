@@ -139,11 +139,11 @@ def try_create_round(
                 model_revision=str(model.get("hf_revision") or ""),
             )
     sampling_context = None
-    if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
-        from bench.trajectory import sampling_context_for_campaign
+    if rule["algo_version"] >= TRAJECTORY_ALGO_VERSION:
+        from bench.sampler import sampling_context_for_rule
 
-        sampling_context = sampling_context_for_campaign(
-            bench, getattr(campaign, "engine", None)
+        sampling_context = sampling_context_for_rule(
+            rule, bench, getattr(campaign, "engine", None)
         )
     sampled = generate_trace(
         rule=rule,

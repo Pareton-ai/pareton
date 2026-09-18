@@ -348,14 +348,24 @@ Fee amounts and history are excluded from `manifest_hash`; never re-seed or
 rewrite a live campaign's signed terms to change its fee.
 
 
-The launch helper targets four RTX 5090 GPUs, `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`, context length
-262144, 32 requests spaced 2 ms apart and up to 5120 output tokens. Sampler
-version 3 uses complete conversation prefixes across four groups with eight
-requests each. Targets are fixed at 4096, 8192, 16384 and 32768 input tokens,
-accepting complete prefixes within 90–100% of each target. All four tiers leave
-room for the full output ceiling. This workload covers inputs up to 32K while
-retaining the 262144-token model limit. Source preflight must fill every tier
-before opening. Thinking is enabled and the failure coefficient is 0.1.
+The launch helper targets four RTX 5090 GPUs, `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`,
+a 262144-token context, and 32 requests spaced 2 ms apart. Sampler version 4
+uses conversation history from the pinned
+[zai-org/LongWriter-6k](https://huggingface.co/datasets/zai-org/LongWriter-6k)
+dataset. Each original user/assistant exchange is followed by a new user request
+for a complete long-form work. Each round has eight inputs per tier: 2k, 4k, 8k
+and 16k, measured within 90-100% of the tier ceiling. There is no 32k tier,
+padding or truncation.
+
+Thinking is disabled. EOS is respected, and 5120 is an output ceiling, not a
+minimum generation length. The failure coefficient remains 0.1. Before opening,
+qualify a source-row pool on the trusted baseline and use that sampling rule
+with the seed helper. See [LongWriter qualification](longwriter-workload.md).
+The qualifier requires at least 3000 generated tokens in each repeated response,
+without forcing continuation. A response that reaches the 5120 ceiling is eligible;
+this demonstrates sustained natural generation up to the cap, not natural EOS
+beyond it. Baseline and drift replay enforce the length floor again under the
+campaign's concurrent workload. Existing version 3 campaigns remain replayable.
 The model revision is
 `009632fef96dd349150baa780c984e62e70e91fe`. Its
 [model configuration](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead/blob/009632fef96dd349150baa780c984e62e70e91fe/config.json)
@@ -486,7 +496,8 @@ After successful image and GPU checks, run this once with the published engine r
 
 ```bash
 INITIAL_FEE_TAO=0.15
-bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO"
+bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO" \
+  /path/to/longwriter-qualification/sampling_rule.json
 ```
 
 It uses `--status open --emission-start-weight 0.20 --emission-floor-weight 0 --force`.

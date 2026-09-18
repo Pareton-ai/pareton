@@ -9,10 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tokenizers import Tokenizer, models
+from tokenizers import Tokenizer, models, pre_tokenizers
 
+from bench.longform import qualification_contract
 from bench.main import scorer_engine_spec
-from bench.sampler import build_prompt_formatter
+from bench.sampler import build_prompt_formatter, parse_sampling_rule
 from bench.schemas import EngineSpec
 from campaign.models import SLA
 from worker.round_job import build_round_request
@@ -33,7 +34,7 @@ def test_sample_request_matches_production_launch_and_scorer(
     )
     model_cache.mkdir(parents=True)
     template = (
-        "{% for m in messages %}{{ m.content }}{% endfor %}"
+        "{% for m in messages %}{{ m.content }} {% endfor %}"
         "{% if enable_thinking %}<think>{% endif %}\r\n"
     )
     tokenizer_config = {"model": "nvfp4"}
@@ -42,9 +43,14 @@ def test_sample_request_matches_production_launch_and_scorer(
     else:
         (model_cache / "chat_template.jinja").write_bytes(template.encode("utf-8"))
     (model_cache / "tokenizer_config.json").write_text(json.dumps(tokenizer_config))
-    tokenizer_json = Tokenizer(
-        models.WordLevel({"[UNK]": 0}, unk_token="[UNK]")
-    ).to_str()
+    tokenizer = Tokenizer(
+        models.WordLevel(
+            {"[UNK]": 0, "ref": 1, **{f"prompt{i}": i + 2 for i in range(6000)}},
+            unk_token="[UNK]",
+        )
+    )
+    tokenizer.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer_json = tokenizer.to_str()
     (model_cache / "tokenizer.json").write_text(tokenizer_json)
     monkeypatch.setattr("config.BENCH_HF_CACHE_DIR", cache_root)
 
@@ -63,26 +69,33 @@ def test_sample_request_matches_production_launch_and_scorer(
         )
         return formatter
 
-    trace_path = tmp_path / "workload_trace.json"
-    trace_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "meta": {"name": "offline-sample-test"},
-                "requests": [
-                    {
-                        "id": f"p{i}",
-                        "prompt": "Explain binary search.",
-                        "arrival_offset_ms": i * 2,
-                        "max_tokens": 8,
-                        "sampling": {"temperature": 0, "top_p": 1},
-                    }
-                    for i in range(32)
-                ],
-            }
-        )
+    fields = json.loads(
+        (ROOT / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json").read_text()
     )
-    monkeypatch.setattr(sys, "argv", ["prepare.py", str(tmp_path)])
+    rule = parse_sampling_rule(fields["sampling_rule"])
+    rule["eligible_row_indices"] = list(range(32))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(
+            rule, fields["bench"], fields["engine"]
+        ),
+        "evidence_sha256": "sha256:" + "a" * 64,
+        "repetitions": 2,
+    }
+    rule_path = tmp_path / "qualified-rule.json"
+    rule_path.write_text(json.dumps(rule))
+    monkeypatch.setattr(
+        "bench.sampler.fetch_hf_row",
+        lambda rule, i: {
+            "messages": [
+                {"role": "user", "content": f"prompt{i}"},
+                {
+                    "role": "assistant",
+                    "content": "ref " * ((1900, 3800, 7600, 15200)[i % 4] - 6),
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(sys, "argv", ["prepare.py", str(tmp_path), str(rule_path)])
     monkeypatch.setattr("bench.sampler.build_prompt_formatter", check_cached_tokenizer)
     monkeypatch.setattr(
         subprocess, "check_output", lambda *a, **kw: "sha256:" + "a" * 64
@@ -90,7 +103,12 @@ def test_sample_request_matches_production_launch_and_scorer(
     runpy.run_path(
         str(ROOT / "ops/sglang-sample-round/prepare.py"), run_name="__main__"
     )
+    # Reuse verifies the saved receipt against the current pins and source.
+    runpy.run_path(
+        str(ROOT / "ops/sglang-sample-round/prepare.py"), run_name="__main__"
+    )
     request = json.loads((tmp_path / "bench_request.json").read_text())
+    trace_path = tmp_path / "workload_trace.json"
     fields = json.loads(
         (ROOT / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json").read_text()
     )
@@ -145,3 +163,10 @@ def test_sample_request_matches_production_launch_and_scorer(
         "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"
         not in request["engines"]["baseline"]["env"]
     )
+    stale = json.loads(trace_path.read_text())
+    stale["requests"][0]["sampling"]["ignore_eos"] = True
+    trace_path.write_text(json.dumps(stale))
+    with pytest.raises(ValueError, match="existing workload differs"):
+        runpy.run_path(
+            str(ROOT / "ops/sglang-sample-round/prepare.py"), run_name="__main__"
+        )

@@ -318,6 +318,10 @@ def test_engine_warmups_excluded_from_score_and_outputs(
     assert result.result.cross_rep_variance["p99_e2e_ms_rel_range"] == 0
     assert result.outputs == {req.id: "ready" for req in requests}
     assert all(samples == ("ready",) * 3 for samples in result.output_samples.values())
+    assert result.completion_token_samples == {
+        req.id: (result.result.timings[req.id].completion_tokens,) * 3
+        for req in requests
+    }
     paths = sorted((tmp_path / role).glob("warmup*/requests.jsonl"))
     assert len(paths) == warmups
     for path in paths:

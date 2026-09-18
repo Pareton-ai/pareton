@@ -10,8 +10,15 @@ import uuid
 from pathlib import Path
 
 import config
-from bench.sampler import build_prompt_formatter, fetch_hf_row, generate_trace
-from bench.trajectory import sampling_context_for_campaign
+from bench.longform import require_qualification
+from bench.sampler import (
+    LONGFORM_ALGO_VERSION,
+    build_prompt_formatter,
+    fetch_hf_row,
+    generate_trace,
+    parse_sampling_rule,
+    sampling_context_for_rule,
+)
 from bench.validate import load_workload_trace, validate_bench_request_dict
 
 logging.basicConfig(
@@ -34,7 +41,13 @@ cache = (
     / model["hf_repo"].replace("/", "--")
     / model["hf_revision"]
 )
-rule = fields["sampling_rule"]
+rule = parse_sampling_rule(
+    json.loads(Path(sys.argv[2]).read_text())
+    if len(sys.argv) > 2
+    else fields["sampling_rule"]
+)
+if rule["algo_version"] == LONGFORM_ALGO_VERSION:
+    require_qualification(rule, bench, fields["engine"])
 
 
 def load_cached_tokenizer_config(**_):
@@ -59,7 +72,7 @@ formatter = build_prompt_formatter(
 trace_path = root / "workload_trace.json"
 if not trace_path.exists():
     logger.info(
-        "Sampling %s prompts from %s@%s; input tiers=4K/8K/16K/32K",
+        "Sampling %s prompts from %s@%s",
         rule["n_prompts"],
         rule["dataset"],
         rule["revision"],
@@ -80,13 +93,28 @@ if not trace_path.exists():
         seed_hex=hashlib.sha256(b"pareton-standalone-sglang-sample-v1").hexdigest(),
         row_fetcher=fetch_row,
         prompt_formatter=formatter,
-        sampling_context=sampling_context_for_campaign(bench, fields["engine"]),
+        sampling_context=sampling_context_for_rule(rule, bench, fields["engine"]),
     )
     trace_path.write_bytes(sampled.body)
     (root / "sampling_receipt.json").write_text(json.dumps(sampled.receipt, indent=2))
     logger.info("Saved trace and sampling receipt after %s row fetches", fetched_rows)
 else:
-    logger.info("Reusing existing workload trace: %s", trace_path)
+    receipt = json.loads((root / "sampling_receipt.json").read_text())
+    replayed = generate_trace(
+        rule=rule,
+        seed_hex=receipt["seed_hex"],
+        row_fetcher=lambda i: fetch_hf_row(rule, i),
+        prompt_formatter=formatter,
+        sampling_context=sampling_context_for_rule(rule, bench, fields["engine"]),
+        sampling_receipt=receipt,
+        sample_seed_block=receipt["sample_seed_block"],
+        sample_seed_block_hash=receipt["sample_seed_block_hash"],
+    )
+    if trace_path.read_bytes() != replayed.body:
+        raise ValueError(
+            "existing workload differs from its receipt; use a fresh sample directory"
+        )
+    logger.info("Verified existing workload trace and receipt: %s", trace_path)
 
 
 def image_id(ref):

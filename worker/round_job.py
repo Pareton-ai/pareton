@@ -163,7 +163,14 @@ def materialize_round_trace(
                     "seed_block_offset": receipt.get("seed_block_offset"),
                     **{
                         key: receipt[key]
-                        for key in ("request_interval_ms", "enable_thinking")
+                        for key in (
+                            "request_interval_ms",
+                            "enable_thinking",
+                            "min_output_tokens",
+                            "followup_prompt",
+                            "eligible_row_indices",
+                            "qualification",
+                        )
                         if key in receipt
                     },
                 }
@@ -214,11 +221,11 @@ def materialize_round_trace(
                         "chat sampling receipt requires chat template metadata"
                     )
             sampling_context = None
-            if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
-                from bench.trajectory import sampling_context_for_campaign
+            if rule["algo_version"] >= TRAJECTORY_ALGO_VERSION:
+                from bench.sampler import sampling_context_for_rule
 
-                sampling_context = sampling_context_for_campaign(
-                    campaign.bench, getattr(campaign, "engine", None)
+                sampling_context = sampling_context_for_rule(
+                    rule, campaign.bench, getattr(campaign, "engine", None)
                 )
             sampled = generate_trace(
                 rule=rule,
@@ -231,7 +238,7 @@ def materialize_round_trace(
                 sample_seed_block_hash=str(receipt.get("sample_seed_block_hash") or ""),
                 sampling_context=sampling_context,
                 sampling_receipt=receipt
-                if rule["algo_version"] == TRAJECTORY_ALGO_VERSION
+                if rule["algo_version"] >= TRAJECTORY_ALGO_VERSION
                 else None,
             )
         except (SamplerError, TypeError, ValueError, KeyError) as exc:

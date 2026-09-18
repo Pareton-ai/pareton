@@ -308,9 +308,14 @@ def _validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
         seen_ids.add(rid_s)
     sampling = (d.get("meta") or {}).get("sampling")
     if sampling is not None:
-        from bench.trajectory import validate_trajectory_trace
+        if isinstance(sampling, dict) and sampling.get("algo_version") == 4:
+            from bench.longform import validate_longform_trace
 
-        validate_trajectory_trace(d["requests"], sampling)
+            validate_longform_trace(d["requests"], sampling)
+        else:
+            from bench.trajectory import validate_trajectory_trace
+
+            validate_trajectory_trace(d["requests"], sampling)
     return WorkloadTrace.from_dict(d)
 
 

@@ -15,7 +15,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
-from bench.sampler import TRAJECTORY_ALGO_VERSION, parse_sampling_rule
+from bench.longform import preflight_longform_campaign, require_qualification
+from bench.sampler import (
+    LONGFORM_ALGO_VERSION,
+    TRAJECTORY_ALGO_VERSION,
+    parse_sampling_rule,
+)
 from bench.trajectory import (
     preflight_trajectory_campaign,
     sampling_context_for_campaign,
@@ -368,6 +373,14 @@ def seed_synthetic_campaign(
                 "Verified trajectory coverage: "
                 + json.dumps(preview.receipt["length_groups"])
             )
+    elif rule["algo_version"] == LONGFORM_ALGO_VERSION:
+        from bench.longform import sampling_context_for_campaign as longform_context
+
+        longform_context(bench, engine_profile)
+        require_qualification(rule, bench, engine_profile)
+        if status == "open":
+            preview = preflight_longform_campaign(rule, bench, engine_profile)
+            print(f"Verified {len(preview.row_indices)} qualified long-form prompts")
 
     profile_id = insert_profile(
         name="pareton-synthetic-v0",

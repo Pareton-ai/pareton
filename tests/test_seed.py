@@ -101,6 +101,96 @@ def test_trajectory_coverage_is_required_before_open_campaign_is_written(monkeyp
     assert captured["profile_data"] is None
 
 
+@pytest.mark.parametrize("status", ["draft", "open", "closed"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_longform_qualification_is_required_before_campaign_or_profile_insert(
+    monkeypatch,
+    status,
+    stale,
+):
+    from bench.sampler import SamplerError
+
+    captured = _patch_store(monkeypatch)
+    rule = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json"
+        ).read_text()
+    )
+    if stale:
+        rule["eligible_row_indices"] = list(range(32))
+        rule["qualification"] = {
+            "contract_sha256": "sha256:" + "a" * 64,
+            "repetitions": 2,
+        }
+    with pytest.raises(SamplerError, match="baseline qualification"):
+        seed_synthetic_campaign(
+            submission_fee_tao="0.15",
+            allow_placeholders=True,
+            status=status,
+            sampling_rule=rule,
+            bench_max_model_len=262144,
+        )
+    assert captured["inserts"] == 0
+    assert captured["profile_data"] is None
+
+
+@pytest.mark.parametrize("legacy_evidence_hash", [False, True])
+@pytest.mark.parametrize("status", ["draft", "open", "closed"])
+def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
+    monkeypatch, tmp_path, legacy_evidence_hash, status
+):
+    from bench.longform import qualification_contract
+    from bench.sampler import parse_sampling_rule
+    from test_longform_sampling import formatter, row
+
+    captured = _patch_store(monkeypatch)
+    root = Path(__file__).resolve().parents[1]
+    fields = json.loads(
+        (root / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json").read_text()
+    )
+    engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
+    fields["bench"]["baseline_engine_image_digest"] = engine_ref
+    rule = parse_sampling_rule(fields["sampling_rule"])
+    rule["eligible_row_indices"] = list(range(32))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(
+            rule, fields["bench"], fields["engine"]
+        ),
+        "repetitions": 2,
+    }
+    if legacy_evidence_hash:
+        rule["qualification"]["evidence_sha256"] = "sha256:" + "a" * 64
+    path = tmp_path / "qualified sampling rule.json"
+    path.write_text(json.dumps(rule))
+    monkeypatch.setattr(
+        "bench.sampler.build_prompt_formatter", lambda r, **kw: formatter(r)
+    )
+    monkeypatch.setattr("bench.sampler.fetch_hf_row", lambda r, i: row(i))
+    argv = (
+        subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
+                "capture",
+                str(root / "ops/seed-sglang-qwen38-27b.sh"),
+                engine_ref,
+                "0.23",
+                str(path),
+            ],
+            cwd=root,
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    argv[argv.index("--status") + 1] = status
+    assert main(argv[2:]) == 0
+    assert captured["manifest"].sampling_rule == rule
+    assert captured["inserts"] == 1
+
+
 def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monkeypatch):
     from types import SimpleNamespace
 
@@ -210,7 +300,6 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     from types import SimpleNamespace
 
     from bench.main import plan_round_starts
-    from bench.trajectory import length_groups
     from bench.validate import sha256_file, validate_bench_request_dict
     from worker.round_job import build_round_request
 
@@ -219,9 +308,10 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
 
     def preview(*args):
         preflight.append(args)
-        return SimpleNamespace(receipt={"length_groups": length_groups(32)})
+        return SimpleNamespace(row_indices=tuple(range(32)))
 
-    monkeypatch.setattr(seed, "preflight_trajectory_campaign", preview)
+    monkeypatch.setattr(seed, "preflight_longform_campaign", preview)
+    monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
     engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
     helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
     # Expand the executable launch helper with Bash, intercepting its final CLI.
@@ -230,11 +320,15 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
                 "capture",
                 str(helper),
                 engine_ref,
                 "0.23",
+                str(
+                    helper.parent.parent
+                    / "fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json"
+                ),
             ],
             cwd=helper.parent.parent,
         )
@@ -281,12 +375,14 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert request["hardware"]["gpu_count"] == 4
     assert request["hardware"]["gpu_sku_expected"] == "RTX5090"
     assert manifest.gpu_skus == ["RTX5090"]
-    assert manifest.sampling_rule["algo_version"] == 3
+    assert manifest.sampling_rule["algo_version"] == 4
     assert manifest.sampling_rule["n_prompts"] == 32
     assert manifest.sampling_rule["max_tokens"] == 5120
     assert manifest.sampling_rule["request_interval_ms"] == 2
     assert manifest.sampling_rule["enable_thinking"] is False
-    assert manifest.sampling_rule["ignore_eos"] is True
+    assert not manifest.sampling_rule.get("ignore_eos", False)
+    assert manifest.sampling_rule["dataset"] == "zai-org/LongWriter-6k"
+    assert manifest.sampling_rule["min_output_tokens"] == 3000
     assert manifest.scoring_rule["failure_penalty"] == 0.1
     assert request["scoring_rule"] == manifest.scoring_rule
     assert preflight == [(manifest.sampling_rule, manifest.bench, manifest.engine)]
@@ -302,12 +398,6 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert example["scoring_rule"] == manifest.scoring_rule
     assert example["emission_rule"] == manifest.emission_rule
     assert example["gpu_skus"] == manifest.gpu_skus
-    groups = length_groups(32)
-    assert [g["name"] for g in groups] == ["4k", "8k", "16k", "32k"]
-    assert [g["max_tokens"] for g in groups] == [4096, 8192, 16384, 32768]
-    assert [g["min_tokens"] for g in groups] == [3687, 7373, 14746, 29492]
-    assert [g["count"] for g in groups] == [8, 8, 8, 8]
-    assert all(g["max_tokens"] + 5120 + 2 <= 262144 for g in groups)
     baseline = request["engines"]["baseline"]
     parsed = validate_bench_request_dict(request)
     assert parsed.correctness.serve_args == ["--mem-fraction-static", "0.4"]

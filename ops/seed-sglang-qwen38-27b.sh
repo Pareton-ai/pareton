@@ -9,13 +9,18 @@
 # SGLang loads its per-layer quantization with modelopt_mixed.
 # Reserve scorer memory for full-input logprobs (logprob_start_len=0).
 set -euo pipefail
-if [[ $# -ne 2 ]]; then
-  echo 'Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF INITIAL_FEE_TAO' >&2
+if [[ $# -ne 3 ]]; then
+  echo 'Usage: seed-sglang-qwen38-27b.sh PUBLISHED_ENGINE_DIGEST_REF INITIAL_FEE_TAO QUALIFIED_SAMPLING_RULE_JSON' >&2
   echo 'Creates a new campaign. For an existing campaign use python -m campaign.set_fee.' >&2
   exit 2
 fi
 engine_ref=$1
 initial_fee_tao=$2
+sampling_rule=$3
+if [[ ! -f "$sampling_rule" || ! -r "$sampling_rule" ]]; then
+  echo "Qualified sampling rule must be a readable file: $sampling_rule" >&2
+  exit 2
+fi
 if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@sha256:[a-f0-9]{64}$ ]]; then
   echo 'Pass the full published SGLang engine reference by digest' >&2
   exit 2
@@ -53,7 +58,7 @@ python -m campaign.seed \
   --bench-correctness-min-token-quantile=0.001 \
   --bench-correctness-min-coverage-ratio=0.5 \
   --bench-correctness-max-mean-logprob-drop=1.5 \
-  --sampling-rule-json fixtures/campaigns/sglang_qwen38_27b/sampling_rule.json \
+  --sampling-rule-json "$sampling_rule" \
   --scoring-rule-json fixtures/campaigns/sglang_qwen38_27b/scoring_rule.json \
   --status open --emission-start-weight 0.20 --emission-floor-weight 0 \
   --emission-decay-blocks 201600 --force

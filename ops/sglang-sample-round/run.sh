@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+if [[ $# -ne 2 ]]; then
+    echo 'Usage: run.sh OUTPUT_DIRECTORY QUALIFIED_SAMPLING_RULE_JSON' >&2
+    exit 2
+fi
+if [[ ! -f "$2" || ! -r "$2" ]]; then
+    echo "Qualified sampling rule must be a readable file: $2" >&2
+    exit 2
+fi
+sampling_rule="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 phase=setup
 log() {
     printf '[%s] [sample-round] [%ss] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SECONDS" "$*"
@@ -7,8 +16,8 @@ log() {
 trap 'log "ERROR: phase=$phase line=$LINENO exit=$?" >&2' ERR
 script_root="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_root/../.." && pwd)"
-mkdir -p "${1:-/workspace/pareton-sample-round-nvfp4}"
-run_root="$(cd "${1:-/workspace/pareton-sample-round-nvfp4}" && pwd)"
+mkdir -p "$1"
+run_root="$(cd "$1" && pwd)"
 mkdir -p /opt/pareton
 exec 9>/opt/pareton/.static-host.lock
 log "Acquiring static-host lock; output directory: $run_root"
@@ -28,6 +37,18 @@ export PARETON_BUILD_TIMEOUT_S=172800
 export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
 cd "$repo_root"
 log "Dependencies ready; weights cache=$PARETON_BENCH_HF_CACHE_DIR; engine cache=$PARETON_BENCH_ENGINE_CACHE_DIR"
+
+# Reject unqualified or stale artifacts before GPU cleanup or a candidate build.
+python - "$sampling_rule" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+from bench.longform import require_qualification
+from bench.sampler import parse_sampling_rule
+fields = json.loads(Path("fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json").read_text())
+rule = parse_sampling_rule(json.loads(Path(sys.argv[1]).read_text()))
+require_qualification(rule, fields["bench"], fields["engine"])
+PYTHON
 
 # Same host lock as static-SSH orchestration; only Pareton bench leftovers.
 phase=preflight
@@ -63,7 +84,7 @@ log "Candidate build completed"
 
 phase=sampling
 log "Preparing sampled workload and benchmark request"
-python "$script_root/prepare.py" "$run_root"
+python "$script_root/prepare.py" "$run_root" "$sampling_rule"
 output_dir="$run_root/output-$(date -u +%Y%m%dT%H%M%SZ)"
 phase=benchmark
 log "Starting baseline, candidate, correctness scorer, and baseline drift replay"

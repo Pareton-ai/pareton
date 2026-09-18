@@ -4,7 +4,6 @@ import copy
 import io
 import json
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from uuid import uuid4
@@ -152,18 +151,10 @@ def test_262k_context_keeps_fixed_inputs_and_full_output_allowances(engine):
     assert all(r["max_tokens"] == 5120 for r in requests)
 
 
-def test_qwen_fixture_generates_reproducible_forced_outputs_without_thinking():
-    fixture = (
-        Path(__file__).resolve().parents[1] / "fixtures/campaigns/sglang_qwen38_27b"
-    )
-    fields = json.loads((fixture / "campaign-fields.json").read_text())
-    workload_rule = json.loads((fixture / "sampling_rule.json").read_text())
-    assert fields["sampling_rule"] == workload_rule
+def test_existing_v3_forced_outputs_remain_reproducible_without_thinking():
     kwargs = {
-        "rule": workload_rule,
-        "sampling_context": sampling_context_for_campaign(
-            fields["bench"], fields["engine"]
-        ),
+        "rule": rule(n_prompts=32, n_rows=40, ignore_eos=True),
+        "sampling_context": context("sglang", max_model_len=262144),
     }
     sampled = sample(**kwargs)
     trace = validate_workload_trace_dict(json.loads(sampled.body))
