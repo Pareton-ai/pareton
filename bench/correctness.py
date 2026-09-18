@@ -43,7 +43,9 @@ every engine when *any* measured baseline completion on that prompt is
 degenerate, not only the latency-median natural-stop text. The median-only
 check misses the case where the pinned image loops on a sibling repetition
 and the prompt stays in the set as a coin-flip disqualifier (PAR-121).
-Campaigns without the relative bar retain the pre-PAR-108 grading path.
+Every measured natural candidate repetition is checked for degeneracy on
+retained correctness prompts. Logprob grading still uses the latency-median
+output. Forced-tail exemptions require the original request to ignore EOS.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -104,6 +106,7 @@ REASONING_END = "</think>"
 class PromptCase:
     id: str
     prompt: str
+    ignore_eos: bool = False
 
 
 def resolve_trace_path(trace_path: str, *, request_path: Path | None = None) -> Path:
@@ -171,7 +174,7 @@ def _prompt_case_from_trace_request(req: TraceRequest) -> PromptCase:
             f"trace request {req.id!r}: correctness requires a text prompt "
             f"(prompt_token_ids-only entries are not supported yet)"
         )
-    return PromptCase(id=req.id, prompt=req.prompt)
+    return PromptCase(id=req.id, prompt=req.prompt, ignore_eos=req.sampling.ignore_eos)
 
 
 def probe_logprob_capability(base_url: str, *, timeout: float = 30.0) -> dict[str, Any]:
@@ -613,12 +616,18 @@ def quantile_low(values: list[float], quantile: float) -> float:
 
 @dataclass(frozen=True)
 class CapturedOutput:
-    """One request's output as the candidate actually produced it."""
+    """One request's generated continuation, separate from its rendered prompt.
+
+    Conversation history belongs in ``prompt``. Repetition checks inspect only
+    ``output_text`` and ``output_samples``, including for tiered follow-ups.
+    """
 
     request_id: str
     prompt: str
     output_text: str
     completion_tokens: int
+    ignore_eos: bool = False
+    output_samples: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -668,6 +677,7 @@ def capture_outputs(
     *,
     timings,
     outputs: dict[str, str],
+    output_samples: Mapping[str, tuple[str, ...]] | None = None,
 ) -> list[CapturedOutput]:
     """Pair the correctness prompts with what the candidate emitted for them.
 
@@ -680,12 +690,17 @@ def capture_outputs(
         if text is None:
             continue
         timing = timings.get(case.id)
+        samples = () if output_samples is None else output_samples.get(case.id, ())
+        if output_samples is not None and not samples:
+            raise EngineError(f"output samples missing correctness request {case.id!r}")
         captured.append(
             CapturedOutput(
                 request_id=case.id,
                 prompt=case.prompt,
                 output_text=text,
                 completion_tokens=(timing.completion_tokens if timing else 0),
+                ignore_eos=case.ignore_eos,
+                output_samples=samples,
             )
         )
     return captured
@@ -715,11 +730,10 @@ def build_baseline_degeneracy_references(
     The drop reads every measured baseline completion, not only
     ``stop.text``. On a trace without ``ignore_eos``, ``stop.text`` is the
     latency-median SLA rep; a looping sibling rep then loosens the relative
-    bar (max span / min distinct) while the prompt stays live. Candidates
-    are graded on their own median rep, so a 2-in-3 loop on an unstable
-    prompt is a terminal DQ. Dropping the prompt when the pinned image
-    itself looped is the signal that separates those coin-flips from a
-    patch-attributable 2/3-or-3/3 against a 0/3 baseline.
+    bar (max span / min distinct) while the prompt stays live. Natural
+    candidate outputs are checked for degeneracy in every measured rep.
+    Dropping a prompt when the pinned image itself looped avoids attributing
+    that baseline instability to a patch.
 
     When the natural stop came from the ``ignore_eos`` probe
     (``NaturalStopReference.probed``), SLA samples are forced-length
@@ -1062,15 +1076,51 @@ def grade_candidate(
             if not captured.output_text:
                 empty.append(captured.request_id)
                 continue
-            positions, span, scored_prefix = score_captured_output(
-                scorer_url,
-                captured,
-                request_timeout_s=request_timeout_s,
-                engine_name=engine_name,
-                prefix_token_limit=None
-                if reference is None
-                else reference.natural_stop_tokens,
+            forced_tail = (
+                captured.ignore_eos
+                and reference is not None
+                and bool(reference.forced_output_samples)
             )
+            repetition_checks = []
+            repetition_degenerate = None
+            if not captured.ignore_eos:
+                for rep, text in enumerate(captured.output_samples, start=1):
+                    reason = degeneracy_reason(text) if text else "empty output"
+                    repetition_checks.append({"rep": rep, "degenerate": reason})
+                    if reason is not None and repetition_degenerate is None:
+                        repetition_degenerate = f"rep {rep}: {reason}"
+            if repetition_degenerate is not None and degenerate is None:
+                degenerate = f"{captured.request_id}: {repetition_degenerate}"
+            try:
+                positions, span, scored_prefix = score_captured_output(
+                    scorer_url,
+                    captured,
+                    request_timeout_s=request_timeout_s,
+                    engine_name=engine_name,
+                    prefix_token_limit=None
+                    if reference is None
+                    else reference.natural_stop_tokens,
+                )
+            except EngineError as exc:
+                if degenerate is None:
+                    raise
+                # A scorer failure cannot erase an established text failure.
+                # Finalize the evidence for that verdict, including the request
+                # whose scoring failed, without inventing missing token scores.
+                ef.write(
+                    json.dumps(
+                        {
+                            "request_id": captured.request_id,
+                            "ignore_eos": captured.ignore_eos,
+                            "repetition_degeneracy": repetition_checks,
+                            "degenerate": repetition_degenerate,
+                            "scorer_error": str(exc),
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                break
             scored = [position.logprob for position in positions]
             logprobs.extend(scored)
             span_positions += span
@@ -1103,12 +1153,10 @@ def grade_candidate(
                     repeated_span_ratio=repeated_span_ratio,
                 )
             prefix_degenerate = this_degenerate
-            forced_tail = reference is not None and bool(
-                reference.forced_output_samples
-            )
             exemptions = []
             if (
                 this_degenerate is not None
+                and forced_tail
                 and reference is not None
                 and any(
                     text.startswith(prefix_text)
@@ -1119,6 +1167,14 @@ def grade_candidate(
                 # forced response. Do not reject a prefix the baseline emitted.
                 exemptions.append("prefix_matches_forced_baseline")
                 this_degenerate = None
+            if not forced_tail and this_degenerate is None:
+                # Keep the existing prefix defense, and also enforce the
+                # absolute bar beyond that boundary for ordinary completions.
+                this_degenerate = degeneracy_reason(
+                    captured.output_text,
+                    distinct_ratio=distinct_ratio,
+                    repeated_span_ratio=repeated_span_ratio,
+                )
             if relative_degenerate is not None:
                 if forced_tail:
                     # Deliberate throughput policy for ignore_eos traces, not
@@ -1126,6 +1182,8 @@ def grade_candidate(
                     exemptions.append("forced_tail_diagnostic_only")
                 elif this_degenerate is None:
                     this_degenerate = relative_degenerate
+            if this_degenerate is None:
+                this_degenerate = repetition_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
@@ -1133,6 +1191,8 @@ def grade_candidate(
                     {
                         "request_id": captured.request_id,
                         "streamed_tokens": captured.completion_tokens,
+                        "ignore_eos": captured.ignore_eos,
+                        "repetition_degeneracy": repetition_checks,
                         "span_positions": span,
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),
@@ -1187,7 +1247,7 @@ def grade_candidate(
 
     if not logprobs:
         return CorrectnessReport(
-            verdict="infra_failed",
+            verdict="fail_correctness" if degenerate is not None else "infra_failed",
             num_prompts=num_prompts,
             num_positions_scored=0,
             mean_logprob=0.0,
@@ -1195,7 +1255,11 @@ def grade_candidate(
             quantile_logprob=0.0,
             coverage_ratio=0.0,
             evidence=rel_evidence,
-            reason="scorer produced no logprobs for any captured output",
+            reason=(
+                f"degenerate output ({degenerate})"
+                if degenerate is not None
+                else "scorer produced no logprobs for any captured output"
+            ),
         )
 
     # Coverage is how much of what the scorer saw it managed to score. Both

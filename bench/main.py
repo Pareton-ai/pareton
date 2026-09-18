@@ -625,6 +625,7 @@ def run_round(
                             prompts,
                             timings=replay.result.timings,
                             outputs=replay.outputs,
+                            output_samples=replay.output_samples,
                         )
                         baseline_degeneracy = build_baseline_degeneracy_references(
                             baseline_outputs,
@@ -709,7 +710,10 @@ def run_round(
                 PendingCorrectness(
                     candidate_index=index,
                     outputs=capture_outputs(
-                        prompts, timings=replay.result.timings, outputs=replay.outputs
+                        prompts,
+                        timings=replay.result.timings,
+                        outputs=replay.outputs,
+                        output_samples=replay.output_samples,
                     ),
                 )
             )

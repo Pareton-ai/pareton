@@ -490,11 +490,11 @@ def _median_rep_row(rows: list[dict]) -> dict:
     self-consistent set. Averaging would blend ITL vectors of different lengths
     and pair timings with text that never occurred together.
 
-    The selected text is the entire graded artifact
+    The selected text is the logprob-graded artifact
     (``capture_outputs`` and, when ``ignore_eos`` is off,
     ``capture_baseline_natural_stops``). A looping sibling rep is
-    invisible here; ``build_baseline_degeneracy_references`` has to
-    look at ``output_samples`` to see it.
+    invisible here; baseline drops and natural candidate degeneracy checks
+    use ``output_samples`` to inspect all measured repetitions.
     """
     ordered = sorted(rows, key=lambda r: float(r["e2e_ms"]))
     return ordered[(len(ordered) - 1) // 2]
