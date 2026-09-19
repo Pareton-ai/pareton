@@ -9,8 +9,8 @@ import pytest
 
 from bench.correctness import (
     BASELINE_INDEX,
-    CapturedOutput,
     MAX_BASELINE_PROMPT_DROPS,
+    CapturedOutput,
     PendingCorrectness,
     PromptCase,
     build_baseline_degeneracy_references,
@@ -1210,7 +1210,10 @@ def test_a_short_loop_that_wins_the_latency_median_is_still_the_graded_artifact(
 
 
 def test_too_many_looping_baseline_sibling_reps_fail_the_round():
-    outputs = [_captured(f"r{i}", f"Prompt {i}", PROSE_TEXT) for i in range(5)]
+    outputs = [
+        _captured(f"r{i}", f"Prompt {i}", PROSE_TEXT)
+        for i in range(MAX_BASELINE_PROMPT_DROPS + 1)
+    ]
     natural_stops = {
         output.request_id: _stop(output.request_id, PROSE_TEXT) for output in outputs
     }

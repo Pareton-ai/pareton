@@ -34,7 +34,7 @@ def _clean_long():
 
 @pytest.mark.parametrize("bad_rep", [None, 0, 1, 2])
 @pytest.mark.parametrize("finish_reason", ["stop", "length"])
-def test_all_natural_repetitions_are_enforced(
+def test_only_latency_median_natural_repetition_is_enforced(
     monkeypatch, tmp_path, bad_rep, finish_reason
 ):
     clean = _clean_long()
@@ -83,14 +83,13 @@ def test_all_natural_repetitions_are_enforced(
         evidence_path=evidence,
         baseline_degeneracy=references,
     )
-    assert report.verdict == ("pass" if bad_rep is None else "fail_correctness")
+    assert report.verdict == ("fail_correctness" if bad_rep == 1 else "pass")
     assert limits == [2500]
     row = json.loads(evidence.read_text())
     assert row["degeneracy_scope"] == "full_output"
     assert row["degeneracy_exemptions"] == []
-    assert [r["rep"] for r in row["repetition_degeneracy"] if r["degenerate"]] == (
-        [] if bad_rep is None else [bad_rep + 1]
-    )
+    assert row["output_selection"] == "latency_median"
+    assert bool(row["degenerate"]) is (bad_rep == 1)
 
 
 def test_normal_eos_cannot_inherit_forced_exemptions(monkeypatch, tmp_path):
@@ -210,6 +209,10 @@ def test_tiered_followups_grade_new_outputs_not_history(
         )
         for prompt in prompts
     }
+    outputs = {
+        prompt.id: (" apple" * 5120 if tiers[prompt.id] == loop_tier else clean)
+        for prompt in prompts
+    }
     captured = capture_outputs(
         prompts, timings={}, outputs=outputs, output_samples=samples
     )
@@ -235,10 +238,8 @@ def test_tiered_followups_grade_new_outputs_not_history(
     for row in rows:
         assert row["degeneracy_scope"] == "full_output"
         assert row["degeneracy_exemptions"] == []
-        failed_reps = [
-            rep["rep"] for rep in row["repetition_degeneracy"] if rep["degenerate"]
-        ]
-        assert failed_reps == ([3] if tiers[row["request_id"]] == loop_tier else [])
+        assert row["output_selection"] == "latency_median"
+        assert bool(row["degenerate"]) is (tiers[row["request_id"]] == loop_tier)
 
 
 @pytest.mark.parametrize("failure_request", ["r1", "r2"])
@@ -255,7 +256,14 @@ def test_known_repetition_failure_survives_scorer_error(
     captured = capture_outputs(
         prompts,
         timings={},
-        outputs={rid: "A clean answer." for rid in ("r1", "r2")},
+        outputs={
+            rid: (
+                " apple" * 200
+                if rid == "r1" and kind == "natural-loop"
+                else "A clean answer."
+            )
+            for rid in ("r1", "r2")
+        },
         output_samples={
             "r1": (
                 "A clean answer.",
@@ -288,11 +296,12 @@ def test_known_repetition_failure_survives_scorer_error(
     expected = "fail_correctness" if kind == "natural-loop" else "infra_failed"
     assert report.verdict == expected
     if kind == "natural-loop":
-        assert "r1" in report.reason and "rep 2" in report.reason
+        assert "r1" in report.reason
         path = tmp_path / "candidate_0.jsonl"
         assert report.evidence.endswith(path.name)
         assert not path.with_suffix(".jsonl.partial").exists()
         rows = [json.loads(line) for line in path.read_text().splitlines()]
-        assert rows[0]["repetition_degeneracy"][1]["degenerate"]
+        assert rows[0]["degenerate"]
+        assert rows[0]["output_selection"] == "latency_median"
         assert rows[-1]["request_id"] == failure_request
         assert rows[-1]["scorer_error"] == "simulated scorer failure"

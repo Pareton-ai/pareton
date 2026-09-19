@@ -101,11 +101,12 @@ bash ops/sglang-sample-round/run.sh \
 
 The standalone runner uses the fixture's published baseline image. Qualify that
 same image when using this runner. Inspect `bench_report.json` and its evidence.
-Every measured baseline and drift repetition must still meet the output-length
-floor. If one stops short under load, the round fails as a baseline workload
-error. It does not force continuation, drop the request or penalize a miner.
-Candidate outputs continue through the existing length, correctness and timing
-checks.
+Both baseline replays run before the candidates. If any measured natural
+baseline repetition is short or repetitive, exclude that prompt from correctness
+and performance scoring for every candidate. Up to eight unique prompts may be
+excluded across both runs; a ninth exclusion or an empty retained set fails the
+round as a baseline workload error. Candidate outputs continue through the
+existing length, correctness and timing checks on retained prompts.
 
 ## Open the campaign
 
@@ -130,29 +131,31 @@ migration is required, and existing campaigns are not rewritten.
 
 ## Natural-output repetition enforcement
 
-For every retained correctness prompt, every measured natural-output repetition
-must pass the absolute repetition checks on its full reconstructed text, including
-text beyond the baseline's output length. This also applies when generation hits
-the 5120-token ceiling. A looping non-median repetition fails correctness even
-when the latency-median response is clean. The policy applies to all normal-EOS
-workloads, not only LongWriter; it is deliberately stricter than median-only
-grading. Logprob checks and existing candidate length checks still use the
-latency-median response. Repetition checks inspect only the newly generated
-response, excluding the rendered user/assistant history and follow-up. The same
-output policy applies across the 2k, 4k, 8k and 16k input tiers; input length does
-not change the repetition thresholds or grant a forced-tail exemption.
+For each retained correctness prompt, grade the full latency-median response for
+repetition and logprobs. A looping sibling repetition does not disqualify a clean
+median response. The policy applies to normal-EOS workloads across all four input
+tiers. Inspect only newly generated text, including text beyond the baseline's
+output length; conversation history is never part of the graded output.
 
-Correctness evidence records per-repetition outcomes in `repetition_degeneracy`;
-full texts remain in the corresponding SLA `rep_N/requests.jsonl` evidence. The
-existing character n-gram and repeated-span thresholds, including the thinking /
-answer split, are unchanged. These are heuristic repetition checks, not a
-semantic-quality guarantee or a detector for every short repeated passage.
+Correctness evidence identifies `output_selection=latency_median`. All generated
+texts remain in SLA `rep_N/requests.jsonl` evidence. Character n-gram and
+repeated-span thresholds, including the thinking/answer split, are unchanged.
 
-The existing baseline instability policy is unchanged: if any measured natural
-baseline repetition is degenerate, that correctness prompt is excluded for all
-engines with an audited reason. More than four exclusions fail the round; an
-empty retained set cannot pass. Qualification already rejects degenerate outputs,
-but qualification alone does not establish behavior under concurrent round load.
+Baseline validation inspects all measured natural repetitions in both baseline
+runs, before candidates start. Repetitive outputs and v4 outputs below 3000 tokens
+exclude the prompt for every candidate, including performance scoring and the
+baseline comparison. The exclusion limit is eight unique prompts across both
+runs, not eight per run. A ninth exclusion or an empty retained set fails the
+round. `evidence/correctness/baseline_exclusions.json` records the shared reasons;
+scored entries also retain them in `score_report.excluded_prompts`. Candidate
+outputs cannot trigger exclusions. Qualification alone does not establish
+stability under concurrent round load.
+
+The second baseline retains the `baseline-drift` role and `baseline_drift` report
+field for compatibility. Because it now precedes candidates, the comparison
+measures baseline repeatability, not hardware drift across the candidate runs.
+Plan version 2 in progress metadata lets the dashboard retain historical order
+for old rounds and show both baselines first for new rounds.
 
 Speculative decoding receives the same text checks. Stream deltas are joined
 before grading; token counts and chunk boundaries cannot truncate the inspected

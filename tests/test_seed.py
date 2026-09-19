@@ -406,9 +406,9 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     )
     assert [start.kind for start in plan] == [
         "baseline",
+        "drift",
         "candidate",
         "scorer",
-        "drift",
     ]
     for start in plan:
         if start.kind == "scorer":

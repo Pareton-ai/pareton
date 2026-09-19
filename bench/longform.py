@@ -402,19 +402,3 @@ def preflight_longform_campaign(rule, bench, engine):
         ),
         sampling_context=sampling_context_for_campaign(bench, engine),
     )
-
-
-def validate_natural_baseline(trace, replay):
-    """A changed baseline workload must void the round, never reward a miner."""
-    from bench.lifecycle import EngineError
-
-    sampling = trace.meta.sampling or {}
-    if sampling.get("algo_version") != 4:
-        return
-    for request in trace.requests:
-        samples = replay.completion_token_samples.get(request.id, [])
-        if not samples or any(n < sampling["min_output_tokens"] for n in samples):
-            raise EngineError(
-                f"long-form baseline request {request.id} fell below the qualified "
-                f"{sampling['min_output_tokens']}-token output threshold; requalify the workload"
-            )
