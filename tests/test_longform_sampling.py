@@ -16,7 +16,6 @@ from bench.longform import (
     qualification_contract,
     require_qualification,
     sampling_context_for_campaign,
-    validate_natural_baseline,
 )
 from bench.qualify_longform import evaluate_response, qualify
 from bench.sampler import (
@@ -332,13 +331,18 @@ def test_every_measured_baseline_repetition_must_stay_long():
     assert (
         evaluate_response(response(2999, "stop"), r, 3)["rejection"] == "short_output"
     )
+    from bench.correctness import baseline_prompt_drops
+
     replay = SimpleNamespace(
-        completion_token_samples={r.id: (5120, 3000, 4000) for r in trace.requests}
+        completion_token_samples={r.id: (5120, 3000, 4000) for r in trace.requests},
+        output_samples={r.id: ("Clean answer.",) * 3 for r in trace.requests},
+        result=SimpleNamespace(role="baseline"),
     )
-    validate_natural_baseline(trace, replay)
+    assert baseline_prompt_drops(trace, replay, dropped={}) == {}
     replay.completion_token_samples[trace.requests[0].id] = (5120, 2999, 4000)
-    with pytest.raises(EngineError, match="requalify"):
-        validate_natural_baseline(trace, replay)
+    dropped = baseline_prompt_drops(trace, replay, dropped={})
+    assert list(dropped) == [trace.requests[0].id]
+    assert "2999" in dropped[trace.requests[0].id]
 
 
 def test_short_baseline_aborts_round_before_candidate_start(monkeypatch, tmp_path):
@@ -363,12 +367,14 @@ def test_short_baseline_aborts_round_before_candidate_start(monkeypatch, tmp_pat
     monkeypatch.setattr(
         "bench.main.run_sla_engine",
         lambda *a, **k: SimpleNamespace(
-            completion_token_samples={r.id: (10, 2, 10) for r in trace.requests}
+            completion_token_samples={r.id: (10, 2, 10) for r in trace.requests},
+            output_samples={r.id: ("Clean answer.",) * 3 for r in trace.requests},
+            result=SimpleNamespace(role="baseline"),
         ),
     )
     layout = OutputLayout(tmp_path)
     layout.prepare()
-    with pytest.raises(EngineError, match="requalify") as caught:
+    with pytest.raises(EngineError, match="no stable workload prompts") as caught:
         run_round(
             req=request,
             provider=SimpleNamespace(start=start),

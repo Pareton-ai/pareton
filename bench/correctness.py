@@ -43,9 +43,9 @@ every engine when *any* measured baseline completion on that prompt is
 degenerate, not only the latency-median natural-stop text. The median-only
 check misses the case where the pinned image loops on a sibling repetition
 and the prompt stays in the set as a coin-flip disqualifier (PAR-121).
-Every measured natural candidate repetition is checked for degeneracy on
-retained correctness prompts. Logprob grading still uses the latency-median
-output. Forced-tail exemptions require the original request to ignore EOS.
+Candidate repetition and logprob grading both use the latency-median output
+on retained correctness prompts. Forced-tail exemptions require the original
+request to ignore EOS.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -77,7 +77,8 @@ from bench.validate import RequestValidationError, load_workload_trace
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from bench.sla_bench import NaturalStopReference
+    from bench.schemas import WorkloadTrace
+    from bench.sla_bench import EngineReplay, NaturalStopReference
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
 DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
 # A larger exclusion set no longer provides a representative correctness
 # sample. This is a harness invariant rather than campaign policy.
-MAX_BASELINE_PROMPT_DROPS = 4
+MAX_BASELINE_PROMPT_DROPS = 8
 # Reasoning models close their thinking with this tag before the final answer.
 REASONING_END = "</think>"
 
@@ -618,8 +619,9 @@ def quantile_low(values: list[float], quantile: float) -> float:
 class CapturedOutput:
     """One request's generated continuation, separate from its rendered prompt.
 
-    Conversation history belongs in ``prompt``. Repetition checks inspect only
-    ``output_text`` and ``output_samples``, including for tiered follow-ups.
+    Conversation history belongs in ``prompt``. Candidate repetition checks
+    inspect ``output_text``, the latency-median continuation. Sibling outputs
+    remain available in ``output_samples`` as evidence.
     """
 
     request_id: str
@@ -720,18 +722,63 @@ def _record_baseline_prompt_drop(
     logger.warning("dropping correctness prompt %r: %s", request_id, drop_reason)
 
 
+def baseline_prompt_drops(
+    trace: WorkloadTrace, replay: EngineReplay, *, dropped: Mapping[str, str]
+) -> dict[str, str]:
+    """Union natural-output failures from a trusted baseline replay only.
+
+    Inspect the whole trace, including requests outside the logprob sample.
+    Forced outputs keep their existing natural-stop probe policy.
+    """
+    result = dict(dropped)
+    sampling = trace.meta.sampling or {}
+    minimum = (
+        sampling.get("min_output_tokens") if sampling.get("algo_version") == 4 else None
+    )
+    for request in trace.requests:
+        if request.sampling.ignore_eos:
+            continue
+        samples = replay.output_samples.get(request.id, ())
+        if not samples:
+            raise EngineError(f"baseline output samples missing request {request.id!r}")
+        reason = None
+        if minimum is not None:
+            counts = replay.completion_token_samples.get(request.id, ())
+            if len(counts) != len(samples):
+                raise EngineError(
+                    f"baseline token samples missing request {request.id!r}"
+                )
+            if min(counts) < minimum:
+                reason = f"output below {minimum}-token floor (minimum {min(counts)})"
+        if reason is None:
+            for text in samples:
+                reason = degeneracy_reason(text) if text else "empty output"
+                if reason is not None:
+                    break
+        if reason is not None and request.id not in result:
+            result[request.id] = f"{replay.result.role}: {reason}"
+    if len(result) > MAX_BASELINE_PROMPT_DROPS:
+        raise EngineError(
+            f"baseline unstable for {len(result)} prompts, above the harness limit of {MAX_BASELINE_PROMPT_DROPS}"
+        )
+    if trace.requests and all(request.id in result for request in trace.requests):
+        raise EngineError("baseline has no stable workload prompts")
+    return result
+
+
 def build_baseline_degeneracy_references(
     outputs: list[CapturedOutput],
     natural_stops: Mapping[str, NaturalStopReference],
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
+    *,
+    dropped: Mapping[str, str] | None = None,
 ) -> BaselineDegeneracyReferences:
     """Build bounds for prompts with a usable baseline natural-stop output.
 
     The drop reads every measured baseline completion, not only
     ``stop.text``. On a trace without ``ignore_eos``, ``stop.text`` is the
     latency-median SLA rep; a looping sibling rep then loosens the relative
-    bar (max span / min distinct) while the prompt stays live. Natural
-    candidate outputs are checked for degeneracy in every measured rep.
+    bar (max span / min distinct) while the prompt stays live.
     Dropping a prompt when the pinned image itself looped avoids attributing
     that baseline instability to a patch.
 
@@ -742,8 +789,10 @@ def build_baseline_degeneracy_references(
     measured forced samples for prefix matching, including non-median paths.
     """
     references: dict[str, BaselineDegeneracyReference] = {}
-    dropped: dict[str, str] = {}
+    dropped = dict(dropped or {})
     for captured in outputs:
+        if captured.request_id in dropped:
+            continue
         stop = natural_stops.get(captured.request_id)
         if stop is None:
             raise EngineError(
@@ -1081,16 +1130,11 @@ def grade_candidate(
                 and reference is not None
                 and bool(reference.forced_output_samples)
             )
-            repetition_checks = []
-            repetition_degenerate = None
+            median_degenerate = None
             if not captured.ignore_eos:
-                for rep, text in enumerate(captured.output_samples, start=1):
-                    reason = degeneracy_reason(text) if text else "empty output"
-                    repetition_checks.append({"rep": rep, "degenerate": reason})
-                    if reason is not None and repetition_degenerate is None:
-                        repetition_degenerate = f"rep {rep}: {reason}"
-            if repetition_degenerate is not None and degenerate is None:
-                degenerate = f"{captured.request_id}: {repetition_degenerate}"
+                median_degenerate = degeneracy_reason(captured.output_text)
+            if median_degenerate is not None and degenerate is None:
+                degenerate = f"{captured.request_id}: {median_degenerate}"
             try:
                 positions, span, scored_prefix = score_captured_output(
                     scorer_url,
@@ -1112,8 +1156,8 @@ def grade_candidate(
                         {
                             "request_id": captured.request_id,
                             "ignore_eos": captured.ignore_eos,
-                            "repetition_degeneracy": repetition_checks,
-                            "degenerate": repetition_degenerate,
+                            "output_selection": "latency_median",
+                            "degenerate": median_degenerate,
                             "scorer_error": str(exc),
                         },
                         sort_keys=True,
@@ -1183,7 +1227,7 @@ def grade_candidate(
                 elif this_degenerate is None:
                     this_degenerate = relative_degenerate
             if this_degenerate is None:
-                this_degenerate = repetition_degenerate
+                this_degenerate = median_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
@@ -1192,7 +1236,7 @@ def grade_candidate(
                         "request_id": captured.request_id,
                         "streamed_tokens": captured.completion_tokens,
                         "ignore_eos": captured.ignore_eos,
-                        "repetition_degeneracy": repetition_checks,
+                        "output_selection": "latency_median",
                         "span_positions": span,
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),

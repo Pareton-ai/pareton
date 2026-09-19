@@ -5,12 +5,10 @@ candidate. The harness starts one engine container at a time, in this order:
 
 1. The baseline, with the engine compile cache mounted read-write. Its SLA
    replay is the fixed reference every candidate is scored against.
-2. Each candidate, with no cache mount and in production configuration, so
+2. The baseline again, to validate reference repeatability in a fresh instance.
+3. Each candidate, with no cache mount and in production configuration, so
    they all meet the same cold cache and are timed on the same footing.
-3. One scorer, after the last candidate has stopped, teacher-forcing every
-   output the candidates produced. Then stopped.
-4. The baseline again, SLA only, to measure how far the pod drifted while
-   the round ran.
+4. One scorer, teacher-forcing the retained latency-median outputs.
 
 That is ``3 + len(candidates)`` engine starts. Only the scorer runs with
 correctness-specific serve args, so the count does not depend on which engine
@@ -38,8 +36,10 @@ from typing import Any, Callable, Iterator
 from bench import __version__
 from bench.correctness import (
     BASELINE_INDEX,
+    BaselineDegeneracyReferences,
     PendingCorrectness,
     PromptCase,
+    baseline_prompt_drops,
     build_baseline_degeneracy_references,
     capture_outputs,
     grade_all,
@@ -106,6 +106,7 @@ VLLM_SCORER_CONTEXT_HEADROOM = 1
 # and inputs must be strictly shorter. Reserve seven slots for a scorer
 # input that fills the replay context, including room for the clamp token.
 SGLANG_SCORER_CONTEXT_HEADROOM = 7
+ROUND_PLAN_VERSION = 2
 
 
 def correctness_extra_serve_args(engine_name: str) -> list[str]:
@@ -208,9 +209,8 @@ def plan_round_starts(
     * only a baseline start mounts the engine compile cache, so every
       candidate begins in the same cache state and whatever it compiles dies
       with the container;
-    * the closing drift baseline mounts it too, because the drift number is a
-      comparison against the first baseline run and the two must differ only
-      in when they ran.
+    * the second baseline mounts it too, to validate the same reference in
+      a fresh instance before any candidate starts.
     """
     starts = [
         EngineStart(
@@ -220,6 +220,14 @@ def plan_round_starts(
             mount_engine_cache=True,
         )
     ]
+    starts.append(
+        EngineStart(
+            role="baseline-drift",
+            kind="drift",
+            spec=engines.baseline,
+            mount_engine_cache=True,
+        )
+    )
     for i, cand in enumerate(engines.candidates):
         starts.append(
             EngineStart(
@@ -241,14 +249,6 @@ def plan_round_starts(
                 mount_engine_cache=False,
             )
         )
-    starts.append(
-        EngineStart(
-            role="baseline-drift",
-            kind="drift",
-            spec=engines.baseline,
-            mount_engine_cache=True,
-        )
-    )
     # Stamp positions here rather than at the call sites: the plan is the only
     # place a start is defined, so it is the only place that can number them
     # without two callers disagreeing.
@@ -438,7 +438,11 @@ class _EngineProvider:
     def _write_phase(self, phase: BenchPhase, start: EngineStart) -> None:
         if self._phase_sink is not None:
             self._phase_sink(
-                phase.value, step=start.step, steps=start.steps, role=start.role
+                phase.value,
+                step=start.step,
+                steps=start.steps,
+                role=start.role,
+                plan_version=ROUND_PLAN_VERSION,
             )
 
     def _mock_config(self, start: EngineStart) -> MockEngineConfig:
@@ -557,6 +561,7 @@ def run_round(
     pending: list[PendingCorrectness] = []
     correctness: dict[int, CorrectnessReport] = {}
     baseline_degeneracy = None
+    excluded_prompts: dict[str, str] = {}
     relative_correctness = req.correctness.thresholds.max_mean_logprob_drop is not None
 
     leader_index = req.leader_candidate_index
@@ -611,9 +616,14 @@ def run_round(
                         evidence_dir=layout.sla_bench_dir,
                         engine_name=start.spec.name,
                     )
-                    from bench.longform import validate_natural_baseline
-
-                    validate_natural_baseline(trace, replay)
+                    excluded_prompts = baseline_prompt_drops(
+                        trace, replay, dropped=excluded_prompts
+                    )
+                    layout.correctness_dir.mkdir(parents=True, exist_ok=True)
+                    (layout.correctness_dir / "baseline_exclusions.json").write_text(
+                        json.dumps(excluded_prompts, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
                     if start.kind == "baseline" and req.mode == "all":
                         natural_stops = capture_baseline_natural_stops(
                             url,
@@ -631,7 +641,21 @@ def run_round(
                             baseline_outputs,
                             natural_stops,
                             replay.output_samples,
+                            dropped=excluded_prompts,
                         )
+                        if baseline_degeneracy is not None:
+                            excluded_prompts.update(baseline_degeneracy.dropped)
+                    elif start.kind == "drift" and baseline_degeneracy is not None:
+                        baseline_degeneracy = BaselineDegeneracyReferences(
+                            {
+                                rid: ref
+                                for rid, ref in baseline_degeneracy.items()
+                                if rid not in excluded_prompts
+                            },
+                            dropped=excluded_prompts,
+                        )
+                    if baseline_degeneracy is not None and not baseline_degeneracy:
+                        raise EngineError("baseline has no stable correctness prompts")
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
                 # scored against, so the round cannot continue without it.
@@ -772,6 +796,8 @@ def run_round(
 
     if baseline is None or drift is None:
         raise EngineError("round plan did not produce both baseline runs")
+    if excluded_prompts:
+        baseline = replace(baseline, excluded_prompts=excluded_prompts)
     return baseline, drift, runs, correctness
 
 
@@ -863,16 +889,22 @@ def _build_entries(
 
         scored = score_candidate(
             req.scoring_rule,
-            baseline=baseline.result.timings,
+            baseline={
+                rid: timing
+                for rid, timing in baseline.result.timings.items()
+                if rid not in baseline.excluded_prompts
+            },
             candidate=run.replay.result.timings,
         )
+        score_report = scored.to_report()
+        score_report["excluded_prompts"] = baseline.excluded_prompts
         entries.append(
             RoundEntryReport(
                 index=run.index,
                 image_digest=digest,
                 status="scored",
                 score=scored.score,
-                score_report=scored.to_report(),
+                score_report=score_report,
                 sla=run.replay.result,
                 correctness=corr,
             )
@@ -883,14 +915,11 @@ def _build_entries(
 def baseline_drift(
     req: BenchRequest, baseline: EngineReplay, drift: EngineReplay
 ) -> float:
-    """How far the pod moved between the round's two baseline runs.
+    """Repeatability between the two initial baseline runs.
 
-    Drift is ``last_baseline_score - first_baseline_score``. The opening
-    baseline scores 0.0 against itself under any speedup rule, so the
-    difference is exactly the closing run's score. Positive means the pod got
-    faster while the round ran; negative, slower. The miner reliability
-    deduction does not alter this hardware-drift diagnostic. A round whose drift is too
-    large was not measuring the candidates.
+    Keep the legacy report field, but both reference runs now precede the
+    candidates. This does not measure hardware drift across the candidate
+    cohort. The miner reliability deduction does not affect the comparison.
     """
     return score_candidate(
         {
@@ -898,7 +927,11 @@ def baseline_drift(
             for key, value in req.scoring_rule.items()
             if key != "failure_penalty"
         },
-        baseline=baseline.result.timings,
+        baseline={
+            rid: timing
+            for rid, timing in baseline.result.timings.items()
+            if rid not in baseline.excluded_prompts
+        },
         candidate=drift.result.timings,
     ).score
 

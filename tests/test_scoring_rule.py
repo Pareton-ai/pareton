@@ -72,7 +72,7 @@ def test_baseline_drift_retains_latency_metric_without_miner_penalty():
     rule = {**RULE, "failure_penalty": 0.1}
     score = baseline_drift(
         SimpleNamespace(scoring_rule=rule),
-        SimpleNamespace(result=SimpleNamespace(timings=base)),
+        SimpleNamespace(result=SimpleNamespace(timings=base), excluded_prompts={}),
         SimpleNamespace(result=SimpleNamespace(timings=drift)),
     )
     assert score == pytest.approx(0.5)
