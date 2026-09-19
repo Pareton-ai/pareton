@@ -316,7 +316,7 @@ def qualify(
                 settings = {
                     "temperature": temperature,
                     "top_p": sampling.top_p,
-                    "seed": sampling.seed_for_replay(rep + 1),
+                    "seed": 0,
                 }
                 response = post_json(
                     base_url,

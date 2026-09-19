@@ -81,17 +81,13 @@ def generation_fields(rule):
                 "temperature_range requires two increasing bounds from 0 to 2, without temperature"
             )
         fields["temperature_range"] = [float(value) for value in bounds]
-    if "randomize_seed" in rule:
-        if type(rule["randomize_seed"]) is not bool:
-            raise SamplerError("randomize_seed must be a boolean")
-        fields["randomize_seed"] = rule["randomize_seed"]
     return fields
 
 
 def generation_sampling(rule, *, seed_key=""):
     """Derive reproducible per-request settings independently of the engine."""
     fields = generation_fields(rule)
-    if ("temperature_range" in fields or fields.get("randomize_seed")) and not seed_key:
+    if "temperature_range" in fields and not seed_key:
         raise SamplerError("randomized generation requires a pinned generation seed")
     temperature = fields.get("temperature", 0.0)
     if "temperature_range" in fields:
@@ -102,15 +98,7 @@ def generation_sampling(rule, *, seed_key=""):
         temperature = min(
             high, max(low, round(low + (high - low) * value / (2**64 - 1), 6))
         )
-    settings = {"temperature": temperature, "top_p": 1.0}
-    if fields.get("randomize_seed"):
-        settings["seed"] = (
-            int.from_bytes(
-                hashlib.sha256(f"seed:{seed_key}".encode()).digest()[:4], "big"
-            )
-            & 0x7FFFFFFF
-        )
-    return settings
+    return {"temperature": temperature, "top_p": 1.0}
 
 
 def parse_longform_fields(rule, parsed):
@@ -364,7 +352,7 @@ def generate_longform_trace(
         "length_groups": groups,
     }
     workload.update(generation_fields(rule))
-    if "temperature_range" in rule or rule.get("randomize_seed"):
+    if "temperature_range" in rule:
         workload["generation_seed"] = seed
     validate_longform_trace(requests, workload)
     body = encode_trace(
@@ -411,9 +399,9 @@ def validate_longform_trace(requests, sampling):
     validate_context(context)
     generation_fields(sampling)
     generation_seed = sampling.get("generation_seed", "")
-    if (
-        "temperature_range" in sampling or sampling.get("randomize_seed")
-    ) and not re.fullmatch(r"[0-9a-f]{64}", str(generation_seed)):
+    if "temperature_range" in sampling and not re.fullmatch(
+        r"[0-9a-f]{64}", str(generation_seed)
+    ):
         raise SamplerError("invalid long-form generation seed")
     for key in ("request_interval_ms", "max_tokens", "min_output_tokens"):
         value = sampling.get(key)

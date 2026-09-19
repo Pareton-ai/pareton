@@ -184,7 +184,7 @@ def test_longform_rejects_invalid_temperature(temperature):
         {"temperature_range": [0.1]},
         {"temperature_range": [0.1, float("nan")]},
         {"temperature_range": [True, 1.5]},
-        {"randomize_seed": 1},
+        {"randomize_seed": True},
     ],
 )
 def test_invalid_randomized_generation_policy_is_rejected(change):
@@ -192,14 +192,15 @@ def test_invalid_randomized_generation_policy_is_rejected(change):
         parse_sampling_rule(rule(**change))
 
 
-def test_random_generation_is_bound_to_round_trace_and_receipt():
-    r = rule(temperature_range=[0.1, 1.5], randomize_seed=True)
+def test_random_temperature_is_bound_to_round_trace_and_receipt():
+    r = rule(temperature_range=[0.1, 1.5])
     sampled = sample(rule=r)
     trace = validate_workload_trace_dict(json.loads(sampled.body))
     assert all(0.1 <= req.sampling.temperature <= 1.5 for req in trace.requests)
     assert len({req.sampling.temperature for req in trace.requests}) == 4
-    assert len({req.sampling.seed for req in trace.requests}) == 4
-    assert all(0 <= req.sampling.seed < 2**31 for req in trace.requests)
+    assert all(
+        "seed" not in req["sampling"] for req in json.loads(sampled.body)["requests"]
+    )
     assert sample(rule=r, sampling_receipt=sampled.receipt).body == sampled.body
     other = validate_workload_trace_dict(
         json.loads(sample(rule=r, seed_hex="d" * 64).body)
@@ -215,9 +216,11 @@ def test_random_generation_is_bound_to_round_trace_and_receipt():
             data["requests"][0]["sampling"][field] = 0
         with pytest.raises(RequestValidationError):
             validate_workload_trace_dict(data)
-    for changes in ({"randomize_seed": False}, {"temperature_range": [0.2, 1.4]}):
-        with pytest.raises(SamplerError):
-            sample(rule={**r, **changes}, sampling_receipt=sampled.receipt)
+    with pytest.raises(SamplerError):
+        sample(
+            rule={**r, "temperature_range": [0.2, 1.4]},
+            sampling_receipt=sampled.receipt,
+        )
 
 
 @pytest.mark.parametrize(
@@ -286,7 +289,7 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     assert r["max_tokens"] == 5120
     assert r["min_output_tokens"] == 3000
     assert r["temperature_range"] == [0.1, 1.5]
-    assert r["randomize_seed"] is True
+    assert "randomize_seed" not in r
     omitted_floor = {
         key: value for key, value in r.items() if key != "min_output_tokens"
     }
@@ -305,7 +308,6 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
         not r.sampling.ignore_eos
         and r.max_tokens == 5120
         and 0.1 <= r.sampling.temperature <= 1.5
-        and r.sampling.seed is not None
         for r in trace.requests
     )
     with pytest.raises(SamplerError, match="baseline qualification"):
@@ -341,7 +343,7 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
 ):
     f = fields()
     if isinstance(temperature, list):
-        f["sampling_rule"].update(temperature_range=temperature, randomize_seed=True)
+        f["sampling_rule"].update(temperature_range=temperature)
     elif temperature is not None:
         f["sampling_rule"]["temperature"] = temperature
     calls = []
@@ -355,7 +357,7 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
         assert body["top_p"] == 1.0
         if isinstance(temperature, list):
             assert body["temperature"] in temperature
-            assert type(body["seed"]) is int and 0 <= body["seed"] < 2**31
+            assert body["seed"] == 0
         else:
             assert body["temperature"] == (0.0 if temperature is None else temperature)
             assert body["seed"] == 0
@@ -379,7 +381,7 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     )
     assert len(calls) == 8
     if isinstance(temperature, list):
-        assert len({call["seed"] for call in calls}) == 8
+        assert {call["seed"] for call in calls} == {0}
         for prompt in {call["prompt"] for call in calls}:
             assert [
                 c["temperature"] for c in calls if c["prompt"] == prompt

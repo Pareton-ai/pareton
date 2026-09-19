@@ -176,15 +176,11 @@ def _fire(
     out: list,
     lock: threading.Lock,
     errs: list,
-    sampling_repetition: int | None = None,
 ) -> None:
     delay = req.arrival_offset_ms / 1000.0 - (time.monotonic() - t0)
     if delay > 0:
         time.sleep(delay)
     dispatch = time.monotonic()
-    sampling_seed = req.sampling.seed_for_replay(
-        rep if sampling_repetition is None else sampling_repetition, warmup=is_warmup
-    )
     try:
         res = post_completion_stream(
             base_url,
@@ -192,7 +188,7 @@ def _fire(
             max_tokens=req.max_tokens,
             temperature=req.sampling.temperature,
             top_p=req.sampling.top_p,
-            seed=sampling_seed,
+            seed=0,
             ignore_eos=req.sampling.ignore_eos,
             timeout=timeout_s,
         )
@@ -250,7 +246,7 @@ def _fire(
         sampling={
             "temperature": req.sampling.temperature,
             "top_p": req.sampling.top_p,
-            "seed": sampling_seed,
+            "seed": 0,
             "ignore_eos": req.sampling.ignore_eos,
         },
     )
@@ -266,7 +262,6 @@ def _replay(
     rep: int,
     is_warmup: bool,
     timeout_s: float,
-    sampling_repetition: int | None = None,
 ) -> tuple[list[dict], float, list[str]]:
     """Open-loop replay of one request set. Returns (rows, wall_s, errors)."""
     t0 = time.monotonic()
@@ -286,7 +281,6 @@ def _replay(
                 "out": rows,
                 "lock": lock,
                 "errs": errs,
-                "sampling_repetition": sampling_repetition,
             },
             daemon=True,
         )
@@ -468,7 +462,6 @@ def _run_engine(
             rep=0,
             is_warmup=True,
             timeout_s=timeout_s,
-            sampling_repetition=warmup + 1,
         )
         dirname = WARMUP_DIRNAME if warmup == 0 else f"warmup_{warmup + 1}"
         _write_rep(engine_evidence_dir / dirname, warm_rows, 0.0)

@@ -28,28 +28,27 @@ arrivals, fees and emissions remain as configured in the seed helper.
 minimum generation length. A long source answer does not establish that the
 model will produce a long new response.
 
-New Qwen campaign fixtures pin `temperature_range=[0.1, 1.5]` and
-`randomize_seed=true`. The sampler derives one temperature per prompt from the
-round seed and request index, uniformly over the range to six decimal places.
-It records that value and a nonnegative 31-bit base seed in each request. Each
-prompt keeps its temperature across repetitions so its baseline reference uses
-the same setting. Different rounds derive new settings.
+New Qwen campaign fixtures pin `temperature_range=[0.1, 1.5]`. The sampler
+reproducibly derives one temperature per prompt from the round seed and request
+index, uniformly over the range to six decimal places. Each prompt keeps that
+temperature across warmups and measured repetitions; different rounds derive
+new temperatures.
 
-Generation derives an integer seed from the request's base seed, phase and
-repetition number. Both warmups and all measured repetitions get distinct seed
-inputs. The opening baseline, second baseline and every candidate use identical
-settings for a given request and repetition. This is reproducible pseudorandom
-sampling, not independent engine-local randomness. SLA request evidence records
-the temperature and actual generation seed, including failed requests.
-`top_p=1` and prefix-cache reuse are unchanged. The teacher-forced correctness
-scorer still uses its existing scoring settings.
+Generation always uses `seed=0`, including qualification, warmups, opening and
+second baselines, and candidates. Repetitions repeat the same sampling settings
+to measure timing stability. They do not deliberately vary sampled continuations.
+The round seed determines prompt selection and temperatures, not the generation
+seed. Fixed sampling settings do not promise bitwise-identical engine outputs.
+SLA evidence records the temperature and actual generation seed, including failed
+requests. `top_p=1` and prefix-cache reuse are unchanged. The teacher-forced
+correctness scorer still uses its existing scoring settings.
 
 Version 4 rules without generation fields retain temperature zero and seed zero
 and reproduce their original trace bytes and qualification hashes. Fixed
 `temperature` is still supported, but cannot coexist with `temperature_range`.
 Range endpoints must be increasing finite numbers between 0 and 2. Generation
 policy is recorded in the rule, receipt and trace metadata; each request's settings
-must match the derivation. Changing the range or seed policy invalidates prior
+must match the derivation. Changing the temperature policy invalidates prior
 qualification. Requalify the source pool and create
 a new campaign rather than overriding an open campaign's trace at runtime. Higher
 temperature can change output lengths, logprob distributions and timing variance;
@@ -105,8 +104,8 @@ where it would naturally end with a larger allowance.
 
 For a temperature range, the first two qualification repetitions test the lower
 and upper endpoints. Additional repetitions use the row's derived temperature.
-Each repetition uses a different derived integer seed when `randomize_seed=true`.
-Evidence records the actual settings. Endpoint qualification does not establish
+Every qualification repetition uses `seed=0`. Evidence records the actual
+settings. Endpoint qualification does not establish
 stability at every intermediate temperature or under full concurrent round load.
 
 `qualification.jsonl` records the contract and generated responses for review.
@@ -249,8 +248,8 @@ GPU qualification must still establish how many rows generate long responses.
 `GET /v1/rounds/{round_id}/entries/{entry_id}/report` retains its existing
 fields and score arithmetic. New reports add:
 
-- `workload.temperature`, `workload.temperature_range`, and
-  `workload.randomize_seed` when explicitly pinned in the sampling receipt.
+- `workload.temperature` or `workload.temperature_range` when explicitly pinned
+  in the sampling receipt.
 - `sla.sampling`: measured request ID, repetition, temperature, top-p, actual
   integer seed and EOS policy, including failed requests.
 - `correctness.prompt_checks`: text-free repetition diagnostics keyed by request
@@ -277,7 +276,7 @@ before resuming. Completed reports, scores and submission events are unchanged.
 The additive API and frontend can deploy in either order; historical entries
 cannot gain diagnostics without their original stored data.
 
-To activate randomized generation, qualify a fresh pool using the new rule and
+To activate the temperature range, qualify a fresh pool using the new rule and
 the campaign's pinned baseline image, model, GPU and serving arguments. Then
 validate full concurrent baseline rounds at the new settings before seeding a
 new campaign. Do not edit the ongoing campaign's rule, receipts or qualification

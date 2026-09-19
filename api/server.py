@@ -357,7 +357,6 @@ class ScoreBreakdownModel(BaseModel):
 class ReportWorkloadModel(BaseModel):
     temperature: float | None = None
     temperature_range: list[float] | None = None
-    randomize_seed: bool | None = None
     algo_version: int
     request_interval_ms: int
     enable_thinking: bool | None = None
@@ -653,7 +652,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
             "algo_version": version,
             **{
                 key: receipt[key]
-                for key in ("temperature", "temperature_range", "randomize_seed")
+                for key in ("temperature", "temperature_range")
                 if key in receipt
             },
             "request_interval_ms": receipt.get("request_interval_ms", 200),

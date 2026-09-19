@@ -1436,7 +1436,6 @@ def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, clien
         "type": "hf_rows",
         "algo_version": 4,
         "temperature_range": [0.1, 1.5],
-        "randomize_seed": True,
     }
     sampling = [
         {
@@ -1444,7 +1443,7 @@ def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, clien
             "rep": 2,
             "temperature": 0.73,
             "top_p": 1.0,
-            "seed": 123,
+            "seed": 0,
             "ignore_eos": False,
         }
     ]
@@ -1463,7 +1462,7 @@ def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, clien
     body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
     server.RoundEntryReportModel.model_validate(body)
     assert body["workload"]["temperature_range"] == [0.1, 1.5]
-    assert body["workload"]["randomize_seed"] is True
+    assert "randomize_seed" not in body["workload"]
     assert "temperature" not in body["workload"]
     assert body["sla"]["sampling"] == sampling
     assert body["correctness"]["prompt_checks"] == checks

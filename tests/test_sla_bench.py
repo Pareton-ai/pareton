@@ -80,7 +80,9 @@ def test_warmups_and_all_replays_use_pinned_temperature(monkeypatch, tmp_path, r
     assert (tmp_path / "warmup_2/requests.jsonl").exists()
 
 
-def test_random_seeds_change_between_replays_but_match_engines(monkeypatch, tmp_path):
+def test_seed_zero_is_preserved_across_warmups_replays_and_engines(
+    monkeypatch, tmp_path
+):
     calls = []
 
     def complete(*args, **kwargs):
@@ -101,7 +103,7 @@ def test_random_seeds_change_between_replays_but_match_engines(monkeypatch, tmp_
         id="r",
         arrival_offset_ms=0,
         max_tokens=2,
-        sampling=TraceSampling(1.2, 1.0, seed=12345),
+        sampling=TraceSampling(1.2, 1.0),
         prompt="Write",
     )
     for role in ("baseline", "baseline-drift", "candidate-0"):
@@ -116,7 +118,7 @@ def test_random_seeds_change_between_replays_but_match_engines(monkeypatch, tmp_
             warmup_repetitions=2,
         )
         sequences.append([c["seed"] for c in calls])
-        assert len(set(sequences[-1])) == 5
+        assert sequences[-1] == [0] * 5
         assert all(c["temperature"] == 1.2 for c in calls)
         for i, dirname in enumerate(("warmup", "warmup_2", "rep_1", "rep_2", "rep_3")):
             row = json.loads(
@@ -127,12 +129,6 @@ def test_random_seeds_change_between_replays_but_match_engines(monkeypatch, tmp_
             assert row["sampling"]["seed"] == sequences[-1][i]
             assert row["sampling"]["temperature"] == 1.2
     assert sequences[0] == sequences[1] == sequences[2]
-
-
-@pytest.mark.parametrize("seed", [True, 0.1, 1.5, -1, 2**31, "123"])
-def test_fractional_or_invalid_generation_seeds_are_rejected(seed):
-    with pytest.raises(ValueError, match="sampling.seed"):
-        TraceSampling.from_dict({"temperature": 0.7, "top_p": 1.0, "seed": seed})
 
 
 def test_percentile_single_sample():
