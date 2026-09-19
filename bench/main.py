@@ -654,6 +654,8 @@ def run_round(
                             },
                             dropped=excluded_prompts,
                         )
+                    if baseline_degeneracy is not None and not baseline_degeneracy:
+                        raise EngineError("baseline has no stable correctness prompts")
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
                 # scored against, so the round cannot continue without it.

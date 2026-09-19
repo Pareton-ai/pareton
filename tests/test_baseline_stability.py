@@ -172,6 +172,49 @@ def test_both_controls_precede_candidates_and_share_grading_and_score_mask(
     assert baseline_drift(request, baseline, drift) == 0
 
 
+@pytest.mark.parametrize("failing_role", ["baseline", "baseline-drift"])
+@pytest.mark.parametrize("relative_bar", [None, 1.5])
+def test_empty_correctness_subset_aborts_before_candidates(
+    monkeypatch, tmp_path, failing_role, relative_bar
+):
+    workload = trace()
+    raw = json.loads(Path("fixtures/bench/sample_request.json").read_text())
+    raw["correctness"]["thresholds"]["max_mean_logprob_drop"] = relative_bar
+    request = validate_bench_request_dict(raw)
+    starts = []
+
+    @contextmanager
+    def start(engine, **_):
+        starts.append(engine.role)
+        assert engine.role in ("baseline", "baseline-drift")
+        yield "unused"
+
+    monkeypatch.setattr(
+        "bench.workload_preflight.validate_engine_workload", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "bench.main.run_sla_engine",
+        lambda *a, role, **k: replay(
+            role, workload, loops={"r0", "r1"} if role == failing_role else ()
+        ),
+    )
+    layout = OutputLayout(tmp_path)
+    layout.prepare()
+    # Ten timing prompts remain stable, but none of the correctness sample do.
+    with pytest.raises(EngineError, match="no stable correctness prompts") as caught:
+        run_round(
+            req=request,
+            provider=SimpleNamespace(start=start),
+            prompts=[PromptCase(rid, "Write") for rid in ("r0", "r1")],
+            trace=workload,
+            layout=layout,
+        )
+    assert caught.value.error_role == "baseline"
+    assert starts == (
+        ["baseline"] if failing_role == "baseline" else ["baseline", "baseline-drift"]
+    )
+
+
 def test_round_plan_marker_survives_teardown_without_stale_engine_fields(monkeypatch):
     from worker.round_job import _round_phase_writer
 
