@@ -23,6 +23,7 @@ from bench.lifecycle import EngineError
 from bench.longform import (
     candidate_for_row,
     digest,
+    generation_fields,
     length_groups,
     ordered_rows,
     qualification_contract,
@@ -290,7 +291,11 @@ def qualify(
                 {
                     "schema_version": 1,
                     "meta": {"sampling": {"context": context}},
-                    "requests": [request_for_candidate(candidate, rule, 0)],
+                    "requests": [
+                        request_for_candidate(
+                            candidate, rule, 0, generation_seed=f"{seed}:{row_index}"
+                        )
+                    ],
                 }
             )
             validate_engine_workload(
@@ -303,15 +308,23 @@ def qualify(
             )
             accepted = True
             for rep in range(repetitions):
+                sampling = trace.requests[0].sampling
+                temperature = sampling.temperature
+                # Test both ends of a range before accepting a source row.
+                if "temperature_range" in rule and rep < 2:
+                    temperature = rule["temperature_range"][rep]
+                settings = {
+                    "temperature": temperature,
+                    "top_p": sampling.top_p,
+                    "seed": 0,
+                }
                 response = post_json(
                     base_url,
                     "/v1/completions",
                     {
                         "prompt": candidate["prompt"],
                         "max_tokens": rule["max_tokens"],
-                        "temperature": 0.0,
-                        "top_p": 1.0,
-                        "seed": 0,
+                        **settings,
                         "ignore_eos": False,
                         "stream": False,
                     },
@@ -325,6 +338,7 @@ def qualify(
                                 "type": "response",
                                 "row_index": row_index,
                                 "repetition": rep,
+                                "sampling": settings,
                                 "input_ids_sha256": candidate["input_ids_sha256"],
                                 "input_tokens": candidate["input_tokens"],
                                 "input_length_group": group,
@@ -410,6 +424,7 @@ def qualify(
         "max_tokens": rule["max_tokens"],
         "ignore_eos": False,
         "enable_thinking": False,
+        "sampling": {**generation_fields(rule), "top_p": 1.0},
         "sampling_rule_sha256": digest(rule),
         "qualified_rows_by_input_tier": qualified_counts,
         "concurrency": concurrency,

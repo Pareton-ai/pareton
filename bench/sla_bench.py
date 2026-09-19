@@ -243,6 +243,12 @@ def _fire(
         completion_offset_ms=round((completed - t0) * 1000, 3),
         input_tokens=req.input_tokens,
         max_tokens=req.max_tokens,
+        sampling={
+            "temperature": req.sampling.temperature,
+            "top_p": req.sampling.top_p,
+            "seed": 0,
+            "ignore_eos": req.sampling.ignore_eos,
+        },
     )
     with lock:
         out.append(row)
@@ -266,16 +272,16 @@ def _replay(
         threading.Thread(
             target=_fire,
             args=(base_url, r),
-            kwargs=dict(
-                role=role,
-                rep=rep,
-                is_warmup=is_warmup,
-                t0=t0,
-                timeout_s=timeout_s,
-                out=rows,
-                lock=lock,
-                errs=errs,
-            ),
+            kwargs={
+                "role": role,
+                "rep": rep,
+                "is_warmup": is_warmup,
+                "t0": t0,
+                "timeout_s": timeout_s,
+                "out": rows,
+                "lock": lock,
+                "errs": errs,
+            },
             daemon=True,
         )
         for r in requests
@@ -601,6 +607,11 @@ def run_sla_engine(
         cross_rep_variance=cross_rep_variance,
         timings=timings,
         evidence=f"evidence/sla_bench/{role}",
+        sampling=[
+            {"request_id": row["request_id"], "rep": row["rep"], **row["sampling"]}
+            for row in measured
+            if "sampling" in row
+        ],
     )
     return EngineReplay(
         result=result,
