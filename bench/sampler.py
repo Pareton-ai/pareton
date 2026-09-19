@@ -29,6 +29,9 @@ LONGFORM_RULE_FIELDS = frozenset(
         "min_output_tokens",
         "eligible_row_indices",
         "qualification",
+        "temperature",
+        "temperature_range",
+        "randomize_seed",
     }
 )
 MAX_PROMPT_CHARS = 8000

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -17,16 +18,32 @@ class TraceSampling:
     temperature: float
     top_p: float
     ignore_eos: bool = False
+    seed: int | None = None
+
+    def seed_for_replay(self, repetition: int, *, warmup: bool = False) -> int:
+        """Pair engines while varying repetitions; old traces retain seed zero."""
+        if self.seed is None:
+            return 0
+        phase = "warmup" if warmup else "measured"
+        key = f"pareton.replay.v1:{self.seed}:{phase}:{repetition}"
+        return (
+            int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big")
+            & 0x7FFFFFFF
+        )
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceSampling:
         ignore_eos = d.get("ignore_eos", False)
         if not isinstance(ignore_eos, bool):
             raise ValueError("sampling.ignore_eos must be a boolean")
+        seed = d.get("seed")
+        if seed is not None and (type(seed) is not int or not 0 <= seed < 2**31):
+            raise ValueError("sampling.seed must be a nonnegative 31-bit integer")
         return cls(
             temperature=float(d["temperature"]),
             top_p=float(d["top_p"]),
             ignore_eos=ignore_eos,
+            seed=seed,
         )
 
 
@@ -452,6 +469,7 @@ class CorrectnessReport:
     coverage_ratio: float
     evidence: str
     reason: str | None = None
+    prompt_checks: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -502,12 +520,14 @@ class EngineSlaResult:
     cross_rep_variance: dict[str, float]
     timings: dict[str, PromptTiming]
     evidence: str
+    sampling: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "role": self.role,
             "metrics": self.metrics.to_dict(),
             "cross_rep_variance": self.cross_rep_variance,
+            "sampling": self.sampling,
             "timings": {rid: asdict(t) for rid, t in self.timings.items()},
             "evidence": self.evidence,
         }

@@ -1426,3 +1426,45 @@ def test_campaign_fee_routes_quote_latest_fee_without_chain(
             assert result["submission_fee"]["amount_tao"] == amount
             assert result["submission_fee_history"] == history
             assert "submission_fee_at_block" not in result
+
+
+def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, client):
+    from api import server
+
+    row = _score_report_row()
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 4,
+        "temperature_range": [0.1, 1.5],
+        "randomize_seed": True,
+    }
+    sampling = [
+        {
+            "request_id": "hf-028",
+            "rep": 2,
+            "temperature": 0.73,
+            "top_p": 1.0,
+            "seed": 123,
+            "ignore_eos": False,
+        }
+    ]
+    checks = [
+        {
+            "request_id": "hf-028",
+            "distinct_ngram_ratio": 0.6808,
+            "baseline_distinct_ngram_ratio": 0.8953,
+            "distinct_ngram_ratio_drop": 0.2145,
+            "max_distinct_ngram_ratio_drop": 0.1,
+        }
+    ]
+    row["report"]["sla"] = {"sampling": sampling}
+    row["report"]["correctness"] = {"prompt_checks": checks}
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["workload"]["temperature_range"] == [0.1, 1.5]
+    assert body["workload"]["randomize_seed"] is True
+    assert "temperature" not in body["workload"]
+    assert body["sla"]["sampling"] == sampling
+    assert body["correctness"]["prompt_checks"] == checks
+    assert body["prompts"] == row["report"]["score_report"]["prompts"]

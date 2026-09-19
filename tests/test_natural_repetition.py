@@ -17,6 +17,8 @@ from bench.correctness import (
     capture_outputs,
     degeneracy_reason,
     grade_candidate,
+    graded_ratios,
+    relative_degeneracy_reason,
     select_correctness_prompts,
 )
 from bench.http import post_completion_stream
@@ -30,6 +32,174 @@ def _clean_long():
     return " ".join(
         "".join(rng.choices(string.ascii_lowercase, k=9)) for _ in range(5120)
     )
+
+
+def _template_repetition():
+    return "\n\n".join(
+        f"In district {i}, the sound belongs to {word}. "
+        "It is a sound that is always present. "
+        "It is a sound that is part of everyday life. "
+        "It is a sound that shapes the neighborhood."
+        for i, word in enumerate(_clean_long().split()[:10])
+    )
+
+
+@pytest.mark.parametrize(
+    "baseline,candidate,fails",
+    [
+        (0.8953, 0.6808, True),
+        (0.9, 0.8, False),
+        (0.9, 0.79999, True),
+        (0.7, 0.6, False),
+        (0.8, 0.9, False),
+        (0.14, 0.13, True),  # Existing relative diagnostic below the absolute floor.
+    ],
+)
+def test_relative_distinct_ratio_allows_at_most_ten_percentage_points(
+    baseline, candidate, fails
+):
+    reason = relative_degeneracy_reason(
+        _template_repetition(),
+        baseline_distinct_ratio=baseline,
+        baseline_repeated_span_ratio=0.01,
+        distinct_ratio=candidate,
+        repeated_span_ratio=0.0153,
+    )
+    assert (reason is not None) is fails
+
+
+@pytest.mark.parametrize("scorer_error", [False, True])
+def test_sentence_template_repetition_fails_even_with_high_logprobs(
+    monkeypatch, tmp_path, scorer_error
+):
+    text = _template_repetition()
+    assert degeneracy_reason(text) is None  # Clears both absolute bars.
+    clean = _clean_long()[: len(text)]
+    baseline = capture_outputs(
+        [PromptCase("r1", "Write")], timings={}, outputs={"r1": clean}
+    )
+    references = build_baseline_degeneracy_references(
+        baseline,
+        {"r1": NaturalStopReference("r1", 200, "stop", clean)},
+        {"r1": (clean,) * 3},
+    )
+    captured = capture_outputs(
+        [PromptCase("r1", "Write")], timings={}, outputs={"r1": text}
+    )
+
+    def score(*a, **kw):
+        if scorer_error:
+            raise EngineError("scorer unavailable")
+        return [SimpleNamespace(logprob=-0.01)] * 200, 200, text
+
+    monkeypatch.setattr("bench.correctness.score_captured_output", score)
+    path = tmp_path / "candidate.jsonl"
+    result = grade_candidate(
+        "unused",
+        captured,
+        cfg=_cfg(num_prompts=1),
+        evidence_path=path,
+        baseline_degeneracy=references,
+    )
+    assert result.verdict == "fail_correctness"
+    assert "0.10 below baseline" in result.reason
+    evidence = json.loads(path.read_text())
+    assert evidence["relative_degenerate"]
+    assert evidence["distinct_ngram_ratio_drop"] > 0.10
+    assert evidence["max_distinct_ngram_ratio_drop"] == 0.10
+    assert evidence["output_selection"] == "latency_median"
+    assert ("scorer_error" in evidence) is scorer_error
+    public = result.to_dict()["prompt_checks"][0]
+    assert public["request_id"] == "r1"
+    assert public["distinct_ngram_ratio_drop"] == evidence["distinct_ngram_ratio_drop"]
+    assert "output_text" not in public
+    assert "scorer_error" not in public
+
+
+def test_relative_guard_uses_least_distinct_valid_baseline_sample(
+    monkeypatch, tmp_path
+):
+    text = _template_repetition()
+    clean = _clean_long()[: len(text)]
+    baseline = capture_outputs(
+        [PromptCase("r1", "Write")], timings={}, outputs={"r1": clean}
+    )
+    references = build_baseline_degeneracy_references(
+        baseline,
+        {"r1": NaturalStopReference("r1", 200, "stop", clean)},
+        {"r1": (clean, text, clean)},
+    )
+    assert not references.dropped
+    assert references["r1"].full_distinct_ngram_ratio == graded_ratios(text)[0]
+    captured = capture_outputs(
+        [PromptCase("r1", "Write")], timings={}, outputs={"r1": text}
+    )
+    monkeypatch.setattr(
+        "bench.correctness.score_captured_output",
+        lambda *a, **kw: ([SimpleNamespace(logprob=-0.01)], 1, text),
+    )
+    result = grade_candidate(
+        "unused",
+        captured,
+        cfg=_cfg(num_prompts=1),
+        evidence_path=tmp_path / "candidate.jsonl",
+        baseline_degeneracy=references,
+    )
+    assert result.verdict == "pass"
+
+
+def test_relative_guard_matches_each_of_32_prompts_to_its_own_baseline(
+    monkeypatch, tmp_path
+):
+    repeated = _template_repetition()
+    clean = _clean_long()[: len(repeated)]
+    prompts = [PromptCase(f"hf-{i:03d}", f"Writing task {i}") for i in range(32)]
+    # Identical candidate text should pass the lower reference on even prompts
+    # and fail the higher reference on odd prompts. A global baseline statistic
+    # would produce the same verdict for every prompt instead.
+    samples = {
+        prompt.id: (clean, repeated if i % 2 == 0 else clean, clean)
+        for i, prompt in enumerate(prompts)
+    }
+    baseline = capture_outputs(
+        prompts, timings={}, outputs={p.id: clean for p in prompts}
+    )
+    references = build_baseline_degeneracy_references(
+        baseline,
+        {p.id: NaturalStopReference(p.id, 200, "stop", clean) for p in prompts},
+        samples,
+    )
+    # Reverse the response order to ensure matching is by ID, not list position.
+    captured = capture_outputs(
+        list(reversed(prompts)),
+        timings={},
+        outputs={p.id: repeated for p in prompts},
+    )
+    monkeypatch.setattr(
+        "bench.correctness.score_captured_output",
+        lambda *a, **kw: ([SimpleNamespace(logprob=-0.01)], 1, repeated),
+    )
+    path = tmp_path / "candidate.jsonl"
+    result = grade_candidate(
+        "unused",
+        captured,
+        cfg=_cfg(num_prompts=32),
+        evidence_path=path,
+        baseline_degeneracy=references,
+    )
+    assert result.verdict == "fail_correctness"
+    assert result.num_prompts == 32
+    evidence = {
+        r["request_id"]: r for r in map(json.loads, path.read_text().splitlines())
+    }
+    assert len(evidence) == 32
+    for i, prompt in enumerate(prompts):
+        row = evidence[prompt.id]
+        assert bool(row["relative_degenerate"]) is (i % 2 == 1)
+        assert bool(row["degenerate"]) is (i % 2 == 1)
+        assert row["baseline_distinct_ngram_ratio"] == min(
+            graded_ratios(text)[0] for text in samples[prompt.id]
+        )
 
 
 @pytest.mark.parametrize("bad_rep", [None, 0, 1, 2])

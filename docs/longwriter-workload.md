@@ -28,6 +28,33 @@ arrivals, fees and emissions remain as configured in the seed helper.
 minimum generation length. A long source answer does not establish that the
 model will produce a long new response.
 
+New Qwen campaign fixtures pin `temperature_range=[0.1, 1.5]` and
+`randomize_seed=true`. The sampler derives one temperature per prompt from the
+round seed and request index, uniformly over the range to six decimal places.
+It records that value and a nonnegative 31-bit base seed in each request. Each
+prompt keeps its temperature across repetitions so its baseline reference uses
+the same setting. Different rounds derive new settings.
+
+Generation derives an integer seed from the request's base seed, phase and
+repetition number. Both warmups and all measured repetitions get distinct seed
+inputs. The opening baseline, second baseline and every candidate use identical
+settings for a given request and repetition. This is reproducible pseudorandom
+sampling, not independent engine-local randomness. SLA request evidence records
+the temperature and actual generation seed, including failed requests.
+`top_p=1` and prefix-cache reuse are unchanged. The teacher-forced correctness
+scorer still uses its existing scoring settings.
+
+Version 4 rules without generation fields retain temperature zero and seed zero
+and reproduce their original trace bytes and qualification hashes. Fixed
+`temperature` is still supported, but cannot coexist with `temperature_range`.
+Range endpoints must be increasing finite numbers between 0 and 2. Generation
+policy is recorded in the rule, receipt and trace metadata; each request's settings
+must match the derivation. Changing the range or seed policy invalidates prior
+qualification. Requalify the source pool and create
+a new campaign rather than overriding an open campaign's trace at runtime. Higher
+temperature can change output lengths, logprob distributions and timing variance;
+run the full concurrent baseline validation before launch.
+
 ## Qualify the source pool
 
 Run qualification on the Linux Docker host serving the trusted baseline, using
@@ -75,6 +102,12 @@ in every repetition, with nonempty text that passes the harness's repetition
 checks. Generation stops normally or reaches its 5120-token ceiling. Reaching
 the ceiling without suppressing EOS qualifies the row, but does not establish
 where it would naturally end with a larger allowance.
+
+For a temperature range, the first two qualification repetitions test the lower
+and upper endpoints. Additional repetitions use the row's derived temperature.
+Each repetition uses a different derived integer seed when `randomize_seed=true`.
+Evidence records the actual settings. Endpoint qualification does not establish
+stability at every intermediate temperature or under full concurrent round load.
 
 `qualification.jsonl` records the contract and generated responses for review.
 `sampling_rule.json` pins the accepted row indices and hashes the campaign settings.
@@ -139,7 +172,22 @@ output length; conversation history is never part of the graded output.
 
 Correctness evidence identifies `output_selection=latency_median`. All generated
 texts remain in SLA `rep_N/requests.jsonl` evidence. Character n-gram and
-repeated-span thresholds, including the thinking/answer split, are unchanged.
+repeated-span absolute thresholds and the thinking/answer split are unchanged.
+An additional baseline-relative check rejects a selected response whose distinct
+character-16-gram ratio is more than 0.10 below the lowest ratio from the opening
+baseline's valid measured responses for that prompt. Exactly 0.10 is allowed.
+The baseline and candidate metrics use the same thinking/answer split. Outputs
+shorter than 64 characters retain the existing exemption. Evidence records the
+reference ratio, observed drop and allowed drop, including when the scorer fails
+after a known text failure. The second baseline still checks stability and shared
+exclusions; it does not change the opening reference's ratios.
+
+This whole-response heuristic detects repeated sentence templates that can clear
+the absolute bars. It does not measure factual accuracy or instruction following,
+and different response lengths and styles can change its value. Validate its
+false-positive rate on independent baseline outputs, including code and lists,
+before deploying it. Forced-tail relative findings remain diagnostic under the
+existing forced-generation policy.
 
 Baseline validation inspects all measured natural repetitions in both baseline
 runs, before candidates start. Repetitive outputs and v4 outputs below 3000 tokens
@@ -194,3 +242,44 @@ follow-up found 185 eligible 2k, 506 eligible 4k, 216 eligible 8k and 25 eligibl
 16k inputs. A 32-request trace filled every tier and replayed exactly. These
 counts establish input availability only. The 16k pool has limited diversity;
 GPU qualification must still establish how many rows generate long responses.
+
+
+## Dashboard report compatibility
+
+`GET /v1/rounds/{round_id}/entries/{entry_id}/report` retains its existing
+fields and score arithmetic. New reports add:
+
+- `workload.temperature`, `workload.temperature_range`, and
+  `workload.randomize_seed` when explicitly pinned in the sampling receipt.
+- `sla.sampling`: measured request ID, repetition, temperature, top-p, actual
+  integer seed and EOS policy, including failed requests.
+- `correctness.prompt_checks`: text-free repetition diagnostics keyed by request
+  ID, including candidate and opening-baseline distinct ratios, their difference,
+  the allowed drop, exclusions and the applied repetition verdict.
+
+The last two are stored in existing report JSON. No DB migration or evidence
+bundle fetch is needed. Old reports have no diagnostics; consumers must treat
+missing data as unknown. Disqualified entries can have prompt checks even when
+`prompts` contains no score contributions. Forced-tail diagnostics retain their
+exemptions and must not be displayed as enforced full-output failures.
+
+## Rollout on an active validator
+
+Merge the baseline-stability parent and this change in order. Use the installed
+release coordinator described in `ops/runbook.md`; let it drain the active job
+before replacing the checkout and restarting services. Do not pull a new
+checkout under a running round or force-stop its GPU job.
+
+The existing campaign retains its frozen trace, temperature and seed policy.
+The relative repetition guard applies to newly executed rounds after deployment,
+including rounds in that campaign, so announce the stricter correctness policy
+before resuming. Completed reports, scores and submission events are unchanged.
+The additive API and frontend can deploy in either order; historical entries
+cannot gain diagnostics without their original stored data.
+
+To activate randomized generation, qualify a fresh pool using the new rule and
+the campaign's pinned baseline image, model, GPU and serving arguments. Then
+validate full concurrent baseline rounds at the new settings before seeding a
+new campaign. Do not edit the ongoing campaign's rule, receipts or qualification
+hash. Compare repeated candidate and baseline runs on held-out traffic before
+claiming a serving speedup. Local unit tests do not perform GPU qualification.
