@@ -107,7 +107,7 @@ def fetch_trace_bytes(
         if len(data) > limit:
             raise RoundInfraError(VOID_TRACE_UNAVAILABLE, f">{limit} bytes")
         return data
-    if url.startswith("https://") or url.startswith("http://"):
+    if url.startswith(("https://", "http://")):
         req = urllib.request.Request(url, method="GET")
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:

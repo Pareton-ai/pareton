@@ -555,9 +555,10 @@ def test_round_creation_and_worker_replay_preserve_qualified_rows(
     path = materialize_round_trace(
         result, campaign, tmp_path, row_fetcher=row, prompt_formatter=formatter()
     )
-    assert "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() == result[
-        "sampled_trace_sha256"
-    ]
+    assert (
+        "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        == result["sampled_trace_sha256"]
+    )
     trace = validate_workload_trace_dict(json.loads(path.read_bytes()))
     for key, value in generation_policy.items():
         assert trace.meta.sampling[key] == value
