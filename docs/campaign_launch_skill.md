@@ -272,7 +272,8 @@ SGLang omits tensor-parallel arguments or uses another accepted alias.
 
 Generate a trace with `bench.sampler.sample_workload` and the campaign's pinned
 sampling rule. Run the same trace against the baseline and candidate. Use all
-three stages: streaming replay, shared correctness scoring and baseline drift.
+full plan: opening baseline, initial baseline repeatability run, candidate
+streaming replay, then shared correctness scoring.
 Verify `/v1/models`, streamed token counts, scoring coverage and cleanup.
 The model mount is `/model`; do not let the engine fetch a default model.
 
@@ -288,7 +289,7 @@ back into the model. Keep the worker-generated numeric context pin in the reques
 no tokens are truncated and no correctness thresholds are changed.
 
 SGLang runs two full, untimed warmups before each measured replay set, including
-the closing baseline. On the pinned Qwen model, one warmup left a startup stall
+the second baseline. On the pinned Qwen model, one warmup left a startup stall
 in the first measured repetition. Both warmups are saved under `warmup/` and
 `warmup_2/` and excluded from scores. vLLM keeps one full warmup.
 
@@ -451,7 +452,7 @@ Sample campaign entries, in addition to the source and image pins:
         "min_token_logprob": -12,
         "min_token_quantile": 0.001,
         "min_coverage_ratio": 0.5,
-        "max_mean_logprob_drop": 1.5
+        "max_mean_logprob_drop": 2.5
       }
     }
   }

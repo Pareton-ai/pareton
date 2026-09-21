@@ -107,8 +107,12 @@ def rank_round(
     re-run. Both are operator knobs the caller reads from config; this module
     holds no defaults for them.
 
-    ``drift`` is ``last_baseline_score - first_baseline_score``. None means the
-    closing baseline run produced no number, which is a baseline failure.
+    ``drift`` is the second baseline scored against the opening baseline.
+    Plan v2 runs both before candidates, so this gate checks initial baseline
+    repeatability, not hardware drift across the candidate window. Historical
+    plans used a closing baseline. Keep the legacy argument and void-reason
+    names for API compatibility. None means no baseline comparison was produced,
+    which is a baseline failure.
 
     ``leader_score`` is the stored ``leaders.last_score``. Overtaking always
     compares in-round scores, because scores are comparable inside one round

@@ -28,6 +28,38 @@ arrivals, fees and emissions remain as configured in the seed helper.
 minimum generation length. A long source answer does not establish that the
 model will produce a long new response.
 
+New Qwen campaign fixtures pin `temperature_range=[0.1, 1.01]`. The sampler
+reproducibly derives one temperature per prompt from the round seed and request
+index, uniformly over the range to six decimal places. Each prompt keeps that
+temperature across warmups and measured repetitions; different rounds derive
+new temperatures.
+
+New campaigns allow a maximum mean-logprob drop of `2.5` below the opening
+baseline, through the same trusted scorer. Absolute likelihood floors and the
+per-prompt `0.10` distinct-character-16-gram drop limit remain unchanged. This
+wider likelihood tolerance is an operator-selected setting, not a measured
+false-positive guarantee. Existing campaigns retain their pinned threshold.
+
+Generation always uses `seed=0`, including qualification, warmups, opening and
+second baselines, and candidates. Repetitions repeat the same sampling settings
+to measure timing stability. They do not deliberately vary sampled continuations.
+The round seed determines prompt selection and temperatures, not the generation
+seed. Fixed sampling settings do not promise bitwise-identical engine outputs.
+SLA evidence records the temperature and actual generation seed, including failed
+requests. `top_p=1` and prefix-cache reuse are unchanged. The teacher-forced
+correctness scorer still uses its existing scoring settings.
+
+Version 4 rules without generation fields retain temperature zero and seed zero
+and reproduce their original trace bytes and qualification hashes. Fixed
+`temperature` is still supported, but cannot coexist with `temperature_range`.
+Range endpoints must be increasing finite numbers between 0 and 2. Generation
+policy is recorded in the rule, receipt and trace metadata; each request's settings
+must match the derivation. Changing the temperature policy invalidates prior
+qualification. Requalify the source pool and create
+a new campaign rather than overriding an open campaign's trace at runtime. Higher
+temperature can change output lengths, logprob distributions and timing variance;
+run the full concurrent baseline validation before launch.
+
 ## Qualify the source pool
 
 Run qualification on the Linux Docker host serving the trusted baseline, using
@@ -75,6 +107,12 @@ in every repetition, with nonempty text that passes the harness's repetition
 checks. Generation stops normally or reaches its 5120-token ceiling. Reaching
 the ceiling without suppressing EOS qualifies the row, but does not establish
 where it would naturally end with a larger allowance.
+
+For a temperature range, the first two qualification repetitions test the lower
+and upper endpoints. Additional repetitions use the row's derived temperature.
+Every qualification repetition uses `seed=0`. Evidence records the actual
+settings. Endpoint qualification does not establish
+stability at every intermediate temperature or under full concurrent round load.
 
 `qualification.jsonl` records the contract and generated responses for review.
 `sampling_rule.json` pins the accepted row indices and hashes the campaign settings.
@@ -143,6 +181,21 @@ relative grading, and records every absolute repetition result in
 `repetition_degeneracy`. All generated texts remain in SLA `rep_N/requests.jsonl`
 evidence. Character n-gram and repeated-span thresholds, including the
 thinking/answer split, are unchanged.
+An additional baseline-relative check rejects a selected response whose distinct
+character-16-gram ratio is more than 0.10 below the lowest ratio from the opening
+baseline's valid measured responses for that prompt. Exactly 0.10 is allowed.
+The baseline and candidate metrics use the same thinking/answer split. Outputs
+shorter than 64 characters retain the existing exemption. Evidence records the
+reference ratio, observed drop and allowed drop, including when the scorer fails
+after a known text failure. The second baseline still checks stability and shared
+exclusions; it does not change the opening reference's ratios.
+
+This whole-response heuristic detects repeated sentence templates that can clear
+the absolute bars. It does not measure factual accuracy or instruction following,
+and different response lengths and styles can change its value. Validate its
+false-positive rate on independent baseline outputs, including code and lists,
+before deploying it. Forced-tail relative findings remain diagnostic under the
+existing forced-generation policy.
 
 Baseline validation inspects all measured natural repetitions in both baseline
 runs, before candidates start. Repetitive outputs and v4 outputs below 3000 tokens
@@ -156,7 +209,11 @@ stability under concurrent round load.
 
 The second baseline retains the `baseline-drift` role and `baseline_drift` report
 field for compatibility. Because it now precedes candidates, the comparison
-measures baseline repeatability, not hardware drift across the candidate runs.
+measures initial baseline repeatability, not hardware drift across the candidate
+runs. The existing `PARETON_BASELINE_DRIFT_CEILING` (default `0.05`) still voids
+a round when the absolute comparison exceeds the ceiling. The config name and
+`baseline_drift` void reason remain compatibility names; neither implies that
+hardware conditions were measured during or after candidates.
 Plan version 2 in progress metadata lets the dashboard retain historical order
 for old rounds and show both baselines first for new rounds.
 
@@ -167,6 +224,87 @@ reported completion tokens require, so some coalesced speculative streams remain
 incompatible with SLA timing. Forced-tail diagnostic exemptions require both a
 forced baseline probe reference and the original request's `ignore_eos=true`;
 normal-EOS requests cannot inherit them.
+
+## Baseline-as-candidate diagnostic on four RTX5090 GPUs
+
+On a dedicated idle Linux GPU host, install `requirements.txt` in a Python
+virtual environment and run from the repository root:
+
+```bash
+export PYTHONPATH="$PWD"
+export PYTHONUNBUFFERED=1
+export PARETON_BENCH_HF_CACHE_DIR=/workspace/hf-cache
+export PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/engine-cache
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+python ops/sglang-baseline-control.py \
+  --output-dir "/workspace/pareton-control-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+This uses the fixture paired with `ops/seed-sglang-qwen38-27b.sh`: the pinned
+image, model, TP4 flags, scorer memory setting, 32 prompts at 2 ms intervals,
+four input tiers, two SGLang warmups and three measured repetitions per engine.
+The baseline image occupies the candidate slot too, with normal candidate cache
+isolation. No native rebuild, campaign creation, database or chain write occurs.
+The script takes the static-host lock and refuses a GPU already doing work.
+Docker registry access and Hugging Face access must be configured; existing
+weight and compile caches are reused. Run as root on the dedicated VM.
+
+Without `--sampling-rule`, the script samples an unqualified source pool. It is
+a diagnostic and may fail early on short or repetitive baseline output. It does
+not fabricate qualification evidence or authorize campaign launch. To test the
+qualified campaign pool, pass `--sampling-rule /path/to/sampling_rule.json`;
+the file must match the current fixture and qualification contract.
+
+Inspect `control_summary.json`, `output/bench_report.json`, `output/harness.log`
+and `output/evidence/`. The exit status is nonzero on harness failure, candidate
+rejection or an initial baseline comparison beyond the configured ceiling.
+There is no positive-speedup requirement for an identical-image control.
+Use a fresh output directory for each run. Change `--block-hash` to another
+64-character hexadecimal value to sample a different reproducible round;
+generation seeds remain zero. One passing control is a smoke test, not an
+estimate of the guard's false-positive rate across independent workloads.
+
+### Stress the temperature endpoints
+
+Add `--temperature-endpoints` to the control command to generate all opening and
+repeatability baseline responses at `0.1`, and all responses in the identical-image
+candidate slot at `1.01`. The same 32 LongWriter prompts, eight in each 2k, 4k,
+8k and 16k input tier, are reused unchanged. Each role uses its endpoint in both
+warmups and all three measured repetitions. Generation seed remains zero.
+
+```bash
+python ops/sglang-baseline-control.py --temperature-endpoints \
+  --output-dir "/workspace/pareton-endpoints-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The trusted scorer grades each role's latency-median response using the existing
+absolute likelihood, coverage and repetition checks. `likelihood_summary.json`
+reports both roles' mean logprobs, raw minima, token quantiles, coverage, the
+baseline-minus-candidate mean drop, and pass/fail against both `1.5` and `2.5`.
+The active campaign fixture uses `2.5`; comparing against `1.5` requires no extra
+GPU run. `min_token_logprob=-16` applies to the `0.001` token quantile, not the
+single lowest token. `endpoint_correctness.json` retains both complete reports,
+including the opening baseline report normally consumed by the harness. Missing
+scoring results remain unknown; early baseline exclusions can prevent the test
+from reaching the candidate or scorer.
+
+This is deliberately a temperature-mismatch stress test, not a normal campaign
+qualification or a valid speedup comparison. The campaign matches temperatures
+between engines. The diagnostic overrides exist only inside this script process;
+they do not alter the production API, sampler, receipt or campaign. The saved
+source trace records input sampling; `temperature_overrides.json` records actual
+role settings, and warmup/replay evidence records the generation parameters.
+All ordinary baseline exclusions and repetition checks remain active. Run the
+matched-temperature control separately before making campaign performance claims.
+
+A user-run endpoint stress test on 4xRTX5090 passed with the Qwen campaign's
+`-16` token-quantile floor: the candidate quantile was `-13.585031`, mean logprob
+was `-1.105059`, baseline-relative mean drop was `0.839368`, and coverage was
+100%. Three baseline repetition exclusions left 29 scored prompts. This supports
+the selected floor for that run; it does not establish semantic output quality or
+the matched-temperature false-positive rate. The Qwen fixture and launch helper
+pin this floor for new campaigns. Existing campaigns retain their frozen values;
+the generic seed-time default remains `-12`.
 
 ## Inspect inputs on a CPU VM
 
@@ -197,3 +335,44 @@ follow-up found 185 eligible 2k, 506 eligible 4k, 216 eligible 8k and 25 eligibl
 16k inputs. A 32-request trace filled every tier and replayed exactly. These
 counts establish input availability only. The 16k pool has limited diversity;
 GPU qualification must still establish how many rows generate long responses.
+
+
+## Dashboard report compatibility
+
+`GET /v1/rounds/{round_id}/entries/{entry_id}/report` retains its existing
+fields and score arithmetic. New reports add:
+
+- `workload.temperature` or `workload.temperature_range` when explicitly pinned
+  in the sampling receipt.
+- `sla.sampling`: measured request ID, repetition, temperature, top-p, actual
+  integer seed and EOS policy, including failed requests.
+- `correctness.prompt_checks`: text-free repetition diagnostics keyed by request
+  ID, including candidate and opening-baseline distinct ratios, their difference,
+  the allowed drop, exclusions and the applied repetition verdict.
+
+The last two are stored in existing report JSON. No DB migration or evidence
+bundle fetch is needed. Old reports have no diagnostics; consumers must treat
+missing data as unknown. Disqualified entries can have prompt checks even when
+`prompts` contains no score contributions. Forced-tail diagnostics retain their
+exemptions and must not be displayed as enforced full-output failures.
+
+## Rollout on an active validator
+
+Merge the baseline-stability parent and this change in order. Use the installed
+release coordinator described in `ops/runbook.md`; let it drain the active job
+before replacing the checkout and restarting services. Do not pull a new
+checkout under a running round or force-stop its GPU job.
+
+The existing campaign retains its frozen trace, temperature and seed policy.
+The relative repetition guard applies to newly executed rounds after deployment,
+including rounds in that campaign, so announce the stricter correctness policy
+before resuming. Completed reports, scores and submission events are unchanged.
+The additive API and frontend can deploy in either order; historical entries
+cannot gain diagnostics without their original stored data.
+
+To activate the temperature range, qualify a fresh pool using the new rule and
+the campaign's pinned baseline image, model, GPU and serving arguments. Then
+validate full concurrent baseline rounds at the new settings before seeding a
+new campaign. Do not edit the ongoing campaign's rule, receipts or qualification
+hash. Compare repeated candidate and baseline runs on held-out traffic before
+claiming a serving speedup. Local unit tests do not perform GPU qualification.

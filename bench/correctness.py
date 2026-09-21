@@ -21,6 +21,11 @@ answer on every absolute bar. Two mandatory harness checks identify it:
 * the longest repeated span catches a miner that scales the loop period with
   the output budget.
 
+When a baseline reference is available, a third check rejects a distinct n-gram
+ratio more than 0.10 below that prompt's least-distinct measured baseline output.
+This catches repeated sentence templates that clear both absolute bars. It uses
+the same thinking/answer split and the selected latency-median candidate output.
+
 They are exploit checks, not competition parameters, and therefore do not
 live in the campaign manifest or bench request. For an ordinary completion,
 the checks grade the whole output. For a forced-length completion, the pinned
@@ -96,6 +101,8 @@ DEGENERACY_NGRAM = 16
 DEGENERACY_MIN_CHARS = 64
 DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
 DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
+# Additional quality bar relative to the least-distinct valid baseline replay.
+DEGENERACY_MAX_DISTINCT_NGRAM_DROP = 0.10
 # A larger exclusion set no longer provides a representative correctness
 # sample. This is a harness invariant rather than campaign policy.
 MAX_BASELINE_PROMPT_DROPS = 8
@@ -570,22 +577,28 @@ def relative_degeneracy_reason(
     distinct_ratio: float | None = None,
     repeated_span_ratio: float | None = None,
 ) -> str | None:
-    """Why a forced output is more degenerate than the same baseline output.
+    """Why an output is more repetitive than the same prompt's baseline.
 
-    The absolute bars still define the suspicious region. The baseline only
-    prevents expected forced-length padding from becoming a false positive;
-    it does not make ordinary non-degenerate text compete on tiny metric
-    differences.
+    A distinct n-gram drop greater than 0.10 catches repeated sentence templates
+    that clear the absolute loop bars. The caller keeps forced tails diagnostic.
+    Both sides use the same thinking/answer split and minimum character length.
     """
     if len(text) < DEGENERACY_MIN_CHARS:
         return None
     if distinct_ratio is None or repeated_span_ratio is None:
         distinct_ratio, repeated_span_ratio = graded_ratios(text)
     distinct = distinct_ratio
+    if baseline_distinct_ratio - distinct > DEGENERACY_MAX_DISTINCT_NGRAM_DROP + 1e-12:
+        return (
+            f"distinct {DEGENERACY_NGRAM}-gram ratio {distinct:.3f} is more than "
+            f"{DEGENERACY_MAX_DISTINCT_NGRAM_DROP:.2f} below baseline "
+            f"{baseline_distinct_ratio:.3f} over {len(text)} chars"
+        )
     if (
         distinct < DEGENERACY_MIN_DISTINCT_NGRAM_RATIO
         and distinct < baseline_distinct_ratio
     ):
+        # Preserve existing absolute-region relative diagnostics for forced tails.
         return (
             f"distinct {DEGENERACY_NGRAM}-gram ratio {distinct:.3f} below "
             f"baseline {baseline_distinct_ratio:.3f} over {len(text)} chars"
@@ -1130,6 +1143,32 @@ def grade_candidate(
                 and reference is not None
                 and bool(reference.forced_output_samples)
             )
+            distinct_ratio, repeated_span_ratio = graded_ratios(captured.output_text)
+            relative_degenerate = (
+                None
+                if reference is None
+                else relative_degeneracy_reason(
+                    captured.output_text,
+                    baseline_distinct_ratio=reference.full_distinct_ngram_ratio,
+                    baseline_repeated_span_ratio=reference.full_repeated_span_ratio,
+                    distinct_ratio=distinct_ratio,
+                    repeated_span_ratio=repeated_span_ratio,
+                )
+            )
+            repetition_evidence = {
+                "distinct_ngram_ratio": distinct_ratio,
+                "longest_repeated_substring_ratio": repeated_span_ratio,
+                "baseline_distinct_ngram_ratio": (
+                    None if reference is None else reference.full_distinct_ngram_ratio
+                ),
+                "distinct_ngram_ratio_drop": (
+                    None
+                    if reference is None
+                    else reference.full_distinct_ngram_ratio - distinct_ratio
+                ),
+                "max_distinct_ngram_ratio_drop": DEGENERACY_MAX_DISTINCT_NGRAM_DROP,
+                "relative_degenerate": relative_degenerate,
+            }
             repetition_checks = []
             repetition_degenerate = None
             if not captured.ignore_eos:
@@ -1140,6 +1179,8 @@ def grade_candidate(
                     repetition_checks.append({"rep": rep, "degenerate": reason})
                     if reason is not None and repetition_degenerate is None:
                         repetition_degenerate = f"rep {rep}: {reason}"
+            if not captured.ignore_eos and repetition_degenerate is None:
+                repetition_degenerate = relative_degenerate
             if repetition_degenerate is not None and degenerate is None:
                 degenerate = f"{captured.request_id}: {repetition_degenerate}"
             try:
@@ -1167,6 +1208,7 @@ def grade_candidate(
                             "repetition_degeneracy": repetition_checks,
                             "degenerate": repetition_degenerate,
                             "scorer_error": str(exc),
+                            **repetition_evidence,
                         },
                         sort_keys=True,
                     )
@@ -1176,7 +1218,6 @@ def grade_candidate(
             scored = [position.logprob for position in positions]
             logprobs.extend(scored)
             span_positions += span
-            distinct_ratio, repeated_span_ratio = graded_ratios(captured.output_text)
             if reference is None:
                 prefix_text = captured.output_text
                 prefix_distinct_ratio = distinct_ratio
@@ -1186,7 +1227,6 @@ def grade_candidate(
                     distinct_ratio=prefix_distinct_ratio,
                     repeated_span_ratio=prefix_repeated_span_ratio,
                 )
-                relative_degenerate = None
             else:
                 prefix_text = scored_prefix
                 prefix_distinct_ratio, prefix_repeated_span_ratio = graded_ratios(
@@ -1196,13 +1236,6 @@ def grade_candidate(
                     prefix_text,
                     distinct_ratio=prefix_distinct_ratio,
                     repeated_span_ratio=prefix_repeated_span_ratio,
-                )
-                relative_degenerate = relative_degeneracy_reason(
-                    captured.output_text,
-                    baseline_distinct_ratio=reference.full_distinct_ngram_ratio,
-                    baseline_repeated_span_ratio=reference.full_repeated_span_ratio,
-                    distinct_ratio=distinct_ratio,
-                    repeated_span_ratio=repeated_span_ratio,
                 )
             prefix_degenerate = this_degenerate
             exemptions = []
@@ -1258,19 +1291,12 @@ def grade_candidate(
                         "prefix_longest_repeated_substring_ratio": (
                             prefix_repeated_span_ratio
                         ),
-                        "distinct_ngram_ratio": distinct_ratio,
-                        "longest_repeated_substring_ratio": repeated_span_ratio,
-                        "baseline_distinct_ngram_ratio": (
-                            None
-                            if reference is None
-                            else reference.full_distinct_ngram_ratio
-                        ),
+                        **repetition_evidence,
                         "baseline_longest_repeated_substring_ratio": (
                             None
                             if reference is None
                             else reference.full_repeated_span_ratio
                         ),
-                        "relative_degenerate": relative_degenerate,
                         "degeneracy_scope": "natural_prefix"
                         if forced_tail
                         else "full_output",
@@ -1284,6 +1310,27 @@ def grade_candidate(
             )
     partial.replace(evidence_path)
 
+    # Persist a public, text-free projection alongside the private evidence.
+    public_keys = {
+        "request_id",
+        "dropped",
+        "drop_reason",
+        "output_selection",
+        "distinct_ngram_ratio",
+        "baseline_distinct_ngram_ratio",
+        "distinct_ngram_ratio_drop",
+        "max_distinct_ngram_ratio_drop",
+        "longest_repeated_substring_ratio",
+        "relative_degenerate",
+        "degenerate",
+        "degeneracy_scope",
+        "degeneracy_exemptions",
+        "ignore_eos",
+    }
+    prompt_checks = [
+        {key: value for key, value in json.loads(line).items() if key in public_keys}
+        for line in evidence_path.read_text(encoding="utf-8").splitlines()
+    ]
     rel_evidence = f"evidence/correctness/{evidence_path.name}"
     if empty:
         return CorrectnessReport(
@@ -1295,6 +1342,7 @@ def grade_candidate(
             quantile_logprob=0.0,
             coverage_ratio=0.0,
             evidence=rel_evidence,
+            prompt_checks=prompt_checks,
             reason=f"engine returned no output for {len(empty)} prompt(s): {empty[0]}",
         )
 
@@ -1308,6 +1356,7 @@ def grade_candidate(
             quantile_logprob=0.0,
             coverage_ratio=0.0,
             evidence=rel_evidence,
+            prompt_checks=prompt_checks,
             reason=(
                 f"degenerate output ({degenerate})"
                 if degenerate is not None
@@ -1380,6 +1429,7 @@ def grade_candidate(
         quantile_logprob=q_lp,
         coverage_ratio=coverage,
         evidence=rel_evidence,
+        prompt_checks=prompt_checks,
         reason=reason,
     )
 

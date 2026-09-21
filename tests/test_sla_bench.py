@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bench.lifecycle import EngineError
 from bench.http import StreamResult
+from bench.lifecycle import EngineError
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.schemas import (
     SlaBenchConfig,
@@ -23,9 +23,10 @@ from bench.schemas import (
 )
 from bench.score import PromptTiming
 from bench.sla_bench import (
-    _fire,
     _engine_metrics_from_reps,
+    _fire,
     _median_rep_row,
+    _run_engine,
     aggregate_rep_metrics,
     capture_baseline_natural_stops,
     percentile,
@@ -35,6 +36,99 @@ from bench.sla_bench import (
 from bench.validate import RequestValidationError
 
 # --- percentile helper -------------------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["baseline", "baseline-drift", "candidate-0"])
+def test_warmups_and_all_replays_use_pinned_temperature(monkeypatch, tmp_path, role):
+    calls = []
+
+    def complete(*args, **kwargs):
+        calls.append(kwargs)
+        return StreamResult(
+            text="answer",
+            finish_reason="stop",
+            completion_tokens=2,
+            prompt_tokens=1,
+            ttft_s=0.1,
+            itl_s=[0.1],
+            e2e_s=0.2,
+        )
+
+    monkeypatch.setattr("bench.sla_bench.post_completion_stream", complete)
+    _, rows = _run_engine(
+        "http://unused",
+        role=role,
+        requests=[
+            TraceRequest(
+                id="r",
+                arrival_offset_ms=0,
+                max_tokens=2,
+                sampling=TraceSampling(0.7, 1.0),
+                prompt="Write",
+            )
+        ],
+        cfg=SlaBenchConfig(repetitions=3, thresholds=SlaThresholds(1e9, 1e9)),
+        engine_evidence_dir=tmp_path,
+        timeout_s=1,
+        warmup_repetitions=2,
+    )
+    assert len(calls) == 5
+    assert all(c["temperature"] == 0.7 and c["top_p"] == 1.0 for c in calls)
+    assert all(c["seed"] == 0 and c["ignore_eos"] is False for c in calls)
+    assert [r["rep"] for r in rows] == [1, 2, 3]
+    assert (tmp_path / "warmup/requests.jsonl").exists()
+    assert (tmp_path / "warmup_2/requests.jsonl").exists()
+
+
+def test_seed_zero_is_preserved_across_warmups_replays_and_engines(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def complete(*args, **kwargs):
+        calls.append(kwargs)
+        return StreamResult(
+            text="answer",
+            finish_reason="stop",
+            completion_tokens=2,
+            prompt_tokens=1,
+            ttft_s=0.1,
+            itl_s=[0.1],
+            e2e_s=0.2,
+        )
+
+    monkeypatch.setattr("bench.sla_bench.post_completion_stream", complete)
+    sequences = []
+    request = TraceRequest(
+        id="r",
+        arrival_offset_ms=0,
+        max_tokens=2,
+        sampling=TraceSampling(1.2, 1.0),
+        prompt="Write",
+    )
+    for role in ("baseline", "baseline-drift", "candidate-0"):
+        calls.clear()
+        _run_engine(
+            "http://unused",
+            role=role,
+            requests=[request],
+            cfg=SlaBenchConfig(repetitions=3, thresholds=SlaThresholds(1e9, 1e9)),
+            engine_evidence_dir=tmp_path / role,
+            timeout_s=1,
+            warmup_repetitions=2,
+        )
+        sequences.append([c["seed"] for c in calls])
+        assert sequences[-1] == [0] * 5
+        assert all(c["temperature"] == 1.2 for c in calls)
+        for i, dirname in enumerate(("warmup", "warmup_2", "rep_1", "rep_2", "rep_3")):
+            row = json.loads(
+                (tmp_path / role / dirname / "requests.jsonl")
+                .read_text()
+                .splitlines()[0]
+            )
+            assert row["sampling"]["seed"] == sequences[-1][i]
+            assert row["sampling"]["temperature"] == 1.2
+    assert sequences[0] == sequences[1] == sequences[2]
 
 
 def test_percentile_single_sample():
@@ -190,6 +284,12 @@ def test_recompute_matches_report(tmp_path: Path):
             evidence_dir=tmp_path,
         )
 
+    sampling = replay.result.to_dict()["sampling"]
+    assert len(sampling) == 6
+    assert {(row["request_id"], row["rep"]) for row in sampling} == {
+        (rid, rep) for rid in ("r1", "r2") for rep in (1, 2, 3)
+    }
+    assert all(row["temperature"] == 0.0 and row["seed"] == 0 for row in sampling)
     metrics = replay.result.metrics
     recomputed = recompute_sla_metrics(
         tmp_path / "candidate-0",

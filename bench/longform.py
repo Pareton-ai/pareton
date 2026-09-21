@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from typing import Any
 
@@ -54,6 +55,52 @@ def digest(value: Any) -> str:
     )
 
 
+def generation_fields(rule):
+    """Validate explicit generation policy without changing legacy rule hashes."""
+
+    def valid_temperature(value):
+        return type(value) in (int, float) and 0 <= value <= 2 and math.isfinite(value)
+
+    fields = {}
+    if "temperature" in rule:
+        if not valid_temperature(rule["temperature"]):
+            raise SamplerError(
+                "long-form temperature must be a finite number from 0 to 2"
+            )
+        fields["temperature"] = float(rule["temperature"])
+    if "temperature_range" in rule:
+        bounds = rule["temperature_range"]
+        if (
+            "temperature" in rule
+            or not isinstance(bounds, list)
+            or len(bounds) != 2
+            or not all(valid_temperature(value) for value in bounds)
+            or bounds[0] >= bounds[1]
+        ):
+            raise SamplerError(
+                "temperature_range requires two increasing bounds from 0 to 2, without temperature"
+            )
+        fields["temperature_range"] = [float(value) for value in bounds]
+    return fields
+
+
+def generation_sampling(rule, *, seed_key=""):
+    """Derive reproducible per-request settings independently of the engine."""
+    fields = generation_fields(rule)
+    if "temperature_range" in fields and not seed_key:
+        raise SamplerError("randomized generation requires a pinned generation seed")
+    temperature = fields.get("temperature", 0.0)
+    if "temperature_range" in fields:
+        low, high = fields["temperature_range"]
+        value = int.from_bytes(
+            hashlib.sha256(f"temperature:{seed_key}".encode()).digest()[:8], "big"
+        )
+        temperature = min(
+            high, max(low, round(low + (high - low) * value / (2**64 - 1), 6))
+        )
+    return {"temperature": temperature, "top_p": 1.0}
+
+
 def parse_longform_fields(rule, parsed):
     if parsed.get("ignore_eos"):
         raise SamplerError("long-form sampling requires normal EOS stopping")
@@ -70,6 +117,9 @@ def parse_longform_fields(rule, parsed):
     if minimum > parsed["max_tokens"]:
         raise SamplerError("min_output_tokens exceeds max_tokens")
     result = {"followup_prompt": prompt, "min_output_tokens": minimum}
+    # Do not add a default field to old rules: their receipts and qualification
+    # hashes must continue to reproduce exactly.
+    result.update(generation_fields(rule))
     if "eligible_row_indices" in rule:
         rows = rule["eligible_row_indices"]
         if (
@@ -195,13 +245,15 @@ def candidate_for_row(row_index, row, formatter, rule, context):
     }
 
 
-def request_for_candidate(candidate, rule, index):
+def request_for_candidate(candidate, rule, index, *, generation_seed=""):
     return {
         "id": f"hf-{index:03d}",
         "arrival_offset_ms": index * rule["request_interval_ms"],
         "prompt": candidate["prompt"],
         "max_tokens": rule["max_tokens"],
-        "sampling": {"temperature": 0.0, "top_p": 1.0},
+        "sampling": generation_sampling(
+            rule, seed_key=f"{generation_seed}:{index}" if generation_seed else ""
+        ),
         "input_tokens": candidate["input_tokens"],
         "input_ids_sha256": candidate["input_ids_sha256"],
         "input_length_group": candidate["input_length_group"],
@@ -286,7 +338,10 @@ def generate_longform_trace(
             f"insufficient distinct long-form prompts; missing by input tier: {remaining}; "
             "no shorter fallback"
         )
-    requests = [request_for_candidate(item, rule, i) for i, item in enumerate(selected)]
+    requests = [
+        request_for_candidate(item, rule, i, generation_seed=seed)
+        for i, item in enumerate(selected)
+    ]
     workload = {
         "algo_version": 4,
         "enable_thinking": False,
@@ -296,6 +351,9 @@ def generate_longform_trace(
         "min_output_tokens": rule["min_output_tokens"],
         "length_groups": groups,
     }
+    workload.update(generation_fields(rule))
+    if "temperature_range" in rule:
+        workload["generation_seed"] = seed
     validate_longform_trace(requests, workload)
     body = encode_trace(
         {
@@ -339,6 +397,12 @@ def validate_longform_trace(requests, sampling):
         raise SamplerError("invalid long-form trace mode")
     context = sampling.get("context")
     validate_context(context)
+    generation_fields(sampling)
+    generation_seed = sampling.get("generation_seed", "")
+    if "temperature_range" in sampling and not re.fullmatch(
+        r"[0-9a-f]{64}", str(generation_seed)
+    ):
+        raise SamplerError("invalid long-form generation seed")
     for key in ("request_interval_ms", "max_tokens", "min_output_tokens"):
         value = sampling.get(key)
         if type(value) is not int or value < (0 if key == "request_interval_ms" else 1):
@@ -354,6 +418,9 @@ def validate_longform_trace(requests, sampling):
         raise SamplerError("invalid long-form input tier contract")
     counts = {g["name"]: 0 for g in groups}
     for i, request in enumerate(requests):
+        settings = generation_sampling(
+            sampling, seed_key=f"{generation_seed}:{i}" if generation_seed else ""
+        )
         size = request.get("input_tokens")
         if (
             type(size) is not int
@@ -371,8 +438,8 @@ def validate_longform_trace(requests, sampling):
             )
             or request.get("sampling")
             not in (
-                {"temperature": 0.0, "top_p": 1.0},
-                {"temperature": 0.0, "top_p": 1.0, "ignore_eos": False},
+                settings,
+                {**settings, "ignore_eos": False},
             )
             or type(request.get("arrival_offset_ms")) is not int
             or request["arrival_offset_ms"] != i * sampling["request_interval_ms"]

@@ -452,6 +452,7 @@ class CorrectnessReport:
     coverage_ratio: float
     evidence: str
     reason: str | None = None
+    prompt_checks: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -502,12 +503,14 @@ class EngineSlaResult:
     cross_rep_variance: dict[str, float]
     timings: dict[str, PromptTiming]
     evidence: str
+    sampling: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "role": self.role,
             "metrics": self.metrics.to_dict(),
             "cross_rep_variance": self.cross_rep_variance,
+            "sampling": self.sampling,
             "timings": {rid: asdict(t) for rid, t in self.timings.items()},
             "evidence": self.evidence,
         }

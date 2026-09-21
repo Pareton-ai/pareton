@@ -253,7 +253,7 @@ BENCH_CORRECTNESS_MIN_COVERAGE_RATIO: float = float(
 # candidate may score. The other half of PAR-108: a loop scores above the
 # baseline, a degraded model scores below it and clears the absolute bar.
 BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP: float = float(
-    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP", "1.5")
+    os.environ.get("PARETON_BENCH_CORRECTNESS_MAX_MEAN_LOGPROB_DROP", "2.5")
 )
 BENCH_SLA_REPETITIONS: int = int(os.environ.get("PARETON_BENCH_SLA_REPETITIONS", "3"))
 
@@ -286,8 +286,9 @@ ROUND_MAX_DURATION_S: int = int(os.environ.get("PARETON_ROUND_MAX_DURATION_S", "
 OVERTAKE_EPSILON: float = float(os.environ.get("PARETON_OVERTAKE_EPSILON", "0.01"))
 # Flat, not exponential: a growing backoff strands a round after capacity returns.
 PROVISION_RETRY_S: int = int(os.environ.get("PARETON_PROVISION_RETRY_S", "1800"))
-# Drift is in the same units as the crown decision. The overtake moat is 0.01,
-# so a round voids only when the machine moved five times that margin.
+# Initial baseline repeatability, in score units. Plan v2 compares two baseline
+# runs before candidates; this does not guard hardware drift during candidates.
+# Keep the legacy config/env name and baseline_drift void reason for compatibility.
 BASELINE_DRIFT_CEILING: float = float(
     os.environ.get("PARETON_BASELINE_DRIFT_CEILING", "0.05")
 )

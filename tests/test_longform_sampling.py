@@ -136,6 +136,93 @@ def test_source_exchange_and_followup_fill_tiers_without_padding_or_forcing():
     assert fetched == list(sampled.row_indices)
 
 
+def test_legacy_v4_trace_is_byte_identical_without_temperature():
+    sampled = sample()
+    assert sampled.sha256 == (
+        "sha256:a7f1a51d2e934924046f4fa4da83e0b7fb2e5953137495fd3f4d8e136b4ee9b4"
+    )
+    assert "temperature" not in sampled.receipt
+    trace = validate_workload_trace_dict(json.loads(sampled.body))
+    assert all(r.sampling.temperature == 0.0 for r in trace.requests)
+
+
+def test_temperature_is_pinned_in_trace_receipt_and_qualification():
+    r = rule(temperature=0.7)
+    sampled = sample(rule=r)
+    trace = validate_workload_trace_dict(json.loads(sampled.body))
+    assert all(r.sampling.temperature == 0.7 for r in trace.requests)
+    assert trace.meta.sampling["temperature"] == 0.7
+    assert sampled.receipt["temperature"] == 0.7
+    assert sample(rule=r, sampling_receipt=sampled.receipt).body == sampled.body
+    with pytest.raises(SamplerError):
+        sample(rule=rule(temperature=0.0), sampling_receipt=sampled.receipt)
+    for change in ("request", "metadata", "missing_metadata"):
+        data = json.loads(sampled.body)
+        if change == "request":
+            data["requests"][0]["sampling"]["temperature"] = 0.0
+        elif change == "metadata":
+            data["meta"]["sampling"]["temperature"] = 0.0
+        else:
+            del data["meta"]["sampling"]["temperature"]
+        with pytest.raises(RequestValidationError):
+            validate_workload_trace_dict(data)
+
+
+@pytest.mark.parametrize(
+    "temperature", [True, "0.7", None, -0.1, 2.1, float("nan"), float("inf")]
+)
+def test_longform_rejects_invalid_temperature(temperature):
+    with pytest.raises(SamplerError, match="temperature"):
+        parse_sampling_rule(rule(temperature=temperature))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"temperature_range": [0.1, 1.5], "temperature": 0.7},
+        {"temperature_range": [1.5, 0.1]},
+        {"temperature_range": [0.1]},
+        {"temperature_range": [0.1, float("nan")]},
+        {"temperature_range": [True, 1.5]},
+        {"randomize_seed": True},
+    ],
+)
+def test_invalid_randomized_generation_policy_is_rejected(change):
+    with pytest.raises(SamplerError):
+        parse_sampling_rule(rule(**change))
+
+
+def test_random_temperature_is_bound_to_round_trace_and_receipt():
+    r = rule(temperature_range=[0.1, 1.5])
+    sampled = sample(rule=r)
+    trace = validate_workload_trace_dict(json.loads(sampled.body))
+    assert all(0.1 <= req.sampling.temperature <= 1.5 for req in trace.requests)
+    assert len({req.sampling.temperature for req in trace.requests}) == 4
+    assert all(
+        "seed" not in req["sampling"] for req in json.loads(sampled.body)["requests"]
+    )
+    assert sample(rule=r, sampling_receipt=sampled.receipt).body == sampled.body
+    other = validate_workload_trace_dict(
+        json.loads(sample(rule=r, seed_hex="d" * 64).body)
+    )
+    assert other.requests[0].sampling != trace.requests[0].sampling
+    for field in ("temperature", "seed", "generation_seed", "range"):
+        data = json.loads(sampled.body)
+        if field == "generation_seed":
+            data["meta"]["sampling"].pop(field)
+        elif field == "range":
+            data["meta"]["sampling"]["temperature_range"] = [0.2, 1.4]
+        else:
+            data["requests"][0]["sampling"][field] = 0
+        with pytest.raises(RequestValidationError):
+            validate_workload_trace_dict(data)
+    with pytest.raises(SamplerError):
+        sample(
+            rule={**r, "temperature_range": [0.2, 1.4]},
+            sampling_receipt=sampled.receipt,
+        )
+
+
 @pytest.mark.parametrize(
     "change", ["prompt", "reference", "tokenizer", "thinking", "rows", "context"]
 )
@@ -201,6 +288,9 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     assert r["dataset"] == "zai-org/LongWriter-6k"
     assert r["max_tokens"] == 5120
     assert r["min_output_tokens"] == 3000
+    assert r["temperature_range"] == [0.1, 1.01]
+    assert f["bench"]["correctness"]["thresholds"]["max_mean_logprob_drop"] == 2.5
+    assert "randomize_seed" not in r
     omitted_floor = {
         key: value for key, value in r.items() if key != "min_output_tokens"
     }
@@ -216,7 +306,10 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     assert trace.meta.sampling["enable_thinking"] is False
     assert trace.meta.sampling["min_output_tokens"] == 3000
     assert all(
-        not r.sampling.ignore_eos and r.max_tokens == 5120 for r in trace.requests
+        not r.sampling.ignore_eos
+        and r.max_tokens == 5120
+        and 0.1 <= r.sampling.temperature <= 1.5
+        for r in trace.requests
     )
     with pytest.raises(SamplerError, match="baseline qualification"):
         require_qualification(parse_sampling_rule(r), f["bench"], f["engine"])
@@ -245,10 +338,15 @@ def test_qualification_distinguishes_early_eos_from_natural_generation_at_the_ca
         evaluate_response(response(3, "length"), rule(), 3)
 
 
+@pytest.mark.parametrize("temperature", [None, 0.7, [0.1, 1.5]])
 def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
-    tmp_path, monkeypatch, baseline_identity
+    tmp_path, monkeypatch, baseline_identity, temperature
 ):
     f = fields()
+    if isinstance(temperature, list):
+        f["sampling_rule"].update(temperature_range=temperature)
+    elif temperature is not None:
+        f["sampling_rule"]["temperature"] = temperature
     calls = []
     monkeypatch.setattr(
         "bench.qualify_longform.validate_engine_workload", lambda *a, **k: None
@@ -257,6 +355,13 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
     def post(url, path, body, **kw):
         calls.append(body)
         assert body["ignore_eos"] is False and "min_tokens" not in body
+        assert body["top_p"] == 1.0
+        if isinstance(temperature, list):
+            assert body["temperature"] in temperature
+            assert body["seed"] == 0
+        else:
+            assert body["temperature"] == (0.0 if temperature is None else temperature)
+            assert body["seed"] == 0
         assert "ref" in body["prompt"] and "THINK" not in body["prompt"]
         result = response()
         result["usage"]["prompt_tokens"] = len(formatter().encode(body["prompt"]))
@@ -276,6 +381,12 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
         formatter=formatter(),
     )
     assert len(calls) == 8
+    if isinstance(temperature, list):
+        assert {call["seed"] for call in calls} == {0}
+        for prompt in {call["prompt"] for call in calls}:
+            assert [
+                c["temperature"] for c in calls if c["prompt"] == prompt
+            ] == temperature
     assert len(qualified["eligible_row_indices"]) == 4
     assert "evidence_sha256" not in qualified["qualification"]
     summary = json.loads((tmp_path / "summary.json").read_text())
@@ -287,6 +398,13 @@ def test_qualified_artifact_is_bound_to_campaign_and_never_requests_forcing(
         qualified, f["bench"], f["engine"]
     )
     require_qualification(qualified, f["bench"], f["engine"])
+    changed = (
+        {**qualified, "temperature_range": [0.2, 1.4]}
+        if isinstance(temperature, list)
+        else {**qualified, "temperature": 0.7 if temperature is None else 0.0}
+    )
+    with pytest.raises(SamplerError, match="baseline qualification"):
+        require_qualification(changed, f["bench"], f["engine"])
     f["bench"]["model"]["hf_revision"] = "d" * 40
     with pytest.raises(SamplerError, match="baseline qualification"):
         require_qualification(qualified, f["bench"], f["engine"])

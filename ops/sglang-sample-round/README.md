@@ -78,7 +78,8 @@ needed.
   workload instead of extending its tail or awarding a candidate speedup.
 - Use the campaign's `modelopt_mixed` loader: NVFP4 MLP layers, FP8 attention
   and an unquantized BF16 output head.
-- Run baseline, candidate, NVFP4 correctness scoring, and baseline drift replay.
+- Run opening baseline, initial baseline repeatability replay, candidate, then
+  NVFP4 correctness scoring.
   The fixed local sampling seed is reproducible. It does not represent a
   chain-selected production round or test a full 262K input window.
 - Reuse `/workspace/hf-cache` and `/workspace/engine-cache`. Local Docker image
