@@ -452,7 +452,7 @@ Sample campaign entries, in addition to the source and image pins:
         "min_token_logprob": -12,
         "min_token_quantile": 0.001,
         "min_coverage_ratio": 0.5,
-        "max_mean_logprob_drop": 1.5
+        "max_mean_logprob_drop": 2.5
       }
     }
   }
