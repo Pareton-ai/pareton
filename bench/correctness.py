@@ -103,6 +103,9 @@ DEGENERACY_MIN_DISTINCT_NGRAM_RATIO = 0.15
 DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
 # Additional quality bar relative to the least-distinct valid baseline replay.
 DEGENERACY_MAX_DISTINCT_NGRAM_DROP = 0.10
+# Count distinct retained prompt IDs per candidate, not measured repetitions.
+# Absolute loops remain immediate failures regardless of this allowance.
+MAX_RELATIVE_DEGENERACY_FAILURES = 4
 # A larger exclusion set no longer provides a representative correctness
 # sample. This is a harness invariant rather than campaign policy.
 MAX_BASELINE_PROMPT_DROPS = 8
@@ -1103,6 +1106,7 @@ def grade_candidate(
     num_prompts = 0
     empty: list[str] = []
     degenerate: str | None = None
+    relative_failures: dict[str, str] = {}
 
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
@@ -1179,10 +1183,19 @@ def grade_candidate(
                     repetition_checks.append({"rep": rep, "degenerate": reason})
                     if reason is not None and repetition_degenerate is None:
                         repetition_degenerate = f"rep {rep}: {reason}"
-            if not captured.ignore_eos and repetition_degenerate is None:
-                repetition_degenerate = relative_degenerate
             if repetition_degenerate is not None and degenerate is None:
                 degenerate = f"{captured.request_id}: {repetition_degenerate}"
+            if relative_degenerate is not None and not forced_tail:
+                relative_failures[captured.request_id] = relative_degenerate
+                if (
+                    len(relative_failures) > MAX_RELATIVE_DEGENERACY_FAILURES
+                    and degenerate is None
+                ):
+                    degenerate = (
+                        "baseline-relative repetition failures exceed allowance "
+                        f"of {MAX_RELATIVE_DEGENERACY_FAILURES} prompts "
+                        f"({captured.request_id}: {relative_degenerate})"
+                    )
             try:
                 positions, span, scored_prefix = score_captured_output(
                     scorer_url,
@@ -1206,7 +1219,7 @@ def grade_candidate(
                             "ignore_eos": captured.ignore_eos,
                             "output_selection": "latency_median",
                             "repetition_degeneracy": repetition_checks,
-                            "degenerate": repetition_degenerate,
+                            "degenerate": repetition_degenerate or relative_degenerate,
                             "scorer_error": str(exc),
                             **repetition_evidence,
                         },
@@ -1260,6 +1273,10 @@ def grade_candidate(
                     distinct_ratio=distinct_ratio,
                     repeated_span_ratio=repeated_span_ratio,
                 )
+            if this_degenerate is None:
+                this_degenerate = repetition_degenerate
+            if this_degenerate and degenerate is None:
+                degenerate = f"{captured.request_id}: {this_degenerate}"
             if relative_degenerate is not None:
                 if forced_tail:
                     # Deliberate throughput policy for ignore_eos traces, not
@@ -1267,10 +1284,6 @@ def grade_candidate(
                     exemptions.append("forced_tail_diagnostic_only")
                 elif this_degenerate is None:
                     this_degenerate = relative_degenerate
-            if this_degenerate is None:
-                this_degenerate = repetition_degenerate
-            if this_degenerate and degenerate is None:
-                degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
                 json.dumps(
                     {
@@ -1332,6 +1345,11 @@ def grade_candidate(
         for line in evidence_path.read_text(encoding="utf-8").splitlines()
     ]
     rel_evidence = f"evidence/correctness/{evidence_path.name}"
+    relative_degeneracy = {
+        "max_failed_prompts": MAX_RELATIVE_DEGENERACY_FAILURES,
+        "failed_prompts": len(relative_failures),
+        "failed_request_ids": sorted(relative_failures),
+    }
     if empty:
         return CorrectnessReport(
             verdict="fail_correctness",
@@ -1343,6 +1361,7 @@ def grade_candidate(
             coverage_ratio=0.0,
             evidence=rel_evidence,
             prompt_checks=prompt_checks,
+            relative_degeneracy=relative_degeneracy,
             reason=f"engine returned no output for {len(empty)} prompt(s): {empty[0]}",
         )
 
@@ -1357,6 +1376,7 @@ def grade_candidate(
             coverage_ratio=0.0,
             evidence=rel_evidence,
             prompt_checks=prompt_checks,
+            relative_degeneracy=relative_degeneracy,
             reason=(
                 f"degenerate output ({degenerate})"
                 if degenerate is not None
@@ -1430,6 +1450,7 @@ def grade_candidate(
         coverage_ratio=coverage,
         evidence=rel_evidence,
         prompt_checks=prompt_checks,
+        relative_degeneracy=relative_degeneracy,
         reason=reason,
     )
 
