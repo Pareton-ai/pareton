@@ -311,6 +311,7 @@ class EngineReplay:
     outputs: dict[str, str]
     output_samples: dict[str, tuple[str, ...]]
     completion_token_samples: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    excluded_prompts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -493,8 +494,9 @@ def _median_rep_row(rows: list[dict]) -> dict:
     The selected text is the logprob-graded artifact
     (``capture_outputs`` and, when ``ignore_eos`` is off,
     ``capture_baseline_natural_stops``). A looping sibling rep is
-    invisible here; baseline drops and natural candidate degeneracy checks
-    use ``output_samples`` to inspect all measured repetitions.
+    invisible here; baseline stability and absolute candidate repetition
+    checks use ``output_samples`` to inspect all measured repetitions.
+    Candidate logprob and relative grading use this median.
     """
     ordered = sorted(rows, key=lambda r: float(r["e2e_ms"]))
     return ordered[(len(ordered) - 1) // 2]

@@ -576,9 +576,19 @@ def remaining_round_budget_s(
 
 
 def _round_phase_writer(round_id: str) -> Callable[..., bool]:
+    plan_version = None
+
     def write(*, job_id: Any, attempt: Any, phase: str, progress: Any = None) -> bool:
+        nonlocal plan_version
         del job_id, attempt
-        return set_round_phase(round_id=round_id, phase=phase, progress=progress)
+        progress = dict(progress or {})
+        if progress.get("plan_version") == 2:
+            plan_version = 2
+        if plan_version is not None:
+            progress["plan_version"] = plan_version
+        return set_round_phase(
+            round_id=round_id, phase=phase, progress=progress or None
+        )
 
     return write
 

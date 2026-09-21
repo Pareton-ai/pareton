@@ -483,4 +483,9 @@ def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Pa
     # Every report carries the plan position, so a viewer can tell the first
     # of nine near-identical starts from the seventh (PAR-98).
     for _, progress in seen:
-        assert progress == {"step": 1, "steps": len(plan), "role": "baseline"}
+        assert progress == {
+            "step": 1,
+            "steps": len(plan),
+            "role": "baseline",
+            "plan_version": 2,
+        }

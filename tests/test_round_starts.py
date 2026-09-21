@@ -80,7 +80,7 @@ def test_five_challenger_round_is_nine_starts_on_either_engine(
     plan = plan_round_starts(req.engines)
     assert len(plan) == EXPECTED_STARTS, engine
     assert [s.kind for s in plan] == (
-        ["baseline"] + ["candidate"] * ROUND_CANDIDATES + ["scorer", "drift"]
+        ["baseline", "drift"] + ["candidate"] * ROUND_CANDIDATES + ["scorer"]
     )
 
 
@@ -230,10 +230,10 @@ def test_the_runner_performs_exactly_the_planned_starts(
     run_round(req=req, provider=provider, prompts=prompts, trace=trace, layout=layout)
     assert provider.starts == [
         "baseline",
+        "baseline-drift",
         "candidate-0",
         "candidate-1",
         "scorer",
-        "baseline-drift",
     ]
     if engine == "sglang":
         for start in starts:
