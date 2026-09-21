@@ -526,14 +526,19 @@ def test_trace_validation_rejects_changed_generation_contract(mutation):
         validate_workload_trace_dict(trace)
 
 
+@pytest.mark.parametrize(
+    "generation_policy",
+    [{}, {"temperature": 0.7}, {"temperature_range": [0.1, 1.01]}],
+    ids=["legacy-greedy", "fixed-temperature", "temperature-range"],
+)
 def test_round_creation_and_worker_replay_preserve_qualified_rows(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, generation_policy
 ):
     f = fields()
     campaign = SimpleNamespace(
         campaign_id=uuid4(),
         gpu_skus=["RTX5090"],
-        sampling_rule=rule(eligible_row_indices=[0, 1, 2, 3]),
+        sampling_rule=rule(eligible_row_indices=[0, 1, 2, 3], **generation_policy),
         scoring_rule={"name": "median_e2e_speedup", "failure_penalty": 0.1},
         bench=f["bench"],
         engine=f["engine"],
@@ -550,7 +555,12 @@ def test_round_creation_and_worker_replay_preserve_qualified_rows(
     path = materialize_round_trace(
         result, campaign, tmp_path, row_fetcher=row, prompt_formatter=formatter()
     )
+    assert "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() == result[
+        "sampled_trace_sha256"
+    ]
     trace = validate_workload_trace_dict(json.loads(path.read_bytes()))
+    for key, value in generation_policy.items():
+        assert trace.meta.sampling[key] == value
     assert trace.meta.sampling["min_output_tokens"] == 6
     assert set(result["sampling_receipt"]["row_indices"]) == {0, 1, 2, 3}
     assert all(not request.sampling.ignore_eos for request in trace.requests)

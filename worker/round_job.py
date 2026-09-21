@@ -170,6 +170,8 @@ def materialize_round_trace(
                             "followup_prompt",
                             "eligible_row_indices",
                             "qualification",
+                            "temperature",
+                            "temperature_range",
                         )
                         if key in receipt
                     },
