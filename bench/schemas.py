@@ -453,6 +453,7 @@ class CorrectnessReport:
     evidence: str
     reason: str | None = None
     prompt_checks: list[dict[str, Any]] | None = None
+    relative_degeneracy: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

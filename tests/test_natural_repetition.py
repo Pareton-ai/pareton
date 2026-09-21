@@ -68,52 +68,75 @@ def test_relative_distinct_ratio_allows_at_most_ten_percentage_points(
     assert (reason is not None) is fails
 
 
+@pytest.mark.parametrize("failed_prompts", [0, 1, 4, 5])
 @pytest.mark.parametrize("scorer_error", [False, True])
-def test_sentence_template_repetition_fails_even_with_high_logprobs(
-    monkeypatch, tmp_path, scorer_error
+def test_relative_repetition_budget(
+    monkeypatch, tmp_path, failed_prompts, scorer_error
 ):
     text = _template_repetition()
-    assert degeneracy_reason(text) is None  # Clears both absolute bars.
+    assert degeneracy_reason(text) is None
     clean = _clean_long()[: len(text)]
+    prompts = [PromptCase(f"r{i}", "Write") for i in range(32)]
     baseline = capture_outputs(
-        [PromptCase("r1", "Write")], timings={}, outputs={"r1": clean}
+        prompts, timings={}, outputs={p.id: clean for p in prompts}
     )
     references = build_baseline_degeneracy_references(
         baseline,
-        {"r1": NaturalStopReference("r1", 200, "stop", clean)},
-        {"r1": (clean,) * 3},
+        {p.id: NaturalStopReference(p.id, 200, "stop", clean) for p in prompts},
+        {p.id: (clean,) * 3 for p in prompts},
     )
+    outputs = {
+        p.id: text if i < failed_prompts else clean for i, p in enumerate(prompts)
+    }
     captured = capture_outputs(
-        [PromptCase("r1", "Write")], timings={}, outputs={"r1": text}
+        prompts,
+        timings={},
+        outputs=outputs,
+        output_samples={rid: (value,) * 3 for rid, value in outputs.items()},
     )
 
-    def score(*a, **kw):
-        if scorer_error:
+    def score(_url, output, **kw):
+        # Error on the boundary prompt must preserve a fifth established flag,
+        # but a tolerated flag alone must not turn an outage into a rejection.
+        if scorer_error and output.request_id == f"r{max(0, failed_prompts - 1)}":
             raise EngineError("scorer unavailable")
-        return [SimpleNamespace(logprob=-0.01)] * 200, 200, text
+        return [SimpleNamespace(logprob=-0.01)] * 200, 200, output.output_text
 
     monkeypatch.setattr("bench.correctness.score_captured_output", score)
     path = tmp_path / "candidate.jsonl"
+    if scorer_error and failed_prompts <= 4:
+        with pytest.raises(EngineError, match="scorer unavailable"):
+            grade_candidate(
+                "unused",
+                captured,
+                cfg=_cfg(num_prompts=32),
+                evidence_path=path,
+                baseline_degeneracy=references,
+            )
+        return
     result = grade_candidate(
         "unused",
         captured,
-        cfg=_cfg(num_prompts=1),
+        cfg=_cfg(num_prompts=32),
         evidence_path=path,
         baseline_degeneracy=references,
     )
-    assert result.verdict == "fail_correctness"
-    assert "0.10 below baseline" in result.reason
-    evidence = json.loads(path.read_text())
-    assert evidence["relative_degenerate"]
-    assert evidence["distinct_ngram_ratio_drop"] > 0.10
-    assert evidence["max_distinct_ngram_ratio_drop"] == 0.10
-    assert evidence["output_selection"] == "latency_median"
-    assert ("scorer_error" in evidence) is scorer_error
-    public = result.to_dict()["prompt_checks"][0]
-    assert public["request_id"] == "r1"
-    assert public["distinct_ngram_ratio_drop"] == evidence["distinct_ngram_ratio_drop"]
-    assert "output_text" not in public
-    assert "scorer_error" not in public
+    assert result.verdict == ("pass" if failed_prompts <= 4 else "fail_correctness")
+    assert result.relative_degeneracy == {
+        "max_failed_prompts": 4,
+        "failed_prompts": failed_prompts,
+        "failed_request_ids": [f"r{i}" for i in range(failed_prompts)],
+    }
+    if failed_prompts > 4:
+        assert "exceed allowance of 4 prompts" in result.reason
+        assert "0.10 below baseline" in result.reason
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert sum(bool(r["relative_degenerate"]) for r in rows) == failed_prompts
+    assert sum(bool(r["degenerate"]) for r in rows) == failed_prompts
+    assert any("scorer_error" in r for r in rows) is scorer_error
+    for row in result.to_dict()["prompt_checks"]:
+        assert "output_text" not in row
+        assert "scorer_error" not in row
 
 
 def test_relative_guard_uses_least_distinct_valid_baseline_sample(
@@ -501,3 +524,78 @@ def test_known_repetition_failure_survives_scorer_error(
         assert rows[0]["repetition_degeneracy"][1]["degenerate"]
         assert rows[-1]["request_id"] == failure_request
         assert rows[-1]["scorer_error"] == "simulated scorer failure"
+
+
+@pytest.mark.parametrize(
+    "mode,verdict,count",
+    [
+        ("excluded", "pass", 4),
+        ("forced-tail", "pass", 0),
+        ("absolute-loop", "fail_correctness", 1),
+        ("low-mean", "fail_correctness", 1),
+        ("low-coverage", "infra_failed", 1),
+        ("relative-logprob", "fail_correctness", 1),
+    ],
+)
+def test_relative_budget_preserves_other_gates(
+    monkeypatch, tmp_path, mode, verdict, count
+):
+    from bench.correctness import BaselineDegeneracyReferences
+
+    text = _template_repetition()
+    clean = _clean_long()[: len(text)]
+    prompts = [
+        PromptCase(f"r{i}", "Write", ignore_eos=mode == "forced-tail") for i in range(5)
+    ]
+    baseline = capture_outputs(
+        prompts, timings={}, outputs={p.id: clean for p in prompts}
+    )
+    refs = build_baseline_degeneracy_references(
+        baseline,
+        {
+            p.id: NaturalStopReference(
+                p.id, 200, "stop", clean, probed=mode == "forced-tail"
+            )
+            for p in prompts
+        },
+        {p.id: (clean,) * 3 for p in prompts},
+    )
+    if mode == "excluded":
+        refs = BaselineDegeneracyReferences(
+            {k: v for k, v in refs.items() if k != "r4"},
+            dropped={"r4": "baseline excluded"},
+        )
+    captured = capture_outputs(
+        prompts,
+        timings={},
+        outputs={
+            p.id: text if i == 0 or mode in ("excluded", "forced-tail") else clean
+            for i, p in enumerate(prompts)
+        },
+        output_samples={
+            p.id: (text, " apple" * 200) if i == 0 else (clean,)
+            for i, p in enumerate(prompts)
+        }
+        if mode == "absolute-loop"
+        else None,
+    )
+
+    def score(_url, output, **kwargs):
+        lp = -5.0 if mode == "low-mean" else -0.1
+        return [SimpleNamespace(logprob=lp)], 10 if mode == "low-coverage" else 1, clean
+
+    monkeypatch.setattr("bench.correctness.score_captured_output", score)
+    report = grade_candidate(
+        "unused",
+        captured,
+        cfg=_cfg(num_prompts=5, max_drop=0.01),
+        evidence_path=tmp_path / "candidate.jsonl",
+        baseline_degeneracy=refs,
+        baseline_mean_logprob=-0.01 if mode == "relative-logprob" else None,
+    )
+    assert report.verdict == verdict
+    assert report.relative_degeneracy["failed_prompts"] == count
+    if mode == "absolute-loop":
+        assert "rep 2" in report.reason
+    if mode == "excluded":
+        assert report.num_prompts == 4
