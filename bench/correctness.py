@@ -48,9 +48,9 @@ every engine when *any* measured baseline completion on that prompt is
 degenerate, not only the latency-median natural-stop text. The median-only
 check misses the case where the pinned image loops on a sibling repetition
 and the prompt stays in the set as a coin-flip disqualifier (PAR-121).
-Candidate repetition and logprob grading both use the latency-median output
-on retained correctness prompts. Forced-tail exemptions require the original
-request to ignore EOS.
+Absolute candidate repetition checks inspect every measured output on retained
+correctness prompts. Logprob and relative grading use the latency-median output.
+Forced-tail exemptions require the original request to ignore EOS.
 
 The min-token bar is applied to the k-th lowest scored position rather than
 the outright minimum (PAR-94). Scorer and candidate are separate instances of
@@ -632,9 +632,9 @@ def quantile_low(values: list[float], quantile: float) -> float:
 class CapturedOutput:
     """One request's generated continuation, separate from its rendered prompt.
 
-    Conversation history belongs in ``prompt``. Candidate repetition checks
-    inspect ``output_text``, the latency-median continuation. Sibling outputs
-    remain available in ``output_samples`` as evidence.
+    Conversation history belongs in ``prompt``. Absolute repetition checks
+    inspect every continuation in ``output_samples``. Logprob and relative
+    grading use ``output_text``, the latency-median continuation.
     """
 
     request_id: str
@@ -1169,18 +1169,20 @@ def grade_candidate(
                 "max_distinct_ngram_ratio_drop": DEGENERACY_MAX_DISTINCT_NGRAM_DROP,
                 "relative_degenerate": relative_degenerate,
             }
-            median_degenerate = None
+            repetition_checks = []
+            repetition_degenerate = None
             if not captured.ignore_eos:
-                median_degenerate = (
-                    degeneracy_reason(
-                        captured.output_text,
-                        distinct_ratio=distinct_ratio,
-                        repeated_span_ratio=repeated_span_ratio,
-                    )
-                    or relative_degenerate
-                )
-            if median_degenerate is not None and degenerate is None:
-                degenerate = f"{captured.request_id}: {median_degenerate}"
+                for rep, text in enumerate(
+                    captured.output_samples or (captured.output_text,), start=1
+                ):
+                    reason = degeneracy_reason(text) if text else "empty output"
+                    repetition_checks.append({"rep": rep, "degenerate": reason})
+                    if reason is not None and repetition_degenerate is None:
+                        repetition_degenerate = f"rep {rep}: {reason}"
+            if not captured.ignore_eos and repetition_degenerate is None:
+                repetition_degenerate = relative_degenerate
+            if repetition_degenerate is not None and degenerate is None:
+                degenerate = f"{captured.request_id}: {repetition_degenerate}"
             try:
                 positions, span, scored_prefix = score_captured_output(
                     scorer_url,
@@ -1203,7 +1205,8 @@ def grade_candidate(
                             "request_id": captured.request_id,
                             "ignore_eos": captured.ignore_eos,
                             "output_selection": "latency_median",
-                            "degenerate": median_degenerate,
+                            "repetition_degeneracy": repetition_checks,
+                            "degenerate": repetition_degenerate,
                             "scorer_error": str(exc),
                             **repetition_evidence,
                         },
@@ -1265,7 +1268,7 @@ def grade_candidate(
                 elif this_degenerate is None:
                     this_degenerate = relative_degenerate
             if this_degenerate is None:
-                this_degenerate = median_degenerate
+                this_degenerate = repetition_degenerate
             if this_degenerate and degenerate is None:
                 degenerate = f"{captured.request_id}: {this_degenerate}"
             ef.write(
@@ -1275,6 +1278,7 @@ def grade_candidate(
                         "streamed_tokens": captured.completion_tokens,
                         "ignore_eos": captured.ignore_eos,
                         "output_selection": "latency_median",
+                        "repetition_degeneracy": repetition_checks,
                         "span_positions": span,
                         "scored_positions": len(scored),
                         "mean_logprob": (sum(scored) / len(scored) if scored else None),

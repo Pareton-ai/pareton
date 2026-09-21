@@ -204,21 +204,23 @@ def test_relative_guard_matches_each_of_32_prompts_to_its_own_baseline(
 
 @pytest.mark.parametrize("bad_rep", [None, 0, 1, 2])
 @pytest.mark.parametrize("finish_reason", ["stop", "length"])
-def test_only_latency_median_natural_repetition_is_enforced(
-    monkeypatch, tmp_path, bad_rep, finish_reason
+@pytest.mark.parametrize("loop_slowest", [False, True])
+def test_all_natural_repetitions_are_enforced_even_when_runaway_is_slowest(
+    monkeypatch, tmp_path, bad_rep, finish_reason, loop_slowest
 ):
-    clean = _clean_long()
+    clean = " ".join(_clean_long().split()[:3000])
     # The first 3000 tokens are clean; the loop begins after the baseline's
-    # natural stop. The median-latency row is clean when rep 0 or 2 loops.
-    loop = " ".join(clean.split()[:3000]) + " apple" * 2120
+    # natural stop. A 5120-token runaway can be the slowest rep, leaving a
+    # clean 3000-token sibling as the latency median regardless of rep order.
+    loop = clean + " apple" * 2120
     assert degeneracy_reason(clean) is None
     assert degeneracy_reason(loop) is not None
     rows = [
         {
             "request_id": "r1",
             "text": loop if rep == bad_rep else clean,
-            "completion_tokens": 5120,
-            "e2e_ms": rep + 1,
+            "completion_tokens": 5120 if rep == bad_rep else 3000,
+            "e2e_ms": 100_000 if loop_slowest and rep == bad_rep else rep + 1,
             "ttft_ms": 1,
             "itl_ms": [],
             "finish_reason": finish_reason,
@@ -232,6 +234,9 @@ def test_only_latency_median_natural_repetition_is_enforced(
         outputs=median,
         output_samples=_output_samples(rows),
     )
+    if loop_slowest:
+        assert captured[0].output_text == clean
+        assert captured[0].completion_tokens == 3000
     baseline_text = " ".join(clean.split()[:2500])
     references = build_baseline_degeneracy_references(
         captured,
@@ -239,10 +244,20 @@ def test_only_latency_median_natural_repetition_is_enforced(
         {"r1": (baseline_text,) * 3},
     )
     limits = []
+    relative_texts = []
+    from bench.correctness import relative_degeneracy_reason
 
-    def score(*args, **kwargs):
+    def relative_check(text, **kwargs):
+        relative_texts.append(text)
+        return relative_degeneracy_reason(text, **kwargs)
+
+    monkeypatch.setattr("bench.correctness.relative_degeneracy_reason", relative_check)
+
+    def score(_url, output, **kwargs):
+        assert output.output_text == median["r1"]
         limits.append(kwargs["prefix_token_limit"])
-        return [SimpleNamespace(logprob=-0.1)] * 5120, 5120, baseline_text
+        count = output.completion_tokens
+        return [SimpleNamespace(logprob=-0.1)] * count, count, baseline_text
 
     monkeypatch.setattr("bench.correctness.score_captured_output", score)
     evidence = tmp_path / "candidate.jsonl"
@@ -253,13 +268,17 @@ def test_only_latency_median_natural_repetition_is_enforced(
         evidence_path=evidence,
         baseline_degeneracy=references,
     )
-    assert report.verdict == ("fail_correctness" if bad_rep == 1 else "pass")
+    assert report.verdict == ("pass" if bad_rep is None else "fail_correctness")
     assert limits == [2500]
+    assert relative_texts == [median["r1"]]
     row = json.loads(evidence.read_text())
     assert row["degeneracy_scope"] == "full_output"
     assert row["degeneracy_exemptions"] == []
     assert row["output_selection"] == "latency_median"
-    assert bool(row["degenerate"]) is (bad_rep == 1)
+    assert [r["rep"] for r in row["repetition_degeneracy"] if r["degenerate"]] == (
+        [] if bad_rep is None else [bad_rep + 1]
+    )
+    assert bool(row["degenerate"]) is (bad_rep is not None)
 
 
 def test_normal_eos_cannot_inherit_forced_exemptions(monkeypatch, tmp_path):
@@ -413,7 +432,9 @@ def test_tiered_followups_grade_new_outputs_not_history(
 
 
 @pytest.mark.parametrize("failure_request", ["r1", "r2"])
-@pytest.mark.parametrize("kind", ["natural-loop", "clean", "forced-loop"])
+@pytest.mark.parametrize(
+    "kind", ["natural-loop", "sibling-loop", "clean", "forced-loop"]
+)
 def test_known_repetition_failure_survives_scorer_error(
     monkeypatch, tmp_path, failure_request, kind
 ):
@@ -463,9 +484,13 @@ def test_known_repetition_failure_survives_scorer_error(
     )
     assert reports[1].verdict == "pass"
     report = reports[0]
-    expected = "fail_correctness" if kind == "natural-loop" else "infra_failed"
+    expected = (
+        "fail_correctness"
+        if kind in ("natural-loop", "sibling-loop")
+        else "infra_failed"
+    )
     assert report.verdict == expected
-    if kind == "natural-loop":
+    if kind in ("natural-loop", "sibling-loop"):
         assert "r1" in report.reason
         path = tmp_path / "candidate_0.jsonl"
         assert report.evidence.endswith(path.name)
@@ -473,5 +498,6 @@ def test_known_repetition_failure_survives_scorer_error(
         rows = [json.loads(line) for line in path.read_text().splitlines()]
         assert rows[0]["degenerate"]
         assert rows[0]["output_selection"] == "latency_median"
+        assert rows[0]["repetition_degeneracy"][1]["degenerate"]
         assert rows[-1]["request_id"] == failure_request
         assert rows[-1]["scorer_error"] == "simulated scorer failure"

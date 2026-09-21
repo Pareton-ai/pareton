@@ -169,15 +169,18 @@ migration is required, and existing campaigns are not rewritten.
 
 ## Natural-output repetition enforcement
 
-For each retained correctness prompt, grade the full latency-median response for
-repetition and logprobs. A looping sibling repetition does not disqualify a clean
-median response. The policy applies to normal-EOS workloads across all four input
-tiers. Inspect only newly generated text, including text beyond the baseline's
-output length; conversation history is never part of the graded output.
+For each retained correctness prompt, check every measured natural response for
+absolute repetition. A looping sibling disqualifies the candidate even when a
+clean response is the latency median. Logprob grading and baseline-relative checks
+still use the latency-median response. The policy applies to normal-EOS workloads
+across all four input tiers. Inspect only newly generated text, including text
+beyond the baseline's output length; conversation history is never graded.
 
-Correctness evidence identifies `output_selection=latency_median`. All generated
-texts remain in SLA `rep_N/requests.jsonl` evidence. Character n-gram and
-repeated-span absolute thresholds and the thinking/answer split are unchanged.
+Correctness evidence identifies `output_selection=latency_median` for logprob and
+relative grading, and records every absolute repetition result in
+`repetition_degeneracy`. All generated texts remain in SLA `rep_N/requests.jsonl`
+evidence. Character n-gram and repeated-span thresholds, including the
+thinking/answer split, are unchanged.
 An additional baseline-relative check rejects a selected response whose distinct
 character-16-gram ratio is more than 0.10 below the lowest ratio from the opening
 baseline's valid measured responses for that prompt. Exactly 0.10 is allowed.

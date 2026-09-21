@@ -500,8 +500,9 @@ def _median_rep_row(rows: list[dict]) -> dict:
     The selected text is the logprob-graded artifact
     (``capture_outputs`` and, when ``ignore_eos`` is off,
     ``capture_baseline_natural_stops``). A looping sibling rep is
-    invisible here; baseline stability checks use ``output_samples`` to
-    inspect all measured repetitions. Candidate grading uses this median.
+    invisible here; baseline stability and absolute candidate repetition
+    checks use ``output_samples`` to inspect all measured repetitions.
+    Candidate logprob and relative grading use this median.
     """
     ordered = sorted(rows, key=lambda r: float(r["e2e_ms"]))
     return ordered[(len(ordered) - 1) // 2]

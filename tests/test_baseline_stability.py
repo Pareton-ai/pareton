@@ -1,4 +1,4 @@
-"""Baseline-owned exclusions and median candidate grading, without GPU or DB."""
+"""Shared baseline-owned correctness and score exclusions, without GPU or DB."""
 
 import json
 from contextlib import contextmanager
@@ -104,6 +104,9 @@ def test_both_controls_precede_candidates_and_share_grading_and_score_mask(
     candidate = replay("candidate-0", workload)
     # Garbage in excluded candidate outputs must never reach the scorer.
     candidate.outputs.update({f"r{i}": LOOP for i in range(bad_count)})
+    candidate.output_samples.update(
+        {f"r{i}": (CLEAN, CLEAN, LOOP) for i in range(bad_count)}
+    )
     # These extreme timings must not enter candidate or baseline-comparison scores.
     for rid in [f"r{i}" for i in range(bad_count)]:
         second.result.timings[rid] = PromptTiming(
