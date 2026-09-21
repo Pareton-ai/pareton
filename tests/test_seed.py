@@ -188,6 +188,9 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
     argv[argv.index("--status") + 1] = status
     assert main(argv[2:]) == 0
     assert captured["manifest"].sampling_rule == rule
+    thresholds = captured["manifest"].bench["correctness"]["thresholds"]
+    assert thresholds == fields["bench"]["correctness"]["thresholds"]
+    assert thresholds["min_token_logprob"] == -16.0
     assert captured["inserts"] == 1
 
 

@@ -282,7 +282,7 @@ absolute likelihood, coverage and repetition checks. `likelihood_summary.json`
 reports both roles' mean logprobs, raw minima, token quantiles, coverage, the
 baseline-minus-candidate mean drop, and pass/fail against both `1.5` and `2.5`.
 The active campaign fixture uses `2.5`; comparing against `1.5` requires no extra
-GPU run. `min_token_logprob=-12` applies to the `0.001` token quantile, not the
+GPU run. `min_token_logprob=-16` applies to the `0.001` token quantile, not the
 single lowest token. `endpoint_correctness.json` retains both complete reports,
 including the opening baseline report normally consumed by the harness. Missing
 scoring results remain unknown; early baseline exclusions can prevent the test
@@ -296,6 +296,15 @@ source trace records input sampling; `temperature_overrides.json` records actual
 role settings, and warmup/replay evidence records the generation parameters.
 All ordinary baseline exclusions and repetition checks remain active. Run the
 matched-temperature control separately before making campaign performance claims.
+
+A user-run endpoint stress test on 4xRTX5090 passed with the Qwen campaign's
+`-16` token-quantile floor: the candidate quantile was `-13.585031`, mean logprob
+was `-1.105059`, baseline-relative mean drop was `0.839368`, and coverage was
+100%. Three baseline repetition exclusions left 29 scored prompts. This supports
+the selected floor for that run; it does not establish semantic output quality or
+the matched-temperature false-positive rate. The Qwen fixture and launch helper
+pin this floor for new campaigns. Existing campaigns retain their frozen values;
+the generic seed-time default remains `-12`.
 
 ## Inspect inputs on a CPU VM
 

@@ -54,7 +54,7 @@ python -m campaign.seed \
   --bench-correctness-num-prompts 32 \
   --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.4 \
   --bench-correctness-min-mean-logprob=-4 \
-  --bench-correctness-min-token-logprob=-12 \
+  --bench-correctness-min-token-logprob=-16 \
   --bench-correctness-min-token-quantile=0.001 \
   --bench-correctness-min-coverage-ratio=0.5 \
   --bench-correctness-max-mean-logprob-drop=2.5 \

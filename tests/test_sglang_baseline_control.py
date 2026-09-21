@@ -147,7 +147,7 @@ def test_endpoint_summary_reports_absolute_failures_and_relative_boundary():
             BASELINE_INDEX: report(-2.0),
             0: report(
                 -4.5,
-                quantile_logprob=-13,
+                quantile_logprob=-17,
                 coverage_ratio=0.4,
                 verdict="fail_correctness",
             ),
