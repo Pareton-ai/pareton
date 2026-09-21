@@ -87,7 +87,7 @@ log "Preparing sampled workload and benchmark request"
 python "$script_root/prepare.py" "$run_root" "$sampling_rule"
 output_dir="$run_root/output-$(date -u +%Y%m%dT%H%M%SZ)"
 phase=benchmark
-log "Starting baseline, candidate, correctness scorer, and baseline drift replay"
+log "Starting opening baseline, baseline repeatability replay, candidate, and correctness scorer"
 log "Live benchmark logs: $output_dir/harness.log; phase state: $output_dir/phase.json"
 python -m bench --request "$run_root/bench_request.json" --output-dir "$output_dir"
 log "Benchmark completed; inspect candidate outcomes in $output_dir/bench_report.json"

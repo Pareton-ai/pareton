@@ -221,7 +221,7 @@ def test_void_when_baseline_drift_is_over_the_ceiling():
     assert rank(entries, drift=0.05).void is False
 
 
-def test_void_when_the_closing_baseline_produced_no_drift_number():
+def test_void_when_the_second_baseline_produced_no_comparison():
     decision = rank([baseline(), challenger("C", 0.42)], drift=None)
     assert decision.void_reason == VOID_BASELINE_FAILED
 

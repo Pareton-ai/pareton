@@ -7,7 +7,7 @@
   "n_prompts": 32,
   "n_rows": 6000,
   "request_interval_ms": 2,
-  "temperature_range": [0.1, 1.5],
+  "temperature_range": [0.1, 1.01],
   "revision": "0db15c0624f19d63e2efe1021595af933cc5b6cc",
   "seed_block_offset": 10,
   "split": "train",

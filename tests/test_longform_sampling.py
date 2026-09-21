@@ -288,7 +288,8 @@ def test_qwen_fixture_uses_longwriter_and_preserves_output_ceiling():
     assert r["dataset"] == "zai-org/LongWriter-6k"
     assert r["max_tokens"] == 5120
     assert r["min_output_tokens"] == 3000
-    assert r["temperature_range"] == [0.1, 1.5]
+    assert r["temperature_range"] == [0.1, 1.01]
+    assert f["bench"]["correctness"]["thresholds"]["max_mean_logprob_drop"] == 2.5
     assert "randomize_seed" not in r
     omitted_floor = {
         key: value for key, value in r.items() if key != "min_output_tokens"

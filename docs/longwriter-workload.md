@@ -28,11 +28,17 @@ arrivals, fees and emissions remain as configured in the seed helper.
 minimum generation length. A long source answer does not establish that the
 model will produce a long new response.
 
-New Qwen campaign fixtures pin `temperature_range=[0.1, 1.5]`. The sampler
+New Qwen campaign fixtures pin `temperature_range=[0.1, 1.01]`. The sampler
 reproducibly derives one temperature per prompt from the round seed and request
 index, uniformly over the range to six decimal places. Each prompt keeps that
 temperature across warmups and measured repetitions; different rounds derive
 new temperatures.
+
+New campaigns allow a maximum mean-logprob drop of `2.5` below the opening
+baseline, through the same trusted scorer. Absolute likelihood floors and the
+per-prompt `0.10` distinct-character-16-gram drop limit remain unchanged. This
+wider likelihood tolerance is an operator-selected setting, not a measured
+false-positive guarantee. Existing campaigns retain their pinned threshold.
 
 Generation always uses `seed=0`, including qualification, warmups, opening and
 second baselines, and candidates. Repetitions repeat the same sampling settings
@@ -200,7 +206,11 @@ stability under concurrent round load.
 
 The second baseline retains the `baseline-drift` role and `baseline_drift` report
 field for compatibility. Because it now precedes candidates, the comparison
-measures baseline repeatability, not hardware drift across the candidate runs.
+measures initial baseline repeatability, not hardware drift across the candidate
+runs. The existing `PARETON_BASELINE_DRIFT_CEILING` (default `0.05`) still voids
+a round when the absolute comparison exceeds the ceiling. The config name and
+`baseline_drift` void reason remain compatibility names; neither implies that
+hardware conditions were measured during or after candidates.
 Plan version 2 in progress metadata lets the dashboard retain historical order
 for old rounds and show both baselines first for new rounds.
 
@@ -211,6 +221,45 @@ reported completion tokens require, so some coalesced speculative streams remain
 incompatible with SLA timing. Forced-tail diagnostic exemptions require both a
 forced baseline probe reference and the original request's `ignore_eos=true`;
 normal-EOS requests cannot inherit them.
+
+## Baseline-as-candidate diagnostic on four RTX5090 GPUs
+
+On a dedicated idle Linux GPU host, install `requirements.txt` in a Python
+virtual environment and run from the repository root:
+
+```bash
+export PYTHONPATH="$PWD"
+export PYTHONUNBUFFERED=1
+export PARETON_BENCH_HF_CACHE_DIR=/workspace/hf-cache
+export PARETON_BENCH_ENGINE_CACHE_DIR=/workspace/engine-cache
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+python ops/sglang-baseline-control.py \
+  --output-dir "/workspace/pareton-control-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+This uses the fixture paired with `ops/seed-sglang-qwen38-27b.sh`: the pinned
+image, model, TP4 flags, scorer memory setting, 32 prompts at 2 ms intervals,
+four input tiers, two SGLang warmups and three measured repetitions per engine.
+The baseline image occupies the candidate slot too, with normal candidate cache
+isolation. No native rebuild, campaign creation, database or chain write occurs.
+The script takes the static-host lock and refuses a GPU already doing work.
+Docker registry access and Hugging Face access must be configured; existing
+weight and compile caches are reused. Run as root on the dedicated VM.
+
+Without `--sampling-rule`, the script samples an unqualified source pool. It is
+a diagnostic and may fail early on short or repetitive baseline output. It does
+not fabricate qualification evidence or authorize campaign launch. To test the
+qualified campaign pool, pass `--sampling-rule /path/to/sampling_rule.json`;
+the file must match the current fixture and qualification contract.
+
+Inspect `control_summary.json`, `output/bench_report.json`, `output/harness.log`
+and `output/evidence/`. The exit status is nonzero on harness failure, candidate
+rejection or an initial baseline comparison beyond the configured ceiling.
+There is no positive-speedup requirement for an identical-image control.
+Use a fresh output directory for each run. Change `--block-hash` to another
+64-character hexadecimal value to sample a different reproducible round;
+generation seeds remain zero. One passing control is a smoke test, not an
+estimate of the guard's false-positive rate across independent workloads.
 
 ## Inspect inputs on a CPU VM
 
