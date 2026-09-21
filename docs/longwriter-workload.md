@@ -264,6 +264,39 @@ Use a fresh output directory for each run. Change `--block-hash` to another
 generation seeds remain zero. One passing control is a smoke test, not an
 estimate of the guard's false-positive rate across independent workloads.
 
+### Stress the temperature endpoints
+
+Add `--temperature-endpoints` to the control command to generate all opening and
+repeatability baseline responses at `0.1`, and all responses in the identical-image
+candidate slot at `1.01`. The same 32 LongWriter prompts, eight in each 2k, 4k,
+8k and 16k input tier, are reused unchanged. Each role uses its endpoint in both
+warmups and all three measured repetitions. Generation seed remains zero.
+
+```bash
+python ops/sglang-baseline-control.py --temperature-endpoints \
+  --output-dir "/workspace/pareton-endpoints-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+The trusted scorer grades each role's latency-median response using the existing
+absolute likelihood, coverage and repetition checks. `likelihood_summary.json`
+reports both roles' mean logprobs, raw minima, token quantiles, coverage, the
+baseline-minus-candidate mean drop, and pass/fail against both `1.5` and `2.5`.
+The active campaign fixture uses `2.5`; comparing against `1.5` requires no extra
+GPU run. `min_token_logprob=-12` applies to the `0.001` token quantile, not the
+single lowest token. `endpoint_correctness.json` retains both complete reports,
+including the opening baseline report normally consumed by the harness. Missing
+scoring results remain unknown; early baseline exclusions can prevent the test
+from reaching the candidate or scorer.
+
+This is deliberately a temperature-mismatch stress test, not a normal campaign
+qualification or a valid speedup comparison. The campaign matches temperatures
+between engines. The diagnostic overrides exist only inside this script process;
+they do not alter the production API, sampler, receipt or campaign. The saved
+source trace records input sampling; `temperature_overrides.json` records actual
+role settings, and warmup/replay evidence records the generation parameters.
+All ordinary baseline exclusions and repetition checks remain active. Run the
+matched-temperature control separately before making campaign performance claims.
+
 ## Inspect inputs on a CPU VM
 
 From an installed repository checkout, run:
