@@ -15,7 +15,9 @@ mkdir -p "$output_dir"
 export PARETON_BUILD_TIMEOUT_S="${PARETON_BUILD_TIMEOUT_S:-172800}"
 # Operator-selected parallelism for this SGLang ops build. NVCC threads per job
 # remain one; MAX_JOBS also controls CMake and Rust build concurrency.
-export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-6}"
+# Keep the default at the a2b-build.sh value: cicc peaks 6-12GB/job, so the safe
+# ceiling is RAM/3GB. Raise it explicitly when running on a large builder.
+export PARETON_BUILD_MAX_JOBS="${PARETON_BUILD_MAX_JOBS:-2}"
 export PARETON_BUILD_LOG_DIR="${PARETON_BUILD_LOG_DIR:-$output_dir/logs}"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
 engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
