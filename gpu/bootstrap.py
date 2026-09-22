@@ -36,6 +36,31 @@ def local_code_sha(repo_root: Path) -> str:
     return (proc.stdout or "").strip() or "unknown"
 
 
+def dns_repair_block() -> str:
+    """Shell that makes name resolution work, or fails the bootstrap.
+
+    Two faults stack on a container-backed pod. Its Docker resolv.conf points
+    at 127.0.0.11, whose upstream is the host's 127.0.0.53 stub, unreachable
+    from inside; and the host network drops UDP/53 to public resolvers while
+    answering the same queries over TCP. So the repair needs both a reachable
+    resolver and ``use-vc``, which is glibc's "always use TCP".
+
+    Runs only when resolution is already broken, so a healthy pod keeps the
+    resolver it came with. Expects ``$SUDO`` to be set by the caller.
+    """
+    return """
+if ! getent hosts pypi.org >/dev/null 2>&1; then
+  echo "pod cannot resolve pypi.org; writing public resolvers over TCP"
+  printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\noptions use-vc\\n' \\
+    | $SUDO tee /etc/resolv.conf >/dev/null
+  getent hosts pypi.org >/dev/null 2>&1 || {
+    echo "pod DNS still broken after resolv.conf repair"
+    exit 1
+  }
+fi
+"""
+
+
 def bootstrap_script(*, with_nvidia_toolkit_install: bool = True) -> str:
     """Generate a verify-first bootstrap shell script (no secrets)."""
     toolkit = ""
@@ -56,22 +81,13 @@ if ! $SUDO docker info 2>/dev/null | grep -qi nvidia; then
   $SUDO systemctl restart docker || $SUDO service docker restart || true
 fi
 """
+    dns = dns_repair_block()
     return f"""set -euo pipefail
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -E"; fi
 
-# DNS first: a container-backed pod can ship a Docker resolv.conf pointing at
-# 127.0.0.11, which forwards to a host resolver the container cannot reach.
-# Every curl, apt and pip below then dies on name resolution, so repair it
-# before the first fetch rather than voiding the round three steps later.
-if ! getent hosts pypi.org >/dev/null 2>&1; then
-  echo "pod cannot resolve pypi.org; writing public resolvers"
-  printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' | $SUDO tee /etc/resolv.conf >/dev/null
-  getent hosts pypi.org >/dev/null 2>&1 || {{
-    echo "pod DNS still broken after resolv.conf repair"
-    exit 1
-  }}
-fi
-
+# DNS before the first fetch: every curl, apt and pip below dies on name
+# resolution otherwise, and the round voids three steps later.
+{dns}
 # Docker: verify first; install only if missing.
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | $SUDO sh
