@@ -918,11 +918,29 @@ def test_round_detail_entries_and_live_phase(monkeypatch, client: TestClient):
     # 0.0 is a real score; a disqualified entry has none.
     assert baseline["score"] == 0.0
     assert challenger["score"] is None
-    assert challenger["disqualify_reason"] == "fail_correctness"
+    # A disqualify_reason can quote the patched source; only scored entries
+    # keep theirs public.
+    assert challenger["disqualify_reason"] is None
     # Detail page: full hotkey. Evidence stays behind its gate.
     assert challenger["hotkey"] == HOTKEY
     assert "evidence_s3_url" not in challenger
     assert "report" not in challenger
+
+
+def test_round_detail_keeps_the_reason_for_a_scored_entry(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    entries = _round_entries()
+    entries[1]["status"] = "scored"
+    entries[1]["score"] = 0.4
+    monkeypatch.setattr(server, "get_round", lambda _rid: _round_row())
+    monkeypatch.setattr(server, "list_round_entries", lambda _rid: entries)
+    body = client.get(f"/v1/rounds/{ROUND_ID}").json()
+    assert body["entries"][1]["disqualify_reason"] == "fail_correctness"
+    # The stored evidence is unchanged by the read-time filter.
+    assert entries[1]["disqualify_reason"] == "fail_correctness"
 
 
 def test_round_detail_drops_phase_text_outside_the_vocabulary(
@@ -1129,10 +1147,13 @@ def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestCli
     assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
 
 
-def test_entry_report_carries_the_reason_for_a_non_scored_entry(
+def test_entry_report_withholds_the_reason_for_a_non_scored_entry(
     monkeypatch, client: TestClient
 ):
-    """A disqualified entry never reached scoring, so it has no prompts."""
+    """A disqualified entry never reached scoring, so it has no prompts.
+
+    Its reason can quote the miner's patched source, so it stays private.
+    """
     from api import server
 
     row = _score_report_row(
@@ -1152,10 +1173,12 @@ def test_entry_report_carries_the_reason_for_a_non_scored_entry(
     body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
     server.RoundEntryReportModel.model_validate(body)
     assert body["score"] is None
-    assert body["reason"] == "mean_logprob -3.9 below -2.0"
+    assert body["reason"] is None
     assert body["prompts"] == []
     assert body["prompt_summary"]["total"] == 0
     assert body["correctness"]["verdict"] == "fail_correctness"
+    # The durable column and the nested report are not changed by the route.
+    assert row["disqualify_reason"] == row["report"]["reason"] != ""
 
 
 def test_entry_report_reads_the_baseline_row_as_an_sla_replay(
@@ -1495,7 +1518,7 @@ def test_entry_report_withholds_raw_logs_and_patch_locators(monkeypatch, client)
 @pytest.mark.parametrize(
     "status", ["pending", "running", "disqualified", "infra_failed", "scored"]
 )
-def test_entry_report_shows_the_reason_for_every_status(monkeypatch, client, status):
+def test_entry_report_reason_follows_the_scored_gate(monkeypatch, client, status):
     from api import server
 
     source = "mean_logprob -3.9 below -2.0"
@@ -1510,7 +1533,12 @@ def test_entry_report_shows_the_reason_for_every_status(monkeypatch, client, sta
     assert response.status_code == 200
     body = response.json()
     assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
-    assert body["reason"] == source
+    # Top-level failure reasons can quote the patched source: scored only.
+    if status == "scored":
+        assert body["reason"] == source
+    else:
+        assert body["reason"] is None
+    # Per-prompt and nested harness diagnostics stay public either way.
     assert body["sla"]["reason"] == source
     assert body["prompts"][0]["reason"] == source
     assert body["correctness"]["requests"][0]["reason"] == source

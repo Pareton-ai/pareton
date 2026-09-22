@@ -192,11 +192,19 @@ def test_private_routes_preserve_missing_and_ambiguous_lookups(
 @pytest.mark.parametrize(
     "status", ["pending", "running", "disqualified", "infra_failed", "scored"]
 )
-def test_entry_reasons_are_public_on_every_route(scenario, monkeypatch, route, status):
+def test_failure_reasons_stay_private_unless_scored(
+    scenario, monkeypatch, route, status
+):
+    """A disqualify_reason can carry a traceback quoting the patched source."""
     from copy import deepcopy
 
     client, _, row, _ = scenario
-    reason = "fail_correctness: mean_logprob -3.9 below -2.0"
+    reason = (
+        "Traceback (most recent call last):\n"
+        '  File "/src/patched.py", line 42, in forward\n'
+        "    return self.private_kernel(x)\n"
+        "ValueError: private kernel exploded"
+    )
     entry = {
         "round_id": CID,
         "ordinal": 3,
@@ -233,7 +241,24 @@ def test_entry_reasons_are_public_on_every_route(scenario, monkeypatch, route, s
         public = payload["submissions"][0]["round"]
     else:
         public = payload["round"]
-    assert public["disqualify_reason"] == reason
+    if status == "scored":
+        assert public["disqualify_reason"] == reason
+    else:
+        # Parsed JSON, not the raw body: escaped quotes cannot hide a leak.
+        assert public["disqualify_reason"] is None
+
+        def strings(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for item in value.values():
+                    yield from strings(item)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from strings(item)
+
+        assert all("private_kernel" not in value for value in strings(payload))
     assert public["status"] == status
     assert public["score"] == entry["score"]
+    # The stored evidence is unchanged by the read-time filter.
     assert entry == stored

@@ -490,7 +490,7 @@ def campaign_submissions(
                     if k not in ("latest_state", "round")
                 },
                 "latest_state": r.get("latest_state"),
-                "round": r.get("round"),
+                "round": _public_round_entry(r.get("round")),
             }
             for r in page["items"]
         ],
@@ -571,15 +571,30 @@ def round_detail(round_id: UUID, response: Response):
         # progress is clamped to short scalars.
         "phase": coerce_phase(row.get("phase")),
         "progress": coerce_progress(row.get("progress")),
-        "entries": list_round_entries(round_id),
+        "entries": [
+            _public_round_entry(entry) for entry in list_round_entries(round_id)
+        ],
     }
+
+
+# Failure reasons are withheld on public routes unless the entry's status is
+# scored: the strings can contain Python tracebacks quoting actual lines from
+# the miner's patched source, so blocking the patch download alone would not
+# prevent disclosure. Scored entries keep the reasons their score was derived
+# from. The stored evidence is unchanged; this filters on read only.
+def _public_round_entry(row: dict | None) -> dict | None:
+    if row is None:
+        return None
+    public = dict(row)
+    if public.get("status") != "scored":
+        public["disqualify_reason"] = None
+    return public
 
 
 # Raw log artifacts stay private wherever they surface: compiler and engine
 # output can quote source lines from the private patch. Diagnostics proper (event
-# details, evidence references, job errors, failure reasons) stay public so every
-# miner can debug a submission; serving them behind authentication is a separate
-# follow-up.
+# details, evidence references, job errors) stay public so every miner can debug
+# a submission; serving them behind authentication is a separate follow-up.
 _PRIVATE_ARTIFACT_FIELDS = frozenset(
     {"build_log_tail", "log_tail", "stdout", "stderr", "retrieval_url"}
 )
@@ -621,6 +636,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         raise HTTPException(status_code=404, detail="round entry not found")
     _set_live_round_cache_control(response, [row["round_status"]])
 
+    scored = row["status"] == "scored"
     raw = _public_diagnostics(row.get("report") or {})
     if not isinstance(raw, dict):
         raw = {}
@@ -689,7 +705,9 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         "engine_image_ref": row["engine_image_ref"],
         "image_digest": raw.get("image_digest"),
         "score": row["score"],
-        "reason": row["disqualify_reason"] or raw.get("reason"),
+        # Failure reasons can quote the miner's patched source; only a scored
+        # entry's reasons stay public.
+        "reason": (row["disqualify_reason"] or raw.get("reason")) if scored else None,
         "engine_crashed": bool(raw.get("engine_crashed", False)),
         "scoring_rule": row["scoring_rule"] or {},
         "prompt_summary": summarize_prompt_scores(prompts),
@@ -753,7 +771,7 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     states = list_latest_states([row["id"]])
     jobs = list_submission_jobs(row["id"])
     round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
-    round_info = dict(round_info) if round_info is not None else None
+    round_info = _public_round_entry(round_info)
     if round_info is not None:
         round_info.pop("_patch_evaluated_at", None)
     response.headers["Cache-Control"] = _NO_STORE

@@ -107,24 +107,40 @@ _SECRET_SHAPE = re.compile(
 # A traceback's frame line names files and line numbers, and the excerpt under
 # it is a source line from the private patch. The unindented exception summary
 # that ends the traceback is not source and stays.
-_TRACEBACK_HEADER = re.compile(r"^\s*Traceback \(most recent call last\):\s*$")
+_TRACEBACK_HEADER = re.compile(
+    r"^\s*(?:Exception Group )?Traceback \(most recent call last\):\s*$"
+)
 _TRACEBACK_FRAME = re.compile(r'^\s*File "[^"]*", line \d+')
+# Python 3.11 ExceptionGroup tracebacks prefix headers, frames, and excerpts
+# with "+ " or "| ". Container log tails often prefix every line the same way.
+_GROUP_PREFIX = re.compile(r"^\s*(?:[+|] )+")
+# Chained-traceback separators carry no summary of their own and go too.
+_TRACEBACK_SEPARATOR = re.compile(
+    r"^\s*(?:During handling of the above exception, another exception occurred:"
+    r"|The above exception was the direct cause of the following exception:)\s*$"
+)
 
 
 def _strip_tracebacks(text: str) -> str:
-    """Drop traceback headers, frame lines, and their source excerpts."""
+    """Drop traceback headers, frame lines, separators, and source excerpts."""
     out: list[str] = []
     in_excerpt = False
     for line in text.splitlines():
-        if _TRACEBACK_HEADER.match(line) or _TRACEBACK_FRAME.match(line):
-            # What follows a frame line is its indented source excerpt and,
-            # on 3.11+, caret markers; both stay with the frame and go.
+        body = _GROUP_PREFIX.sub("", line)
+        if not body.strip(" \t\r"):
+            # Traceback formatting only; keep no empty lines either way.
+            continue
+        if (
+            _TRACEBACK_HEADER.match(body)
+            or _TRACEBACK_SEPARATOR.match(body)
+            or _TRACEBACK_FRAME.match(body)
+        ):
             in_excerpt = True
             continue
-        if in_excerpt and (not line.strip() or line[:1].isspace()):
+        if in_excerpt and body[:1].isspace():
             continue
         in_excerpt = False
-        out.append(line)
+        out.append(body)
     return "\n".join(out)
 
 

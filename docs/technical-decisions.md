@@ -39,3 +39,30 @@ Tolerated prompts remain in correctness and performance scoring.
 A known fifth span failure survives a subsequent scorer error. Tolerated span
 flags alone cannot turn an incomplete scorer run into a correctness failure.
 Linear tools were unavailable; this policy follows the user's explicit request.
+
+
+## 2026-09-22: Keep every patch private permanently
+
+Supersede all delayed-publication and legacy-public exemptions at the user's
+request. Public API reads never publish patches, disclose download links, or
+schedule a reveal. Remove the public-copy implementation and timer logic.
+Retain PARETON_PATCH_REVEAL_DELAY_S with a ten-year default only for rollback
+compatibility; it has no effect on public access in this version.
+
+Failure reasons (round_entries.disqualify_reason and report reason strings)
+are null on public routes unless the entry's status is scored, because worker
+exception strings can contain Python tracebacks quoting lines from the miner's
+patched source. Blocking the patch download alone does not prevent that
+disclosure. The filter is read-time only; stored evidence is unchanged. Raw
+build/engine logs stay private wherever they surface; the remaining miner
+diagnostics (event details, evidence references, job errors) stay public with
+patch URLs masked inside them. Serving diagnostics behind authentication is a
+separate follow-up.
+
+The privacy rollout is not complete at the API: existing public S3 objects
+remain downloadable directly until the bucket policy deploys, and candidate
+container images carry patched source. Deploy authenticated legacy readers
+before restricting S3 access, verify anonymous reads fail for patch and
+evidence objects and candidate images, purge cached public artifacts where
+applicable, and confirm internal workers still fetch patches and pull images
+afterward. Previously downloaded copies cannot be recalled.

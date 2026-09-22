@@ -138,8 +138,46 @@ def test_caret_markers_and_chained_tracebacks_are_dropped():
     for leaked in ("private_kernel", "private_grad", "patched.py", "^^^"):
         assert leaked not in out
     assert "ValueError: first" in out
-    assert "During handling" in out
+    # The separator carries no summary of its own; both summaries survive.
+    assert "During handling" not in out
     assert "RuntimeError: second" in out
+
+
+def test_exception_group_tracebacks_lose_their_prefixed_frames():
+    """Python 3.11 prefixes group tracebacks with + and |: still source."""
+    # A captured 3.11-style traceback also exercises this on supported 3.10.
+    detail = (
+        "  + Exception Group Traceback (most recent call last):\n"
+        '  |   File "/src/patched.py", line 42, in forward\n'
+        '  |     raise ExceptionGroup("group", errors)\n'
+        "  | ExceptionGroup: group (2 sub-exceptions)\n"
+        "  +-+---------------- 1 ----------------\n"
+        "    | ValueError: bad\n"
+        "    +---------------- 2 ----------------\n"
+        "    | TypeError: worse\n"
+        "    +------------------------------------\n"
+    )
+    out = sanitize_void_detail(detail)
+    assert "Traceback" not in out
+    assert "raise ExceptionGroup" not in out
+    for line in out.splitlines():
+        assert not line.startswith(("|", "+"))
+    assert "ExceptionGroup: group" in out
+    assert "ValueError: bad" in out
+    assert "TypeError: worse" in out
+
+
+def test_orphaned_excerpts_in_a_log_tail_are_dropped():
+    """A truncated container log tail starts mid-stack, before any header."""
+    detail = (
+        '  File "/src/patched.py", line 42, in forward\n'
+        "    return self.private_kernel(x)\n"
+        "ValueError: private kernel exploded"
+    )
+    out = sanitize_void_detail(detail)
+    assert "private_kernel" not in out
+    assert "patched.py" not in out
+    assert out == "ValueError: private kernel exploded"
 
 
 def test_a_bare_traceback_publishes_nothing():
