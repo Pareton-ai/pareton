@@ -170,8 +170,11 @@ migration is required, and existing campaigns are not rewritten.
 ## Natural-output repetition enforcement
 
 For each retained correctness prompt, check every measured natural response for
-absolute repetition. A looping sibling disqualifies the candidate even when a
-clean response is the latency median. Logprob grading and baseline-relative checks
+absolute repetition. A distinct character-16-gram ratio below 0.15 disqualifies
+immediately, including on a sibling of a clean latency-median response. A longest
+repeated-span ratio at or above 0.25 consumes one of four allowed prompt failures;
+the fifth affected prompt disqualifies. Count each prompt once across repetitions,
+scored prefixes and full outputs. Logprob grading and baseline-relative checks
 still use the latency-median response. The policy applies to normal-EOS workloads
 across all four input tiers. Inspect only newly generated text, including text
 beyond the baseline's output length; conversation history is never graded.
@@ -181,9 +184,13 @@ relative grading, and records every absolute repetition result in
 `repetition_degeneracy`. All generated texts remain in SLA `rep_N/requests.jsonl`
 evidence. Character n-gram and repeated-span thresholds, including the
 thinking/answer split, are unchanged.
-An additional baseline-relative check rejects a selected response whose distinct
+An additional baseline-relative check flags a selected response whose distinct
 character-16-gram ratio is more than 0.10 below the lowest ratio from the opening
 baseline's valid measured responses for that prompt. Exactly 0.10 is allowed.
+This check has its own four-prompt allowance per candidate per round. The span
+and relative allowances are separate fixed counts, including when baseline
+exclusions reduce the usual 32-prompt cohort. Tolerated prompts remain in both
+likelihood and performance scoring. Baseline exclusions remain strict.
 The baseline and candidate metrics use the same thinking/answer split. Outputs
 shorter than 64 characters retain the existing exemption. Evidence records the
 reference ratio, observed drop and allowed drop, including when the scorer fails
@@ -349,8 +356,10 @@ fields and score arithmetic. New reports add:
 - `correctness.prompt_checks`: text-free repetition diagnostics keyed by request
   ID, including candidate and opening-baseline distinct ratios, their difference,
   the allowed drop, exclusions and the applied repetition verdict.
+- `correctness.repeated_span_degeneracy` and `correctness.relative_degeneracy`:
+  failure count, affected prompt IDs and allowance for each repetition policy.
 
-The last two are stored in existing report JSON. No DB migration or evidence
+The diagnostic fields are stored in existing report JSON. No DB migration or evidence
 bundle fetch is needed. Old reports have no diagnostics; consumers must treat
 missing data as unknown. Disqualified entries can have prompt checks even when
 `prompts` contains no score contributions. Forced-tail diagnostics retain their

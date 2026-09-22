@@ -706,10 +706,10 @@ def test_a_loop_without_spaces_is_still_caught(tmp_path: Path):
     assert "16-gram" in (report.reason or "")
 
 
-def test_a_long_period_loop_is_disqualified_by_the_repeated_span_bar(
+def test_a_long_period_loop_consumes_one_repeated_span_allowance(
     tmp_path: Path,
 ):
-    """Scaling the repeated unit with a 5120-token budget must not evade us."""
+    """A long-period loop is diagnosed and consumes one prompt allowance."""
     outputs = [_captured("r1", "Hello world", LONG_PERIOD_LOOP_TEXT, tokens=300)]
     scorer_cfg = MockEngineConfig(host="127.0.0.1", port=0, logprobs=[-0.5])
     with MockEngine(scorer_cfg) as scorer:
@@ -719,8 +719,9 @@ def test_a_long_period_loop_is_disqualified_by_the_repeated_span_bar(
             cfg=_cfg(num_prompts=1),
             evidence_path=tmp_path / "correctness" / "candidate_0.jsonl",
         )
-    assert report.verdict == "fail_correctness"
-    assert "longest repeated span" in (report.reason or "")
+    assert report.verdict == "pass"
+    assert report.repeated_span_degeneracy["failed_request_ids"] == ["r1"]
+    assert "longest repeated span" in report.prompt_checks[0]["degenerate"]
     assert report.mean_logprob == pytest.approx(-0.5)
 
 
@@ -1261,7 +1262,7 @@ def test_loop_before_the_baseline_stop_is_still_disqualified(tmp_path: Path):
 
 @pytest.mark.parametrize("forced", [False, True])
 def test_tail_repetition_policy_requires_a_forced_trace(tmp_path: Path, forced: bool):
-    """Only forced traces make tail checks diagnostic, even with a clean baseline."""
+    """Forced tails are diagnostic; natural spans consume the allowance."""
     baseline_forced = PROSE_TEXT + REPETITIVE_LIST_TEXT
     candidate = PROSE_TEXT + LOOP_TEXT
     outputs = [_captured("r1", "Hello world", candidate, tokens=240, ignore_eos=forced)]
@@ -1277,7 +1278,8 @@ def test_tail_repetition_policy_requires_a_forced_trace(tmp_path: Path, forced: 
                 forced=forced,
             ),
         )
-    assert report.verdict == ("pass" if forced else "fail_correctness")
+    assert report.verdict == "pass"
+    assert report.repeated_span_degeneracy["failed_prompts"] == (0 if forced else 1)
     evidence = json.loads((tmp_path / "correctness" / "candidate_0.jsonl").read_text())
     assert evidence["relative_degenerate"] is not None
     assert evidence["degeneracy_scope"] == (
