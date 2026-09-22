@@ -141,7 +141,8 @@ def cleanup(
 
     Failed image removals remain tracked for the next attempt. Never force image
     deletion: an unrelated container may still reference the same image. Return
-    image-removal failures for alerting without blocking the next evaluation.
+    image-removal failures so the caller can retry them next round without
+    blocking the evaluation or paging.
     """
     if collected_output is not None and not _OUTPUT.fullmatch(collected_output):
         raise ValueError("collected output must name one static run directory")

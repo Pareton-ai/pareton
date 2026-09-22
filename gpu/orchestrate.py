@@ -297,7 +297,7 @@ def _static_host_cleanup(
     if result.exit_code == IMAGE_RETRY_EXIT:
         error = (result.stderr or result.stdout).strip()[-800:]
         logger.warning("static host image cleanup deferred: %s", error)
-        obs.static_host_cleanup_failed(pod=pod.name, error=error)
+        obs.static_host_cleanup_deferred(pod=pod.name, error=error)
         return
     if result.exit_code:
         raise GpuError(

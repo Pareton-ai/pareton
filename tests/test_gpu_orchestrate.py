@@ -2115,7 +2115,7 @@ def test_reaper_racing_bootstrap_defers_only_lock_contention(
         assert not provider.destroy_calls
 
 
-def test_image_cleanup_retry_alerts_without_blocking_static_round(
+def test_image_cleanup_retry_defers_without_blocking_or_paging_static_round(
     tmp_path, monkeypatch
 ):
     provider = FakeProvider()
@@ -2129,7 +2129,11 @@ def test_image_cleanup_retry_alerts_without_blocking_static_round(
         "gpu.orchestrate.pull_engine_images", lambda *a, **k: stages.append("pull")
     )
     monkeypatch.setattr(
-        "gpu.orchestrate.obs.static_host_cleanup_failed", lambda **k: alerts.append(k)
+        "gpu.orchestrate.obs.static_host_cleanup_deferred", lambda **k: alerts.append(k)
+    )
+    failures: list[dict] = []
+    monkeypatch.setattr(
+        "gpu.orchestrate.obs.static_host_cleanup_failed", lambda **k: failures.append(k)
     )
 
     def runner(cmd, **kwargs):
@@ -2158,4 +2162,5 @@ def test_image_cleanup_retry_alerts_without_blocking_static_round(
     )
     assert stages == ["cleanup", "pull", "bench", "cleanup"]
     assert len(alerts) == 2
+    assert failures == []
     assert all("image in use" in alert["error"] for alert in alerts)

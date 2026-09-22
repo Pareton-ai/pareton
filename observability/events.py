@@ -369,6 +369,17 @@ def static_host_cleanup_failed(*, pod: str, error: str) -> dict[str, Any]:
     )
 
 
+def static_host_cleanup_deferred(*, pod: str, error: str) -> dict[str, Any]:
+    """Candidate image is still in use. It stays tracked and is retried later.
+
+    This is not a failed round and must not page. A container that outlives
+    one round is expected; forcing the image delete could remove a live user.
+    """
+    return _emit(
+        "static_host_cleanup_deferred", pod=pod, provider="static_ssh", error=error
+    )
+
+
 # -- Provider balance --------------------------------------------------------
 
 

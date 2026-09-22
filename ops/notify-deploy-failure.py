@@ -54,6 +54,9 @@ BASE_ENV = "PARETON_NOTIFY_BASE"
 UID_ENV = "PARETON_NOTIFY_EXPECTED_UID"
 WEBHOOK_VAR = "PARETON_DISCORD_DEPLOY_WEBHOOK"
 SUPPRESS_SECONDS = 30 * 60
+# A drain past the wait budget is the release waiting on a live round.
+# Page once with that wording. The 30-minute failure reminder is for real faults.
+WAITING_STEPS = frozenset({"drain-wait"})
 REQUEST_TIMEOUT = 20
 MAX_ATTEMPTS = 2
 TOTAL_BUDGET_SECONDS = 60
@@ -220,8 +223,13 @@ def fault_key(facts: dict) -> dict:
 def build_message(facts: dict, fault: dict) -> str:
     count = fault.get("count", 1)
     first = fault.get("first_seen", facts["started_at"])
+    waiting = facts["step"] in WAITING_STEPS
     lines = [
-        "🚨 pareton deploy failed",
+        (
+            "pareton release waiting on active round"
+            if waiting
+            else "🚨 pareton deploy failed"
+        ),
         f"host: {facts['host']}",
         f"unit: {DEPLOY_UNIT} (exit {facts['exec_status']}, result {facts['exit_class']})",
         f"step: {facts['step']}",
@@ -292,11 +300,15 @@ def cmd_notify_failure(args: argparse.Namespace) -> int:
 
         last_notified = parse_iso(fault.get("last_notified") or "")
         now_dt = parse_iso(now)
+        remind = facts["step"] not in WAITING_STEPS
         if (
             same
             and last_notified
             and now_dt
-            and (now_dt - last_notified).total_seconds() < SUPPRESS_SECONDS
+            and (
+                not remind
+                or (now_dt - last_notified).total_seconds() < SUPPRESS_SECONDS
+            )
         ):
             state["fault"] = fault
             write_json_atomic(state_path(), state)
