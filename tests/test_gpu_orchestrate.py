@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1133,6 +1134,8 @@ def test_bootstrap_script_verify_first_no_token():
     assert "gpg --batch --yes --dearmor" in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
+    # DNS repair runs before the first fetch, or every curl/pip dies on it
+    assert script.index("nameserver 1.1.1.1") < script.index("get.docker.com")
     # sock ACL after toolkit restart so chmod hits the final socket
     assert script.index("systemctl restart docker") < script.index(
         "chmod 666 /var/run/docker.sock"
@@ -1140,6 +1143,64 @@ def test_bootstrap_script_verify_first_no_token():
     assert "stable/deb/nvidia-container-toolkit.list" in script
     assert "$distribution/libnvidia-container.list" not in script
     assert "grep -q '^deb '" in script
+
+
+def _run_dns_repair(tmp_path: Path, mode: str) -> tuple[int, str, str]:
+    """Run the DNS repair block under bash with getent and tee stubbed.
+
+    ``mode`` picks what the stubbed resolver does: ``healthy`` always
+    resolves, ``repairable`` resolves only once resolv.conf has been
+    rewritten, ``broken`` never resolves. Returns exit code, output, and
+    whatever the block wrote to the fake resolv.conf.
+    """
+    from gpu.bootstrap import dns_repair_block
+
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    resolv = tmp_path / "resolv.conf"
+    (stub_bin / "getent").write_text(
+        "#!/bin/sh\n"
+        f'case "{mode}" in\n'
+        "  healthy) exit 0 ;;\n"
+        f'  repairable) [ -s "{resolv}" ] && exit 0 || exit 2 ;;\n'
+        "  *) exit 2 ;;\n"
+        "esac\n"
+    )
+    # The block pipes the new resolv.conf through tee; catch it in tmp_path
+    # rather than writing /etc on the machine running the tests.
+    (stub_bin / "tee").write_text(f'#!/bin/sh\ncat > "{resolv}"\n')
+    for stub in ("getent", "tee"):
+        (stub_bin / stub).chmod(0o755)
+
+    script = f'set -euo pipefail\nSUDO=""\n{dns_repair_block()}'
+    proc = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{stub_bin}:/usr/bin:/bin"},
+        timeout=30,
+    )
+    written = resolv.read_text() if resolv.exists() else ""
+    return proc.returncode, proc.stdout + proc.stderr, written
+
+
+def test_dns_repair_leaves_healthy_resolver_alone(tmp_path: Path):
+    code, _, written = _run_dns_repair(tmp_path, "healthy")
+    assert code == 0
+    assert written == ""
+
+
+def test_dns_repair_rewrites_resolv_conf_over_tcp(tmp_path: Path):
+    code, _, written = _run_dns_repair(tmp_path, "repairable")
+    assert code == 0
+    # UDP/53 is dropped on the bench host, so the resolver must speak TCP.
+    assert written == "nameserver 1.1.1.1\nnameserver 8.8.8.8\noptions use-vc\n"
+
+
+def test_dns_repair_stops_bootstrap_when_it_does_not_take(tmp_path: Path):
+    code, output, _ = _run_dns_repair(tmp_path, "broken")
+    assert code == 1
+    assert "pod DNS still broken after resolv.conf repair" in output
 
 
 def test_orchestrate_repetitions_one_pod_five_runs(tmp_path: Path, monkeypatch):
