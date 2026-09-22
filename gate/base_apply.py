@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -16,8 +17,32 @@ def check_base_apply(
     patch_bytes: bytes,
     work_root: Path | None = None,
 ) -> GateResult:
-    """Clone/fetch baseline at commit and run `git apply --check --whitespace=nowarn`."""
+    """Clone/fetch baseline at commit and run `git apply --check --whitespace=nowarn`.
+
+    A missing ``work_root`` is created here and removed on every return,
+    including success and failure. A caller-provided root is left in place.
+    """
+    owns_root = work_root is None
     root = work_root or Path(tempfile.mkdtemp(prefix="pareton-apply-"))
+    try:
+        return _check_base_apply(
+            root=root,
+            baseline_repo=baseline_repo,
+            baseline_commit=baseline_commit,
+            patch_bytes=patch_bytes,
+        )
+    finally:
+        if owns_root:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def _check_base_apply(
+    *,
+    root: Path,
+    baseline_repo: str,
+    baseline_commit: str,
+    patch_bytes: bytes,
+) -> GateResult:
     root.mkdir(parents=True, exist_ok=True)
     repo_dir = root / "baseline"
     patch_path = root / "submission.diff"
