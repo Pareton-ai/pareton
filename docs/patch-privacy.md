@@ -10,8 +10,9 @@ The public API returns empty `retrieval_url`, null `patch_download_url`, and nul
 Submission events retain their states and timestamps, but their raw detail and
 evidence references are withheld. Job status and progress remain available;
 raw job errors are withheld. Nested report evidence and raw error/log fields
-are also removed while score and timing metrics remain available. Operators
-still have the original logs and
+are also removed while score and timing metrics remain available. Non-scored
+entry reports omit free-form reasons at every nesting level; scored-entry
+reasons retain their existing behavior. Operators retain the original logs and
 append-only audit events. No database migration or event rewrite is needed.
 
 ## Legacy objects and rollout order
@@ -32,10 +33,11 @@ retrieval without copying or deleting the only retained source of a patch.
    database-known patches can be read with the service identity and match their
    committed SHA-256. Keep the inventory outside the repository and protect it
    as operator data. Check lifecycle rules before retaining originals in place.
-4. Merge `PrivatePatchAndEvidenceReads` from
-   `ops/aws/s3-bucket-policy.json` into the live bucket policy, preserving
-   unrelated statements. The checked-in account is the verified production
-   service account, `820451690806`. Confirm that all internal S3 readers belong
+4. Replace the `PublicReadCampaignPatches` grant and merge the
+   `PrivatePatchAndEvidenceReads` deny from `ops/aws/s3-bucket-policy.json`
+   into the live bucket policy, preserving
+   unrelated statements. Public GetObject covers only realized traces.
+   The checked-in account is the verified production service account, `820451690806`. Confirm that all internal S3 readers belong
    to this account before applying. The explicit deny covers anonymous and
    other-account reads, including object versions, regardless of public ACLs.
    It does not grant any new reader permissions or block signed uploads.
@@ -65,12 +67,12 @@ import json
 from pathlib import Path
 before = json.loads(Path('/tmp/pareton-policy-before.json').read_text())
 source = json.loads(Path('ops/aws/s3-bucket-policy.json').read_text())
-sid = 'PrivatePatchAndEvidenceReads'
-restriction = next(s for s in source['Statement'] if s.get('Sid') == sid)
+managed = {'PublicReadCampaignPatches', 'PrivatePatchAndEvidenceReads'}
+replacements = [s for s in source['Statement'] if s.get('Sid') in managed]
 statements = before['Statement']
 if isinstance(statements, dict):
     statements = [statements]
-before['Statement'] = [s for s in statements if s.get('Sid') != sid] + [restriction]
+before['Statement'] = [s for s in statements if s.get('Sid') not in managed] + replacements
 Path('/tmp/pareton-policy-after.json').write_text(json.dumps(before, indent=2) + '\n')
 PY
 ```

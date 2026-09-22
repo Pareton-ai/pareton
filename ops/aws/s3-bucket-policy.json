@@ -6,7 +6,7 @@
       "Effect": "Allow",
       "Principal": "*",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::pareton-s3/stage0/campaigns/*"
+      "Resource": "arn:aws:s3:::pareton-s3/stage0/campaigns/*/realized-traces/*"
     },
     {
       "Sid": "PrivatePatchAndEvidenceReads",

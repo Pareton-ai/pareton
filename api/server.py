@@ -575,7 +575,7 @@ def round_detail(round_id: UUID, response: Response):
     }
 
 
-def _public_report(value: Any) -> Any:
+def _public_report(value: Any, *, include_reasons: bool) -> Any:
     """Retain score metrics while withholding nested artifacts and raw logs."""
     private_fields = {
         "evidence",
@@ -589,14 +589,16 @@ def _public_report(value: Any) -> Any:
         "traceback",
         "error",
     }
+    if not include_reasons:
+        private_fields.update({"reason", "disqualify_reason"})
     if isinstance(value, dict):
         return {
-            key: _public_report(item)
+            key: _public_report(item, include_reasons=include_reasons)
             for key, item in value.items()
             if key not in private_fields
         }
     if isinstance(value, list):
-        return [_public_report(item) for item in value]
+        return [_public_report(item, include_reasons=include_reasons) for item in value]
     return value
 
 
@@ -621,7 +623,8 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         raise HTTPException(status_code=404, detail="round entry not found")
     _set_live_round_cache_control(response, [row["round_status"]])
 
-    raw = _public_report(row.get("report") or {})
+    scored = row["status"] == "scored"
+    raw = _public_report(row.get("report") or {}, include_reasons=scored)
     if not isinstance(raw, dict):
         raw = {}
     score_report = raw.get("score_report")
@@ -689,9 +692,8 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         "engine_image_ref": row["engine_image_ref"],
         "image_digest": raw.get("image_digest"),
         "score": row["score"],
-        # disqualify_reason is the column the worker writes the harness reason
-        # into for every non-scored status, infra_failed included.
-        "reason": row["disqualify_reason"] or raw.get("reason"),
+        # Failed-entry reasons can contain source lines from worker exceptions.
+        "reason": (row["disqualify_reason"] or raw.get("reason")) if scored else None,
         "engine_crashed": bool(raw.get("engine_crashed", False)),
         "scoring_rule": row["scoring_rule"] or {},
         "prompt_summary": summarize_prompt_scores(prompts),

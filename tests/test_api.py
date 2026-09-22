@@ -1129,7 +1129,7 @@ def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestCli
     assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
 
 
-def test_entry_report_carries_the_reason_for_a_non_scored_entry(
+def test_entry_report_withholds_the_reason_for_a_non_scored_entry(
     monkeypatch, client: TestClient
 ):
     """A disqualified entry never reached scoring, so it has no prompts."""
@@ -1152,7 +1152,7 @@ def test_entry_report_carries_the_reason_for_a_non_scored_entry(
     body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
     server.RoundEntryReportModel.model_validate(body)
     assert body["score"] is None
-    assert body["reason"] == "mean_logprob -3.9 below -2.0"
+    assert body["reason"] is None
     assert body["prompts"] == []
     assert body["prompt_summary"]["total"] == 0
     assert body["correctness"]["verdict"] == "fail_correctness"
@@ -1477,3 +1477,40 @@ def test_entry_report_withholds_nested_artifacts_and_raw_errors(monkeypatch, cli
     assert body["correctness"]["requests"] == [{"coverage_ratio": 1.0}]
     assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
     assert row["report"]["correctness"]["requests"][0]["error"] == secret
+
+
+@pytest.mark.parametrize(
+    "status", ["pending", "running", "disqualified", "infra_failed", "scored"]
+)
+def test_entry_report_reason_privacy_follows_entry_status(monkeypatch, client, status):
+    from api import server
+
+    source = "private source from worker exception"
+    row = _score_report_row(status=status, disqualify_reason=source)
+    raw = row["report"]
+    raw["reason"] = source
+    raw["sla"]["reason"] = source
+    raw["correctness"]["requests"] = [
+        {"reason": source, "disqualify_reason": source, "coverage_ratio": 1.0}
+    ]
+    raw["score_report"]["prompts"][0]["reason"] = source
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *args: row)
+    response = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
+    assert body["correctness"]["requests"][0]["coverage_ratio"] == 1.0
+    if status == "scored":
+        assert body["reason"] == source
+        assert body["sla"]["reason"] == source
+        assert body["prompts"][0]["reason"] == source
+        assert body["correctness"]["requests"][0]["disqualify_reason"] == source
+    else:
+        assert source not in response.text
+        assert body["reason"] is None
+        assert "reason" not in body["sla"]
+        assert "reason" not in body["prompts"][0]
+        assert body["correctness"]["requests"] == [{"coverage_ratio": 1.0}]
+    # Neither the durable column nor the nested report is changed by redaction.
+    assert row["disqualify_reason"] == raw["reason"] == source
+    assert raw["correctness"]["requests"][0]["disqualify_reason"] == source

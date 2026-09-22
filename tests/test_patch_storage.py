@@ -262,3 +262,29 @@ def test_hash_utility_matches_exact_uploaded_bytes(tmp_path, capsys):
     patch.write_bytes(data)
     assert main([str(patch)]) == 0
     assert capsys.readouterr().out == f"sha256:{hashlib.sha256(data).hexdigest()}\n"
+
+
+def test_public_bucket_grant_matches_trace_producer_but_not_other_artifacts():
+    import json
+    from fnmatch import fnmatchcase
+
+    policy = json.loads(
+        (config.REPO_ROOT / "ops/aws/s3-bucket-policy.json").read_text()
+    )
+    public = next(
+        statement
+        for statement in policy["Statement"]
+        if statement["Sid"] == "PublicReadCampaignPatches"
+    )
+    assert public["Principal"] == "*"
+    assert public["Effect"] == "Allow"
+    assert public["Action"] == "s3:GetObject"
+    trace = s3.realized_trace_object_key("campaign", "sha256:" + "a" * 64)
+    assert fnmatchcase("arn:aws:s3:::pareton-s3/" + trace, public["Resource"])
+    for key in (
+        "stage0/campaigns/campaign/patches/hotkey/patch.diff",
+        "stage0/private/campaigns/campaign/patches/hotkey/patch.diff",
+        "stage0/campaigns/campaign/other-artifact.json",
+        "stage0/evidence/submission/task.tar.gz",
+    ):
+        assert not fnmatchcase("arn:aws:s3:::pareton-s3/" + key, public["Resource"])
