@@ -461,8 +461,10 @@ the saved schedule).
 ## S5. What looks like failure but is not
 
 - `drain-wait` non-zero ticks after 30 minutes: the deploy unit enters
-  failed on purpose while a long bench drains; the notifier rate-limits.
-  The state stays in draining and the next tick continues waiting.
+  failed on purpose while a long bench drains. Discord gets one notice,
+  "release waiting on active round", and does not remind. A real fault
+  still says "deploy failed" and reminds every 30 minutes. The state
+  stays in draining and the next tick continues waiting.
 - ExecCondition skips during applying/quiescing: the unit is inactive and
   NOT failed; services do not auto-start after a skip — the release starts
   them explicitly at verify.

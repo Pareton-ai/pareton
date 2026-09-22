@@ -222,6 +222,23 @@ def test_same_fault_suppressed_then_reminded_after_window(notifier, monkeypatch)
     assert state(notifier)["fault"]["count"] == 3
 
 
+def test_drain_wait_notifies_once_as_waiting(notifier):
+    notifier._write_env_file()
+    notifier._write_run_env(step="drain-wait")
+    code, _, _ = run_mode(notifier, "notify-failure")
+    assert code == 0
+    message = notifier._test_sent[0]["payload"]["content"]
+    assert message.startswith("pareton release waiting on active round")
+    assert "deploy failed" not in message
+    assert "step: drain-wait" in message
+
+    notifier._set_now("2026-09-10T13:00:00Z")
+    code, _, _ = run_mode(notifier, "notify-failure")
+    assert code == 0
+    assert len(notifier._test_sent) == 1
+    assert state(notifier)["fault"]["count"] == 2
+
+
 def test_fault_key_change_sends_immediately(notifier):
     notifier._write_env_file()
     notifier._write_run_env(step="fetch")

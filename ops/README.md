@@ -301,17 +301,24 @@ recovery on the actual node before relying on unattended cleanup.
 ### Alerts
 
 There is no cloud fallback with only `static_ssh` configured. Failed rounds emit
-`round_voided`; post-round cleanup failures emit `static_host_cleanup_failed`
-without discarding a valid score. Create an Axiom monitor with the existing
-operations notifier, **Above 0 over 5 minutes**, evaluated every minute, and
-**Alert on no data** off. Keep the separate worker heartbeat alerts above.
+`round_voided`. Hard cleanup failures (GPU processes still running, inspection
+or SSH failure) emit `static_host_cleanup_failed` without discarding a valid
+score. A candidate image still referenced by a container stays tracked and emits
+`static_host_cleanup_deferred`. That retry is not a page.
+
+The Axiom monitor uses the operations notifier, **Above 0 over 30 minutes**,
+evaluated every 5 minutes, and **Alert on no data** off. Thirty minutes covers
+the 10-minute reaper, so one stuck GPU stays one open alert. The `error !has`
+clause ignores deferred image retries that older builds logged as
+`static_host_cleanup_failed`. Keep the separate worker heartbeat alerts above.
 
 ```apl
 ['pareton-prod']
 | where (event == "round_voided" and void_reason in
     ("pod_provision_failed", "pod_failed", "round_timeout", "heartbeat_stale"))
-    or event == "static_host_cleanup_failed"
-| summarize count()
+    or (event == "static_host_cleanup_failed"
+        and error !has "candidate image cleanup needs retry")
+| summarize failures=count()
 ```
 
 Activate the monitor/notifier during rollout; code deployment does not create it.
