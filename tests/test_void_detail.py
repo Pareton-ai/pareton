@@ -102,6 +102,56 @@ def test_harness_completion_token_counts_are_not_redacted():
     assert REDACTED not in out
 
 
+def test_traceback_frames_and_source_lines_are_dropped():
+    """A copied entry reason can be a traceback quoting the patched source."""
+    detail = (
+        "Traceback (most recent call last):\n"
+        '  File "/usr/lib/python3.12/runpy.py", line 196, in _run_module_as_main\n'
+        "    return _run_code(code, main_globals, None,\n"
+        '  File "/src/patched.py", line 42, in forward\n'
+        "    return self.private_kernel(x)\n"
+        "ValueError: private kernel exploded"
+    )
+    out = sanitize_void_detail(detail)
+    assert "private_kernel" not in out
+    assert "patched.py" not in out
+    assert "runpy" not in out
+    assert "Traceback" not in out
+    assert "ValueError: private kernel exploded" in out
+
+
+def test_caret_markers_and_chained_tracebacks_are_dropped():
+    detail = (
+        '  File "/src/patched.py", line 42, in forward\n'
+        "    return self.private_kernel(x)\n"
+        "           ^^^^^^^^^^^^^^^^^^^^\n"
+        "ValueError: first\n"
+        "\n"
+        "During handling of the above exception, another exception occurred:\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "/src/patched.py", line 57, in backward\n'
+        "    self.private_grad(x)\n"
+        "RuntimeError: second"
+    )
+    out = sanitize_void_detail(detail)
+    for leaked in ("private_kernel", "private_grad", "patched.py", "^^^"):
+        assert leaked not in out
+    assert "ValueError: first" in out
+    assert "During handling" in out
+    assert "RuntimeError: second" in out
+
+
+def test_a_bare_traceback_publishes_nothing():
+    """With no summary left, the caller stores NULL rather than frame debris."""
+    detail = (
+        "Traceback (most recent call last):\n"
+        '  File "/src/patched.py", line 42, in forward\n'
+        "    return self.private_kernel(x)\n"
+    )
+    assert sanitize_void_detail(detail) == ""
+
+
 @pytest.mark.parametrize(
     "pair",
     ["completion_tokens=41", "prompt_tokens=40", "total_tokens=81", "tokens=12"],

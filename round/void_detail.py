@@ -7,6 +7,11 @@ scrubbed here before it lands rather than on the way out. Sanitizing on write
 keeps credentials out of the database entirely; the worker still logs the raw
 string for internal debugging.
 
+A copied entry reason can also be a Python traceback quoting source lines from
+the miner's patched source, so traceback headers, `File "..."` frame lines, and
+their indented source excerpts are dropped outright. The exception summary that
+ends the traceback stays: it is the part that says what broke.
+
 The value after a credential name is delimited by a hand-written scanner rather
 than by regex alternatives. A regex has to describe every shape a value can
 take, and a shape it fails to describe falls through to a narrower alternative
@@ -97,6 +102,30 @@ _SECRET_SHAPE = re.compile(
     r"|xox[abprs]-[A-Za-z0-9-]{8,}",  # Slack token
     re.IGNORECASE,
 )
+
+
+# A traceback's frame line names files and line numbers, and the excerpt under
+# it is a source line from the private patch. The unindented exception summary
+# that ends the traceback is not source and stays.
+_TRACEBACK_HEADER = re.compile(r"^\s*Traceback \(most recent call last\):\s*$")
+_TRACEBACK_FRAME = re.compile(r'^\s*File "[^"]*", line \d+')
+
+
+def _strip_tracebacks(text: str) -> str:
+    """Drop traceback headers, frame lines, and their source excerpts."""
+    out: list[str] = []
+    in_excerpt = False
+    for line in text.splitlines():
+        if _TRACEBACK_HEADER.match(line) or _TRACEBACK_FRAME.match(line):
+            # What follows a frame line is its indented source excerpt and,
+            # on 3.11+, caret markers; both stay with the frame and go.
+            in_excerpt = True
+            continue
+        if in_excerpt and (not line.strip() or line[:1].isspace()):
+            continue
+        in_excerpt = False
+        out.append(line)
+    return "\n".join(out)
 
 
 def _quoted_value_end(text: str, start: int, quote: str) -> int:
@@ -197,14 +226,16 @@ def _redact_pairs(text: str) -> str:
 def sanitize_void_detail(detail: str | None, *, limit: int = MAX_VOID_DETAIL) -> str:
     """Scrub a void detail for public display.
 
-    Strips terminal escapes, redacts URL query strings, credential pairs
-    (quoted or not, at any encoding depth) and self-describing tokens, then
-    flattens to one line and truncates.
+    Drops traceback frames and source excerpts, strips terminal escapes,
+    redacts URL query strings, credential pairs (quoted or not, at any
+    encoding depth) and self-describing tokens, then flattens to one line and
+    truncates.
     Returns "" for nothing worth showing, so a caller can store NULL.
     """
     if not detail:
         return ""
     text = _ANSI.sub("", str(detail))[: max(limit, 0) * _SCAN_HEADROOM]
+    text = _strip_tracebacks(text)
     text = _URL_QUERY.sub(rf"\1?{REDACTED}", text)
     text = _redact_pairs(text)
     text = _SECRET_SHAPE.sub(REDACTED, text)

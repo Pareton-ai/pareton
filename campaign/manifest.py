@@ -77,7 +77,7 @@ def freeze_manifest_fields(
     The submission window used to be pinned here as ``window``. It was dropped
     with the feature, so campaigns hashed before that no longer recompute to
     their stored hash. Nothing recomputes a stored hash, so those pins stand as
-    written; see docs/technical-decisions.md.
+    written.
     """
     sla_obj = sla if isinstance(sla, SLA) else SLA.from_dict(sla)
     out: dict[str, Any] = {
