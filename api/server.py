@@ -490,7 +490,7 @@ def campaign_submissions(
                     if k not in ("latest_state", "round")
                 },
                 "latest_state": r.get("latest_state"),
-                "round": _public_round_entry(r.get("round")),
+                "round": r.get("round"),
             }
             for r in page["items"]
         ],
@@ -571,46 +571,32 @@ def round_detail(round_id: UUID, response: Response):
         # progress is clamped to short scalars.
         "phase": coerce_phase(row.get("phase")),
         "progress": coerce_progress(row.get("progress")),
-        "entries": [
-            _public_round_entry(entry) for entry in list_round_entries(round_id)
-        ],
+        "entries": list_round_entries(round_id),
     }
 
 
-def _public_round_entry(row: dict | None) -> dict | None:
-    """Apply the report's reason policy without changing stored round evidence."""
-    if row is None:
-        return None
-    public = dict(row)
-    if public.get("status") != "scored":
-        public["disqualify_reason"] = None
-    return public
+# Raw log artifacts stay private wherever they surface: compiler and engine
+# output can quote source lines from the private patch. Diagnostics proper (event
+# details, evidence references, job errors, failure reasons) stay public so every
+# miner can debug a submission; serving them behind authentication is a separate
+# follow-up.
+_PRIVATE_ARTIFACT_FIELDS = frozenset(
+    {"build_log_tail", "log_tail", "stdout", "stderr", "retrieval_url"}
+)
 
 
-def _public_report(value: Any, *, include_reasons: bool) -> Any:
-    """Retain score metrics while withholding nested artifacts and raw logs."""
-    private_fields = {
-        "evidence",
-        "evidence_ref",
-        "evidence_s3_url",
-        "retrieval_url",
-        "build_log_tail",
-        "log_tail",
-        "stdout",
-        "stderr",
-        "traceback",
-        "error",
-    }
-    if not include_reasons:
-        private_fields.update({"reason", "disqualify_reason"})
+def _public_diagnostics(value: Any, patch_url: str = "") -> Any:
+    """Keep diagnostics public without leaking raw logs or the patch URL."""
+    if isinstance(value, str):
+        return value.replace(patch_url, "[patch URL withheld]") if patch_url else value
     if isinstance(value, dict):
         return {
-            key: _public_report(item, include_reasons=include_reasons)
+            key: _public_diagnostics(item, patch_url)
             for key, item in value.items()
-            if key not in private_fields
+            if key not in _PRIVATE_ARTIFACT_FIELDS
         }
     if isinstance(value, list):
-        return [_public_report(item, include_reasons=include_reasons) for item in value]
+        return [_public_diagnostics(item, patch_url) for item in value]
     return value
 
 
@@ -635,8 +621,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         raise HTTPException(status_code=404, detail="round entry not found")
     _set_live_round_cache_control(response, [row["round_status"]])
 
-    scored = row["status"] == "scored"
-    raw = _public_report(row.get("report") or {}, include_reasons=scored)
+    raw = _public_diagnostics(row.get("report") or {})
     if not isinstance(raw, dict):
         raw = {}
     score_report = raw.get("score_report")
@@ -704,8 +689,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         "engine_image_ref": row["engine_image_ref"],
         "image_digest": raw.get("image_digest"),
         "score": row["score"],
-        # Failed-entry reasons can contain source lines from worker exceptions.
-        "reason": (row["disqualify_reason"] or raw.get("reason")) if scored else None,
+        "reason": row["disqualify_reason"] or raw.get("reason"),
         "engine_crashed": bool(raw.get("engine_crashed", False)),
         "scoring_rule": row["scoring_rule"] or {},
         "prompt_summary": summarize_prompt_scores(prompts),
@@ -769,7 +753,7 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     states = list_latest_states([row["id"]])
     jobs = list_submission_jobs(row["id"])
     round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
-    round_info = _public_round_entry(round_info)
+    round_info = dict(round_info) if round_info is not None else None
     if round_info is not None:
         round_info.pop("_patch_evaluated_at", None)
     response.headers["Cache-Control"] = _NO_STORE
@@ -785,7 +769,7 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         "jobs": [
             {
                 "status": j["status"],
-                "last_error": None,
+                "last_error": j.get("last_error"),
                 "phase": coerce_phase(j.get("phase")),
                 "phase_started_at": _iso_or_none(j.get("phase_started_at")),
                 "heartbeat_at": _iso_or_none(j.get("heartbeat_at")),
@@ -796,8 +780,8 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         "events": [
             {
                 "state": e["state"],
-                "evidence_ref": None,
-                "detail": {},
+                "evidence_ref": e.get("evidence_ref"),
+                "detail": e.get("detail") or {},
                 "created_at": e["created_at"].isoformat()
                 if hasattr(e["created_at"], "isoformat")
                 else str(e["created_at"]),
@@ -806,7 +790,15 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         ],
         "round": round_info,
     }
-    return payload
+    # Diagnostics stay public; raw logs and the patch URL inside them do not.
+    return {
+        **payload,
+        "jobs": _public_diagnostics(payload["jobs"], row.get("retrieval_url") or ""),
+        "events": _public_diagnostics(
+            payload["events"], row.get("retrieval_url") or ""
+        ),
+        "round": _public_diagnostics(payload["round"], row.get("retrieval_url") or ""),
+    }
 
 
 def _resolve_unambiguous_submission(patch_hash: str) -> dict:

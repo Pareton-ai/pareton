@@ -1,4 +1,4 @@
-"""Permanent confidentiality across public patch and diagnostic routes."""
+"""Permanent patch confidentiality with public miner diagnostics."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -129,9 +129,14 @@ def test_all_patch_routes_stay_private(
         assert data["submission"]["patch_download_url"] is None
         assert data["submission"]["patch_hash"] == HASH
         assert data["latest_state"] == "scored"
-        assert data["events"][0]["detail"] == {}
-        assert data["events"][0]["evidence_ref"] is None
-        assert data["jobs"][0]["last_error"] is None
+        assert data["events"][0]["detail"] == {
+            "nested": {"error": "[patch URL withheld]"}
+        }
+        assert (
+            data["events"][0]["evidence_ref"]
+            == "https://example.test/private-artifact.tar.gz"
+        )
+        assert data["jobs"][0]["last_error"] == "public diagnostics"
         assert secret not in response.text
         assert row["retrieval_url"] not in response.text
         for suffix, reason in (
@@ -187,13 +192,11 @@ def test_private_routes_preserve_missing_and_ambiguous_lookups(
 @pytest.mark.parametrize(
     "status", ["pending", "running", "disqualified", "infra_failed", "scored"]
 )
-def test_public_entry_reasons_follow_entry_status_on_every_route(
-    scenario, monkeypatch, route, status
-):
+def test_entry_reasons_are_public_on_every_route(scenario, monkeypatch, route, status):
     from copy import deepcopy
 
     client, _, row, _ = scenario
-    reason = 'Traceback:\n  File "/src/patched.py", line 42\n    raise ValueError("private source")'
+    reason = "fail_correctness: mean_logprob -3.9 below -2.0"
     entry = {
         "round_id": CID,
         "ordinal": 3,
@@ -230,21 +233,7 @@ def test_public_entry_reasons_follow_entry_status_on_every_route(
         public = payload["submissions"][0]["round"]
     else:
         public = payload["round"]
-    assert public["disqualify_reason"] == (reason if status == "scored" else None)
+    assert public["disqualify_reason"] == reason
     assert public["status"] == status
     assert public["score"] == entry["score"]
-
-    def strings(value):
-        if isinstance(value, dict):
-            for item in value.values():
-                yield from strings(item)
-        elif isinstance(value, list):
-            for item in value:
-                yield from strings(item)
-        elif isinstance(value, str):
-            yield value
-
-    if status != "scored":
-        # Inspect decoded JSON; wire escaping must not conceal leaked source.
-        assert all(reason not in text for text in strings(payload))
     assert entry == stored

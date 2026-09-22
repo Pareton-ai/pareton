@@ -35,10 +35,12 @@ The updated workload still requires GPU calibration before launch.
 All patches remain private permanently, including leaders, former leaders, and
 legacy uploads. Submission APIs keep hashes, states, and scores public but never
 return patch download links or release dates. Public patch and build-log routes
-return 403. Raw event details, evidence links, and job errors are withheld
-because they can contain patch source. Failure reasons appear only for `scored`
-entries, and void details carry sanitized summaries with traceback source lines
-removed. Stored audit events remain unchanged.
+return 403. Raw logs stay private wherever they surface, including log tails
+inside reports and events. The other miner diagnostics stay public: event
+details, evidence references, job errors, and failure reasons, with patch URLs
+masked inside them. Void details carry sanitized summaries with traceback source
+lines removed. Stored audit events remain unchanged. Serving diagnostics behind
+authentication is a separate follow-up.
 
 The miner signs its upload request locally. The on-chain URL identifies a
 private S3 object and grants no download access. Watcher and worker reads use

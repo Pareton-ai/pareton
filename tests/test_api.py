@@ -408,7 +408,7 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     assert body["jobs"] == [
         {
             "status": "failed",
-            "last_error": None,
+            "last_error": "bench_exit_bad_request",
             "phase": None,
             "phase_started_at": None,
             "heartbeat_at": None,
@@ -918,7 +918,7 @@ def test_round_detail_entries_and_live_phase(monkeypatch, client: TestClient):
     # 0.0 is a real score; a disqualified entry has none.
     assert baseline["score"] == 0.0
     assert challenger["score"] is None
-    assert challenger["disqualify_reason"] is None
+    assert challenger["disqualify_reason"] == "fail_correctness"
     # Detail page: full hotkey. Evidence stays behind its gate.
     assert challenger["hotkey"] == HOTKEY
     assert "evidence_s3_url" not in challenger
@@ -1129,7 +1129,7 @@ def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestCli
     assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
 
 
-def test_entry_report_withholds_the_reason_for_a_non_scored_entry(
+def test_entry_report_carries_the_reason_for_a_non_scored_entry(
     monkeypatch, client: TestClient
 ):
     """A disqualified entry never reached scoring, so it has no prompts."""
@@ -1152,7 +1152,7 @@ def test_entry_report_withholds_the_reason_for_a_non_scored_entry(
     body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
     server.RoundEntryReportModel.model_validate(body)
     assert body["score"] is None
-    assert body["reason"] is None
+    assert body["reason"] == "mean_logprob -3.9 below -2.0"
     assert body["prompts"] == []
     assert body["prompt_summary"]["total"] == 0
     assert body["correctness"]["verdict"] == "fail_correctness"
@@ -1458,59 +1458,61 @@ def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, clien
     assert body["prompts"] == row["report"]["score_report"]["prompts"]
 
 
-def test_entry_report_withholds_nested_artifacts_and_raw_errors(monkeypatch, client):
+def test_entry_report_withholds_raw_logs_and_patch_locators(monkeypatch, client):
     from api import server
 
     row = _score_report_row()
-    secret = "source code in an engine error"
+    secret = "private source line in a log tail"
     row["report"]["sla"]["evidence"] = "https://example.test/evidence.tar.gz"
+    row["report"]["sla"]["build_log_tail"] = secret
     row["report"]["correctness"]["evidence"] = {"path": "private.jsonl"}
     row["report"]["correctness"]["requests"] = [
-        {"error": secret, "coverage_ratio": 1.0}
+        {
+            "error": "engine exit 1",
+            "stdout": secret,
+            "log_tail": secret,
+            "coverage_ratio": 1.0,
+        }
     ]
+    row["report"]["retrieval_url"] = "https://example/p.diff"
     monkeypatch.setattr(server, "get_round_entry_report", lambda *args: row)
     response = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
     assert response.status_code == 200
-    assert "evidence" not in response.text
     assert secret not in response.text
+    assert "https://example/p.diff" not in response.text
     body = response.json()
-    assert body["correctness"]["requests"] == [{"coverage_ratio": 1.0}]
+    # Diagnostics stay public: evidence references and engine errors survive.
+    assert body["sla"]["evidence"] == "https://example.test/evidence.tar.gz"
+    assert body["correctness"]["evidence"] == {"path": "private.jsonl"}
+    assert body["correctness"]["requests"] == [
+        {"error": "engine exit 1", "coverage_ratio": 1.0}
+    ]
     assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
-    assert row["report"]["correctness"]["requests"][0]["error"] == secret
+    # The stored report is not changed by withholding.
+    assert row["report"]["sla"]["build_log_tail"] == secret
 
 
 @pytest.mark.parametrize(
     "status", ["pending", "running", "disqualified", "infra_failed", "scored"]
 )
-def test_entry_report_reason_privacy_follows_entry_status(monkeypatch, client, status):
+def test_entry_report_shows_the_reason_for_every_status(monkeypatch, client, status):
     from api import server
 
-    source = "private source from worker exception"
+    source = "mean_logprob -3.9 below -2.0"
     row = _score_report_row(status=status, disqualify_reason=source)
     raw = row["report"]
     raw["reason"] = source
     raw["sla"]["reason"] = source
-    raw["correctness"]["requests"] = [
-        {"reason": source, "disqualify_reason": source, "coverage_ratio": 1.0}
-    ]
+    raw["correctness"]["requests"] = [{"reason": source, "coverage_ratio": 1.0}]
     raw["score_report"]["prompts"][0]["reason"] = source
     monkeypatch.setattr(server, "get_round_entry_report", lambda *args: row)
     response = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
     assert response.status_code == 200
     body = response.json()
     assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
-    assert body["correctness"]["requests"][0]["coverage_ratio"] == 1.0
-    if status == "scored":
-        assert body["reason"] == source
-        assert body["sla"]["reason"] == source
-        assert body["prompts"][0]["reason"] == source
-        assert body["correctness"]["requests"][0]["disqualify_reason"] == source
-    else:
-        assert source not in response.text
-        assert body["reason"] is None
-        assert "reason" not in body["sla"]
-        assert "reason" not in body["prompts"][0]
-        assert body["correctness"]["requests"] == [{"coverage_ratio": 1.0}]
-    # Neither the durable column nor the nested report is changed by redaction.
+    assert body["reason"] == source
+    assert body["sla"]["reason"] == source
+    assert body["prompts"][0]["reason"] == source
+    assert body["correctness"]["requests"][0]["reason"] == source
+    # The durable column and the nested report are not changed by the route.
     assert row["disqualify_reason"] == raw["reason"] == source
-    assert raw["correctness"]["requests"][0]["disqualify_reason"] == source
