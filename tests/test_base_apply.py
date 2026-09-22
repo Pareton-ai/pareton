@@ -116,7 +116,11 @@ def test_internal_root_removed_after_checkout_failure(monkeypatch):
         (
             subprocess.TimeoutExpired(cmd=["git", "clone"], timeout=600),
             "base_apply_timeout",
-            {"error": str(subprocess.TimeoutExpired(cmd=["git", "clone"], timeout=600))},
+            {
+                "error": str(
+                    subprocess.TimeoutExpired(cmd=["git", "clone"], timeout=600)
+                )
+            },
         ),
         (
             subprocess.CalledProcessError(1, ["git", "clone"], stderr="clone failed"),
