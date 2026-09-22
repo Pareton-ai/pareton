@@ -490,7 +490,7 @@ def campaign_submissions(
                     if k not in ("latest_state", "round")
                 },
                 "latest_state": r.get("latest_state"),
-                "round": r.get("round"),
+                "round": _public_round_entry(r.get("round")),
             }
             for r in page["items"]
         ],
@@ -571,8 +571,20 @@ def round_detail(round_id: UUID, response: Response):
         # progress is clamped to short scalars.
         "phase": coerce_phase(row.get("phase")),
         "progress": coerce_progress(row.get("progress")),
-        "entries": list_round_entries(round_id),
+        "entries": [
+            _public_round_entry(entry) for entry in list_round_entries(round_id)
+        ],
     }
+
+
+def _public_round_entry(row: dict | None) -> dict | None:
+    """Apply the report's reason policy without changing stored round evidence."""
+    if row is None:
+        return None
+    public = dict(row)
+    if public.get("status") != "scored":
+        public["disqualify_reason"] = None
+    return public
 
 
 def _public_report(value: Any, *, include_reasons: bool) -> Any:
@@ -757,7 +769,7 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     states = list_latest_states([row["id"]])
     jobs = list_submission_jobs(row["id"])
     round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
-    round_info = dict(round_info) if round_info is not None else None
+    round_info = _public_round_entry(round_info)
     if round_info is not None:
         round_info.pop("_patch_evaluated_at", None)
     response.headers["Cache-Control"] = _NO_STORE

@@ -181,3 +181,70 @@ def test_private_routes_preserve_missing_and_ambiguous_lookups(
     assert client.get(BASE.replace(CID, "other") + suffix).status_code == 404
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _: 2)
     assert client.get(f"/v1/submissions/{HASH}" + suffix).status_code == 409
+
+
+@pytest.mark.parametrize("route", ["round", "detail", "legacy_detail", "list"])
+@pytest.mark.parametrize(
+    "status", ["pending", "running", "disqualified", "infra_failed", "scored"]
+)
+def test_public_entry_reasons_follow_entry_status_on_every_route(
+    scenario, monkeypatch, route, status
+):
+    from copy import deepcopy
+
+    client, _, row, _ = scenario
+    reason = 'Traceback:\n  File "/src/patched.py", line 42\n    raise ValueError("private source")'
+    entry = {
+        "round_id": CID,
+        "ordinal": 3,
+        "status": status,
+        "score": 0.5 if status == "scored" else None,
+        "disqualify_reason": reason,
+    }
+    stored = deepcopy(entry)
+    monkeypatch.setattr(
+        server, "get_round", lambda _: {"id": CID, "status": "complete"}
+    )
+    monkeypatch.setattr(server, "list_round_entries", lambda _: [entry])
+    monkeypatch.setattr(server, "list_submission_round_entries", lambda _: {SID: entry})
+    monkeypatch.setattr(
+        server,
+        "list_campaign_submissions",
+        lambda *a, **k: {
+            "total": 1,
+            "items": [{**row, "round": entry, "latest_state": "scored"}],
+        },
+    )
+    paths = {
+        "round": f"/v1/rounds/{CID}",
+        "detail": BASE,
+        "legacy_detail": f"/v1/submissions/{HASH}",
+        "list": f"/v1/campaigns/{CID}/submissions",
+    }
+    response = client.get(paths[route])
+    assert response.status_code == 200
+    payload = response.json()
+    if route == "round":
+        public = payload["entries"][0]
+    elif route == "list":
+        public = payload["submissions"][0]["round"]
+    else:
+        public = payload["round"]
+    assert public["disqualify_reason"] == (reason if status == "scored" else None)
+    assert public["status"] == status
+    assert public["score"] == entry["score"]
+
+    def strings(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from strings(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from strings(item)
+        elif isinstance(value, str):
+            yield value
+
+    if status != "scored":
+        # Inspect decoded JSON; wire escaping must not conceal leaked source.
+        assert all(reason not in text for text in strings(payload))
+    assert entry == stored

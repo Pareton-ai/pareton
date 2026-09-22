@@ -32,17 +32,19 @@ The updated workload still requires GPU calibration before launch.
 
 ## Patch visibility
 
-All patches remain private permanently, including leaders, former leaders, and
-legacy uploads. Submission APIs keep hashes, states, and scores public but never
-return patch download links or release dates. Public patch and build-log routes
-return 403. Raw event details, evidence links, and job errors are withheld because
-they can contain patch source. Stored audit events remain unchanged.
+For newly ingested submissions, the API and dashboard withhold the patch download
+link until two days after the first finalized `scored` or `disqualified`
+evaluation. `PARETON_PATCH_REVEAL_DELAY_S` configures that delay. Submissions
+ingested before rollout keep their existing links. Hashes, status, scores, and
+logs remain public.
 
-Miners sign upload requests locally. The on-chain URL identifies a private S3
-object and grants no download access. Watcher and worker reads use S3 credentials
-for both private and legacy locators. No API request publishes a patch.
-`PARETON_PATCH_REVEAL_DELAY_S` is a deprecated rollback safeguard, not a privacy
-switch. See [patch privacy](docs/patch-privacy.md) for storage rollout and checks.
+The miner signs its upload request locally. New patches use private S3 objects
+with independently random UUIDv4 filenames. The on-chain URL identifies the
+private object; it does not grant download access. The watcher and worker read
+it with S3 credentials. After the reveal deadline, the first API request copies
+the diff to public storage and returns a permanent URL without an expiry.
+See [patch visibility](docs/patch-visibility.md) for the upload contract,
+deployment prerequisites, and a local patch-hash command.
 
 ## Campaign submission fees
 

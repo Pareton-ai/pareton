@@ -918,7 +918,7 @@ def test_round_detail_entries_and_live_phase(monkeypatch, client: TestClient):
     # 0.0 is a real score; a disqualified entry has none.
     assert baseline["score"] == 0.0
     assert challenger["score"] is None
-    assert challenger["disqualify_reason"] == "fail_correctness"
+    assert challenger["disqualify_reason"] is None
     # Detail page: full hotkey. Evidence stays behind its gate.
     assert challenger["hotkey"] == HOTKEY
     assert "evidence_s3_url" not in challenger
