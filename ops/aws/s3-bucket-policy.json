@@ -7,6 +7,25 @@
       "Principal": "*",
       "Action": "s3:GetObject",
       "Resource": "arn:aws:s3:::pareton-s3/stage0/campaigns/*"
+    },
+    {
+      "Sid": "PrivatePatchAndEvidenceReads",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::pareton-s3/stage0/campaigns/*/patches/*",
+        "arn:aws:s3:::pareton-s3/stage0/private/*",
+        "arn:aws:s3:::pareton-s3/stage0/evidence/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:PrincipalAccount": "820451690806"
+        }
+      }
     }
   ]
 }

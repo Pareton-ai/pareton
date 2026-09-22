@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
-from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -16,7 +14,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import config
 from bench.phases import BenchPhase, coerce_phase, coerce_progress
 from bench.score import summarize_prompt_scores
-from builder.hermetic import _ANSI_SEQ, _CONTROL_CHARS
 from campaign.store import (
     campaign_hotkey_is_disqualified,
     count_submission_campaigns,
@@ -37,45 +34,22 @@ from round.store import (
     get_leader,
     get_round,
     get_round_entry_report,
-    list_patch_evaluation_times,
     list_round_entries,
     list_rounds,
     list_score_progress,
     list_submission_round_entries,
 )
-from storage.s3 import create_presigned_patch_upload, private_patch_key, publish_patch
+from storage.s3 import create_presigned_patch_upload
 from storage.upload_auth import verify_upload_request
-from storage.visibility import patch_is_revealed, patch_reveal_at
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
-# Build logs use no-store until the submission reaches a terminal state.
-# Enrolled submissions use no-store because URL visibility depends on time/config.
-# Exempt submissions retain their existing cache policy.
-# Campaigns and other settled resources keep the shared short TTL above.
-# ``built`` is terminal for no-bench campaigns; bench campaigns continue via
-# ``bench_queued`` (and later) in the same worker turn after enqueue.
-_TERMINAL_SUBMISSION_STATES = frozenset(
-    {"built", "scored", "disqualified", "rejected", "rejected_duplicate"}
-)
+# Submission responses always use no-store, including historical submissions.
 # rounds.status: a pending or running round is live and moves without warning.
 _TERMINAL_ROUND_STATUSES = frozenset({"complete", "void"})
 _NO_STORE = "no-store"
 
 # Identity is the hotkey. Lists carry a prefix; detail pages carry it in full.
 _HOTKEY_PREFIX_LEN = 16
-logger = logging.getLogger(__name__)
-
-
-def _is_terminal_submission_state(state: str | None) -> bool:
-    return state in _TERMINAL_SUBMISSION_STATES
-
-
-def _set_live_submission_cache_control(
-    response: Response, latest_state: str | None
-) -> None:
-    """Keep live detail and build-log responses fresh."""
-    if not _is_terminal_submission_state(latest_state):
-        response.headers["Cache-Control"] = _NO_STORE
 
 
 def _set_live_round_cache_control(response: Response, statuses: list[str]) -> None:
@@ -502,15 +476,7 @@ def campaign_submissions(
     page = list_campaign_submissions(campaign_id, limit=limit, offset=offset)
     if page is None:
         raise HTTPException(status_code=404, detail="campaign not found")
-    evaluation_times = {
-        str(r["id"]): (
-            r.get("_patch_evaluated_at") if r.get("_patch_reveal_delayed") else None
-        )
-        for r in page["items"]
-        if r.get("_patch_reveal_delayed") or private_patch_key(r["retrieval_url"])
-    }
-    if evaluation_times:
-        response.headers["Cache-Control"] = _NO_STORE
+    response.headers["Cache-Control"] = _NO_STORE
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -520,7 +486,7 @@ def campaign_submissions(
             {
                 **{
                     k: (str(v) if k in ("id", "campaign_id") else v)
-                    for k, v in _public_submission(r, evaluation_times).items()
+                    for k, v in _public_submission(r).items()
                     if k not in ("latest_state", "round")
                 },
                 "latest_state": r.get("latest_state"),
@@ -609,6 +575,31 @@ def round_detail(round_id: UUID, response: Response):
     }
 
 
+def _public_report(value: Any) -> Any:
+    """Retain score metrics while withholding nested artifacts and raw logs."""
+    private_fields = {
+        "evidence",
+        "evidence_ref",
+        "evidence_s3_url",
+        "retrieval_url",
+        "build_log_tail",
+        "log_tail",
+        "stdout",
+        "stderr",
+        "traceback",
+        "error",
+    }
+    if isinstance(value, dict):
+        return {
+            key: _public_report(item)
+            for key, item in value.items()
+            if key not in private_fields
+        }
+    if isinstance(value, list):
+        return [_public_report(item) for item in value]
+    return value
+
+
 @app.get(
     "/v1/rounds/{round_id}/entries/{entry_id}/report",
     responses={200: {"model": RoundEntryReportModel}},
@@ -630,7 +621,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         raise HTTPException(status_code=404, detail="round entry not found")
     _set_live_round_cache_control(response, [row["round_status"]])
 
-    raw = row.get("report") or {}
+    raw = _public_report(row.get("report") or {})
     if not isinstance(raw, dict):
         raw = {}
     score_report = raw.get("score_report")
@@ -748,55 +739,15 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _public_submission(row: dict, evaluation_times: dict) -> dict:
-    sid = str(row["id"])
-    evaluated_at = evaluation_times.get(sid)
-    release = patch_reveal_at(evaluated_at)
+def _public_submission(row: dict) -> dict:
+    """Keep every patch private, regardless of age, enrollment, or leadership."""
     public = dict(row)
     public.pop("_patch_evaluated_at", None)
     public.pop("_patch_reveal_delayed", None)
     public["retrieval_url"] = ""
-    public["patch_reveal_at"] = _iso_or_none(release)
+    public["patch_reveal_at"] = None
     public["patch_download_url"] = None
-    legacy = (
-        sid not in evaluation_times and private_patch_key(row["retrieval_url"]) is None
-    )
-    if legacy or patch_is_revealed(evaluated_at):
-        try:
-            public["retrieval_url"] = _published_patch_url(row)
-        except HTTPException as exc:
-            if exc.status_code != 503:
-                raise
-            # Keep this row visible when its patch cannot be published.
-            return public
-        public["patch_download_url"] = (
-            f"/v1/campaigns/{quote(str(row['campaign_id']), safe='')}/submissions/"
-            f"{quote(row['patch_hash'], safe='')}/patch"
-        )
     return public
-
-
-def _published_patch_url(row: dict) -> str:
-    try:
-        return publish_patch(row["retrieval_url"], row["patch_hash"])
-    except Exception:
-        logger.exception("patch publication failed submission_id=%s", row["id"])
-        raise HTTPException(
-            status_code=503,
-            detail="patch publication unavailable; retry shortly",
-            headers={"Cache-Control": _NO_STORE},
-        ) from None
-
-
-def _withhold_patch_url(value: Any, url: str) -> Any:
-    """Keep diagnostics public without leaking the URL through error metadata."""
-    if isinstance(value, str):
-        return value.replace(url, "[patch URL withheld]") if url else value
-    if isinstance(value, dict):
-        return {k: _withhold_patch_url(v, url) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_withhold_patch_url(v, url) for v in value]
-    return value
 
 
 def _submission_detail_payload(row: dict, response: Response) -> dict:
@@ -805,23 +756,10 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     jobs = list_submission_jobs(row["id"])
     round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
     round_info = dict(round_info) if round_info is not None else None
-    evaluated_at = (
-        round_info.pop("_patch_evaluated_at", None) if round_info is not None else None
-    )
-    enrolled = any(
-        e["state"] == "committed"
-        and (e.get("detail") or {}).get("patch_reveal_delayed") is True
-        for e in events
-    )
-    delayed = enrolled or private_patch_key(row["retrieval_url"]) is not None
-    evaluation_times = (
-        {str(row["id"]): evaluated_at if enrolled else None} if delayed else {}
-    )
-    if delayed:
-        response.headers["Cache-Control"] = _NO_STORE
-    else:
-        _set_live_submission_cache_control(response, states.get(str(row["id"])))
-    public = _public_submission(row, evaluation_times)
+    if round_info is not None:
+        round_info.pop("_patch_evaluated_at", None)
+    response.headers["Cache-Control"] = _NO_STORE
+    public = _public_submission(row)
     payload = {
         "submission": {
             **{
@@ -833,7 +771,7 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         "jobs": [
             {
                 "status": j["status"],
-                "last_error": j.get("last_error"),
+                "last_error": None,
                 "phase": coerce_phase(j.get("phase")),
                 "phase_started_at": _iso_or_none(j.get("phase_started_at")),
                 "heartbeat_at": _iso_or_none(j.get("heartbeat_at")),
@@ -844,8 +782,8 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         "events": [
             {
                 "state": e["state"],
-                "evidence_ref": e.get("evidence_ref"),
-                "detail": e.get("detail") or {},
+                "evidence_ref": None,
+                "detail": {},
                 "created_at": e["created_at"].isoformat()
                 if hasattr(e["created_at"], "isoformat")
                 else str(e["created_at"]),
@@ -854,8 +792,6 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         ],
         "round": round_info,
     }
-    if not public["retrieval_url"]:
-        return _withhold_patch_url(payload, row["retrieval_url"])
     return payload
 
 
@@ -895,24 +831,10 @@ def submission_detail(patch_hash: str, response: Response):
     )
 
 
-def _patch_download_response(row: dict) -> RedirectResponse:
-    times = list_patch_evaluation_times([row["id"]])
-    evaluated_at = times.get(str(row["id"]))
-    delayed = (
-        str(row["id"]) in times or private_patch_key(row["retrieval_url"]) is not None
-    )
-    if delayed and not patch_is_revealed(evaluated_at):
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "reason": "patch_not_revealed",
-                "patch_reveal_at": _iso_or_none(patch_reveal_at(evaluated_at)),
-            },
-            headers={"Cache-Control": _NO_STORE},
-        )
-    return RedirectResponse(
-        _published_patch_url(row),
-        status_code=307,
+def _patch_download_response(row: dict) -> None:
+    raise HTTPException(
+        status_code=403,
+        detail={"reason": "patch_private", "patch_reveal_at": None},
         headers={"Cache-Control": _NO_STORE},
     )
 
@@ -938,22 +860,12 @@ _BUILD_LOG_MAX_TAIL = 2000
 
 
 def _build_log_response(row: dict, tail: int) -> PlainTextResponse:
-    log_path = config.BUILD_LOG_DIR / str(row["id"]) / "build.log"
-    if not log_path.is_file():
-        raise HTTPException(status_code=404, detail="build log not found")
-    try:
-        size = log_path.stat().st_size
-        with log_path.open("rb") as f:
-            f.seek(max(0, size - 256 * 1024))
-            raw_tail = f.read()
-    except OSError:
-        raise HTTPException(status_code=404, detail="build log not found") from None
-    text = raw_tail.decode("utf-8", errors="replace")
-    clean = _CONTROL_CHARS.sub("", _ANSI_SEQ.sub("", text))
-    resp = PlainTextResponse("\n".join(clean.splitlines()[-tail:]) + "\n")
-    states = list_latest_states([row["id"]])
-    _set_live_submission_cache_control(resp, states.get(str(row["id"])))
-    return resp
+    # Compiler diagnostics can contain source lines from the private patch.
+    raise HTTPException(
+        status_code=403,
+        detail={"reason": "build_log_private"},
+        headers={"Cache-Control": _NO_STORE},
+    )
 
 
 @app.get(
@@ -976,12 +888,7 @@ def submission_build_log(
     patch_hash: str,
     tail: int = Query(default=200, ge=1, le=_BUILD_LOG_MAX_TAIL),
 ):
-    """Last `tail` lines of the durable build log (PAR-37 path), sanitized.
-
-    Content is miner-influenced build output: ANSI/control chars stripped,
-    served as text/plain. Non-terminal submissions are Cache-Control: no-store
-    so live tails are not held by CDN/browser caches (PAR-44).
-    """
+    """Build logs are available only through authenticated operator access."""
     row = _resolve_unambiguous_submission(patch_hash)
     return _build_log_response(row, tail)
 

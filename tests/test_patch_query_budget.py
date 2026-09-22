@@ -101,7 +101,7 @@ def test_json_query_counts_stay_at_pre_reveal_budget(monkeypatch, delayed, endpo
     assert response.status_code == 200
     payload = response.json()
     public = payload["submissions"][0] if endpoint == "list" else payload["submission"]
-    assert public["retrieval_url"] == ("" if delayed else URL)
+    assert public["retrieval_url"] == ""
     assert "_patch_evaluated_at" not in response.text
     assert "_patch_reveal_delayed" not in response.text
     assert len(queries) == expected_queries

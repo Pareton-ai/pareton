@@ -76,8 +76,9 @@ PRESIGN_EXPIRES_S: int = int(os.environ.get("PARETON_PRESIGN_EXPIRES_S", "3600")
 UPLOAD_AUTH_TTL_S: int = int(os.environ.get("PARETON_UPLOAD_AUTH_TTL_S", "300"))
 if UPLOAD_AUTH_TTL_S <= 0:
     raise ValueError("PARETON_UPLOAD_AUTH_TTL_S must be positive")
+# Deprecated: retained for rollback compatibility; never enables publication.
 PATCH_REVEAL_DELAY_S: int = int(
-    os.environ.get("PARETON_PATCH_REVEAL_DELAY_S", "172800")
+    os.environ.get("PARETON_PATCH_REVEAL_DELAY_S", "315360000")
 )
 if PATCH_REVEAL_DELAY_S < 0:
     raise ValueError("PARETON_PATCH_REVEAL_DELAY_S must be nonnegative")

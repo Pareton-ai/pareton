@@ -1,7 +1,6 @@
 """Public patch upload URLs and reveal timing, with no network or database."""
 
 import hashlib
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import urlparse
 from uuid import UUID
@@ -10,7 +9,6 @@ import pytest
 
 import config
 from storage import s3
-from storage.visibility import patch_is_revealed, patch_reveal_at
 
 
 @pytest.fixture(autouse=True)
@@ -20,27 +18,6 @@ def storage_config(monkeypatch):
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
     monkeypatch.setattr(config, "S3_PUBLIC_BASE_URL", "")
     monkeypatch.setattr(config, "S3_ENDPOINT_URL", "")
-    monkeypatch.setattr(config, "PATCH_REVEAL_DELAY_S", 21600)
-    s3.publish_patch.cache_clear()
-    yield
-    s3.publish_patch.cache_clear()
-
-
-def test_release_boundary_missing_evaluation_and_retrospective_delay(monkeypatch):
-    evaluated = datetime(2026, 9, 7, 10, tzinfo=timezone.utc)
-    release = evaluated + timedelta(hours=6)
-    assert patch_reveal_at(evaluated) == release
-    assert not patch_is_revealed(evaluated, now=release - timedelta(microseconds=1))
-    assert patch_is_revealed(evaluated, now=release)
-    assert patch_is_revealed(evaluated, now=release + timedelta(days=20))
-    assert not patch_is_revealed(None, now=release)
-    monkeypatch.setattr(config, "PATCH_REVEAL_DELAY_S", 43200)
-    assert not patch_is_revealed(evaluated, now=release)
-    monkeypatch.setattr(config, "PATCH_REVEAL_DELAY_S", 0)
-    assert patch_is_revealed(evaluated, now=evaluated)
-    assert not patch_is_revealed(None, now=release)
-    with pytest.raises(ValueError, match="timezone"):
-        patch_reveal_at(datetime(2026, 9, 7))
 
 
 def test_each_upload_uses_an_independent_uuid():
@@ -157,55 +134,39 @@ def test_private_fetch_uses_credentials_and_closes_bounded_body(monkeypatch):
         s3.fetch_patch_bytes(PRIVATE_URL, attempts=1)
 
 
-def test_publish_copies_verified_private_object_once_to_permanent_public_url(
-    monkeypatch,
-):
+@pytest.mark.parametrize("cdn", [False, True])
+def test_legacy_fetch_still_works_after_public_access_is_revoked(monkeypatch, cdn):
+    from io import BytesIO
+
+    legacy = PRIVATE_URL.replace("/private/", "/")
+    key = legacy.split("amazonaws.com/", 1)[1]
+    if cdn:
+        monkeypatch.setattr(
+            config, "S3_PUBLIC_BASE_URL", "https://cdn.example.test/assets"
+        )
+        legacy = "https://cdn.example.test/assets/" + key
+    body = BytesIO(b"old private patch")
     calls = []
-    checksum = s3._checksum("sha256:" + "a" * 64)
 
-    def head(**kwargs):
-        from botocore.exceptions import ClientError
+    def get(**kwargs):
+        calls.append(kwargs)
+        return {"Body": body}
 
-        if "/private/" not in kwargs["Key"]:
-            raise ClientError({"Error": {"Code": "403"}}, "HeadObject")
-        return {"ChecksumSHA256": checksum, "ContentLength": 5, "ETag": '"etag"'}
-
-    client = SimpleNamespace(
-        head_object=head,
-        copy_object=lambda **k: calls.append(k),
+    monkeypatch.setattr(s3, "_client", lambda **_: SimpleNamespace(get_object=get))
+    monkeypatch.setattr(
+        s3.urllib.request, "urlopen", lambda *a, **k: pytest.fail("anonymous GET")
     )
-    monkeypatch.setattr(s3, "_client", lambda **_: client)
-    expected = PRIVATE_URL.replace("/private/", "/")
-    for _ in range(2):
-        assert s3.publish_patch(PRIVATE_URL, "sha256:" + "a" * 64) == expected
-    assert len(calls) == 1
-    assert calls[0]["CopySource"]["Key"] == s3.private_patch_key(PRIVATE_URL)
-    assert calls[0]["Key"] == s3.private_patch_key(PRIVATE_URL).replace(
-        "/private/", "/"
-    )
-    assert calls[0]["CopySourceIfMatch"] == '"etag"'
-    assert urlparse(expected).query == ""
-    with pytest.raises(ValueError, match="checksum"):
-        s3.publish_patch(PRIVATE_URL, "sha256:" + "b" * 64)
-    assert len(calls) == 1
-
-
-def test_existing_public_copy_does_not_need_private_source(monkeypatch):
-    def head(**kwargs):
-        assert "/private/" not in kwargs["Key"]
-        return {"ChecksumSHA256": s3._checksum("sha256:" + "a" * 64)}
-
-    monkeypatch.setattr(s3, "_client", lambda **_: SimpleNamespace(head_object=head))
-    assert s3.publish_patch(PRIVATE_URL, "sha256:" + "a" * 64) == PRIVATE_URL.replace(
-        "/private/", "/"
-    )
+    assert s3.fetch_patch_bytes(legacy) == b"old private patch"
+    assert calls == [{"Bucket": config.S3_BUCKET, "Key": key}]
+    assert body.closed
 
 
 def test_real_s3_presigner_signs_checksum_and_conditional_write_headers(monkeypatch):
+    from urllib.parse import parse_qs
+
     import boto3
     from botocore.config import Config
     from botocore.stub import Stubber
-    from urllib.parse import parse_qs
 
     client = boto3.client(
         "s3",

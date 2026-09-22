@@ -26,7 +26,6 @@ def client(monkeypatch):
     )
     # No unit test may reach the database. Tests that care override this.
     monkeypatch.setattr(server, "list_submission_round_entries", lambda _ids: {})
-    monkeypatch.setattr(server, "list_patch_evaluation_times", lambda _ids: {})
     return TestClient(server.app)
 
 
@@ -119,8 +118,8 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert row["latest_state"] == "scored"
     assert row["round"]["ordinal"] == 3
     assert row["round"]["score"] == 0.31
-    assert row["retrieval_url"] == "https://example/p.diff"
-    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+    assert row["retrieval_url"] == ""
+    assert resp.headers.get("Cache-Control") == "no-store"
 
 
 def test_submissions_offset_past_end(monkeypatch, client: TestClient):
@@ -137,7 +136,7 @@ def test_submissions_offset_past_end(monkeypatch, client: TestClient):
     body = resp.json()
     assert body["total"] == 3
     assert body["submissions"] == []
-    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+    assert resp.headers.get("Cache-Control") == "no-store"
 
 
 @pytest.mark.parametrize(
@@ -330,29 +329,20 @@ def test_build_log_endpoint(monkeypatch, client: TestClient, tmp_path):
     from api import server
 
     sid = "22222222-2222-2222-2222-222222222222"
-    row = {"id": sid, "patch_hash": "sha256:abc"}
-    monkeypatch.setattr(server, "get_submission", lambda _h: row)
+    monkeypatch.setattr(server, "get_submission", lambda _h: {"id": sid})
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
-    monkeypatch.setattr(server, "list_latest_states", lambda _ids: {sid: "building"})
     log_dir = tmp_path / sid
-    log_dir.mkdir(parents=True)
-    (log_dir / "build.log").write_bytes(b"step1\n\x1b[31mcolored\x1b[0m\nstep3\n")
+    log_dir.mkdir()
+    (log_dir / "build.log").write_text("private source diagnostic\n")
     monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
-
-    resp = client.get("/v1/submissions/sha256:abc/build-log")
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/plain")
-    assert resp.headers.get("Cache-Control") == "no-store"
-    body = resp.text
-    assert "colored" in body
-    assert "\x1b" not in body
-    assert body.count("\n") == 3
-
-    resp = client.get("/v1/submissions/sha256:abc/build-log?tail=1")
-    assert resp.text.strip() == "step3"
-
-    resp = client.get("/v1/submissions/sha256:abc/build-log?tail=99999")
-    assert resp.status_code == 422
+    for suffix in ("", "?tail=1"):
+        resp = client.get("/v1/submissions/sha256:abc/build-log" + suffix)
+        assert resp.status_code == 403
+        assert resp.headers["cache-control"] == "no-store"
+        assert "private source diagnostic" not in resp.text
+    assert (
+        client.get("/v1/submissions/sha256:abc/build-log?tail=99999").status_code == 422
+    )
 
 
 def test_build_log_404s(monkeypatch, client: TestClient, tmp_path):
@@ -366,7 +356,7 @@ def test_build_log_404s(monkeypatch, client: TestClient, tmp_path):
     monkeypatch.setattr(server, "count_submission_campaigns", lambda _h: 1)
     monkeypatch.setattr(server, "list_latest_states", lambda _ids: {})
     monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
-    assert client.get("/v1/submissions/p/build-log").status_code == 404
+    assert client.get("/v1/submissions/p/build-log").status_code == 403
 
 
 def _detail_row(sid: str, campaign_id: str, patch_hash: str) -> dict:
@@ -418,7 +408,7 @@ def test_campaign_scoped_submission_detail(monkeypatch, client: TestClient):
     assert body["jobs"] == [
         {
             "status": "failed",
-            "last_error": "bench_exit_bad_request",
+            "last_error": None,
             "phase": None,
             "phase_started_at": None,
             "heartbeat_at": None,
@@ -451,11 +441,9 @@ def test_campaign_scoped_build_log(monkeypatch, client: TestClient, tmp_path):
     monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
 
     resp = client.get("/v1/campaigns/c1/submissions/sha256:dup/build-log")
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/plain")
+    assert resp.status_code == 403
     assert resp.headers.get("Cache-Control") == "no-store"
-    assert "line2" in resp.text
-    assert "\x1b" not in resp.text
+    assert "line2" not in resp.text
 
     monkeypatch.setattr(server, "get_submission_for_campaign", lambda _c, _h: None)
     resp = client.get("/v1/campaigns/c2/submissions/sha256:dup/build-log")
@@ -502,10 +490,10 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     [
         ("building", "no-store"),
         ("bench_queued", "no-store"),
-        ("built", V1_CACHE_CONTROL_EXPECTED),
-        ("scored", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
+        ("built", "no-store"),
+        ("scored", "no-store"),
+        ("rejected", "no-store"),
+        ("rejected_duplicate", "no-store"),
     ],
 )
 def test_submission_detail_cache_control_by_state(
@@ -529,10 +517,10 @@ def test_submission_detail_cache_control_by_state(
     ("latest_state", "expected_cache"),
     [
         ("building", "no-store"),
-        ("built", V1_CACHE_CONTROL_EXPECTED),
-        ("scored", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
+        ("built", "no-store"),
+        ("scored", "no-store"),
+        ("rejected", "no-store"),
+        ("rejected_duplicate", "no-store"),
     ],
 )
 def test_build_log_cache_control_by_state(
@@ -550,7 +538,7 @@ def test_build_log_cache_control_by_state(
     monkeypatch.setattr(server.config, "BUILD_LOG_DIR", tmp_path)
 
     resp = client.get("/v1/campaigns/c1/submissions/sha256:log/build-log")
-    assert resp.status_code == 200
+    assert resp.status_code == 403
     assert resp.headers.get("Cache-Control") == expected_cache
 
 
@@ -1405,6 +1393,7 @@ def test_campaign_fee_routes_quote_latest_fee_without_chain(
     monkeypatch, client, amount
 ):
     import bittensor as bt
+
     from api import server
 
     history = [
@@ -1467,3 +1456,24 @@ def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, clien
     assert body["sla"]["sampling"] == sampling
     assert body["correctness"]["prompt_checks"] == checks
     assert body["prompts"] == row["report"]["score_report"]["prompts"]
+
+
+def test_entry_report_withholds_nested_artifacts_and_raw_errors(monkeypatch, client):
+    from api import server
+
+    row = _score_report_row()
+    secret = "source code in an engine error"
+    row["report"]["sla"]["evidence"] = "https://example.test/evidence.tar.gz"
+    row["report"]["correctness"]["evidence"] = {"path": "private.jsonl"}
+    row["report"]["correctness"]["requests"] = [
+        {"error": secret, "coverage_ratio": 1.0}
+    ]
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *args: row)
+    response = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert response.status_code == 200
+    assert "evidence" not in response.text
+    assert secret not in response.text
+    body = response.json()
+    assert body["correctness"]["requests"] == [{"coverage_ratio": 1.0}]
+    assert body["sla"]["metrics"]["output_tokens_per_s"] == 91.2
+    assert row["report"]["correctness"]["requests"][0]["error"] == secret
