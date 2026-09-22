@@ -1133,6 +1133,8 @@ def test_bootstrap_script_verify_first_no_token():
     assert "gpg --batch --yes --dearmor" in script
     # verify-before-install: docker check appears before get.docker.com
     assert script.index("command -v docker") < script.index("get.docker.com")
+    # DNS repair runs before the first fetch, or every curl/pip dies on it
+    assert script.index("nameserver 1.1.1.1") < script.index("get.docker.com")
     # sock ACL after toolkit restart so chmod hits the final socket
     assert script.index("systemctl restart docker") < script.index(
         "chmod 666 /var/run/docker.sock"

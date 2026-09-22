@@ -59,6 +59,19 @@ fi
     return f"""set -euo pipefail
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo -E"; fi
 
+# DNS first: a container-backed pod can ship a Docker resolv.conf pointing at
+# 127.0.0.11, which forwards to a host resolver the container cannot reach.
+# Every curl, apt and pip below then dies on name resolution, so repair it
+# before the first fetch rather than voiding the round three steps later.
+if ! getent hosts pypi.org >/dev/null 2>&1; then
+  echo "pod cannot resolve pypi.org; writing public resolvers"
+  printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' | $SUDO tee /etc/resolv.conf >/dev/null
+  getent hosts pypi.org >/dev/null 2>&1 || {{
+    echo "pod DNS still broken after resolv.conf repair"
+    exit 1
+  }}
+fi
+
 # Docker: verify first; install only if missing.
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | $SUDO sh
