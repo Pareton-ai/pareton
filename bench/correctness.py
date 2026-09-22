@@ -21,19 +21,24 @@ answer on every absolute bar. Two mandatory harness checks identify it:
 * the longest repeated span catches a miner that scales the loop period with
   the output budget.
 
-When a baseline reference is available, a third check rejects a distinct n-gram
+When a baseline reference is available, a third check flags a distinct n-gram
 ratio more than 0.10 below that prompt's least-distinct measured baseline output.
 This catches repeated sentence templates that clear both absolute bars. It uses
 the same thinking/answer split and the selected latency-median candidate output.
+
+Distinct-ngram floor failures disqualify immediately. Repeated-span failures
+and baseline-relative failures each have a separate allowance of four distinct
+retained prompt IDs per candidate; the fifth failure in either category rejects
+the candidate. All measured natural repetitions contribute to the span count.
 
 They are exploit checks, not competition parameters, and therefore do not
 live in the campaign manifest or bench request. For an ordinary completion,
 the checks grade the whole output. For a forced-length completion, the pinned
 baseline is replayed once with EOS handling restored. Its natural response must
 be non-degenerate, but its token count can cut into repetition in a different
-forced response. A flagged prefix is allowed only when it is also a prefix of
-a measured forced baseline output. Forced-length runs deliberately prioritize
-decode measurement: full-output repetition is diagnostic only, regardless of
+forced response. A flagged prefix matching a measured forced baseline output is
+exempt; other prefixes follow the same floor and span policies. Forced-length
+runs deliberately prioritize decode measurement: full-output repetition is diagnostic only, regardless of
 whether the baseline repeats. This allows cheap repeating filler after a valid
 prefix. Logprob checks still grade the whole captured output, but do not replace
 the disabled tail loop defense.
@@ -104,8 +109,9 @@ DEGENERACY_MAX_REPEATED_SPAN_RATIO = 0.25
 # Additional quality bar relative to the least-distinct valid baseline replay.
 DEGENERACY_MAX_DISTINCT_NGRAM_DROP = 0.10
 # Count distinct retained prompt IDs per candidate, not measured repetitions.
-# Absolute loops remain immediate failures regardless of this allowance.
+# Distinct-ngram floor failures remain immediate regardless of these allowances.
 MAX_RELATIVE_DEGENERACY_FAILURES = 4
+MAX_REPEATED_SPAN_FAILURES = 4
 # A larger exclusion set no longer provides a representative correctness
 # sample. This is a harness invariant rather than campaign policy.
 MAX_BASELINE_PROMPT_DROPS = 8
@@ -498,6 +504,7 @@ def degeneracy_reason(
     *,
     distinct_ratio: float | None = None,
     repeated_span_ratio: float | None = None,
+    check_repeated_span: bool = True,
 ) -> str | None:
     """Why this output reads as a repeat loop, or None if it does not.
 
@@ -512,16 +519,23 @@ def degeneracy_reason(
     thinking is still caught. Only the first tag splits: later tags stay in the
     answer, so scattered tags cannot cut a loop into pieces too short to grade.
     Precomputed ratios describe the whole text, so they are ignored on a split.
+    Disable the span check only to distinguish an immediate distinct-ngram
+    failure from a span failure subject to the candidate's prompt allowance.
     """
     thinking, tag, answer = text.partition(REASONING_END)
     if tag:
         for label, part in (("thinking", thinking), ("answer", answer)):
-            reason = _text_degeneracy_reason(part)
+            reason = _text_degeneracy_reason(
+                part, check_repeated_span=check_repeated_span
+            )
             if reason is not None:
                 return f"{label}: {reason}"
         return None
     return _text_degeneracy_reason(
-        text, distinct_ratio=distinct_ratio, repeated_span_ratio=repeated_span_ratio
+        text,
+        distinct_ratio=distinct_ratio,
+        repeated_span_ratio=repeated_span_ratio,
+        check_repeated_span=check_repeated_span,
     )
 
 
@@ -550,6 +564,7 @@ def _text_degeneracy_reason(
     *,
     distinct_ratio: float | None = None,
     repeated_span_ratio: float | None = None,
+    check_repeated_span: bool = True,
 ) -> str | None:
     if len(text) < DEGENERACY_MIN_CHARS:
         return None
@@ -559,6 +574,8 @@ def _text_degeneracy_reason(
             f"distinct {DEGENERACY_NGRAM}-gram ratio {ratio:.3f} below harness floor "
             f"over {len(text)} chars"
         )
+    if not check_repeated_span:
+        return None
     ratio = (
         repeated_span_ratio
         if repeated_span_ratio is not None
@@ -1107,6 +1124,35 @@ def grade_candidate(
     empty: list[str] = []
     degenerate: str | None = None
     relative_failures: dict[str, str] = {}
+    repeated_span_failures: set[str] = set()
+
+    def record_absolute_check(
+        request_id: str, text: str, reason: str | None, *, label: str = ""
+    ) -> None:
+        nonlocal degenerate
+        if reason is None:
+            return
+        # Check every split part: a span in thinking must not mask a
+        # distinct-ngram floor failure in the answer (or a later repetition).
+        hard_reason = (
+            degeneracy_reason(text, check_repeated_span=False)
+            if text
+            else "empty output"
+        )
+        if hard_reason is not None:
+            if degenerate is None:
+                degenerate = f"{request_id}: {label}{hard_reason}"
+            return
+        repeated_span_failures.add(request_id)
+        if (
+            len(repeated_span_failures) > MAX_REPEATED_SPAN_FAILURES
+            and degenerate is None
+        ):
+            degenerate = (
+                "repeated-span failures exceed allowance "
+                f"of {MAX_REPEATED_SPAN_FAILURES} prompts "
+                f"({request_id}: {label}{reason})"
+            )
 
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     partial = evidence_path.with_suffix(evidence_path.suffix + ".partial")
@@ -1181,10 +1227,11 @@ def grade_candidate(
                 ):
                     reason = degeneracy_reason(text) if text else "empty output"
                     repetition_checks.append({"rep": rep, "degenerate": reason})
+                    record_absolute_check(
+                        captured.request_id, text, reason, label=f"rep {rep}: "
+                    )
                     if reason is not None and repetition_degenerate is None:
                         repetition_degenerate = f"rep {rep}: {reason}"
-            if repetition_degenerate is not None and degenerate is None:
-                degenerate = f"{captured.request_id}: {repetition_degenerate}"
             if relative_degenerate is not None and not forced_tail:
                 relative_failures[captured.request_id] = relative_degenerate
                 if (
@@ -1265,18 +1312,22 @@ def grade_candidate(
                 # forced response. Do not reject a prefix the baseline emitted.
                 exemptions.append("prefix_matches_forced_baseline")
                 this_degenerate = None
-            if not forced_tail and this_degenerate is None:
+            record_absolute_check(captured.request_id, prefix_text, this_degenerate)
+            if not forced_tail:
                 # Keep the existing prefix defense, and also enforce the
                 # absolute bar beyond that boundary for ordinary completions.
-                this_degenerate = degeneracy_reason(
+                full_degenerate = degeneracy_reason(
                     captured.output_text,
                     distinct_ratio=distinct_ratio,
                     repeated_span_ratio=repeated_span_ratio,
                 )
+                record_absolute_check(
+                    captured.request_id, captured.output_text, full_degenerate
+                )
+                if this_degenerate is None:
+                    this_degenerate = full_degenerate
             if this_degenerate is None:
                 this_degenerate = repetition_degenerate
-            if this_degenerate and degenerate is None:
-                degenerate = f"{captured.request_id}: {this_degenerate}"
             if relative_degenerate is not None:
                 if forced_tail:
                     # Deliberate throughput policy for ignore_eos traces, not
@@ -1350,6 +1401,11 @@ def grade_candidate(
         "failed_prompts": len(relative_failures),
         "failed_request_ids": sorted(relative_failures),
     }
+    repeated_span_degeneracy = {
+        "max_failed_prompts": MAX_REPEATED_SPAN_FAILURES,
+        "failed_prompts": len(repeated_span_failures),
+        "failed_request_ids": sorted(repeated_span_failures),
+    }
     if empty:
         return CorrectnessReport(
             verdict="fail_correctness",
@@ -1362,6 +1418,7 @@ def grade_candidate(
             evidence=rel_evidence,
             prompt_checks=prompt_checks,
             relative_degeneracy=relative_degeneracy,
+            repeated_span_degeneracy=repeated_span_degeneracy,
             reason=f"engine returned no output for {len(empty)} prompt(s): {empty[0]}",
         )
 
@@ -1377,6 +1434,7 @@ def grade_candidate(
             evidence=rel_evidence,
             prompt_checks=prompt_checks,
             relative_degeneracy=relative_degeneracy,
+            repeated_span_degeneracy=repeated_span_degeneracy,
             reason=(
                 f"degenerate output ({degenerate})"
                 if degenerate is not None
@@ -1451,6 +1509,7 @@ def grade_candidate(
         evidence=rel_evidence,
         prompt_checks=prompt_checks,
         relative_degeneracy=relative_degeneracy,
+        repeated_span_degeneracy=repeated_span_degeneracy,
         reason=reason,
     )
 
