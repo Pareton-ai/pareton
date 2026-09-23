@@ -11,7 +11,6 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -270,60 +269,6 @@ def fetch_patch_bytes(url: str, *, attempts: int | None = None) -> bytes:
     raise RuntimeError(
         f"patch fetch failed after {attempt_limit} attempt(s): {last_err}"
     )
-
-
-@lru_cache(maxsize=1024)
-def publish_patch(url: str, patch_hash: str) -> str:
-    """Copy an immutable patch to public storage. Caller MUST check reveal time.
-
-    Successful copies are cached per process. After restart, verify the public
-    copy first so its availability does not depend on private-source retention.
-    """
-    key = private_patch_key(url)
-    if key is None:
-        return url  # Previously public submissions keep their original URLs.
-    from botocore.exceptions import ClientError
-
-    client = _client(bounded=True)
-    prefix = config.S3_PREFIX.strip("/")
-    public_key = key.replace(f"{prefix}/private/", f"{prefix}/", 1)
-    public_url = public_retrieval_url(public_key)
-    checksum = _checksum(patch_hash)
-    try:
-        published = client.head_object(
-            Bucket=config.S3_BUCKET, Key=public_key, ChecksumMode="ENABLED"
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] not in (
-            "403",
-            "404",
-            "NoSuchKey",
-            "AccessDenied",
-        ):
-            raise
-    else:
-        # A public copy remains usable even if its private source is removed.
-        if published.get("ChecksumSHA256") != checksum:
-            raise ValueError("public patch checksum does not match commitment")
-        return public_url
-    source = client.head_object(
-        Bucket=config.S3_BUCKET, Key=key, ChecksumMode="ENABLED"
-    )
-    if source.get("ChecksumSHA256") != checksum:
-        raise ValueError("private patch checksum does not match commitment")
-    if source["ContentLength"] > config.PATCH_MAX_BYTES:
-        raise ValueError("private patch exceeds size limit")
-    client.copy_object(
-        Bucket=config.S3_BUCKET,
-        Key=public_key,
-        CopySource={"Bucket": config.S3_BUCKET, "Key": key},
-        CopySourceIfMatch=source["ETag"],
-        MetadataDirective="REPLACE",
-        ChecksumAlgorithm="SHA256",
-        ContentType="text/plain",
-        ContentDisposition='attachment; filename="patch.diff"',
-    )
-    return public_url
 
 
 def evidence_object_key(submission_id: str, task_id: str) -> str:
