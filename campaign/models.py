@@ -198,7 +198,7 @@ class CampaignManifest:
     denied_paths: list[str]
     manifest_hash: str
     customer_signoff: CustomerSignoff | None
-    status: str  # draft | open | closed
+    status: str  # draft | open | closed | archived
     priority_metric: str  # one of PRIORITY_METRICS
     success_threshold: str  # human-readable win condition for the pilot
     # Initial fee for a new campaign; persisted history is outside the hash.
