@@ -39,3 +39,20 @@ Tolerated prompts remain in correctness and performance scoring.
 A known fifth span failure survives a subsequent scorer error. Tolerated span
 flags alone cannot turn an incomplete scorer run into a correctness failure.
 Linear tools were unavailable; this policy follows the user's explicit request.
+
+
+## 2026-09-23: Patches stay private permanently
+
+Miner patches never become public. The API has no patch download routes and
+never exposes retrieval locations: no `retrieval_url`, `patch_reveal_at`, or
+`patch_download_url` on any submission response. Patch hashes remain the public
+identifiers for submissions, on listings, details, rounds, and leader rows.
+
+Signed upload still returns the private S3 locator to the submitting miner,
+and the on-chain commitment stores that locator. It identifies the private
+object; it does not grant access. The watcher, worker, and other validator
+services keep credentialed S3 access for fetch and build.
+
+Old append-only `submission_events` rows are untouched: nothing rewrites past
+`committed` details. Objects already copied to public storage under the former
+reveal policy are outside this code change.

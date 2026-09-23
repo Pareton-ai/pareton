@@ -26,7 +26,6 @@ def client(monkeypatch):
     )
     # No unit test may reach the database. Tests that care override this.
     monkeypatch.setattr(server, "list_submission_round_entries", lambda _ids: {})
-    monkeypatch.setattr(server, "list_patch_evaluation_times", lambda _ids: {})
     return TestClient(server.app)
 
 
@@ -119,7 +118,7 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert row["latest_state"] == "scored"
     assert row["round"]["ordinal"] == 3
     assert row["round"]["score"] == 0.31
-    assert row["retrieval_url"] == "https://example/p.diff"
+    assert "retrieval_url" not in row
     assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
 
 

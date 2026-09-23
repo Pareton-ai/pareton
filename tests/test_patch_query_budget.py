@@ -15,9 +15,8 @@ HASH = "sha256:" + "a" * 64
 URL = "https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/campaigns/c/patches/h/random.diff"
 
 
-@pytest.mark.parametrize("delayed", [False, True])
 @pytest.mark.parametrize("endpoint", ["list", "detail", "legacy_detail"])
-def test_json_query_counts_stay_at_pre_reveal_budget(monkeypatch, delayed, endpoint):
+def test_json_query_counts_stay_at_budget(monkeypatch, endpoint):
     row = {
         "id": SID,
         "campaign_id": CID,
@@ -41,8 +40,6 @@ def test_json_query_counts_stay_at_pre_reveal_budget(monkeypatch, delayed, endpo
                     "round_entry_status": None,
                     "round_score": None,
                     "round_disqualify_reason": None,
-                    "_patch_reveal_delayed": delayed,
-                    "_patch_evaluated_at": None,
                 }
             ],
         ]
@@ -54,7 +51,7 @@ def test_json_query_counts_stay_at_pre_reveal_budget(monkeypatch, delayed, endpo
             [
                 {
                     "state": "committed",
-                    "detail": {"patch_reveal_delayed": True} if delayed else {},
+                    "detail": {},
                     "created_at": row["committed_at"],
                 }
             ],
@@ -101,8 +98,6 @@ def test_json_query_counts_stay_at_pre_reveal_budget(monkeypatch, delayed, endpo
     assert response.status_code == 200
     payload = response.json()
     public = payload["submissions"][0] if endpoint == "list" else payload["submission"]
-    assert public["retrieval_url"] == ("" if delayed else URL)
-    assert "_patch_evaluated_at" not in response.text
-    assert "_patch_reveal_delayed" not in response.text
+    assert "retrieval_url" not in public
     assert len(queries) == expected_queries
     assert len(checkouts) == expected_checkouts
