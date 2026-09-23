@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 from uuid import UUID
 
@@ -477,7 +477,9 @@ def _public_campaign(c):
 
 
 @app.get("/v1/campaigns")
-def campaigns(status: str | None = Query(default=None)):
+def campaigns(
+    status: Literal["open", "closed", "archived"] = Query(default="open"),
+):
     return {"campaigns": [_public_campaign(c) for c in list_campaigns(status=status)]}
 
 

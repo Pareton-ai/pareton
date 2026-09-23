@@ -64,6 +64,46 @@ def test_campaign_routes_expose_submission_fee(monkeypatch, client):
     assert client.get("/v1/campaigns/c1").json()["submission_fee"] == fee
 
 
+def test_campaigns_list_defaults_to_open(monkeypatch, client: TestClient):
+    from api import server
+
+    seen = []
+    monkeypatch.setattr(
+        server, "list_campaigns", lambda status=None: seen.append(status) or []
+    )
+    resp = client.get("/v1/campaigns")
+    assert resp.status_code == 200
+    assert seen == ["open"]
+
+
+@pytest.mark.parametrize("status", ["open", "closed", "archived"])
+def test_campaigns_list_forwards_status(monkeypatch, client: TestClient, status: str):
+    from api import server
+
+    seen = []
+    monkeypatch.setattr(
+        server, "list_campaigns", lambda status=None: seen.append(status) or []
+    )
+    resp = client.get(f"/v1/campaigns?status={status}")
+    assert resp.status_code == 200
+    assert seen == [status]
+
+
+@pytest.mark.parametrize("status", ["draft", "paused"])
+def test_campaigns_list_rejects_bad_status(
+    monkeypatch, client: TestClient, status: str
+):
+    from api import server
+
+    seen = []
+    monkeypatch.setattr(
+        server, "list_campaigns", lambda status=None: seen.append(status) or []
+    )
+    resp = client.get(f"/v1/campaigns?status={status}")
+    assert resp.status_code == 422
+    assert seen == []
+
+
 def test_campaign_detail_db_unavailable_is_503(monkeypatch, client: TestClient):
     from api import server
     from db.exceptions import DatabaseUnavailable

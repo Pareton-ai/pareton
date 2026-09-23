@@ -690,7 +690,7 @@ def count_submission_campaigns(patch_hash: str) -> int:
             return int(cur.fetchone()["n"])
 
 
-KNOWN_CAMPAIGN_STATUSES: tuple[str, ...] = ("draft", "open", "closed")
+KNOWN_CAMPAIGN_STATUSES: tuple[str, ...] = ("draft", "open", "closed", "archived")
 # Derived, not copied. Add states in gate/types.py only (PAR-46).
 KNOWN_SUBMISSION_STATES: tuple[str, ...] = SUBMISSION_STATES
 

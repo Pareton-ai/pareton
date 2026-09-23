@@ -39,3 +39,14 @@ Tolerated prompts remain in correctness and performance scoring.
 A known fifth span failure survives a subsequent scorer error. Tolerated span
 flags alone cannot turn an incomplete scorer run into a correctness failure.
 Linear tools were unavailable; this policy follows the user's explicit request.
+
+
+## 2026-09-23: Archive campaigns out of the default dashboard list
+
+Add `archived` to the campaigns.status vocabulary. Archiving preserves the
+campaign's history and consumed payment references while excluding it from the
+default dashboard list: `GET /v1/campaigns` now defaults to `status=open`, and
+the public filter accepts only `open`, `closed`, or `archived`. Explicit
+`closed` and `archived` filters remain available, and direct lookup by
+campaign ID still returns an archived campaign. Internal `draft` remains a
+valid stored status but is not a public filter value.
