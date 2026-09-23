@@ -15,6 +15,8 @@ A path is classified as:
 
 A container cgroup wins over ``docker.service``. ``runc`` stays inside
 ``docker.service`` even while the RUN step it started does not.
+``peak_workload_memory_mib`` is the container. ``peak_docker_memory_mib`` is
+only ``docker.service``, which does not include that container.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ from pathlib import Path
 
 _UNSET = {"", "[not set]", "[no data]", "infinity", "n/a"}
 _WORKLOAD_CLASSES = ("docker.container", "docker.scope")
+# runc and a build that stays inside docker.service also count as busy.
+# Other new units (a deploy tick, the reaper) must not.
+_BUSY_CLASSES = ("docker.container", "docker.scope", "docker.service")
 
 
 def is_build_cmdline(cmdline: bytes) -> bool:
@@ -120,6 +125,35 @@ def cgroup_names(cgroup_root: Path) -> set[str]:
     return names
 
 
+def sample_is_busy(sample: dict) -> bool:
+    """True when this sample shows a build, not an unrelated unit start."""
+    if sample.get("build_process_cgroups"):
+        return True
+    return any(
+        classify_cgroup(path) in _BUSY_CLASSES
+        for path in sample.get("new_cgroups") or []
+    )
+
+
+def workload_memory_bytes(cgroup_root: Path, relative_paths: list[str]) -> int | None:
+    """Sum memory.current for container cgroups. docker.service is excluded."""
+    total = 0
+    found = False
+    for relative in relative_paths:
+        if classify_cgroup(relative) not in _WORKLOAD_CLASSES:
+            continue
+        try:
+            total += int(
+                (cgroup_root / relative / "memory.current").read_text().strip()
+            )
+        except (OSError, ValueError):
+            continue
+        found = True
+    if not found:
+        return None
+    return total
+
+
 def placement_of(paths: list[str]) -> tuple[str, dict[str, int]]:
     counts: dict[str, int] = {}
     for path in paths:
@@ -168,6 +202,7 @@ def summarize(samples: list[dict]) -> dict:
         "peak_disk_used_percent": _peak(samples, "disk_used_percent"),
         "peak_load1": _peak(samples, "load1"),
         "peak_docker_memory_mib": _mib(_peak(samples, "docker_memory_bytes")),
+        "peak_workload_memory_mib": _mib(_peak(samples, "workload_memory_bytes")),
         "peak_worker_memory_mib": _mib(_peak(samples, "worker_memory_bytes")),
         "peak_api_memory_mib": _mib(_peak(samples, "api_memory_bytes")),
     }
@@ -267,6 +302,9 @@ def collect_sample(
         "api_memory_bytes": parse_bytes(api.get("MemoryCurrent")),
         "new_cgroups": sorted(current - baseline),
         "build_process_cgroups": build_process_cgroups(proc_root),
+        "workload_memory_bytes": workload_memory_bytes(
+            cgroup_root, sorted(current - baseline)
+        ),
     }
 
 
@@ -296,7 +334,7 @@ def sample_until(
     while now() - started <= max_seconds:
         sample = collect_fn()
         samples.append(sample)
-        busy = bool(sample.get("new_cgroups") or sample.get("build_process_cgroups"))
+        busy = sample_is_busy(sample)
         if busy:
             seen_build = True
             quiet_since = None
@@ -322,6 +360,7 @@ def _print_summary(report: dict) -> None:
         "peak_disk_used_percent",
         "peak_load1",
         "peak_docker_memory_mib",
+        "peak_workload_memory_mib",
         "peak_worker_memory_mib",
         "peak_api_memory_mib",
     ):

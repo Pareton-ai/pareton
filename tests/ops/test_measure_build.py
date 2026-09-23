@@ -117,6 +117,7 @@ def test_summarize_reports_scope_placement_and_peaks():
     assert report["peak_load1"] == 4.0
     assert report["peak_docker_memory_mib"] == 40.0
     assert report["peak_api_memory_mib"] == 30.0
+    assert report["peak_workload_memory_mib"] is None
 
 
 @pytest.mark.unit
@@ -173,3 +174,66 @@ def test_sample_until_waits_for_a_build_then_stops_after_quiet():
     )
     assert len(samples) == 5
     assert measure.summarize(samples)["placement"] == "docker.service"
+
+
+@pytest.mark.unit
+def test_sample_until_ignores_unrelated_units_while_waiting(tmp_path):
+    clock = {"t": 0.0}
+
+    def now():
+        return clock["t"]
+
+    def sleep(seconds):
+        clock["t"] += seconds
+
+    plan = [
+        {
+            "new_cgroups": ["system.slice/pareton-deploy.service"],
+            "build_process_cgroups": [],
+        },
+        {"new_cgroups": [], "build_process_cgroups": []},
+        {
+            "new_cgroups": ["system.slice/system.slice:docker:abc"],
+            "build_process_cgroups": [],
+            "workload_memory_bytes": 3 * 1048576,
+        },
+        {"new_cgroups": [], "build_process_cgroups": []},
+    ]
+    calls = {"n": 0}
+
+    def collect():
+        item = dict(plan[min(calls["n"], len(plan) - 1)])
+        calls["n"] += 1
+        return item
+
+    samples = measure.sample_until(
+        interval=1,
+        max_seconds=3,
+        quiet_seconds=5,
+        wait_for_build=True,
+        sleep=sleep,
+        now=now,
+        collect=collect,
+    )
+    assert [sample.get("new_cgroups") for sample in samples][-2:] == [
+        ["system.slice/system.slice:docker:abc"],
+        [],
+    ]
+    assert measure.summarize(samples)["placement"] == "docker.container"
+    assert measure.summarize(samples)["peak_workload_memory_mib"] == 3.0
+
+    root = tmp_path
+    container = root / "system.slice" / "system.slice:docker:abc"
+    container.mkdir(parents=True)
+    (container / "memory.current").write_text("1048576\n")
+    (root / "system.slice" / "docker.service").mkdir()
+    assert (
+        measure.workload_memory_bytes(
+            root,
+            [
+                "system.slice/system.slice:docker:abc",
+                "system.slice/docker.service",
+            ],
+        )
+        == 1048576
+    )

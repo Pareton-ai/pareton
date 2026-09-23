@@ -171,6 +171,56 @@ def test_main_emits_builder_cleanup_and_fails_above_hard_watermark(monkeypatch):
 
 
 @pytest.mark.unit
+def test_main_pages_when_cleanup_raises_above_the_hard_watermark(monkeypatch):
+    events = []
+
+    @contextmanager
+    def lock(**_kwargs):
+        yield True
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("prune failed")
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", lock)
+    monkeypatch.setattr(cleanup, "_load_campaigns", list)
+    monkeypatch.setattr(cleanup, "cleanup_once", fail)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(95))
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 1
+    assert events[0]["above_hard_watermark"] is True
+    assert events[0]["error"] == "RuntimeError: prune failed"
+    assert events[0]["usage_after_percent"] == 95.0
+
+
+@pytest.mark.unit
+def test_main_does_not_page_when_cleanup_raises_below_the_watermark(monkeypatch):
+    events = []
+
+    @contextmanager
+    def lock(**_kwargs):
+        yield True
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("prune failed")
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", lock)
+    monkeypatch.setattr(cleanup, "_load_campaigns", list)
+    monkeypatch.setattr(cleanup, "cleanup_once", fail)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(50))
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 1
+    assert events[0]["above_hard_watermark"] is False
+
+
+@pytest.mark.unit
 def test_builder_cleanup_event_keeps_zero_and_rounds_percent():
     from observability import events as obs
 

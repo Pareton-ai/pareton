@@ -377,11 +377,13 @@ def builder_cleanup(
     pruned: bool,
     dry_run: bool,
     above_hard_watermark: bool,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """One builder-cleanup run, including runs that did not prune.
 
-    Alert on ``above_hard_watermark``, not on the bare journal line. A quiet
-    hour still emits this event so a stalled timer is visible.
+    Alert on ``above_hard_watermark``. A run that raises still emits this
+    event, with ``error`` set, so a failed prune above the hard watermark
+    pages the same way a finished-but-full run does.
     """
     return _emit(
         "builder_cleanup",
@@ -391,6 +393,7 @@ def builder_cleanup(
         pruned=pruned,
         dry_run=dry_run,
         above_hard_watermark=above_hard_watermark,
+        error=None if error is None else str(error)[:500],
     )
 
 
