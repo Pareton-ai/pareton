@@ -37,6 +37,17 @@ def test_classify_cgroup_distinguishes_scope_from_docker_service():
         == "pareton-worker.service"
     )
     assert measure.classify_cgroup("/system.slice/pareton-api.service") == "other"
+    assert (
+        measure.classify_cgroup(
+            "0::/system.slice/system.slice:docker:qhd7gutph7rj1778rtbkomeeo"
+        )
+        == "docker.container"
+    )
+    assert (
+        measure.is_build_cmdline(b"runc --log /var/lib/docker/buildkit/executor/x")
+        is False
+    )
+    assert measure.is_build_cmdline(b"docker buildx build --builder default") is True
 
 
 @pytest.mark.unit
@@ -98,7 +109,7 @@ def test_summarize_reports_scope_placement_and_peaks():
             },
         ]
     )
-    assert report["placement"] == "mixed"
+    assert report["placement"] == "docker.scope"
     assert report["cgroup_classes"] == {"docker.scope": 1, "docker.service": 1}
     assert report["peak_mem_used_mib"] == 800.0
     assert report["peak_swap_used_mib"] == 50.0
@@ -106,6 +117,22 @@ def test_summarize_reports_scope_placement_and_peaks():
     assert report["peak_load1"] == 4.0
     assert report["peak_docker_memory_mib"] == 40.0
     assert report["peak_api_memory_mib"] == 30.0
+
+
+@pytest.mark.unit
+def test_systemd_container_cgroup_wins_over_runc_in_docker_service():
+    report = measure.summarize(
+        [
+            {
+                "new_cgroups": [
+                    "system.slice/system.slice:docker:qhd7gutph7rj1778rtbkomeeo"
+                ],
+                "build_process_cgroups": ["/system.slice/docker.service"],
+            }
+        ]
+    )
+    assert report["placement"] == "docker.container"
+    assert report["cgroup_classes"]["docker.service"] == 1
 
 
 @pytest.mark.unit

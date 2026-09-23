@@ -8,9 +8,13 @@ has been quiet. It does not start a build.
 
 A path is classified as:
 
+- ``docker.container`` when systemd names it ``system.slice:docker:<id>``
 - ``docker.scope`` when it is a ``docker-*.scope`` sibling under ``system.slice``
 - ``pareton-worker.service`` when the worker unit owns it
 - ``docker.service`` when it sits inside that unit
+
+A container cgroup wins over ``docker.service``. ``runc`` stays inside
+``docker.service`` even while the RUN step it started does not.
 """
 
 from __future__ import annotations
@@ -21,19 +25,29 @@ import sys
 import time
 from pathlib import Path
 
-BUILD_MARKERS = (b"buildkit", b"buildx")
 _UNSET = {"", "[not set]", "[no data]", "infinity", "n/a"}
+_WORKLOAD_CLASSES = ("docker.container", "docker.scope")
+
+
+def is_build_cmdline(cmdline: bytes) -> bool:
+    """True for buildx or buildkitd. False for runc, whose path mentions buildkit."""
+    text = cmdline.replace(b"\0", b" ")
+    if text.startswith(b"runc") or b"/runc " in text or b" runc " in text:
+        return False
+    return b"buildkitd" in text or b"buildx" in text
 
 
 def classify_cgroup(path: str) -> str:
     """Return the placement class for one cgroup path."""
     text = path.strip().removeprefix("0::")
-    if ".scope" in text and "docker-" in text:
-        return "docker.scope"
     if "pareton-worker.service" in text:
         return "pareton-worker.service"
     if "docker.service" in text:
         return "docker.service"
+    if ".scope" in text and "docker-" in text:
+        return "docker.scope"
+    if ":docker:" in text:
+        return "docker.container"
     return "other"
 
 
@@ -113,6 +127,11 @@ def placement_of(paths: list[str]) -> tuple[str, dict[str, int]]:
         if kind == "other":
             continue
         counts[kind] = counts.get(kind, 0) + 1
+    workload = [kind for kind in _WORKLOAD_CLASSES if counts.get(kind)]
+    if len(workload) == 1:
+        return workload[0], counts
+    if len(workload) > 1:
+        return "mixed", counts
     kinds = [kind for kind, count in counts.items() if count]
     if not kinds:
         return "none", counts
@@ -180,7 +199,7 @@ def build_process_cgroups(proc_root: Path) -> list[str]:
             cmdline = (pid_dir / "cmdline").read_bytes()
         except OSError:
             continue
-        if not any(marker in cmdline for marker in BUILD_MARKERS):
+        if not is_build_cmdline(cmdline):
             continue
         cgroup = _proc_cgroup(pid_dir)
         if cgroup:
