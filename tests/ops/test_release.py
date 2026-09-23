@@ -397,6 +397,42 @@ def test_check_logs_partial_result_keeps_polling(axiom, base):
 
 
 @needs_tomllib
+def test_check_logs_accepts_builder_cleanup_without_a_probe(axiom, base):
+    write_vector_toml(
+        base,
+        units=[
+            "pareton-worker",
+            "pareton-round-worker",
+            "pareton-watcher",
+            "pareton-api",
+            "pareton-weights",
+            "pareton-gpu-reap",
+            "pareton-deploy",
+            "pareton-deploy-failed",
+            "pareton-builder-cleanup",
+        ],
+    )
+    axiom["response"] = axiom_response(
+        [
+            "pareton-worker.service",
+            "pareton-round-worker.service",
+            "pareton-watcher.service",
+            "pareton-api.service",
+            "pareton-weights.service",
+            "pareton-gpu-reap.service",
+            "pareton-deploy.service",
+        ]
+    )
+    code, report = release.run_log_check(
+        {"probe_id": "probe-x", "target_commit": "c1", "issued_at": release.now_iso()},
+        skip_acceptance=True,
+    )
+    assert code == 0
+    assert "pareton-builder-cleanup.service" not in report["expected"]
+    assert "pareton-builder-cleanup.service" in release.PROBE_EXEMPT_UNITS
+
+
+@needs_tomllib
 def test_check_logs_rejects_unknown_source(axiom, base):
     write_vector_toml(
         base,

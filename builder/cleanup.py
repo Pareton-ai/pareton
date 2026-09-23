@@ -14,6 +14,7 @@ from typing import Any
 import config
 from builder.lock import builder_storage_lock
 from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
+from observability import events as obs
 
 logger = logging.getLogger(__name__)
 
@@ -219,10 +220,20 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("cleanup failed: %s", exc)
         return 1
     print(json.dumps(result, sort_keys=True))
-    if (
+    above_hard = (
         not args.dry_run
-        and result["usage_after_percent"] >= config.BUILDER_CLEANUP_HARD_WATER_PERCENT
-    ):
+        and float(result["usage_after_percent"])
+        >= config.BUILDER_CLEANUP_HARD_WATER_PERCENT
+    )
+    obs.builder_cleanup(
+        usage_before_percent=float(result.get("usage_before_percent", 0)),
+        usage_after_percent=float(result["usage_after_percent"]),
+        candidates_removed=int(result.get("candidates_removed", 0)),
+        pruned=bool(result.get("pruned", False)),
+        dry_run=bool(args.dry_run),
+        above_hard_watermark=above_hard,
+    )
+    if above_hard:
         logger.error("cleanup: Docker disk remains above hard watermark")
         return 2
     return 0

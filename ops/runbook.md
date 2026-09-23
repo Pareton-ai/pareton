@@ -302,7 +302,9 @@ window with the timer disabled:
 
 4. `request verify` + one deploy run completes the release. Pure
    `include_units` member additions (keeping `pareton-deploy-failed.service`)
-   are the single exemption and do not need a new drill.
+   are the single exemption and do not need a new drill. Listing a new unit
+   in `PROBE_EXEMPT_UNITS` or `PROBE_KNOWN_UNITS` edits `ops/release.py`.
+   That edit needs this drill. The `include_units` exemption does not cover it.
 
 ## S4. Manual escalation for a stuck stop (spec 5.2)
 

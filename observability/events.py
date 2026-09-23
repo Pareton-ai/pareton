@@ -369,6 +369,31 @@ def static_host_cleanup_failed(*, pod: str, error: str) -> dict[str, Any]:
     )
 
 
+def builder_cleanup(
+    *,
+    usage_before_percent: float,
+    usage_after_percent: float,
+    candidates_removed: int,
+    pruned: bool,
+    dry_run: bool,
+    above_hard_watermark: bool,
+) -> dict[str, Any]:
+    """One builder-cleanup run, including runs that did not prune.
+
+    Alert on ``above_hard_watermark``, not on the bare journal line. A quiet
+    hour still emits this event so a stalled timer is visible.
+    """
+    return _emit(
+        "builder_cleanup",
+        usage_before_percent=round(float(usage_before_percent), 2),
+        usage_after_percent=round(float(usage_after_percent), 2),
+        candidates_removed=candidates_removed,
+        pruned=pruned,
+        dry_run=dry_run,
+        above_hard_watermark=above_hard_watermark,
+    )
+
+
 def static_host_cleanup_deferred(*, pod: str, error: str) -> dict[str, Any]:
     """Candidate image is still in use. It stays tracked and is retried later.
 
