@@ -23,15 +23,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 _UNSET = {"", "[not set]", "[no data]", "infinity", "n/a"}
 _WORKLOAD_CLASSES = ("docker.container", "docker.scope")
-# runc and a build that stays inside docker.service also count as busy.
-# Other new units (a deploy tick, the reaper) must not.
-_BUSY_CLASSES = ("docker.container", "docker.scope", "docker.service")
 
 
 def is_build_cmdline(cmdline: bytes) -> bool:
@@ -125,33 +123,53 @@ def cgroup_names(cgroup_root: Path) -> set[str]:
     return names
 
 
-def sample_is_busy(sample: dict) -> bool:
-    """True when this sample shows a build, not an unrelated unit start."""
+def sample_is_busy(sample: dict, seen_scopes: set[str] | None = None) -> bool:
+    """True when this sample shows a build, not an unrelated unit start.
+
+    A ``docker-*.scope`` counts only the sample it first appears. A container
+    left running after ``docker run`` must not hold the sampler open.
+    """
     if sample.get("build_process_cgroups"):
         return True
-    return any(
-        classify_cgroup(path) in _BUSY_CLASSES
-        for path in sample.get("new_cgroups") or []
-    )
+    already = seen_scopes or set()
+    for path in sample.get("new_cgroups") or []:
+        kind = classify_cgroup(path)
+        if kind == "docker.scope":
+            if path not in already:
+                return True
+            continue
+        if kind in ("docker.container", "docker.service"):
+            return True
+    return False
 
 
 def workload_memory_bytes(cgroup_root: Path, relative_paths: list[str]) -> int | None:
-    """Sum memory.current for container cgroups. docker.service is excluded."""
-    total = 0
-    found = False
+    """Sum memory.current for build containers.
+
+    A lingering ``docker-*.scope`` is included only when no
+    ``system.slice:docker:`` container is present, so a normal ``docker run``
+    does not replace the compile's memory.
+    """
+    containers: list[int] = []
+    scopes: list[int] = []
     for relative in relative_paths:
-        if classify_cgroup(relative) not in _WORKLOAD_CLASSES:
+        kind = classify_cgroup(relative)
+        if kind not in _WORKLOAD_CLASSES:
             continue
         try:
-            total += int(
+            amount = int(
                 (cgroup_root / relative / "memory.current").read_text().strip()
             )
         except (OSError, ValueError):
             continue
-        found = True
-    if not found:
+        if kind == "docker.container":
+            containers.append(amount)
+        else:
+            scopes.append(amount)
+    chosen = containers or scopes
+    if not chosen:
         return None
-    return total
+    return sum(chosen)
 
 
 def placement_of(paths: list[str]) -> tuple[str, dict[str, int]]:
@@ -161,11 +179,10 @@ def placement_of(paths: list[str]) -> tuple[str, dict[str, int]]:
         if kind == "other":
             continue
         counts[kind] = counts.get(kind, 0) + 1
-    workload = [kind for kind in _WORKLOAD_CLASSES if counts.get(kind)]
-    if len(workload) == 1:
-        return workload[0], counts
-    if len(workload) > 1:
-        return "mixed", counts
+    if counts.get("docker.container"):
+        return "docker.container", counts
+    if counts.get("docker.scope"):
+        return "docker.scope", counts
     kinds = [kind for kind, count in counts.items() if count]
     if not kinds:
         return "none", counts
@@ -189,9 +206,15 @@ def _mib(value: float | None) -> float | None:
 
 def summarize(samples: list[dict]) -> dict:
     paths: list[str] = []
+    seen: set[str] = set()
     for sample in samples:
-        paths.extend(sample.get("new_cgroups") or [])
-        paths.extend(sample.get("build_process_cgroups") or [])
+        for path in (sample.get("new_cgroups") or []) + (
+            sample.get("build_process_cgroups") or []
+        ):
+            if path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
     placement, counts = placement_of(paths)
     return {
         "sample_count": len(samples),
@@ -243,15 +266,16 @@ def build_process_cgroups(proc_root: Path) -> list[str]:
 
 
 def _systemctl_show(unit: str) -> dict[str, str]:
-    import subprocess
-
-    proc = subprocess.run(
-        ["systemctl", "show", unit, "-p", "MemoryCurrent", "-p", "ControlGroup"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", unit, "-p", "MemoryCurrent", "-p", "ControlGroup"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
     values: dict[str, str] = {}
     for line in proc.stdout.splitlines():
         key, sep, value = line.partition("=")
@@ -268,15 +292,16 @@ def _load1() -> float | None:
 
 
 def _df_root() -> float | None:
-    import subprocess
-
-    proc = subprocess.run(
-        ["df", "-P", "/"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["df", "-P", "/"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     return parse_df(proc.stdout)
 
 
@@ -329,12 +354,16 @@ def sample_until(
     )
     started = now()
     seen_build = False
+    seen_scopes: set[str] = set()
     quiet_since: float | None = None
     samples: list[dict] = []
     while now() - started <= max_seconds:
         sample = collect_fn()
         samples.append(sample)
-        busy = sample_is_busy(sample)
+        busy = sample_is_busy(sample, seen_scopes)
+        for path in sample.get("new_cgroups") or []:
+            if classify_cgroup(path) == "docker.scope":
+                seen_scopes.add(path)
         if busy:
             seen_build = True
             quiet_since = None
