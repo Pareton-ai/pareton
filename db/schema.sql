@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   manifest_hash TEXT NOT NULL,
   customer_signoff JSONB,
   status TEXT NOT NULL DEFAULT 'draft'
-    CHECK (status IN ('draft', 'open', 'closed')),
+    CHECK (status IN ('draft', 'open', 'closed', 'archived')),
   bench JSONB,
   -- Build/launch recipe (campaign.engine):
   -- {name, install_cmd, entrypoint, cache_dir}.
