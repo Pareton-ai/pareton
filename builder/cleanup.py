@@ -201,8 +201,12 @@ def _load_campaigns() -> list[Any]:
     return list_campaigns()
 
 
-def _emit_cleanup_failure(exc: BaseException, *, dry_run: bool) -> None:
-    """Emit the disk event when cleanup raises, so a full disk still pages."""
+def _emit_cleanup_disk(exc: BaseException | None, *, dry_run: bool) -> None:
+    """Emit disk state when cleanup raises or the build lock is busy.
+
+    A cold build holds the lock for hours, and that is when the disk fills.
+    The skip still exits 0. The monitor reads ``above_hard_watermark``.
+    """
     usage: float | None
     try:
         usage = _used_percent(shutil.disk_usage(config.BUILDER_DOCKER_ROOT))
@@ -219,7 +223,7 @@ def _emit_cleanup_failure(exc: BaseException, *, dry_run: bool) -> None:
         pruned=False,
         dry_run=dry_run,
         above_hard_watermark=above_hard,
-        error=f"{type(exc).__name__}: {exc}",
+        error=None if exc is None else f"{type(exc).__name__}: {exc}",
     )
 
 
@@ -233,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         with builder_storage_lock(blocking=False) as acquired:
             if not acquired:
                 logger.info("cleanup: build storage lock is busy; skip this run")
+                _emit_cleanup_disk(None, dry_run=bool(args.dry_run))
                 return 0
             campaigns = _load_campaigns()
             result = cleanup_once(
@@ -240,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
             )
     except Exception as exc:  # noqa: BLE001 - oneshot reports operational failure.
         logger.error("cleanup failed: %s", exc)
-        _emit_cleanup_failure(exc, dry_run=bool(args.dry_run))
+        _emit_cleanup_disk(exc, dry_run=bool(args.dry_run))
         return 1
     print(json.dumps(result, sort_keys=True))
     above_hard = (

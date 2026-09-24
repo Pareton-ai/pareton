@@ -221,6 +221,32 @@ def test_main_does_not_page_when_cleanup_raises_below_the_watermark(monkeypatch)
 
 
 @pytest.mark.unit
+def test_main_pages_when_the_build_lock_is_busy_and_disk_is_full(monkeypatch):
+    events = []
+
+    @contextmanager
+    def busy(**_kwargs):
+        yield False
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("cleanup ran while the build lock was busy")
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", busy)
+    monkeypatch.setattr(cleanup, "cleanup_once", must_not_run)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(95))
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 0
+    assert len(events) == 1
+    assert events[0]["above_hard_watermark"] is True
+    assert events[0]["error"] is None
+    assert events[0]["usage_after_percent"] == 95.0
+
+
+@pytest.mark.unit
 def test_builder_cleanup_event_keeps_zero_and_rounds_percent():
     from observability import events as obs
 
