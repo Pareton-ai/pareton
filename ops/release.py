@@ -73,9 +73,13 @@ ONESHOT_UNITS = ("pareton-gpu-reap.service", "pareton-builder-cleanup.service")
 DEPLOY_TIMER = "pareton-deploy.timer"
 DEPLOY_UNIT = "pareton-deploy.service"
 
-# The one include_units source with no per-release probe: real OnFailure
-# drills cover it (spec 7.1). Everything else must have a probe method.
-PROBE_EXEMPT_UNITS = ("pareton-deploy-failed.service",)
+# include_units sources with no per-release probe. The OnFailure unit is
+# covered by a real drill (spec 7.1). Builder cleanup is a timer oneshot and
+# cannot answer an on-demand probe. Everything else must have a probe method.
+PROBE_EXEMPT_UNITS = (
+    "pareton-deploy-failed.service",
+    "pareton-builder-cleanup.service",
+)
 PROBE_KNOWN_UNITS = (
     tuple(f"{u}.service" for u in (*ALL_RESIDENT, "pareton-deploy", "pareton-gpu-reap"))
     + PROBE_EXEMPT_UNITS
