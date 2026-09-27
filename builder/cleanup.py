@@ -14,6 +14,7 @@ from typing import Any
 import config
 from builder.lock import builder_storage_lock
 from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
+from observability import events as obs
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,32 @@ def _load_campaigns() -> list[Any]:
     return list_campaigns()
 
 
+def _emit_cleanup_disk(exc: BaseException | None, *, dry_run: bool) -> None:
+    """Emit disk state when cleanup raises or the build lock is busy.
+
+    A cold build holds the lock for hours, and that is when the disk fills.
+    The skip still exits 0. The monitor reads ``above_hard_watermark``.
+    """
+    usage: float | None
+    try:
+        usage = _used_percent(shutil.disk_usage(config.BUILDER_DOCKER_ROOT))
+    except OSError:
+        usage = None
+    above_hard = (not dry_run) and (
+        usage is None or usage >= config.BUILDER_CLEANUP_HARD_WATER_PERCENT
+    )
+    reported = 0.0 if usage is None else usage
+    obs.builder_cleanup(
+        usage_before_percent=reported,
+        usage_after_percent=reported,
+        candidates_removed=0,
+        pruned=False,
+        dry_run=dry_run,
+        above_hard_watermark=above_hard,
+        error=None if exc is None else f"{type(exc).__name__}: {exc}",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
@@ -210,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         with builder_storage_lock(blocking=False) as acquired:
             if not acquired:
                 logger.info("cleanup: build storage lock is busy; skip this run")
+                _emit_cleanup_disk(None, dry_run=bool(args.dry_run))
                 return 0
             campaigns = _load_campaigns()
             result = cleanup_once(
@@ -217,12 +245,23 @@ def main(argv: list[str] | None = None) -> int:
             )
     except Exception as exc:  # noqa: BLE001 - oneshot reports operational failure.
         logger.error("cleanup failed: %s", exc)
+        _emit_cleanup_disk(exc, dry_run=bool(args.dry_run))
         return 1
     print(json.dumps(result, sort_keys=True))
-    if (
+    above_hard = (
         not args.dry_run
-        and result["usage_after_percent"] >= config.BUILDER_CLEANUP_HARD_WATER_PERCENT
-    ):
+        and float(result["usage_after_percent"])
+        >= config.BUILDER_CLEANUP_HARD_WATER_PERCENT
+    )
+    obs.builder_cleanup(
+        usage_before_percent=float(result.get("usage_before_percent", 0)),
+        usage_after_percent=float(result["usage_after_percent"]),
+        candidates_removed=int(result.get("candidates_removed", 0)),
+        pruned=bool(result.get("pruned", False)),
+        dry_run=bool(args.dry_run),
+        above_hard_watermark=above_hard,
+    )
+    if above_hard:
         logger.error("cleanup: Docker disk remains above hard watermark")
         return 2
     return 0

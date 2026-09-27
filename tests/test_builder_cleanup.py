@@ -133,6 +133,140 @@ def test_dry_run_and_database_failure_do_not_mutate(monkeypatch):
 
 
 @pytest.mark.unit
+def test_main_emits_builder_cleanup_and_fails_above_hard_watermark(monkeypatch):
+    events = []
+
+    @contextmanager
+    def lock(**_kwargs):
+        yield True
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", lock)
+    monkeypatch.setattr(cleanup, "_load_campaigns", list)
+    monkeypatch.setattr(
+        cleanup,
+        "cleanup_once",
+        lambda campaigns, **_kwargs: {
+            "usage_before_percent": 91.234,
+            "usage_after_percent": 90.5,
+            "candidates_removed": 2,
+            "pruned": True,
+        },
+    )
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 2
+    assert events == [
+        {
+            "usage_before_percent": 91.234,
+            "usage_after_percent": 90.5,
+            "candidates_removed": 2,
+            "pruned": True,
+            "dry_run": False,
+            "above_hard_watermark": True,
+        }
+    ]
+
+
+@pytest.mark.unit
+def test_main_pages_when_cleanup_raises_above_the_hard_watermark(monkeypatch):
+    events = []
+
+    @contextmanager
+    def lock(**_kwargs):
+        yield True
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("prune failed")
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", lock)
+    monkeypatch.setattr(cleanup, "_load_campaigns", list)
+    monkeypatch.setattr(cleanup, "cleanup_once", fail)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(95))
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 1
+    assert events[0]["above_hard_watermark"] is True
+    assert events[0]["error"] == "RuntimeError: prune failed"
+    assert events[0]["usage_after_percent"] == 95.0
+
+
+@pytest.mark.unit
+def test_main_does_not_page_when_cleanup_raises_below_the_watermark(monkeypatch):
+    events = []
+
+    @contextmanager
+    def lock(**_kwargs):
+        yield True
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("prune failed")
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", lock)
+    monkeypatch.setattr(cleanup, "_load_campaigns", list)
+    monkeypatch.setattr(cleanup, "cleanup_once", fail)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(50))
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 1
+    assert events[0]["above_hard_watermark"] is False
+
+
+@pytest.mark.unit
+def test_main_pages_when_the_build_lock_is_busy_and_disk_is_full(monkeypatch):
+    events = []
+
+    @contextmanager
+    def busy(**_kwargs):
+        yield False
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("cleanup ran while the build lock was busy")
+
+    monkeypatch.setattr(cleanup, "builder_storage_lock", busy)
+    monkeypatch.setattr(cleanup, "cleanup_once", must_not_run)
+    monkeypatch.setattr(cleanup.shutil, "disk_usage", lambda _path: _usage(95))
+    monkeypatch.setattr(cleanup.config, "BUILDER_CLEANUP_HARD_WATER_PERCENT", 90)
+    monkeypatch.setattr(
+        cleanup.obs, "builder_cleanup", lambda **kwargs: events.append(kwargs) or kwargs
+    )
+
+    assert cleanup.main([]) == 0
+    assert len(events) == 1
+    assert events[0]["above_hard_watermark"] is True
+    assert events[0]["error"] is None
+    assert events[0]["usage_after_percent"] == 95.0
+
+
+@pytest.mark.unit
+def test_builder_cleanup_event_keeps_zero_and_rounds_percent():
+    from observability import events as obs
+
+    payload = obs.builder_cleanup(
+        usage_before_percent=74.956,
+        usage_after_percent=74.951,
+        candidates_removed=0,
+        pruned=False,
+        dry_run=False,
+        above_hard_watermark=False,
+    )
+    assert payload["event"] == "builder_cleanup"
+    assert payload["usage_before_percent"] == 74.96
+    assert payload["usage_after_percent"] == 74.95
+    assert payload["candidates_removed"] == 0
+    assert payload["pruned"] is False
+    assert payload["above_hard_watermark"] is False
+
+
+@pytest.mark.unit
 def test_main_loads_campaigns_after_acquiring_lock(monkeypatch):
     events = []
 

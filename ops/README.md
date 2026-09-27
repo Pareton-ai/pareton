@@ -323,3 +323,22 @@ clause ignores deferred image retries that older builds logged as
 
 Activate the monitor/notifier during rollout; code deployment does not create it.
 Investigate failures in `pareton-round-worker` and `pareton-gpu-reap` journals.
+
+### Builder disk headroom
+
+`pareton-builder-cleanup.service` runs from an hourly timer. Each run emits
+`builder_cleanup` with `usage_before_percent` and `usage_after_percent`. A run
+that finishes at or above the hard watermark (default 90 percent) sets
+`above_hard_watermark` to true and exits 2.
+
+The Axiom monitor uses the operations notifier, **Above 0 over 2 hours**,
+evaluated every 15 minutes, and **Alert on no data** off. Two hours covers the
+hourly timer, so one full disk stays one open alert.
+
+```apl
+['pareton-prod']
+| where event == "builder_cleanup" and above_hard_watermark == true
+| summarize failures=count()
+```
+
+Activate the monitor/notifier during rollout; code deployment does not create it.
