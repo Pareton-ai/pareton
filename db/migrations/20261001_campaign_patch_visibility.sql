@@ -28,5 +28,10 @@ ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS patch_visibility JSONB
   NOT NULL DEFAULT '{"mode":"private"}'::jsonb;
 ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_patch_visibility_check;
 ALTER TABLE campaigns ADD CONSTRAINT campaigns_patch_visibility_check
-  CHECK (valid_campaign_patch_visibility(patch_visibility));
+  CHECK (valid_campaign_patch_visibility(patch_visibility)) NOT VALID;
+COMMIT;
+
+-- Release the earlier DDL locks before scanning existing campaigns.
+BEGIN;
+ALTER TABLE campaigns VALIDATE CONSTRAINT campaigns_patch_visibility_check;
 COMMIT;
