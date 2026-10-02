@@ -15,27 +15,6 @@ A campaign needs a published engine image, a working offline miner build, pinned
 model weights, a workload and correctness policy. Verify those before creating the
 open row. Never invent image digests, source revisions or GPU measurements.
 
-## Scope: new campaigns only
-
-[Backend PR #187](https://github.com/Pareton-ai/pareton/pull/187) adds an opt-in
-LongWriter v5 contract for **newly created campaigns**. Deploying that support
-is not a campaign launch or migration. Existing campaigns keep their pinned
-sampler version, interval scheduling, output policy, scoring rule, qualification
-artifacts, manifest, fees and emissions. New rounds in those campaigns continue
-to use their existing contract; completed reports are not rescored.
-
-Launch fixtures and seed helpers are templates for a future new campaign. Do not
-copy their v5 fields into an existing campaign row, regenerate its signed
-manifest, replace its qualified pool, or close/reseed it as part of deploying
-#187. No campaign update, reseeding or qualification job is required for the
-existing campaign. Follow the launch steps below only when a new campaign launch
-has separately been requested.
-
-Before opening that future v5 campaign, deploy compatible backend/API/workers
-and [frontend PR #89](https://github.com/Pareton-ai/pareton-frontend/pull/89), then
-qualify and GPU-validate the exact new contract. Code deployment can happen
-before those future launch checks; it does not activate v5 for existing rows.
-
 ## 1. Select the engine, model and hardware
 
 Read `GET https://api.pareton.ai/v1/campaigns` and the pinned upstream source.
@@ -352,8 +331,10 @@ configuration before opening, using the normal deployment process.
 
 ## 4. Open a future Qwen v5 campaign
 
-This section creates a new campaign only after a separate launch request and
-successful validation. It is not part of deploying PR #187 to an active validator.
+These v5 settings apply only to new campaigns; existing campaigns retain their
+pinned workload and scoring rules. Before opening a new v5 campaign, qualify its
+workload and deploy compatible backend and
+[frontend support](https://github.com/Pareton-ai/pareton-frontend/pull/89).
 
 ### Initial submission fee
 
