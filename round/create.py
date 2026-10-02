@@ -15,11 +15,13 @@ from typing import Any
 
 import config
 from bench.sampler import (
+    AFFINE_RULE_TYPE,
     CHAT_TEMPLATE_ALGO_VERSION,
     TRAJECTORY_ALGO_VERSION,
     PromptFormatter,
     build_prompt_formatter,
     compute_sample_seed,
+    default_row_fetcher,
     fetch_hf_row,
     generate_trace,
     parse_sampling_rule,
@@ -145,10 +147,16 @@ def try_create_round(
         sampling_context = sampling_context_for_rule(
             rule, bench, getattr(campaign, "engine", None)
         )
+    if row_fetcher is None:
+        row_fetcher = (
+            default_row_fetcher(rule)
+            if rule["type"] == AFFINE_RULE_TYPE
+            else (lambda idx: fetch_hf_row(rule, idx))
+        )
     sampled = generate_trace(
         rule=rule,
         seed_hex=seed_hex,
-        row_fetcher=row_fetcher or (lambda idx: fetch_hf_row(rule, idx)),
+        row_fetcher=row_fetcher,
         prompt_formatter=formatter,
         sample_seed_block=seed_block,
         sample_seed_block_hash=seed_block_hash,

@@ -629,7 +629,10 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
 
     receipt = row.get("sampling_receipt") or {}
     workload = None
-    if isinstance(receipt, dict) and receipt.get("type") == "hf_rows":
+    if isinstance(receipt, dict) and receipt.get("type") in (
+        "hf_rows",
+        "affine_corpus",
+    ):
         version = receipt.get("algo_version", 1)
         template = receipt.get("chat_template") or {}
         context = receipt.get("context") or {}

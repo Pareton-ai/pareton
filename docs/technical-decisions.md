@@ -67,3 +67,22 @@ services keep credentialed S3 access for fetch and build.
 Old append-only `submission_events` rows are untouched: nothing rewrites past
 `committed` details. Objects already copied to public storage under the former
 reveal policy are outside this code change.
+
+
+## 2026-10-02: Affine corpus turns as sampler version 5
+
+Add Affine's public corpus as a separate `affine_corpus` sampling rule rather
+than another `hf_rows` version. It has its own source (a hashed object store,
+not a Hugging Face dataset) and its own prompt shape (a message graph, not a
+LongWriter exchange plus follow-up). Versions 1 through 4 are unchanged.
+
+Rules pin one immutable manifest revision by hash and never follow the mutable
+pointer. Only schema 3 with `duel_turns@v4` chunks is supported; other schemas
+need their own adapter and fixtures. A turn's prompt is the root-to-parent path
+of its reply node. The reply is never sent, and Affine's duel scoring is not
+imported: Pareton's correctness, SLA and scoring rules apply unchanged.
+
+Default campaign terms for the first rule: all sources and action kinds, which
+weights the mix by turn count; thinking disabled; four contiguous input tiers
+up to 16,384 tokens; a 5,120-token output ceiling with natural EOS. The Affine
+H100 launch may change these, which requires requalification and a new rule.

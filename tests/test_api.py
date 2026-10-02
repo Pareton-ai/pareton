@@ -1141,6 +1141,37 @@ def test_entry_report_exposes_reliability_and_the_rounds_frozen_workload(
     assert "input_tokens" not in row["report"]["score_report"]["prompts"][0]
 
 
+def test_entry_report_exposes_an_affine_corpus_workload(
+    monkeypatch, client: TestClient
+):
+    from api import server
+
+    row = _score_report_row()
+    row["sampling_receipt"] = {
+        "type": "affine_corpus",
+        "algo_version": 5,
+        "request_interval_ms": 2,
+        "enable_thinking": False,
+        "context": {"max_model_len": 32768},
+        "requests": [
+            {
+                "request_id": "req-0",
+                "turn_id": "traj.1:0",
+                "input_tokens": 3071,
+                "max_tokens": 5120,
+                "input_length_group": "4k",
+            }
+        ],
+    }
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["workload"]["algo_version"] == 5
+    assert body["workload"]["max_model_len"] == 32768
+    assert body["prompts"][0]["input_length_group"] == "4k"
+    assert "turn_id" not in body["prompts"][0]
+
+
 def test_baseline_report_exposes_input_lengths_without_inventing_scores(
     monkeypatch, client: TestClient
 ):

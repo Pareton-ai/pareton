@@ -308,7 +308,11 @@ def _validate_workload_trace_dict(d: dict[str, Any]) -> WorkloadTrace:
         seen_ids.add(rid_s)
     sampling = (d.get("meta") or {}).get("sampling")
     if sampling is not None:
-        if isinstance(sampling, dict) and sampling.get("algo_version") == 4:
+        if isinstance(sampling, dict) and sampling.get("workload") == "affine_corpus":
+            from bench.affine_corpus import validate_affine_trace
+
+            validate_affine_trace(d["requests"], sampling)
+        elif isinstance(sampling, dict) and sampling.get("algo_version") == 4:
             from bench.longform import validate_longform_trace
 
             validate_longform_trace(d["requests"], sampling)

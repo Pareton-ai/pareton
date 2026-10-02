@@ -1,0 +1,15 @@
+{
+  "type": "affine_corpus",
+  "algo_version": 5,
+  "base_url": "https://data.affine.io",
+  "manifest_sha256": "sha256:4f1d5945dcbb260a0493ca3f3060ca09c0a295d285ba386099fd46fe4cbb9778",
+  "index_sha256": "sha256:adfc84f948254f238e990426afd88d6a3ce58eff7530acb77c106b1dd4798dc7",
+  "corpus_epoch": 103,
+  "n_turns": 300209,
+  "n_prompts": 32,
+  "max_tokens": 5120,
+  "request_interval_ms": 2,
+  "enable_thinking": false,
+  "seed_block_offset": 1,
+  "max_prefix_chars": 65536
+}
