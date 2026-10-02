@@ -11,13 +11,14 @@ from uuid import UUID
 from .engine import validate_engine
 from .fees import validate_submission_fee
 from .models import (
+    SLA,
     CampaignManifest,
     CustomerSignoff,
-    SLA,
     validate_emission_rule,
     validate_priority_metric,
     validate_scoring_rule,
 )
+from .visibility import validate_patch_visibility
 
 
 def _canon(value: Any) -> Any:
@@ -56,6 +57,7 @@ def freeze_manifest_fields(
     scoring_rule: dict[str, Any] | None = None,
     emission_rule: dict[str, Any] | None = None,
     submission_fee: dict[str, Any] | None = None,
+    patch_visibility: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the pin set used for manifest_hash (excludes status/signoff).
 
@@ -73,6 +75,7 @@ def freeze_manifest_fields(
     so it must not be able to change under them silently. Absent means the
     campaign pays nothing.
     ``submission_fee`` is deliberately excluded: fees have block-effective history.
+    ``patch_visibility`` is also excluded: disclosure is an operational policy.
 
     The submission window used to be pinned here as ``window``. It was dropped
     with the feature, so campaigns hashed before that no longer recompute to
@@ -153,6 +156,7 @@ def build_manifest(
     scoring_rule: dict[str, Any] | None = None,
     emission_rule: dict[str, Any] | None = None,
     submission_fee: dict[str, Any],
+    patch_visibility: dict[str, Any] | None = None,
     created_at: datetime | None = None,
 ) -> CampaignManifest:
     fields = freeze_manifest_fields(
@@ -219,5 +223,6 @@ def build_manifest(
         scoring_rule=dict(scoring_obj),
         emission_rule=dict(emission_obj) if isinstance(emission_obj, dict) else None,
         submission_fee=dict(submission_fee_obj),
+        patch_visibility=validate_patch_visibility(patch_visibility),
         created_at=created_at,
     )

@@ -15,9 +15,16 @@ HASH = "sha256:" + "a" * 64
 URL = "https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/campaigns/c/patches/h/random.diff"
 
 
-@pytest.mark.parametrize("endpoint", ["list", "detail", "legacy_detail"])
-def test_json_query_counts_stay_at_budget(monkeypatch, endpoint):
+@pytest.mark.parametrize(
+    "policy",
+    [{"mode": "private"}, {"mode": "public_after_reveal", "reveal_delay_s": 0}],
+)
+@pytest.mark.parametrize(
+    "endpoint", ["list", "detail", "legacy_detail", "availability"]
+)
+def test_json_query_counts_stay_at_budget(monkeypatch, endpoint, policy):
     row = {
+        "_patch_visibility": policy,
         "id": SID,
         "campaign_id": CID,
         "patch_hash": HASH,
@@ -44,6 +51,13 @@ def test_json_query_counts_stay_at_budget(monkeypatch, endpoint):
             ],
         ]
         expected_queries, expected_checkouts = 2, 1
+    elif endpoint == "availability":
+        path = f"/v1/campaigns/{CID}/submissions/{HASH}/patch-availability"
+        replies = [row]
+        expected_queries = expected_checkouts = 1
+        if policy["mode"] == "public_after_reveal":
+            replies.append([])  # No finalized evaluation yet.
+            expected_queries = expected_checkouts = 2
     else:
         path = f"/v1/campaigns/{CID}/submissions/{HASH}"
         replies = [
@@ -98,6 +112,11 @@ def test_json_query_counts_stay_at_budget(monkeypatch, endpoint):
     assert response.status_code == 200
     payload = response.json()
     public = payload["submissions"][0] if endpoint == "list" else payload["submission"]
-    assert "retrieval_url" not in public
+    if policy["mode"] == "private":
+        assert "retrieval_url" not in public
+    else:
+        assert public["retrieval_url"] == ""
+        assert public["patch_reveal_at"] is None
+    assert "_patch_visibility" not in public
     assert len(queries) == expected_queries
     assert len(checkouts) == expected_checkouts

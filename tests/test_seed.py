@@ -887,3 +887,41 @@ def test_seed_requires_fee_even_if_removed_environment_variable_is_set(
     assert "--submission-fee-tao" in capsys.readouterr().err
     assert captured["inserts"] == 0
     assert captured["profile_data"] is None
+
+
+@pytest.mark.parametrize(
+    "policy", [None, {"mode": "public_after_reveal", "reveal_delay_s": 3600}]
+)
+def test_seed_persists_visibility_with_unchanged_signoff(monkeypatch, policy):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15", allow_placeholders=True, patch_visibility=policy
+    )
+    manifest = captured["manifest"]
+    assert manifest.patch_visibility == (policy or {"mode": "private"})
+    assert manifest.customer_signoff.approved_manifest_hash == manifest.manifest_hash
+
+
+def test_seed_visibility_flags(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        seed, "seed_synthetic_campaign", lambda **kwargs: captured.update(kwargs)
+    )
+    assert (
+        main(
+            [
+                "--submission-fee-tao",
+                "0",
+                "--patch-visibility",
+                "public_after_reveal",
+                "--patch-reveal-delay-s",
+                "0",
+            ]
+        )
+        == 0
+    )
+    assert captured["patch_visibility"] == {
+        "mode": "public_after_reveal",
+        "reveal_delay_s": 0,
+    }
+    assert main(["--submission-fee-tao", "0", "--patch-reveal-delay-s", "60"]) == 1

@@ -16,6 +16,7 @@ from .exclusion import ACTION_WAIVED, latest_campaign_hotkey_action
 from .fees import fee_at_block, validate_fee_history, validate_submission_fee
 from .manifest import build_manifest
 from .models import SLA, CampaignManifest, CustomerSignoff, validate_scoring_rule
+from .visibility import validate_patch_visibility
 
 
 class CampaignHotkeyDisqualified(RuntimeError):
@@ -83,6 +84,7 @@ def _row_to_manifest(row: dict[str, Any]) -> CampaignManifest:
         scoring_rule=dict(scoring_rule) if isinstance(scoring_rule, dict) else None,
         emission_rule=dict(emission_rule) if isinstance(emission_rule, dict) else None,
         submission_fee=submission_fee,
+        patch_visibility=_parse_json_obj(row.get("patch_visibility")),
         created_at=(
             _parse_ts(row["created_at"]) if row.get("created_at") is not None else None
         ),
@@ -118,6 +120,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
     )
     if fee_at_block(history, 0) != submission_fee:
         raise ValueError("submission_fee must match the block-zero fee history entry")
+    visibility = validate_patch_visibility(manifest.patch_visibility)
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -130,7 +133,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   manifest_hash, customer_signoff, status, bench, engine,
                   priority_metric, success_threshold,
                   workload_pool, sampling_rule, scoring_rule, emission_rule,
-                  submission_fee_history
+                  submission_fee_history, patch_visibility
                 ) VALUES (
                   COALESCE(%s, gen_random_uuid()), %s, %s, %s, %s,
                   %s, %s, %s, %s,
@@ -138,7 +141,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                   %s, %s,
                   %s, %s, %s, %s, %s,
                   %s, %s,
-                  %s, %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s
                 )
                 RETURNING id
                 """,
@@ -180,6 +183,7 @@ def insert_campaign(manifest: CampaignManifest) -> UUID:
                         else None
                     ),
                     Json(history),
+                    Json(visibility),
                 ),
             )
             return cur.fetchone()[0]
@@ -649,9 +653,10 @@ def get_submission(patch_hash: str) -> dict[str, Any] | None:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT * FROM submissions
-                WHERE patch_hash = %s
-                ORDER BY created_at DESC
+                SELECT s.*, c.patch_visibility AS _patch_visibility
+                FROM submissions s JOIN campaigns c ON c.id = s.campaign_id
+                WHERE s.patch_hash = %s
+                ORDER BY s.created_at DESC
                 LIMIT 1
                 """,
                 (patch_hash,),
@@ -667,8 +672,9 @@ def get_submission_for_campaign(
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT * FROM submissions
-                WHERE campaign_id = %s AND patch_hash = %s
+                SELECT s.*, c.patch_visibility AS _patch_visibility
+                FROM submissions s JOIN campaigns c ON c.id = s.campaign_id
+                WHERE s.campaign_id = %s AND s.patch_hash = %s
                 """,
                 (str(campaign_id), patch_hash),
             )
@@ -734,8 +740,8 @@ def list_campaign_submissions(
     """One-connection page for ``GET /v1/campaigns/{id}/submissions``.
 
     Returns ``None`` when the campaign is missing. Each item already has
-    ``latest_state`` and ``round`` attached, so the handler does not open
-    extra Neon round-trips for those lookups.
+    ``latest_state``, ``round``, campaign policy, and first evaluation time
+    attached, so the handler does not open extra Neon round-trips for disclosure.
     """
     cid = str(campaign_id)
     with db_connection(readonly=True) as conn:
@@ -762,13 +768,16 @@ def list_campaign_submissions(
                        st.state AS latest_state,
                        re.round_id, re.ordinal AS round_ordinal,
                        re.status AS round_entry_status, re.score AS round_score,
-                       re.disqualify_reason AS round_disqualify_reason
+                       re.disqualify_reason AS round_disqualify_reason,
+                       re.patch_evaluated_at AS _patch_evaluated_at,
+                       c.patch_visibility AS _patch_visibility
                 FROM (
                     SELECT * FROM submissions
                     WHERE campaign_id = %s
                     ORDER BY committed_at DESC, id DESC
                     LIMIT %s OFFSET %s
                 ) s
+                JOIN campaigns c ON c.id = s.campaign_id
                 LEFT JOIN LATERAL (
                     SELECT e.state
                     FROM submission_events e
@@ -778,7 +787,11 @@ def list_campaign_submissions(
                 ) st ON true
                 LEFT JOIN LATERAL (
                     SELECT e.round_id, r.ordinal, e.status, e.score,
-                           e.disqualify_reason
+                           e.disqualify_reason,
+                           MIN(r.completed_at) FILTER (
+                               WHERE r.status = 'complete'
+                                 AND e.status IN ('scored', 'disqualified')
+                           ) OVER () AS patch_evaluated_at
                     FROM round_entries e
                     JOIN rounds r ON r.id = e.round_id
                     WHERE e.submission_id = s.id AND r.status <> 'void'

@@ -37,6 +37,7 @@ from campaign.models import (
     validate_scoring_rule,
 )
 from campaign.store import insert_campaign, insert_profile, list_campaigns
+from campaign.visibility import validate_patch_visibility
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SAMPLING_RULE = (
@@ -262,11 +263,13 @@ def seed_synthetic_campaign(
     status: str = DEFAULT_STATUS,
     no_bench: bool = False,
     submission_fee_tao: str,
+    patch_visibility: dict | None = None,
     engine: str | None = None,
     allowed_paths: list[str] | None = None,
     denied_paths: list[str] | None = None,
 ) -> str:
     # Normalize before floor lookup / profile insert (build_manifest also validates).
+    visibility = validate_patch_visibility(patch_visibility)
     priority_metric = validate_priority_metric(priority_metric)
     status = _normalize_status(status)
     # None (not "vllm") is the default: it keeps engine out of the manifest pin
@@ -425,6 +428,7 @@ def seed_synthetic_campaign(
         scoring_rule=scoring,
         emission_rule=emission,
         submission_fee=fee,
+        patch_visibility=visibility,
     )
 
     signoff = CustomerSignoff(
@@ -462,6 +466,7 @@ def seed_synthetic_campaign(
         scoring_rule=scoring,
         emission_rule=emission,
         submission_fee=fee,
+        patch_visibility=visibility,
     )
 
     inserted = insert_campaign(manifest)
@@ -650,8 +655,18 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_SUCCESS_THRESHOLD,
         help="Human-readable win condition for the pilot",
     )
+    p.add_argument(
+        "--patch-visibility",
+        choices=("private", "public_after_reveal"),
+        default="private",
+    )
+    p.add_argument("--patch-reveal-delay-s", type=int, default=None)
     args = p.parse_args(argv)
     try:
+        visibility = {"mode": args.patch_visibility}
+        if args.patch_reveal_delay_s is not None:
+            visibility["reveal_delay_s"] = args.patch_reveal_delay_s
+        visibility = validate_patch_visibility(visibility)
         pool = None
         if args.workload_pool_json:
             pool_path = Path(args.workload_pool_json)
@@ -711,6 +726,7 @@ def main(argv: list[str] | None = None) -> int:
             status=args.status,
             no_bench=args.no_bench,
             submission_fee_tao=args.submission_fee_tao,
+            patch_visibility=visibility,
             engine=args.engine,
             allowed_paths=args.allowed_path,
             denied_paths=args.denied_path,
