@@ -245,6 +245,45 @@ def test_hung_headers_hit_absolute_deadline_without_refill(monkeypatch):
         release.set()
 
 
+def test_replay_deadline_stops_parked_worker_before_refill(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    calls, workers = [], []
+
+    class ParkedWorker(threading.Thread):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            workers.append(self)
+
+        def join(self, timeout=None):
+            # Model a timed-out join while _fire is still in progress.
+            assert started.wait(2)
+
+    def fire(url, req, **kwargs):
+        calls.append(req.id)
+        started.set()
+        assert release.wait(2)
+
+    monkeypatch.setattr("bench.sla_bench.threading.Thread", ParkedWorker)
+    monkeypatch.setattr("bench.sla_bench._fire", fire)
+    try:
+        with pytest.raises(EngineError, match="absolute replay deadline"):
+            _replay_concurrent(
+                "unused",
+                requests(),
+                role="test",
+                rep=1,
+                is_warmup=False,
+                timeout_s=1,
+                request_concurrency=1,
+            )
+    finally:
+        release.set()
+        for worker in workers:
+            super(ParkedWorker, worker).join(2)
+            assert not worker.is_alive()
+    assert calls == ["2k-0"]
+
+
 def test_done_timestamp_is_separate_from_last_token(monkeypatch):
     from test_http import _FakeResp, _sse
 
@@ -406,6 +445,28 @@ def test_real_http_replay_persists_complete_tier_evidence(tmp_path, c):
     assert all(
         "protocol_completion_offset_ms" in r for r in data if not r.get("_rep_meta")
     )
+
+
+def test_failed_concurrent_warmup_preserves_error_evidence(monkeypatch, tmp_path):
+    from bench.schemas import SlaBenchConfig, SlaThresholds
+    from bench.sla_bench import run_sla_engine
+
+    error = "connection reset by peer"
+    row = {"request_id": "2k-0", "error": error}
+    monkeypatch.setattr(
+        "bench.sla_bench._replay_concurrent", lambda *a, **kw: ([row], 0.5, [error])
+    )
+    with pytest.raises(EngineError, match=f"concurrency warmup failed: {error}"):
+        run_sla_engine(
+            "unused",
+            role="candidate",
+            requests=requests(),
+            cfg=SlaBenchConfig(2, SlaThresholds(1e9, 1e9)),
+            evidence_dir=tmp_path,
+            request_concurrency=32,
+        )
+    evidence = (tmp_path / "candidate/warmup/requests.jsonl").read_text().splitlines()
+    assert json.loads(evidence[0]) == row
 
 
 def test_reference_drift_cannot_cancel_between_tiers():

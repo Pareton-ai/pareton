@@ -403,7 +403,10 @@ def _replay_concurrent(
         for worker in workers:
             worker.join(max(0, deadline - time.monotonic()))
         if any(worker.is_alive() for worker in workers):
-            raise EngineError("concurrency replay exceeded absolute replay deadline")
+            error = "concurrency replay exceeded absolute replay deadline"
+            with lock:
+                errs.append(error)
+            raise EngineError(error)
         if errs:
             break
     if len(rows) != len(requests) and not errs:
@@ -578,16 +581,16 @@ def _run_engine(
             timeout_s=timeout_s,
             **replay_kwargs,
         )
-        if request_concurrency is not None and (
-            warm_errors or any(r.get("error") for r in warm_rows)
-        ):
-            raise EngineError("concurrency warmup failed")
         dirname = WARMUP_DIRNAME if warmup == 0 else f"warmup_{warmup + 1}"
         _write_rep(
             engine_evidence_dir / dirname,
             warm_rows,
             warm_wall if request_concurrency is not None else 0.0,
         )
+        if request_concurrency is not None:
+            errors = warm_errors or [r["error"] for r in warm_rows if r.get("error")]
+            if errors:
+                raise EngineError(f"concurrency warmup failed: {errors[0]}")
 
     rep_metrics: list[dict] = []
     measured: list[dict] = []
