@@ -32,8 +32,10 @@ The updated workload still requires GPU calibration before launch.
 
 ## Patch visibility
 
-Patches remain private. Public API responses expose patch hashes, statuses,
-scores, and logs, but never patch retrieval locations or downloads.
+Patches remain private by default. Campaigns can opt into public downloads after
+a configurable delay from the first finalized evaluation via `patch_visibility`.
+This policy is outside `manifest_hash`, like submission fees. See
+[patch visibility](docs/patch-visibility.md) for configuration and rollout.
 
 The miner signs its upload request locally. Patches use private S3 objects
 with independently random UUIDv4 filenames. The on-chain URL identifies the

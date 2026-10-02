@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Literal
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
@@ -29,6 +30,7 @@ from campaign.store import (
     list_latest_states,
     list_submission_jobs,
 )
+from campaign.visibility import validate_patch_visibility
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
 from gate.types import SubmissionState
 from round.store import (
@@ -36,16 +38,19 @@ from round.store import (
     get_leader,
     get_round,
     get_round_entry_report,
+    list_patch_evaluation_times,
     list_round_entries,
     list_rounds,
     list_score_progress,
     list_submission_round_entries,
 )
-from storage.s3 import create_presigned_patch_upload
+from storage.s3 import create_presigned_patch_upload, publish_patch
 from storage.upload_auth import verify_upload_request
+from storage.visibility import patch_is_revealed, patch_reveal_at
 
 V1_CACHE_CONTROL = "public, max-age=30, stale-while-revalidate=300"
 # Build logs use no-store until the submission reaches a terminal state.
+# Submission list/detail use no-store: disclosure depends on time and policy.
 # Campaigns and other settled resources keep the shared short TTL above.
 # ``built`` is terminal for no-bench campaigns; bench campaigns continue via
 # ``bench_queued`` (and later) in the same worker turn after enqueue.
@@ -179,6 +184,12 @@ class SubmissionRoundModel(BaseModel):
 
 class SubmissionSummaryModel(BaseModel):
     """One row of `GET /v1/campaigns/{campaign_id}/submissions`."""
+
+    patch_visibility: dict[str, Any]
+    # Present only for campaigns that opt into delayed public disclosure.
+    retrieval_url: str | None = None
+    patch_reveal_at: str | None = None
+    patch_download_url: str | None = None
 
     id: str
     campaign_id: str
@@ -496,6 +507,7 @@ def campaign_submissions(
     page = list_campaign_submissions(campaign_id, limit=limit, offset=offset)
     if page is None:
         raise HTTPException(status_code=404, detail="campaign not found")
+    response.headers["Cache-Control"] = _NO_STORE
     return {
         "campaign_id": campaign_id,
         "total": page["total"],
@@ -733,10 +745,43 @@ def _iso_or_none(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _public_submission(row: dict) -> dict:
-    public = dict(row)
+def _public_submission(row: dict, evaluated_at=None) -> dict:
+    policy = validate_patch_visibility(row.get("_patch_visibility"))
+    if evaluated_at is None:
+        evaluated_at = row.get("_patch_evaluated_at")
+    public = {k: v for k, v in row.items() if not k.startswith("_patch_")}
     public.pop("retrieval_url", None)
+    public["patch_visibility"] = policy
+    public = _withhold_patch_url(public, row["retrieval_url"])
+    if policy["mode"] == "private":
+        return public
+    public["retrieval_url"] = ""
+    public["patch_reveal_at"] = _iso_or_none(patch_reveal_at(evaluated_at, policy))
+    public["patch_download_url"] = None
+    if patch_is_revealed(evaluated_at, policy):
+        try:
+            public["retrieval_url"] = _published_patch_url(row)
+        except HTTPException as exc:
+            if exc.status_code != 503:
+                raise
+            return public
+        public["patch_download_url"] = (
+            f"/v1/campaigns/{quote(str(row['campaign_id']), safe='')}/submissions/"
+            f"{quote(row['patch_hash'], safe='')}/patch"
+        )
     return public
+
+
+def _published_patch_url(row: dict) -> str:
+    try:
+        return publish_patch(row["retrieval_url"], row["patch_hash"])
+    except Exception:
+        logger.exception("patch publication failed submission_id=%s", row["id"])
+        raise HTTPException(
+            status_code=503,
+            detail="patch publication unavailable; retry shortly",
+            headers={"Cache-Control": _NO_STORE},
+        ) from None
 
 
 def _withhold_patch_url(value: Any, url: str) -> Any:
@@ -756,8 +801,11 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     jobs = list_submission_jobs(row["id"])
     round_info = list_submission_round_entries([row["id"]]).get(str(row["id"]))
     round_info = dict(round_info) if round_info is not None else None
-    _set_live_submission_cache_control(response, states.get(str(row["id"])))
-    public = _public_submission(row)
+    evaluated_at = (
+        round_info.pop("_patch_evaluated_at", None) if round_info is not None else None
+    )
+    response.headers["Cache-Control"] = _NO_STORE
+    public = _public_submission(row, evaluated_at)
     payload = {
         "submission": {
             **{
@@ -790,7 +838,12 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         ],
         "round": round_info,
     }
-    return _withhold_patch_url(payload, row["retrieval_url"])
+    payload = _withhold_patch_url(payload, row["retrieval_url"])
+    # A revealed legacy URL can equal the stored locator; only its intentional
+    # public location survives diagnostic redaction.
+    if public.get("retrieval_url"):
+        payload["submission"]["retrieval_url"] = public["retrieval_url"]
+    return payload
 
 
 def _resolve_unambiguous_submission(patch_hash: str) -> dict:
@@ -827,6 +880,49 @@ def submission_detail(patch_hash: str, response: Response):
     return _submission_detail_payload(
         _resolve_unambiguous_submission(patch_hash), response
     )
+
+
+def _patch_download_response(row: dict) -> RedirectResponse:
+    policy = validate_patch_visibility(row.get("_patch_visibility"))
+    if policy["mode"] == "private":
+        raise HTTPException(
+            status_code=403,
+            detail={"reason": "patch_private"},
+            headers={"Cache-Control": _NO_STORE},
+        )
+    times = list_patch_evaluation_times([row["id"]])
+    evaluated_at = times.get(str(row["id"]))
+    if not patch_is_revealed(evaluated_at, policy):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "reason": "patch_not_revealed",
+                "patch_reveal_at": _iso_or_none(patch_reveal_at(evaluated_at, policy)),
+            },
+            headers={"Cache-Control": _NO_STORE},
+        )
+    return RedirectResponse(
+        _published_patch_url(row),
+        status_code=307,
+        headers={"Cache-Control": _NO_STORE},
+    )
+
+
+@app.get("/v1/campaigns/{campaign_id}/submissions/{patch_hash}/patch")
+def campaign_submission_patch(campaign_id: str, patch_hash: str):
+    row = get_submission_for_campaign(campaign_id, patch_hash)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="submission not found",
+            headers={"Cache-Control": _NO_STORE},
+        )
+    return _patch_download_response(row)
+
+
+@app.get("/v1/submissions/{patch_hash}/patch")
+def submission_patch(patch_hash: str):
+    return _patch_download_response(_resolve_unambiguous_submission(patch_hash))
 
 
 _BUILD_LOG_MAX_TAIL = 2000

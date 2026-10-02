@@ -204,6 +204,10 @@ class CampaignManifest:
     # Initial fee for a new campaign; persisted history is outside the hash.
     submission_fee: dict[str, str]
     submission_fee_history: list[dict[str, Any]] | None = None
+    # Operational disclosure policy; never pinned in manifest_hash.
+    patch_visibility: dict[str, Any] = field(
+        default_factory=lambda: {"mode": "private"}
+    )
     bench: dict[str, Any] | None = None
     # Build/launch recipe (campaign.engine). None ⇒ the vLLM default, and stays
     # out of the manifest pin set so pre-engine campaign hashes remain valid.
@@ -251,6 +255,7 @@ class CampaignManifest:
             "engine": self.engine,
             "scoring_rule": dict(self.scoring_rule),
             "emission_rule": self.emission_rule,
+            "patch_visibility": dict(self.patch_visibility),
             "submission_fee": self.submission_fee,
             "submission_fee_history": self.submission_fee_history
             or [{**self.submission_fee, "effective_from_block": 0}],

@@ -13,6 +13,7 @@ from storage import s3
 
 @pytest.fixture(autouse=True)
 def storage_config(monkeypatch):
+    s3.publish_patch.cache_clear()
     monkeypatch.setattr(config, "S3_BUCKET", "pareton-s3")
     monkeypatch.setattr(config, "S3_REGION", "us-east-2")
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
@@ -234,3 +235,90 @@ def test_hash_utility_matches_exact_uploaded_bytes(tmp_path, capsys):
     patch.write_bytes(data)
     assert main([str(patch)]) == 0
     assert capsys.readouterr().out == f"sha256:{hashlib.sha256(data).hexdigest()}\n"
+
+
+def test_publish_copies_verified_private_object_once_to_permanent_public_url(
+    monkeypatch,
+):
+    calls = []
+    checksum = s3._checksum("sha256:" + "a" * 64)
+
+    def head(**kwargs):
+        from botocore.exceptions import ClientError
+
+        if "/private/" not in kwargs["Key"]:
+            raise ClientError({"Error": {"Code": "403"}}, "HeadObject")
+        return {"ChecksumSHA256": checksum, "ContentLength": 5, "ETag": '"etag"'}
+
+    client = SimpleNamespace(
+        head_object=head,
+        copy_object=lambda **k: calls.append(k),
+    )
+    monkeypatch.setattr(s3, "_client", lambda **_: client)
+    expected = PRIVATE_URL.replace("/private/", "/")
+    for _ in range(2):
+        assert s3.publish_patch(PRIVATE_URL, "sha256:" + "a" * 64) == expected
+    assert len(calls) == 1
+    assert calls[0]["CopySource"]["Key"] == s3.private_patch_key(PRIVATE_URL)
+    assert calls[0]["Key"] == s3.private_patch_key(PRIVATE_URL).replace(
+        "/private/", "/"
+    )
+    assert calls[0]["CopySourceIfMatch"] == '"etag"'
+    assert urlparse(expected).query == ""
+    with pytest.raises(ValueError, match="checksum"):
+        s3.publish_patch(PRIVATE_URL, "sha256:" + "b" * 64)
+    assert len(calls) == 1
+
+
+def test_existing_public_copy_does_not_need_private_source(monkeypatch):
+    def head(**kwargs):
+        assert "/private/" not in kwargs["Key"]
+        return {"ChecksumSHA256": s3._checksum("sha256:" + "a" * 64)}
+
+    monkeypatch.setattr(s3, "_client", lambda **_: SimpleNamespace(head_object=head))
+    assert s3.publish_patch(PRIVATE_URL, "sha256:" + "a" * 64) == PRIVATE_URL.replace(
+        "/private/", "/"
+    )
+
+
+@pytest.mark.parametrize("failure", ["checksum", "size"])
+def test_publication_refuses_unverified_private_source(monkeypatch, failure):
+    from botocore.exceptions import ClientError
+
+    patch_hash = "sha256:" + "a" * 64
+
+    def head(**kwargs):
+        if "/private/" not in kwargs["Key"]:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {
+            "ChecksumSHA256": s3._checksum(patch_hash)
+            if failure == "size"
+            else "wrong",
+            "ContentLength": config.PATCH_MAX_BYTES + 1 if failure == "size" else 5,
+            "ETag": '"etag"',
+        }
+
+    monkeypatch.setattr(
+        s3,
+        "_client",
+        lambda **_: SimpleNamespace(
+            head_object=head, copy_object=lambda **_: pytest.fail("unsafe copy")
+        ),
+    )
+    with pytest.raises(ValueError, match="checksum|size"):
+        s3.publish_patch(PRIVATE_URL, patch_hash)
+
+
+def test_publication_rejects_untrusted_url_and_wrong_public_checksum(monkeypatch):
+    monkeypatch.setattr(
+        s3,
+        "_client",
+        lambda **_: SimpleNamespace(
+            head_object=lambda **_: {"ChecksumSHA256": "wrong"},
+            copy_object=lambda **_: pytest.fail("unsafe copy"),
+        ),
+    )
+    with pytest.raises(ValueError, match="allowlisted"):
+        s3.publish_patch("https://evil.example/patch", "sha256:" + "a" * 64)
+    with pytest.raises(ValueError, match="public patch checksum"):
+        s3.publish_patch(PRIVATE_URL, "sha256:" + "a" * 64)
