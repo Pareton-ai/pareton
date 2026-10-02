@@ -129,6 +129,7 @@ def test_longform_qualification_is_required_before_campaign_or_profile_insert(
             allow_placeholders=True,
             status=status,
             sampling_rule=rule,
+            scoring_rule={"name": "weighted_tier_completion_speedup"},
             bench_max_model_len=262144,
         )
     assert captured["inserts"] == 0
@@ -140,9 +141,10 @@ def test_longform_qualification_is_required_before_campaign_or_profile_insert(
 def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
     monkeypatch, tmp_path, legacy_evidence_hash, status
 ):
+    from test_longform_sampling import formatter, row
+
     from bench.longform import qualification_contract
     from bench.sampler import parse_sampling_rule
-    from test_longform_sampling import formatter, row
 
     captured = _patch_store(monkeypatch)
     root = Path(__file__).resolve().parents[1]
@@ -378,10 +380,12 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert request["hardware"]["gpu_count"] == 4
     assert request["hardware"]["gpu_sku_expected"] == "RTX5090"
     assert manifest.gpu_skus == ["RTX5090"]
-    assert manifest.sampling_rule["algo_version"] == 4
+    assert manifest.sampling_rule["algo_version"] == 5
     assert manifest.sampling_rule["n_prompts"] == 32
     assert manifest.sampling_rule["max_tokens"] == 5120
-    assert manifest.sampling_rule["request_interval_ms"] == 2
+    assert manifest.sampling_rule["request_concurrency"] == 32
+    assert manifest.sampling_rule["output_tokens"] == 3000
+    assert "request_interval_ms" not in manifest.sampling_rule
     assert manifest.sampling_rule["enable_thinking"] is False
     assert not manifest.sampling_rule.get("ignore_eos", False)
     assert manifest.sampling_rule["dataset"] == "zai-org/LongWriter-6k"

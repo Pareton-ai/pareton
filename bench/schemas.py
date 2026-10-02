@@ -506,6 +506,10 @@ class EngineSlaResult:
     timings: dict[str, PromptTiming]
     evidence: str
     sampling: list[dict[str, Any]] | None = None
+    tier_completion: dict[str, Any] | None = None
+    request_concurrency: int | None = None
+    concurrency_observations: list[dict[str, Any]] | None = None
+    eligible_workload_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -513,6 +517,16 @@ class EngineSlaResult:
             "metrics": self.metrics.to_dict(),
             "cross_rep_variance": self.cross_rep_variance,
             "sampling": self.sampling,
+            **(
+                {
+                    "tier_completion": self.tier_completion,
+                    "request_concurrency": self.request_concurrency,
+                    "concurrency_observations": self.concurrency_observations,
+                    "eligible_workload_sha256": self.eligible_workload_sha256,
+                }
+                if self.tier_completion is not None
+                else {}
+            ),
             "timings": {rid: asdict(t) for rid, t in self.timings.items()},
             "evidence": self.evidence,
         }

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Run once, after image publication, miner build verification and GPU calibration.
+# Requires a newly qualified v5 rule: concurrency scheduling, fixed timed output
+# budget, weighted tier completion score and configurable failure penalty.
 # PARETON_DATABASE_URL must be configured. This creates a public open campaign.
 # Use the Pareton engine from ops/build-sglang-baseline.sh. The upstream
 # lmsysorg/sglang runtime image lacks the trusted offline miner-build installer.

@@ -1162,6 +1162,51 @@ def test_baseline_report_exposes_input_lengths_without_inventing_scores(
     assert body["sla"]["timings"]["req-0"]["input_tokens"] == 2048
 
 
+def test_weighted_report_preserves_penalty_and_actual_output_budget(
+    monkeypatch, client
+):
+    from api import server
+
+    row = _score_report_row()
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 5,
+        "request_concurrency": 16,
+        "output_tokens": 3000,
+        "enable_thinking": False,
+        "requests": [
+            {
+                "request_id": "req-0",
+                "input_tokens": 2048,
+                "max_tokens": 5120,
+                "input_length_group": "2k",
+            }
+        ],
+    }
+    breakdown = {
+        "weighted_speedup": 0.3,
+        "eligible_speedup": 0,
+        "scheduled_requests": 30,
+        "failed_requests": 1,
+        "failure_rate": 1 / 30,
+        "failure_penalty": 0.1,
+        "penalty": 0.1 / 30,
+        "tiers": {"2k": {"weight": 0.25, "speedup": 0.3}},
+    }
+    row["scoring_rule"] = {
+        "name": "weighted_tier_completion_speedup",
+        "failure_penalty": 0.1,
+    }
+    row["report"]["score_report"]["score_breakdown"] = breakdown
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["score_breakdown"] == breakdown
+    assert body["workload"]["request_concurrency"] == 16
+    assert "request_interval_ms" not in body["workload"]
+    assert body["prompts"][0]["max_tokens"] == 3000
+
+
 def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestClient):
     from api import server
 
@@ -1444,6 +1489,7 @@ def test_campaign_fee_routes_quote_latest_fee_without_chain(
     monkeypatch, client, amount
 ):
     import bittensor as bt
+
     from api import server
 
     history = [

@@ -165,6 +165,8 @@ def materialize_round_trace(
                         key: receipt[key]
                         for key in (
                             "request_interval_ms",
+                            "request_concurrency",
+                            "output_tokens",
                             "enable_thinking",
                             "min_output_tokens",
                             "followup_prompt",
@@ -584,8 +586,8 @@ def _round_phase_writer(round_id: str) -> Callable[..., bool]:
         nonlocal plan_version
         del job_id, attempt
         progress = dict(progress or {})
-        if progress.get("plan_version") == 2:
-            plan_version = 2
+        if progress.get("plan_version") in (2, 3):
+            plan_version = progress["plan_version"]
         if plan_version is not None:
             progress["plan_version"] = plan_version
         return set_round_phase(

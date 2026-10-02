@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from bench.concurrency import WEIGHTED_RULE, tier_weights
 from bench.score import failure_penalty
 
 # Priority metrics a campaign can optimize for (BD memo vocabulary).
@@ -23,7 +24,7 @@ PRIORITY_METRICS = frozenset(
 
 # Named ranking rules. One implementation ships today; bench/score.py holds the
 # implementations and dispatches on the name.
-SCORING_RULE_NAMES = frozenset({"median_e2e_speedup"})
+SCORING_RULE_NAMES = frozenset({"median_e2e_speedup", WEIGHTED_RULE})
 
 DEFAULT_SCORING_RULE: dict[str, Any] = {"name": "median_e2e_speedup"}
 
@@ -45,6 +46,15 @@ def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             f"got {rule.get('name')!r}"
         )
     failure_penalty(rule)
+    if name == WEIGHTED_RULE:
+        unknown = set(rule) - {"name", "tier_weights", "failure_penalty"}
+        if unknown:
+            raise ValueError(f"unknown weighted scoring fields: {sorted(unknown)}")
+        return {
+            "name": name,
+            "tier_weights": tier_weights(rule),
+            "failure_penalty": failure_penalty(rule),
+        }
     out = {k: rule[k] for k in sorted(rule) if k != "name"}
     return {"name": name, **out}
 
