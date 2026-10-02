@@ -2,8 +2,8 @@
 
 ``campaigns.scoring_rule`` names the formula and is pinned in
 ``manifest_hash``; the resolved rule is copied onto ``rounds.scoring_rule`` so
-every round records the formula that produced its numbers. One rule ships:
-``median_e2e_speedup``.
+every round records the formula that produced its numbers. Historical rounds
+use ``median_e2e_speedup``; version 5 uses weighted full-tier completion speedup.
 
 Pure math. No HTTP, no Docker, no database.
 """
@@ -13,8 +13,10 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
+
+from bench.concurrency import TIERS, WEIGHTED_RULE, tier_weights
 
 # Minimum fraction of the baseline's output tokens a candidate must emit
 # before it earns speed credit on that prompt. Overridable per campaign with
@@ -254,13 +256,102 @@ def _median_e2e_speedup(
 
 # Dispatch by name. campaign/models.py validates the name against
 # SCORING_RULE_NAMES; the two sets are asserted equal in the tests.
+def _weighted_tier_completion_speedup(
+    rule, baseline, candidate, *, baseline_tiers=None, candidate_tiers=None
+):
+    """All eligible work contributes; incomplete work cannot buy speed credit."""
+    weights = tier_weights(rule)
+    coefficient = failure_penalty(rule)
+    if not baseline or not baseline_tiers or not candidate_tiers:
+        raise ValueError(
+            "weighted score requires complete baseline and candidate tier evidence"
+        )
+    if set(baseline_tiers) != set(TIERS) or set(candidate_tiers) != set(TIERS):
+        raise ValueError("weighted score requires all four tiers")
+    per_prompt = [
+        prompt_speedup(rid, timing, candidate.get(rid), tolerance=1.0)
+        for rid, timing in baseline.items()
+    ]
+    per_prompt = [
+        replace(
+            p,
+            candidate_failed=True,
+            reason="candidate did not match fixed output work",
+            speedup=0.0,
+        )
+        if p.request_id in candidate
+        and candidate[p.request_id].completion_tokens
+        != baseline[p.request_id].completion_tokens
+        else p
+        for p in per_prompt
+    ]
+    if any(
+        aligned_e2e_s(t, t.completion_tokens) in (None, 0) for t in baseline.values()
+    ):
+        raise ValueError("weighted score requires valid baseline request timings")
+    details, seen = {}, set()
+    for tier in TIERS:
+        b, c = baseline_tiers[tier], candidate_tiers[tier]
+        ids = b["request_ids"]
+        if (
+            not ids
+            or len(set(ids)) != len(ids)
+            or seen.intersection(ids)
+            or set(ids) != set(c["request_ids"])
+        ):
+            raise ValueError("tier membership differs between baseline and candidate")
+        seen.update(ids)
+        bt, ct = b["completion_s"], c["completion_s"]
+        if any(
+            isinstance(t, bool)
+            or not isinstance(t, (int, float))
+            or not math.isfinite(t)
+            or t <= 0
+            for t in (bt, ct)
+        ):
+            raise ValueError("invalid tier completion time")
+        details[tier] = {
+            "weight": weights[tier],
+            "baseline_completion_s": bt,
+            "candidate_completion_s": ct,
+            "speedup": 1 - ct / bt,
+            "scheduled_requests": len(ids),
+        }
+    if seen != set(baseline) or set(candidate) - seen:
+        raise ValueError("tier membership does not match eligible request timings")
+    raw = sum(d["weight"] * d["speedup"] for d in details.values())
+    failed = sum(p.candidate_failed for p in per_prompt)
+    rate = failed / len(per_prompt)
+    # A selective failure must not free capacity and buy positive speed credit
+    # on other tiers. Hard runtime/correctness failures still abort upstream.
+    adjusted = min(raw, 0.0) if failed else raw
+    return ScoreResult(
+        score=adjusted - coefficient * rate,
+        rule=WEIGHTED_RULE,
+        per_prompt=per_prompt,
+        breakdown={
+            "weighted_speedup": raw,
+            "eligible_speedup": adjusted,
+            "tiers": details,
+            "scheduled_requests": len(per_prompt),
+            "failed_requests": failed,
+            "failure_rate": rate,
+            "failure_penalty": coefficient,
+            "penalty": coefficient * rate,
+        },
+    )
+
+
 SCORING_RULES: dict[
     str,
     Callable[
         [Mapping[str, Any], Mapping[str, PromptTiming], Mapping[str, PromptTiming]],
         ScoreResult,
     ],
-] = {"median_e2e_speedup": _median_e2e_speedup}
+] = {
+    "median_e2e_speedup": _median_e2e_speedup,
+    WEIGHTED_RULE: _weighted_tier_completion_speedup,
+}
 
 
 def score_candidate(
@@ -268,17 +359,28 @@ def score_candidate(
     *,
     baseline: Mapping[str, PromptTiming],
     candidate: Mapping[str, PromptTiming],
+    baseline_tiers: Mapping[str, Any] | None = None,
+    candidate_tiers: Mapping[str, Any] | None = None,
 ) -> ScoreResult:
     """Score one candidate against the round's baseline under a named rule.
 
     ``baseline`` and ``candidate`` map request id to timing. The baseline's
-    prompts define the set: a prompt the candidate never answered scores 0.0
-    rather than dropping out of the median.
+    prompts define the eligible set. Missing candidate timings count as failures;
+    they never disappear from the denominator. Weighted scoring additionally
+    requires complete-tier evidence with matching request membership.
     """
     name = str(rule.get("name") or "")
     impl = SCORING_RULES.get(name)
     if impl is None:
         raise ValueError(
             f"scoring_rule.name must be one of {sorted(SCORING_RULES)}, got {name!r}"
+        )
+    if name == WEIGHTED_RULE:
+        return impl(
+            rule,
+            baseline,
+            candidate,
+            baseline_tiers=baseline_tiers,
+            candidate_tiers=candidate_tiers,
         )
     return impl(rule, baseline, candidate)

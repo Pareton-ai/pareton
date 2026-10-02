@@ -1,7 +1,7 @@
 # LongWriter campaign workload
 
 The Qwen SGLang launch helper uses `zai-org/LongWriter-6k` at revision
-`0db15c0624f19d63e2efe1021595af933cc5b6cc` (6000 rows). Sampler version 4
+`0db15c0624f19d63e2efe1021595af933cc5b6cc` (6000 rows). Sampler version 5
 renders the original `user` and `assistant` messages as conversation history,
 then appends the pinned `followup_prompt` as a new user turn. The follow-up asks
 for a new complete work of approximately 4,000-6,000 words. Thinking is disabled.
@@ -20,13 +20,86 @@ model tokenizer:
 
 Rows outside these bands are skipped. Source messages are never padded or
 truncated. There is no 32k tier or fallback when a tier cannot be filled.
-Versions 1 through 3 keep their existing behavior and receipt formats.
+Versions 1 through 4 keep their existing behavior, trace bytes and receipt formats.
 
-The model, engine, hardware, serving arguments, 32-request workload, 2 ms
-arrivals, fees and emissions remain as configured in the seed helper.
-`max_tokens=5120` remains a ceiling. Requests respect EOS and never set a
-minimum generation length. A long source answer does not establish that the
-model will produce a long new response.
+The model, engine, hardware, serving arguments, fees and emissions remain as
+configured in the seed helper. Version 5 retires `request_interval_ms` and requires
+`request_concurrency` (1, 2, 4, 8, 16 or 32). The fixture uses C32.
+Natural-output qualification retains `max_tokens=5120` and normal EOS. Scored
+replays use the pinned `output_tokens` budget (3000 in the fixture), with
+`ignore_eos=true` and exact output-count validation. This is an explicit new
+campaign contract, not a change to historical natural-EOS campaigns. The budget
+must be positive and no larger than the qualification `min_output_tokens` floor.
+A long source answer alone does not establish that a row qualifies.
+
+## Version 5 scheduling and scoring
+
+C1 through C8 run the four tiers separately in ascending order. C16 runs two
+fixed groups, 2k+4k followed by 8k+16k. C32 runs one group containing all tiers.
+Admission interleaves tiers deterministically within each mixed group and keeps
+sampled order within a tier. A shared FIFO refills a slot on valid stream
+termination, until no requests remain. Groups never overlap. With eight requests
+per tier, C8/C16/C32 are full-group bursts, not sustained concurrency trials.
+
+Two baseline qualification starts inspect natural outputs and union exclusions
+from every measured repetition before either scored reference, leader, or
+challenger runs. The original trace contains eight requests per tier; the eligible
+set may be smaller. Existing exclusion limits remain, and every tier must retain
+at least one request. Excluded requests are never dispatched in scored runs.
+Both scored baseline references are measured anew on the eligible fixed-budget
+workload; a further baseline failure invalidates the round rather than removing
+more work. In all-mode, the scorer checks every eligible fixed-budget output;
+post-EOS repetition exemptions do not apply. There are `5 + candidates` engine
+starts in all-mode (two qualification, two measured reference, candidates, scorer).
+Warmup policy and prefix-cache reuse remain the same for each timed engine.
+
+`evidence/sla_bench/eligible_workload.json` records excluded IDs, reasons, group
+membership, and actual timed requests. Its SHA-256 travels with each scored
+engine result. Requested/effective concurrency, observed slot occupancy, group
+start, admission, dispatch, last-choice, protocol completion and slot release are
+recorded separately. A C32 workload with 29 survivors has effective concurrency
+29. No duplicates or unqualified replacement requests are inserted.
+
+The manifest uses:
+
+```json
+{
+  "name": "weighted_tier_completion_speedup",
+  "tier_weights": {"2k": 0.25, "4k": 0.25, "8k": 0.25, "16k": 0.25},
+  "failure_penalty": 0.1
+}
+```
+
+For each tier, T is the median across complete repetitions of the time from its
+**group start** to valid protocol completion of the last eligible request in that
+tier. Shared group origins charge admission waiting in mixed groups. Calculate:
+
+```
+weighted_speedup = sum(weight[t] * (1 - T_candidate[t] / T_baseline[t]))
+failure_rate = failed eligible request IDs / all eligible request IDs
+eligible_speedup = min(weighted_speedup, 0) if any request failed else weighted_speedup
+score = eligible_speedup - failure_penalty * failure_rate
+```
+
+Weights must explicitly name all four tiers, be finite and nonnegative, and sum
+to one. Equal weights and a zero penalty are resolved defaults when omitted;
+the launch fixture explicitly sets penalty 0.1. Resolved weights and penalty are
+manifest-hashed. No tier is dropped and weights are never redistributed.
+Per-request aligned-token speedups remain diagnostics, not the ranking metric.
+
+The penalty counts each failed ID once, not repetitions, and excludes trusted
+baseline removals. Incomplete fixed work cannot earn positive credit by freeing
+capacity elsewhere. Runtime/stream failures and hard correctness failures retain
+their existing non-scored outcomes; a penalty does not make them eligible.
+Both request and replay deadlines are absolute. Delayed `[DONE]` occupies a slot
+and is charged in T. Candidate repeatability uses the worst tier's relative
+range; reference drift uses the largest absolute tier speedup, so opposing tier
+changes cannot cancel out.
+
+CPU and mock HTTP tests establish contract behavior only. Requalify the source
+pool with the v5 pins and run full GPU shadow rounds before activating a campaign.
+Timing noise, fixed-length output quality, promotion margins, and latency/deadline
+limits still require qualification on the pinned serving image and hardware.
 
 New Qwen campaign fixtures pin `temperature_range=[0.1, 1.01]`. The sampler
 reproducibly derives one temperature per prompt from the round seed and request
@@ -139,12 +212,13 @@ bash ops/sglang-sample-round/run.sh \
 
 The standalone runner uses the fixture's published baseline image. Qualify that
 same image when using this runner. Inspect `bench_report.json` and its evidence.
-Both baseline replays run before the candidates. If any measured natural
-baseline repetition is short or repetitive, exclude that prompt from correctness
-and performance scoring for every candidate. Up to eight unique prompts may be
-excluded across both runs; a ninth exclusion or an empty retained set fails the
-round as a baseline workload error. Candidate outputs continue through the
-existing length, correctness and timing checks on retained prompts.
+Both natural-output baseline qualification runs finish before the measured
+baseline and candidate runs. If any qualification repetition is short or
+repetitive, exclude that prompt from correctness and performance scoring for
+every candidate. Up to eight unique prompts may be excluded across both runs;
+a ninth exclusion or an empty retained tier fails the round as a baseline
+workload error. The eligible workload then stays frozen for the measured runs,
+which enforce fixed output length, correctness and complete-tier timing.
 
 ## Open the campaign
 
@@ -156,7 +230,7 @@ bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO" \
 ```
 
 All three arguments are required, including the qualified rule file. The fixture
-rule remains a source template for qualification and CPU previews. Every v4
+rule remains a source template for qualification and CPU previews. Every v4/v5
 campaign status, including draft, rejects missing or stale qualification before
 inserting a profile or campaign. A different model, image, serving configuration
 or sampling rule requires requalification.

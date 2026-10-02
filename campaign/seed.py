@@ -17,7 +17,7 @@ from uuid import uuid4
 import config
 from bench.longform import preflight_longform_campaign, require_qualification
 from bench.sampler import (
-    LONGFORM_ALGO_VERSION,
+    LONGFORM_ALGO_VERSIONS,
     TRAJECTORY_ALGO_VERSION,
     parse_sampling_rule,
 )
@@ -364,6 +364,12 @@ def seed_synthetic_campaign(
 
     pool = list(workload_pool) if workload_pool is not None else None
     scoring = validate_scoring_rule(scoring_rule)
+    if (rule["algo_version"] == 5) != (
+        scoring["name"] == "weighted_tier_completion_speedup"
+    ):
+        raise ValueError(
+            "version 5 requires weighted_tier_completion_speedup and vice versa"
+        )
 
     if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
         sampling_context_for_campaign(bench, engine_profile)
@@ -373,7 +379,7 @@ def seed_synthetic_campaign(
                 "Verified trajectory coverage: "
                 + json.dumps(preview.receipt["length_groups"])
             )
-    elif rule["algo_version"] == LONGFORM_ALGO_VERSION:
+    elif rule["algo_version"] in LONGFORM_ALGO_VERSIONS:
         from bench.longform import sampling_context_for_campaign as longform_context
 
         longform_context(bench, engine_profile)

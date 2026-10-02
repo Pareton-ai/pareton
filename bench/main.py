@@ -10,7 +10,8 @@ candidate. The harness starts one engine container at a time, in this order:
    they all meet the same cold cache and are timed on the same footing.
 4. One scorer, teacher-forcing the retained latency-median outputs.
 
-That is ``3 + len(candidates)`` engine starts. Only the scorer runs with
+Legacy rounds use ``3 + len(candidates)`` engine starts. Version 5 adds two
+natural-output qualification starts before the scored references. Only the scorer runs with
 correctness-specific serve args, so the count does not depend on which engine
 the campaign pins: a vLLM round and an SGLang round are the same size.
 
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from bench import __version__
+from bench.concurrency import WEIGHTED_RULE, request_groups
 from bench.correctness import (
     BASELINE_INDEX,
     BaselineDegeneracyReferences,
@@ -76,6 +78,7 @@ from bench.score import score_candidate
 from bench.sla_bench import (
     REPRO_BAR_MAX_REL_RANGE,
     EngineReplay,
+    NaturalStopReference,
     capture_baseline_natural_stops,
     run_sla_engine,
 )
@@ -200,6 +203,7 @@ def plan_round_starts(
     *,
     mode: str = "all",
     correctness_serve_args: list[str] | None = None,
+    qualify_concurrency: bool = False,
 ) -> list[EngineStart]:
     """Every container this round will start, in order.
 
@@ -228,6 +232,11 @@ def plan_round_starts(
             mount_engine_cache=True,
         )
     )
+    if qualify_concurrency:
+        starts = [
+            replace(s, role=f"qualification-{i}", kind="qualification")
+            for i, s in enumerate(starts, 1)
+        ] + starts
     for i, cand in enumerate(engines.candidates):
         starts.append(
             EngineStart(
@@ -442,7 +451,11 @@ class _EngineProvider:
                 step=start.step,
                 steps=start.steps,
                 role=start.role,
-                plan_version=ROUND_PLAN_VERSION,
+                plan_version=(
+                    3
+                    if self._req.scoring_rule["name"] == WEIGHTED_RULE
+                    else ROUND_PLAN_VERSION
+                ),
             )
 
     def _mock_config(self, start: EngineStart) -> MockEngineConfig:
@@ -546,10 +559,21 @@ def run_round(
 ]:
     """Execute the whole round against one pod. Returns the raw material."""
     requests = list(trace.requests)
+    workload = trace.meta.sampling or {}
+    concurrent = workload.get("algo_version") == 5
+    if concurrent != (req.scoring_rule["name"] == WEIGHTED_RULE):
+        raise RequestValidationError(
+            "version 5 workloads require weighted_tier_completion_speedup and vice versa"
+        )
+    replay_kwargs = (
+        {"request_concurrency": workload["request_concurrency"]} if concurrent else {}
+    )
+    eligible_hash = None
     plan = plan_round_starts(
         req.engines,
         mode=req.mode,
         correctness_serve_args=req.correctness.serve_args,
+        **({"qualify_concurrency": True} if concurrent else {}),
     )
     layout.append_log(
         {"event": "round_plan", "starts": [s.role for s in plan], "count": len(plan)}
@@ -584,10 +608,67 @@ def run_round(
             engine_name=start.spec.name,
             max_model_len=req.model.max_model_len,
             evidence_dir=layout.sla_bench_dir / start.role,
-            verify_tokenizer=start.kind == "baseline",
+            verify_tokenizer=start.kind in ("baseline", "qualification"),
         )
 
     for start in plan:
+        if start.kind == "qualification":
+            try:
+                with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
+                    preflight(url, start)
+                    qualification = run_sla_engine(
+                        url,
+                        role=start.role,
+                        requests=requests,
+                        cfg=req.sla_bench,
+                        evidence_dir=layout.sla_bench_dir,
+                        engine_name=start.spec.name,
+                        **replay_kwargs,
+                    )
+                    excluded_prompts = baseline_prompt_drops(
+                        trace, qualification, dropped=excluded_prompts
+                    )
+                if start.role == "qualification-2":
+                    requests = [
+                        replace(
+                            r,
+                            max_tokens=workload["output_tokens"],
+                            sampling=replace(r.sampling, ignore_eos=True),
+                        )
+                        for r in requests
+                        if r.id not in excluded_prompts
+                    ]
+                    groups = request_groups(requests, workload["request_concurrency"])
+                    # All surviving fixed-budget outputs are checked in full;
+                    # forced post-EOS repetition exemptions do not apply here.
+                    prompts = [
+                        PromptCase(r.id, r.prompt, ignore_eos=True) for r in requests
+                    ]
+                    trace = replace(trace, requests=requests)
+                    layout.correctness_dir.mkdir(parents=True, exist_ok=True)
+                    (layout.correctness_dir / "baseline_exclusions.json").write_text(
+                        json.dumps(excluded_prompts, sort_keys=True) + "\n"
+                    )
+                    eligible_body = (
+                        json.dumps(
+                            {
+                                "request_concurrency": workload["request_concurrency"],
+                                "output_tokens": workload["output_tokens"],
+                                "excluded_prompts": excluded_prompts,
+                                "groups": [[r.id for r in group] for group in groups],
+                                "requests": trace.to_dict()["requests"],
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+                    eligible_hash = sha256_bytes(eligible_body.encode())
+                    (layout.sla_bench_dir / "eligible_workload.json").write_text(
+                        eligible_body
+                    )
+            except EngineError as exc:
+                raise EngineError(str(exc), error_role="baseline") from exc
+            continue
         if leader_failed and start.kind == "candidate":
             # A leader infra failure voids the round at ranking time, so
             # benching the rest of the cohort only burns pod hours. Record
@@ -615,21 +696,72 @@ def run_round(
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
                         engine_name=start.spec.name,
+                        **replay_kwargs,
                     )
-                    excluded_prompts = baseline_prompt_drops(
-                        trace, replay, dropped=excluded_prompts
-                    )
+                    if concurrent:
+                        replay.result.eligible_workload_sha256 = eligible_hash
+                        if (
+                            replay.result.cross_rep_variance.get(
+                                "tier_completion_max_rel_range", 0
+                            )
+                            > REPRO_BAR_MAX_REL_RANGE
+                        ):
+                            raise EngineError(
+                                "baseline tier completion repetitions are unstable"
+                            )
+                    if concurrent:
+                        # Recheck both scored references, but never shrink the
+                        # frozen workload after the qualification boundary.
+                        checked_trace = replace(
+                            trace,
+                            requests=[
+                                replace(
+                                    r, sampling=replace(r.sampling, ignore_eos=False)
+                                )
+                                for r in requests
+                            ],
+                            meta=replace(
+                                trace.meta,
+                                sampling={
+                                    **workload,
+                                    "min_output_tokens": workload["output_tokens"],
+                                },
+                            ),
+                        )
+                        checked_drops = baseline_prompt_drops(
+                            checked_trace, replay, dropped=excluded_prompts
+                        )
+                        if checked_drops != excluded_prompts:
+                            raise EngineError(
+                                "frozen baseline workload failed validation; requalification required"
+                            )
+                    else:
+                        excluded_prompts = baseline_prompt_drops(
+                            trace, replay, dropped=excluded_prompts
+                        )
                     layout.correctness_dir.mkdir(parents=True, exist_ok=True)
                     (layout.correctness_dir / "baseline_exclusions.json").write_text(
                         json.dumps(excluded_prompts, sort_keys=True) + "\n",
                         encoding="utf-8",
                     )
                     if start.kind == "baseline" and req.mode == "all":
-                        natural_stops = capture_baseline_natural_stops(
-                            url,
-                            requests=requests,
-                            replay=replay,
-                            evidence_dir=layout.correctness_dir,
+                        natural_stops = (
+                            {
+                                r.id: NaturalStopReference(
+                                    r.id,
+                                    replay.result.timings[r.id].completion_tokens,
+                                    None,
+                                    replay.outputs[r.id],
+                                )
+                                for r in requests
+                            }
+                            if concurrent
+                            else capture_baseline_natural_stops(
+                                url,
+                                requests=requests,
+                                replay=replay,
+                                evidence_dir=layout.correctness_dir,
+                            )
                         )
                         baseline_outputs = capture_outputs(
                             prompts,
@@ -644,6 +776,13 @@ def run_round(
                             dropped=excluded_prompts,
                         )
                         if baseline_degeneracy is not None:
+                            if (
+                                concurrent
+                                and baseline_degeneracy.dropped != excluded_prompts
+                            ):
+                                raise EngineError(
+                                    "frozen baseline correctness failed; requalification required"
+                                )
                             excluded_prompts.update(baseline_degeneracy.dropped)
                     elif start.kind == "drift" and baseline_degeneracy is not None:
                         baseline_degeneracy = BaselineDegeneracyReferences(
@@ -668,7 +807,7 @@ def run_round(
                 # The relative correctness bar needs the baseline's own
                 # outputs through the same scorer (PAR-108). An older campaign
                 # without that bar keeps its original candidate-only path.
-                if req.mode == "all" and relative_correctness:
+                if req.mode == "all" and (relative_correctness or concurrent):
                     pending.append(
                         PendingCorrectness(
                             candidate_index=BASELINE_INDEX,
@@ -692,7 +831,10 @@ def run_round(
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
                         engine_name=start.spec.name,
+                        **replay_kwargs,
                     )
+                    if concurrent:
+                        replay.result.eligible_workload_sha256 = eligible_hash
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and
                 # its own code died. That is the candidate's fault, so the
@@ -756,13 +898,14 @@ def run_round(
                         evidence_dir=layout.correctness_dir,
                         baseline_degeneracy=baseline_degeneracy,
                         engine_name=start.spec.name,
+                        **({"strict_fixed_output": True} if concurrent else {}),
                     )
             except EngineError as exc:
                 # Correctness is a hard gate, so an unusable scorer means no
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
             baseline_report = correctness.pop(BASELINE_INDEX, None)
-            if relative_correctness and (
+            if (relative_correctness or concurrent) and (
                 baseline_report is None or baseline_report.verdict != "pass"
             ):
                 # The baseline runs the campaign's own pinned image, so a
@@ -868,7 +1011,12 @@ def _build_entries(
             continue
 
         variance = run.replay.result.cross_rep_variance or {}
-        rel_range = float(variance.get("p99_e2e_ms_rel_range") or 0.0)
+        variance_key = (
+            "tier_completion_max_rel_range"
+            if getattr(req, "scoring_rule", {}).get("name") == WEIGHTED_RULE
+            else "p99_e2e_ms_rel_range"
+        )
+        rel_range = float(variance.get(variance_key) or 0.0)
         # A mock engine sleeps on the host clock, so its spread measures the
         # machine running the harness rather than the candidate.
         if not mock_engine and rel_range > REPRO_BAR_MAX_REL_RANGE:
@@ -880,13 +1028,19 @@ def _build_entries(
                     sla=run.replay.result,
                     correctness=corr,
                     reason=(
-                        f"p99_e2e_ms_rel_range {rel_range:.4f} exceeds "
+                        f"{variance_key} {rel_range:.4f} exceeds "
                         f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
                     ),
                 )
             )
             continue
 
+        if req.scoring_rule["name"] == WEIGHTED_RULE and (
+            not baseline.result.eligible_workload_sha256
+            or baseline.result.eligible_workload_sha256
+            != run.replay.result.eligible_workload_sha256
+        ):
+            raise EngineError("candidate workload identity differs from baseline")
         scored = score_candidate(
             req.scoring_rule,
             baseline={
@@ -895,6 +1049,14 @@ def _build_entries(
                 if rid not in baseline.excluded_prompts
             },
             candidate=run.replay.result.timings,
+            **(
+                {
+                    "baseline_tiers": baseline.result.tier_completion,
+                    "candidate_tiers": run.replay.result.tier_completion,
+                }
+                if req.scoring_rule["name"] == WEIGHTED_RULE
+                else {}
+            ),
         )
         score_report = scored.to_report()
         score_report["excluded_prompts"] = baseline.excluded_prompts
@@ -921,7 +1083,7 @@ def baseline_drift(
     candidates. This does not measure hardware drift across the candidate
     cohort. The miner reliability deduction does not affect the comparison.
     """
-    return score_candidate(
+    result = score_candidate(
         {
             key: value
             for key, value in req.scoring_rule.items()
@@ -933,7 +1095,19 @@ def baseline_drift(
             if rid not in baseline.excluded_prompts
         },
         candidate=drift.result.timings,
-    ).score
+        **(
+            {
+                "baseline_tiers": baseline.result.tier_completion,
+                "candidate_tiers": drift.result.tier_completion,
+            }
+            if req.scoring_rule["name"] == WEIGHTED_RULE
+            else {}
+        ),
+    )
+    if req.scoring_rule["name"] == WEIGHTED_RULE:
+        # Opposing tier regressions must not cancel in the reference gate.
+        return max(abs(t["speedup"]) for t in result.breakdown["tiers"].values())
+    return result.score
 
 
 def _should_pull_image(image: str) -> bool:

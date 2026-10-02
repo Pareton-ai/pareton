@@ -766,7 +766,9 @@ def baseline_prompt_drops(
     result = dict(dropped)
     sampling = trace.meta.sampling or {}
     minimum = (
-        sampling.get("min_output_tokens") if sampling.get("algo_version") == 4 else None
+        sampling.get("min_output_tokens")
+        if sampling.get("algo_version") in (4, 5)
+        else None
     )
     for request in trace.requests:
         if request.sampling.ignore_eos:
@@ -1102,6 +1104,7 @@ def grade_candidate(
     baseline_mean_logprob: float | None = None,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
     engine_name: str = "vllm",
+    strict_fixed_output: bool = False,
 ) -> CorrectnessReport:
     """Teacher-force one engine's captured outputs through the scorer.
 
@@ -1190,6 +1193,7 @@ def grade_candidate(
                 continue
             forced_tail = (
                 captured.ignore_eos
+                and not strict_fixed_output
                 and reference is not None
                 and bool(reference.forced_output_samples)
             )
@@ -1221,7 +1225,7 @@ def grade_candidate(
             }
             repetition_checks = []
             repetition_degenerate = None
-            if not captured.ignore_eos:
+            if not captured.ignore_eos or strict_fixed_output:
                 for rep, text in enumerate(
                     captured.output_samples or (captured.output_text,), start=1
                 ):
@@ -1523,6 +1527,7 @@ def grade_all(
     request_timeout_s: float = 300.0,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
     engine_name: str = "vllm",
+    strict_fixed_output: bool = False,
 ) -> dict[int, CorrectnessReport]:
     """Grade everything queued against one already-running scorer.
 
@@ -1555,6 +1560,7 @@ def grade_all(
                 baseline_mean_logprob=None if is_baseline else baseline_mean,
                 baseline_degeneracy=baseline_degeneracy,
                 engine_name=engine_name,
+                **({"strict_fixed_output": True} if strict_fixed_output else {}),
             )
         except EngineError as exc:
             # The text being forced through the scorer is whatever an engine
