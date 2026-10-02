@@ -40,6 +40,96 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ## A merge to `main` is a production deploy
 
+### RTX PRO 6000 Qwen3.8 FP8 campaign (draft)
+
+`ops/seed-sglang-qwen38-27b-pro6000.sh` prepares a campaign for one `RTXPRO6000`,
+with `Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, FP8
+quantization, BF16 activation dtype, and SGLang commit
+`4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. The model revision is a Hugging Face
+pin, not an engine source commit.
+
+**Draft dependency:** after [PR #187](https://github.com/Pareton-ai/pareton/pull/187)
+merges, revise this campaign to sampler v5, `request_concurrency: 4`, the fixed
+output budget, and `weighted_tier_completion_speedup` with explicit tier weights
+and failure penalty. Until then, these fixtures retain main's 32-prompt v4
+interval workload and `median_e2e_speedup` only for development validation.
+That interval workload does not enforce sustained C32 or C4. Requalify the final
+C4 contract and run its full shadow round before opening the campaign. Do not
+launch this interim draft. Verify the backend and frontend activation dependencies
+in #187 before launch.
+
+The qualification fixture
+`fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json` reuses both
+image pins from the original Qwen campaign: the finished Pareton engine at
+`ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431`.
+This is `engine_image` in the original `image-pins.json`, not its bootstrap
+`build_base_image`. It includes the offline miner installer and warmed build
+cache. A GPU-specific rebuild is not required merely because TP or GPU count
+changes. Matching the source commit alone does not establish compatible CUDA,
+kernel binaries, drivers, or runtime behavior; qualify the existing digest on
+RTX PRO 6000. If compatibility requires a rebuild, pin the new finished engine
+in both fields and use it throughout qualification and seeding.
+
+| vLLM configuration | Pinned SGLang serving argument |
+| --- | --- |
+| `--tensor-parallel-size 1` | `--tp 1` |
+| `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder` | `--tool-call-parser qwen3_coder` (no separate auto-tool-choice switch) |
+| `--reasoning-parser qwen3` | `--reasoning-parser qwen3` |
+| `--max-model-len 262144` | `--context-length 262144` |
+| `--max-num-seqs 32` | `--max-running-requests 32` |
+| `--mm-encoder-tp-mode data` | `--mm-enable-dp-encoder` |
+| `--speculative-config {"method":"mtp","num_speculative_tokens":3}` | `--speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4` |
+
+All these SGLang flags are stored in `bench.serve_args` and hashed into the
+manifest. Engine capacity remains 32 even when benchmark concurrency becomes C4.
+The speculative settings require runtime qualification on the target GPU.
+
+Before any campaign launch, run `bench/qualify_longform.py` through its module
+entry point on the Linux RTX PRO 6000 host, from the repository root with the
+Pareton Python environment activated. First start the trusted baseline container
+with the fixture's model revision and serving arguments, pinned weights mounted
+at `/model`, and its API port published to `127.0.0.1:30000`. Use a Docker port
+mapping, not host networking: the qualifier verifies the container's identity,
+image digest and published endpoint. In the same shell, run:
+
+```bash
+PRO6000_ENGINE_REF=$(python -c 'import json; print(json.load(open("fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json"))["base_image_digest"])')
+PRO6000_BASELINE_CONTAINER=pareton-pro6000-baseline  # actual running container name
+PRO6000_QUALIFICATION_DIR=$(mktemp -d /var/tmp/pareton-pro6000-qualification-XXXXXX)
+python -m bench.qualify_longform \
+  --campaign-fields fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json \
+  --base-url http://127.0.0.1:30000 \
+  --container "$PRO6000_BASELINE_CONTAINER" \
+  --engine-ref "$PRO6000_ENGINE_REF" \
+  --output-dir "$PRO6000_QUALIFICATION_DIR" \
+  --pool-size 64 --repetitions 2 --concurrency 4
+```
+
+The qualifier writes `sampling_rule.json` and evidence into the fresh output
+directory. Its `--concurrency 4` controls pool qualification only; it does not
+set the scored replay's concurrency. The command above works with the interim
+v4 fixture; after the #187 migration, rerun it with the final v5 fixture and
+follow #187's full shadow-round procedure. Earlier v4 receipts do not qualify v5.
+
+Only after the C4 migration, fresh qualification, and full GPU round including
+the trusted scorer succeed, configure `PARETON_DATABASE_URL` and the explicit
+initial fee, then seed a new campaign using the qualified output:
+
+```bash
+bash -n ops/seed-sglang-qwen38-27b-pro6000.sh
+ops/seed-sglang-qwen38-27b-pro6000.sh \
+  "$PRO6000_ENGINE_REF" "$INITIAL_FEE_TAO" \
+  "$PRO6000_QUALIFICATION_DIR/sampling_rule.json"
+```
+
+The helper preserves the supplied qualified rule unchanged. No TP4 memory
+fractions or qualification receipts are copied. The scorer inherits this
+campaign's flags with the harness's context headroom and logprob settings.
+Validate any required memory adjustment in both the helper and fixture before
+qualification. The 262144 context setting does not make LongWriter a full-context
+or multimodal test. Image reuse does not reuse TP4 performance or correctness
+qualification.
+
 ### Correctness scorer memory
 
 Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
@@ -51,7 +141,7 @@ Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
 The Qwen seed helper supplies these through repeatable
 `--bench-correctness-serve-args` options. The round request carries them to the
 remote harness, which appends them only to the trusted scorer's serving arguments.
-The scorer inherits the campaign's TP and GPU allocation. All Qwen stages use TP4
+The scorer inherits the campaign's TP and GPU allocation. The original NVFP4 Qwen stages use TP4
 and four GPUs; timed baseline, candidate and drift stages retain memory fraction
 `0.85`. No scorer TP environment setting or additional GPUs are required.
 
