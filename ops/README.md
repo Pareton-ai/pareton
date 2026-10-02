@@ -40,6 +40,14 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ## A merge to `main` is a production deploy
 
+### Optional RTX PRO 6000 scorer diagnostic
+
+[PAR-144 diagnostic instructions](../docs/pro6000-correctness-probe.md) describe
+`ops/pro6000-correctness-probe.py`: longest-tier LongWriter natural/forced-output
+runs through the production scorer lifecycle, with repeated grading and GPU
+memory evidence. This opt-in tool can run from its branch without merging; it
+changes no live campaign, scorer defaults, or qualified memory settings.
+
 ### Correctness scorer memory
 
 Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
