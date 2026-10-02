@@ -19,7 +19,9 @@ URL = "https://pareton-s3.s3.us-east-2.amazonaws.com/stage0/campaigns/c/patches/
     "policy",
     [{"mode": "private"}, {"mode": "public_after_reveal", "reveal_delay_s": 0}],
 )
-@pytest.mark.parametrize("endpoint", ["list", "detail", "legacy_detail"])
+@pytest.mark.parametrize(
+    "endpoint", ["list", "detail", "legacy_detail", "availability"]
+)
 def test_json_query_counts_stay_at_budget(monkeypatch, endpoint, policy):
     row = {
         "_patch_visibility": policy,
@@ -49,6 +51,13 @@ def test_json_query_counts_stay_at_budget(monkeypatch, endpoint, policy):
             ],
         ]
         expected_queries, expected_checkouts = 2, 1
+    elif endpoint == "availability":
+        path = f"/v1/campaigns/{CID}/submissions/{HASH}/patch-availability"
+        replies = [row]
+        expected_queries = expected_checkouts = 1
+        if policy["mode"] == "public_after_reveal":
+            replies.append([])  # No finalized evaluation yet.
+            expected_queries = expected_checkouts = 2
     else:
         path = f"/v1/campaigns/{CID}/submissions/{HASH}"
         replies = [

@@ -62,8 +62,9 @@ to 172800. The policy is stored and exposed in the manifest but excluded from
 The reveal clock starts at the first complete round with a scored or disqualified
 entry, even for submissions without an old enrollment event. Live/void rounds,
 infrastructure failures, and operator bans do not start it. Closing or archiving
-a campaign does not release private patches. Public list/detail reads and patch
-downloads publish eligible objects lazily using checksum-verified S3 copies;
+a campaign does not release private patches. Explicit patch availability and
+download requests publish eligible objects lazily using checksum-verified S3 copies;
+ordinary list/detail reads withhold links and never perform S3 I/O;
 private policy always suppresses publication and locations.
 
 The policy applies retrospectively to existing submissions. Changing policy

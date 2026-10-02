@@ -211,6 +211,10 @@ class SubmissionsPageModel(BaseModel):
     submissions: list[SubmissionSummaryModel]
 
 
+class PatchAvailabilityModel(BaseModel):
+    submission: SubmissionSummaryModel
+
+
 class SubmissionEventModel(BaseModel):
     state: SubmissionStateName
     evidence_ref: str | None = None
@@ -746,6 +750,7 @@ def _iso_or_none(value: Any) -> str | None:
 
 
 def _public_submission(row: dict, evaluated_at=None) -> dict:
+    """Render metadata without storage I/O, regardless of page size or S3 health."""
     policy = validate_patch_visibility(row.get("_patch_visibility"))
     if evaluated_at is None:
         evaluated_at = row.get("_patch_evaluated_at")
@@ -758,17 +763,6 @@ def _public_submission(row: dict, evaluated_at=None) -> dict:
     public["retrieval_url"] = ""
     public["patch_reveal_at"] = _iso_or_none(patch_reveal_at(evaluated_at, policy))
     public["patch_download_url"] = None
-    if patch_is_revealed(evaluated_at, policy):
-        try:
-            public["retrieval_url"] = _published_patch_url(row)
-        except HTTPException as exc:
-            if exc.status_code != 503:
-                raise
-            return public
-        public["patch_download_url"] = (
-            f"/v1/campaigns/{quote(str(row['campaign_id']), safe='')}/submissions/"
-            f"{quote(row['patch_hash'], safe='')}/patch"
-        )
     return public
 
 
@@ -839,10 +833,6 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
         "round": round_info,
     }
     payload = _withhold_patch_url(payload, row["retrieval_url"])
-    # A revealed legacy URL can equal the stored locator; only its intentional
-    # public location survives diagnostic redaction.
-    if public.get("retrieval_url"):
-        payload["submission"]["retrieval_url"] = public["retrieval_url"]
     return payload
 
 
@@ -880,6 +870,36 @@ def submission_detail(patch_hash: str, response: Response):
     return _submission_detail_payload(
         _resolve_unambiguous_submission(patch_hash), response
     )
+
+
+@app.get(
+    "/v1/campaigns/{campaign_id}/submissions/{patch_hash}/patch-availability",
+    responses={200: {"model": PatchAvailabilityModel}},
+)
+def campaign_submission_patch_availability(
+    campaign_id: str, patch_hash: str, response: Response
+):
+    """Explicit single-patch publication; list/detail reads never wait on S3."""
+    row = get_submission_for_campaign(campaign_id, patch_hash)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="submission not found",
+            headers={"Cache-Control": _NO_STORE},
+        )
+    policy = validate_patch_visibility(row.get("_patch_visibility"))
+    evaluated_at = None
+    if policy["mode"] != "private":
+        evaluated_at = list_patch_evaluation_times([row["id"]]).get(str(row["id"]))
+    public = _public_submission(row, evaluated_at)
+    if patch_is_revealed(evaluated_at, policy):
+        public["retrieval_url"] = _published_patch_url(row)
+        public["patch_download_url"] = (
+            f"/v1/campaigns/{quote(str(row['campaign_id']), safe='')}/submissions/"
+            f"{quote(row['patch_hash'], safe='')}/patch"
+        )
+    response.headers["Cache-Control"] = _NO_STORE
+    return {"submission": public}
 
 
 def _patch_download_response(row: dict) -> RedirectResponse:

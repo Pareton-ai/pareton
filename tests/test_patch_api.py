@@ -108,6 +108,7 @@ def test_submission_routes_never_expose_patch_locations(scenario):
     client, _, _ = scenario
     for path in (
         BASE,
+        BASE + "/patch-availability",
         f"/v1/submissions/{HASH}",
         f"/v1/campaigns/{CID}/submissions",
     ):
@@ -119,6 +120,7 @@ def test_historically_public_url_is_also_omitted(scenario):
     row["retrieval_url"] = PUBLIC_URL
     for path in (
         BASE,
+        BASE + "/patch-availability",
         f"/v1/submissions/{HASH}",
         f"/v1/campaigns/{CID}/submissions",
     ):
@@ -215,11 +217,22 @@ def test_all_routes_observe_exact_reveal_boundary(revealing, age):
         assert RAW_URL not in response.text
         assert "_patch_" not in response.text
         assert submission["patch_visibility"] == row["_patch_visibility"]
-        assert submission["retrieval_url"] == (PUBLIC_URL if revealed else "")
-        assert bool(submission["patch_download_url"]) == revealed
+        assert submission["retrieval_url"] == ""
+        assert submission["patch_download_url"] is None
         assert submission["patch_reveal_at"] == (
             (evaluated_at + timedelta(hours=6)).isoformat() if evaluated_at else None
         )
+    assert publications == []
+    response = client.get(BASE + "/patch-availability")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    submission = response.json()["submission"]
+    assert submission["retrieval_url"] == (PUBLIC_URL if revealed else "")
+    assert bool(submission["patch_download_url"]) == revealed
+    assert submission["patch_reveal_at"] == (
+        (evaluated_at + timedelta(hours=6)).isoformat() if evaluated_at else None
+    )
+    assert RAW_URL not in response.text
     for path in (BASE, f"/v1/submissions/{HASH}"):
         response = client.get(path + "/patch", follow_redirects=False)
         assert response.status_code == (307 if revealed else 403)
@@ -248,13 +261,48 @@ def test_private_policy_overrides_old_enrollment_and_evaluation(revealing, url):
 def test_policy_changes_are_read_on_each_request(revealing):
     client, row, _, publications = revealing
     row["_patch_evaluated_at"] = NOW - timedelta(hours=6)
-    assert client.get(BASE + "/patch", follow_redirects=False).status_code == 307
+    assert (
+        client.get(BASE + "/patch-availability").json()["submission"]["retrieval_url"]
+        == PUBLIC_URL
+    )
     row["_patch_visibility"]["reveal_delay_s"] += 1
     assert client.get(BASE + "/patch").status_code == 403
+    assert (
+        client.get(BASE + "/patch-availability").json()["submission"]["retrieval_url"]
+        == ""
+    )
     row["_patch_visibility"] = {"mode": "private"}
     _assert_private(client.get(BASE), RAW_URL)
+    _assert_private(client.get(BASE + "/patch-availability"), RAW_URL)
     assert client.get(BASE + "/patch").status_code == 403
     assert len(publications) == 1
+
+
+def test_repeated_full_pages_and_details_never_attempt_publication(
+    revealing, monkeypatch
+):
+    client, row, _, _ = revealing
+    row["_patch_evaluated_at"] = NOW - timedelta(days=3)
+    monkeypatch.setattr(
+        server, "publish_patch", lambda *a: pytest.fail("metadata must not wait on S3")
+    )
+    monkeypatch.setattr(
+        server,
+        "list_campaign_submissions",
+        lambda *a, **k: {
+            "total": 200,
+            "items": [{**row, "id": str(i)} for i in range(200)],
+        },
+    )
+    for _ in range(3):
+        response = client.get(f"/v1/campaigns/{CID}/submissions?limit=200")
+        assert response.status_code == 200
+        rows = response.json()["submissions"]
+        assert len(rows) == 200
+        assert all(r["retrieval_url"] == "" for r in rows)
+        assert all(r["patch_download_url"] is None for r in rows)
+        for path in (BASE, f"/v1/submissions/{HASH}"):
+            assert client.get(path).status_code == 200
 
 
 def test_publication_failure_is_retryable_and_keeps_json_available(
@@ -273,6 +321,10 @@ def test_publication_failure_is_retryable_and_keeps_json_available(
         assert _submission(response.json())["retrieval_url"] == ""
         assert _submission(response.json())["patch_download_url"] is None
         assert RAW_URL not in response.text
+    response = client.get(BASE + "/patch-availability")
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert RAW_URL not in response.text
     for path in (BASE, f"/v1/submissions/{HASH}"):
         response = client.get(path + "/patch", follow_redirects=False)
         assert response.status_code == 503
@@ -287,4 +339,7 @@ def test_download_rejects_ambiguous_hash_and_missing_submission(revealing, monke
     assert (
         client.get(BASE.replace(HASH, "sha256:missing") + "/patch").status_code == 404
     )
+    response = client.get(BASE.replace(HASH, "sha256:missing") + "/patch-availability")
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
     assert publications == []

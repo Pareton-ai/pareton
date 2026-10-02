@@ -59,11 +59,15 @@ Every submission response includes the effective `patch_visibility` policy from
 the same database read. This lets the frontend distinguish permanent privacy
 from a missing evaluation timestamp without a separate cached campaign lookup.
 Private submissions omit `retrieval_url`, `patch_reveal_at`, and
-`patch_download_url`, as before. Public-mode submissions return a nullable reveal
-time, an empty retrieval URL and null download URL until eligible. Once eligible,
-the API verifies the object's checksum/size and copies it into the public prefix.
-It returns the permanent public location and a campaign-scoped download route.
-This is lazy publication on list/detail/download access, not a background timer.
+`patch_download_url`, as before. Public-mode list/detail responses return a nullable
+reveal time, an empty retrieval URL and null download URL. Once eligible, an
+availability/download request verifies the object's checksum/size and copies it
+into the public prefix. The availability response then includes the permanent
+public location and a campaign-scoped download route.
+Publication happens only on an explicit availability or download request, not
+on ordinary list/detail reads or a background timer. List/detail always withhold
+download fields and perform no S3 calls, even for already-revealed patches, so
+a cold cache or storage outage cannot delay those responses.
 The original private locator is still scrubbed from event/job diagnostics.
 
 Both routes are restored:
@@ -71,10 +75,17 @@ Both routes are restored:
 - `/v1/campaigns/{campaign_id}/submissions/{patch_hash}/patch`
 - `/v1/submissions/{patch_hash}/patch` (409 if the hash spans campaigns)
 
-They return 403 with `patch_private` or `patch_not_revealed` while withheld and
-307 to the public object once eligible. Publication failures return retryable
-503 responses; list/detail remain available with download fields withheld.
-Visibility-bearing list/detail responses and download responses use `no-store`.
+The frontend polls the campaign-scoped
+`/v1/campaigns/{campaign_id}/submissions/{patch_hash}/patch-availability` endpoint.
+It returns `{"submission": ...}` with the policy, reveal time, and verified public
+location when available. Private or not-yet-eligible patches return 200 with
+locations withheld. Each availability request can publish at most one patch.
+
+The download routes return 403 with `patch_private` or `patch_not_revealed` while
+withheld and 307 to the public object once eligible. Publication failures return retryable
+503 responses from the availability/download routes; list/detail remain available
+with download fields withheld. List/detail, availability, and download responses
+use `no-store`.
 
 ## Rollout
 
@@ -229,7 +240,7 @@ cannot revoke public copies or downloads.
 cd /opt/pareton
 /opt/pareton/.venv/bin/python -m campaign.set_patch_visibility \
   --campaign-id "$CAMPAIGN_ID" --mode public_after_reveal --reveal-delay-s 172800
-curl -fsS "$SUBMISSION_URL" \
+curl -fsS "$SUBMISSION_URL/patch-availability" \
   | jq '.submission | {patch_visibility, patch_reveal_at, patch_download_url, retrieval_url}'
 curl -sS -D "$ROLLOUT_DIR/download-headers.txt" \
   -o "$ROLLOUT_DIR/download-response.txt" "$SUBMISSION_URL/patch"
@@ -240,8 +251,8 @@ curl -fsS "$PATCH_PROXY" | jq '{mode, revealAt, downloadable, url}'
 Before eligibility, expect API 403 `patch_not_revealed`. At/after the timestamp,
 expect 307 with the public destination in `Location`; the frontend should show
 **Download diff** only after the API supplies a safe public URL. Publication is
-lazy on list/detail/download reads. An S3 publication failure returns 503 from
-the download route and leaves JSON download fields withheld for retry. Use a
+lazy on availability/download reads. An S3 publication failure returns 503 from
+those routes, while ordinary list/detail reads never contact S3. Use a
 controlled test campaign to exercise both sides of the deadline without
 shortening a real campaign's disclosure period.
 
