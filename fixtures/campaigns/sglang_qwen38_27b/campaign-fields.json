@@ -98,14 +98,8 @@
     "cache_dir": "/root/.cache/sglang"
   },
   "scoring_rule": {
-    "name": "weighted_tier_completion_speedup",
-    "failure_penalty": 0.1,
-    "tier_weights": {
-      "2k": 0.25,
-      "4k": 0.25,
-      "8k": 0.25,
-      "16k": 0.25
-    }
+    "name": "median_e2e_speedup",
+    "failure_penalty": 0.1
   },
   "emission_rule": {
     "name": "linear_decay",
@@ -114,24 +108,20 @@
     "decay_blocks": 201600
   },
   "sampling_rule": {
-    "algo_version": 5,
+    "algo_version": 4,
     "config": "default",
     "dataset": "zai-org/LongWriter-6k",
     "enable_thinking": false,
     "max_tokens": 5120,
     "n_prompts": 32,
     "n_rows": 6000,
-    "temperature_range": [
-      0.1,
-      1.01
-    ],
+    "request_interval_ms": 2,
+    "temperature_range": [0.1, 1.01],
     "revision": "0db15c0624f19d63e2efe1021595af933cc5b6cc",
     "seed_block_offset": 10,
     "split": "train",
     "type": "hf_rows",
     "min_output_tokens": 3000,
-    "followup_prompt": "Write a new, original, self-contained long-form work. Use the previous response as an example of depth and detail, but choose a different topic from coding, fiction, non-fiction, science, history, astronomy, or internet culture. Surprise me. Produce the complete work, not an outline, summary, or discussion of what you would write. Aim for approximately 4,000-6,000 words.",
-    "request_concurrency": 32,
-    "output_tokens": 3000
+    "followup_prompt": "Write a new, original, self-contained long-form work. Use the previous response as an example of depth and detail, but choose a different topic from coding, fiction, non-fiction, science, history, astronomy, or internet culture. Surprise me. Produce the complete work, not an outline, summary, or discussion of what you would write. Aim for approximately 4,000-6,000 words."
   }
 }

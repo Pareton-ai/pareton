@@ -1,7 +1,7 @@
 # LongWriter campaign workload
 
 The Qwen SGLang launch helper uses `zai-org/LongWriter-6k` at revision
-`0db15c0624f19d63e2efe1021595af933cc5b6cc` (6000 rows). Sampler version 5
+`0db15c0624f19d63e2efe1021595af933cc5b6cc` (6000 rows). Sampler version 4
 renders the original `user` and `assistant` messages as conversation history,
 then appends the pinned `followup_prompt` as a new user turn. The follow-up asks
 for a new complete work of approximately 4,000-6,000 words. Thinking is disabled.
@@ -20,19 +20,56 @@ model tokenizer:
 
 Rows outside these bands are skipped. Source messages are never padded or
 truncated. There is no 32k tier or fallback when a tier cannot be filled.
-Versions 1 through 4 keep their existing behavior, trace bytes and receipt formats.
+Versions 1 through 3 keep their existing behavior and receipt formats.
 
-The model, engine, hardware, serving arguments, fees and emissions remain as
-configured in the seed helper. Version 5 retires `request_interval_ms` and requires
-`request_concurrency` (1, 2, 4, 8, 16 or 32). The fixture uses C32.
-Natural-output qualification retains `max_tokens=5120` and normal EOS. Scored
-replays use the pinned `output_tokens` budget (3000 in the fixture), with
-`ignore_eos=true` and exact output-count validation. This is an explicit new
-campaign contract, not a change to historical natural-EOS campaigns. The budget
-must be positive and no larger than the qualification `min_output_tokens` floor.
-A long source answer alone does not establish that a row qualifies.
+The model, engine, hardware, serving arguments, 32-request workload, 2 ms
+arrivals, fees and emissions remain as configured in the seed helper.
+`max_tokens=5120` remains a ceiling. Requests respect EOS and never set a
+minimum generation length. A long source answer does not establish that the
+model will produce a long new response.
 
-## Version 5 scheduling and scoring
+New Qwen campaign fixtures pin `temperature_range=[0.1, 1.01]`. The sampler
+reproducibly derives one temperature per prompt from the round seed and request
+index, uniformly over the range to six decimal places. Each prompt keeps that
+temperature across warmups and measured repetitions; different rounds derive
+new temperatures.
+
+New campaigns allow a maximum mean-logprob drop of `2.5` below the opening
+baseline, through the same trusted scorer. Absolute likelihood floors and the
+per-prompt `0.10` distinct-character-16-gram drop limit remain unchanged. This
+wider likelihood tolerance is an operator-selected setting, not a measured
+false-positive guarantee. Existing campaigns retain their pinned threshold.
+
+Generation always uses `seed=0`, including qualification, warmups, opening and
+second baselines, and candidates. Repetitions repeat the same sampling settings
+to measure timing stability. They do not deliberately vary sampled continuations.
+The round seed determines prompt selection and temperatures, not the generation
+seed. Fixed sampling settings do not promise bitwise-identical engine outputs.
+SLA evidence records the temperature and actual generation seed, including failed
+requests. `top_p=1` and prefix-cache reuse are unchanged. The teacher-forced
+correctness scorer still uses its existing scoring settings.
+
+Version 4 rules without generation fields retain temperature zero and seed zero
+and reproduce their original trace bytes and qualification hashes. Fixed
+`temperature` is still supported, but cannot coexist with `temperature_range`.
+Range endpoints must be increasing finite numbers between 0 and 2. Generation
+policy is recorded in the rule, receipt and trace metadata; each request's settings
+must match the derivation. Changing the temperature policy invalidates prior
+qualification. Requalify the source pool and create
+a new campaign rather than overriding an open campaign's trace at runtime. Higher
+temperature can change output lengths, logprob distributions and timing variance;
+run the full concurrent baseline validation before launch.
+
+## Version 5: opt-in for new campaigns
+
+The stock Qwen fixtures and helpers above remain v4. New campaigns may opt into
+v5 using a separate configuration: set `algo_version: 5`, remove
+`request_interval_ms`, and set `request_concurrency` to 1, 2, 4, 8, 16 or 32.
+Pin `output_tokens` (for example, 3000), positive and no larger than the natural
+qualification `min_output_tokens` floor. Natural qualification retains normal EOS
+and the `max_tokens` ceiling; measured runs use exactly `output_tokens` with
+`ignore_eos=true`. Pair v5 with the scoring rule below. Historical v1-v4 contracts,
+trace bytes and receipt reconstruction remain unchanged.
 
 C1 through C8 run the four tiers separately in ascending order. C16 runs two
 fixed groups, 2k+4k followed by 8k+16k. C32 runs one group containing all tiers.
@@ -83,7 +120,7 @@ score = eligible_speedup - failure_penalty * failure_rate
 
 Weights must explicitly name all four tiers, be finite and nonnegative, and sum
 to one. Equal weights and a zero penalty are resolved defaults when omitted;
-the launch fixture explicitly sets penalty 0.1. Resolved weights and penalty are
+the example above explicitly sets penalty 0.1. Resolved weights and penalty are
 manifest-hashed. No tier is dropped and weights are never redistributed.
 Per-request aligned-token speedups remain diagnostics, not the ranking metric.
 
@@ -101,39 +138,17 @@ pool with the v5 pins and run full GPU shadow rounds before activating a campaig
 Timing noise, fixed-length output quality, promotion margins, and latency/deadline
 limits still require qualification on the pinned serving image and hardware.
 
-New Qwen campaign fixtures pin `temperature_range=[0.1, 1.01]`. The sampler
-reproducibly derives one temperature per prompt from the round seed and request
-index, uniformly over the range to six decimal places. Each prompt keeps that
-temperature across warmups and measured repetitions; different rounds derive
-new temperatures.
+For a future v5 launch, pass its separate configuration to
+`bench.qualify_longform --campaign-fields /path/to/new-campaign-fields.json`.
+Use `campaign.seed` with the qualified `--sampling-rule-json` and matching
+`--scoring-rule-json`, plus the new campaign's pinned engine/model/hardware and
+fee/emission settings. The stock Qwen seed and standalone sample-round helpers
+use the v4 fixture's scoring rule; they cannot launch or validate v5 unchanged.
+Use a matching worker-generated request for the v5 GPU shadow round. Deploy
+[frontend support](https://github.com/Pareton-ai/pareton-frontend/pull/89) before
+opening the new campaign. No existing campaign migration is required.
 
-New campaigns allow a maximum mean-logprob drop of `2.5` below the opening
-baseline, through the same trusted scorer. Absolute likelihood floors and the
-per-prompt `0.10` distinct-character-16-gram drop limit remain unchanged. This
-wider likelihood tolerance is an operator-selected setting, not a measured
-false-positive guarantee. Existing campaigns retain their pinned threshold.
-
-Generation always uses `seed=0`, including qualification, warmups, opening and
-second baselines, and candidates. Repetitions repeat the same sampling settings
-to measure timing stability. They do not deliberately vary sampled continuations.
-The round seed determines prompt selection and temperatures, not the generation
-seed. Fixed sampling settings do not promise bitwise-identical engine outputs.
-SLA evidence records the temperature and actual generation seed, including failed
-requests. `top_p=1` and prefix-cache reuse are unchanged. The teacher-forced
-correctness scorer still uses its existing scoring settings.
-
-Version 4 rules without generation fields retain temperature zero and seed zero
-and reproduce their original trace bytes and qualification hashes. Fixed
-`temperature` is still supported, but cannot coexist with `temperature_range`.
-Range endpoints must be increasing finite numbers between 0 and 2. Generation
-policy is recorded in the rule, receipt and trace metadata; each request's settings
-must match the derivation. Changing the temperature policy invalidates prior
-qualification. Requalify the source pool and create
-a new campaign rather than overriding an open campaign's trace at runtime. Higher
-temperature can change output lengths, logprob distributions and timing variance;
-run the full concurrent baseline validation before launch.
-
-## Qualify the source pool
+## Qualify the source pool (stock v4 recipe)
 
 Run qualification on the Linux Docker host serving the trusted baseline, using
 the exact model, published image and serving arguments from
@@ -212,13 +227,12 @@ bash ops/sglang-sample-round/run.sh \
 
 The standalone runner uses the fixture's published baseline image. Qualify that
 same image when using this runner. Inspect `bench_report.json` and its evidence.
-Both natural-output baseline qualification runs finish before the measured
-baseline and candidate runs. If any qualification repetition is short or
-repetitive, exclude that prompt from correctness and performance scoring for
-every candidate. Up to eight unique prompts may be excluded across both runs;
-a ninth exclusion or an empty retained tier fails the round as a baseline
-workload error. The eligible workload then stays frozen for the measured runs,
-which enforce fixed output length, correctness and complete-tier timing.
+Both baseline replays run before the candidates. If any measured natural
+baseline repetition is short or repetitive, exclude that prompt from correctness
+and performance scoring for every candidate. Up to eight unique prompts may be
+excluded across both runs; a ninth exclusion or an empty retained set fails the
+round as a baseline workload error. Candidate outputs continue through the
+existing length, correctness and timing checks on retained prompts.
 
 ## Open the campaign
 
@@ -230,7 +244,7 @@ bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO" \
 ```
 
 All three arguments are required, including the qualified rule file. The fixture
-rule remains a source template for qualification and CPU previews. Every v4/v5
+rule remains a source template for qualification and CPU previews. Every v4
 campaign status, including draft, rejects missing or stale qualification before
 inserting a profile or campaign. A different model, image, serving configuration
 or sampling rule requires requalification.
