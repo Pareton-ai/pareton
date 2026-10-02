@@ -1,5 +1,8 @@
 """Deterministic on-the-fly workload traces from a pinned HuggingFace dataset.
 
+Rules of type ``affine_corpus`` (sampler version 5) draw from Affine's pinned
+public corpus instead; see ``bench.affine_corpus``.
+
 Seed = sha256(block_hash(seed block) || campaign_id).
 Row i = sha256(seed || counter) % n_rows. Empty/too-long rows skip via counter.
 """
@@ -23,6 +26,8 @@ SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3, 4})
 CHAT_TEMPLATE_ALGO_VERSION = 2
 TRAJECTORY_ALGO_VERSION = 3
 LONGFORM_ALGO_VERSION = 4
+AFFINE_ALGO_VERSION = 5
+AFFINE_RULE_TYPE = "affine_corpus"
 LONGFORM_RULE_FIELDS = frozenset(
     {
         "followup_prompt",
@@ -83,6 +88,10 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(rule, dict):
         raise SamplerError("sampling_rule must be an object")
     rtype = str(rule.get("type") or "")
+    if rtype == AFFINE_RULE_TYPE:
+        from bench.affine_corpus import parse_affine_rule
+
+        return parse_affine_rule(rule)
     if rtype != "hf_rows":
         raise SamplerError(f"unsupported sampling_rule.type: {rtype!r}")
     offset = int(rule.get("seed_block_offset", DEFAULT_SEED_BLOCK_OFFSET))
@@ -172,7 +181,9 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
 
 def sampling_context_for_rule(rule, bench, engine=None):
     """Resolve capacity without imposing SWE history tiers on writing prompts."""
-    if rule["algo_version"] == LONGFORM_ALGO_VERSION:
+    if rule.get("type") == AFFINE_RULE_TYPE:
+        from bench.affine_corpus import sampling_context_for_campaign
+    elif rule["algo_version"] == LONGFORM_ALGO_VERSION:
         from bench.longform import sampling_context_for_campaign
     else:
         from bench.trajectory import sampling_context_for_campaign
@@ -573,6 +584,15 @@ def fetch_hf_row(rule: dict[str, Any], index: int) -> dict[str, Any]:
     return row
 
 
+def default_row_fetcher(rule: dict[str, Any]) -> Any:
+    """The production source for a parsed rule: HF rows, or the pinned corpus."""
+    if rule.get("type") == AFFINE_RULE_TYPE:
+        from bench.affine_corpus import corpus_for_rule
+
+        return corpus_for_rule(rule)
+    return lambda idx: fetch_hf_row(rule, idx)
+
+
 def generate_trace(
     *,
     rule: dict[str, Any],
@@ -584,8 +604,24 @@ def generate_trace(
     sampling_context: dict[str, Any] | None = None,
     sampling_receipt: dict[str, Any] | None = None,
 ) -> SampledTrace:
-    """Build a trace from hash-selected rows. row_fetcher is injected in tests."""
+    """Build a trace from hash-selected rows. row_fetcher is injected in tests.
+
+    For ``affine_corpus`` rules, row_fetcher is the rule's ``AffineCorpus``.
+    """
     parsed = parse_sampling_rule(rule)
+    if parsed["type"] == AFFINE_RULE_TYPE:
+        from bench.affine_corpus import generate_affine_trace
+
+        return generate_affine_trace(
+            rule=parsed,
+            seed_hex=seed_hex,
+            corpus=row_fetcher,
+            formatter=prompt_formatter,
+            context=sampling_context,
+            receipt=sampling_receipt,
+            sample_seed_block=sample_seed_block,
+            sample_seed_block_hash=sample_seed_block_hash,
+        )
     if parsed["algo_version"] == LONGFORM_ALGO_VERSION:
         from bench.longform import generate_longform_trace
 
@@ -695,7 +731,7 @@ def sample_workload(
         block_hash=block_hash,
         campaign_id=campaign_id,
     )
-    fetcher = row_fetcher or (lambda idx: fetch_hf_row(parsed, idx))
+    fetcher = row_fetcher or default_row_fetcher(parsed)
     return generate_trace(
         rule=parsed,
         seed_hex=seed_hex,

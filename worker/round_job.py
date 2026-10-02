@@ -15,11 +15,13 @@ from uuid import uuid4
 import config
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
+    AFFINE_RULE_TYPE,
     CHAT_TEMPLATE_ALGO_VERSION,
     TRAJECTORY_ALGO_VERSION,
     PromptFormatter,
     SamplerError,
     build_prompt_formatter,
+    default_row_fetcher,
     fetch_hf_row,
     generate_trace,
     parse_sampling_rule,
@@ -133,6 +135,38 @@ def _write_trace(dest_dir: Path, raw: bytes, expected_sha256: str) -> Path:
     return path
 
 
+def _hf_rule_from_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    return parse_sampling_rule(
+        {
+            "type": "hf_rows",
+            "dataset": receipt.get("dataset"),
+            "revision": receipt.get("revision"),
+            "config": receipt.get("config"),
+            "split": receipt.get("split"),
+            "n_rows": receipt.get("n_rows"),
+            "n_prompts": receipt.get("n_prompts"),
+            "max_tokens": receipt.get("max_tokens"),
+            "ignore_eos": receipt.get("ignore_eos"),
+            "algo_version": receipt.get("algo_version"),
+            "seed_block_offset": receipt.get("seed_block_offset"),
+            **{
+                key: receipt[key]
+                for key in (
+                    "request_interval_ms",
+                    "enable_thinking",
+                    "min_output_tokens",
+                    "followup_prompt",
+                    "eligible_row_indices",
+                    "qualification",
+                    "temperature",
+                    "temperature_range",
+                )
+                if key in receipt
+            },
+        }
+    )
+
+
 def materialize_round_trace(
     round_row: dict[str, Any],
     campaign: Any,
@@ -146,37 +180,14 @@ def materialize_round_trace(
     expected = str(round_row["sampled_trace_sha256"])
     receipt = _parse_json_field(round_row.get("sampling_receipt")) or {}
     rtype = str(receipt.get("type") or "")
-    if rtype == "hf_rows":
+    if rtype in ("hf_rows", AFFINE_RULE_TYPE):
         try:
-            rule = parse_sampling_rule(
-                {
-                    "type": "hf_rows",
-                    "dataset": receipt.get("dataset"),
-                    "revision": receipt.get("revision"),
-                    "config": receipt.get("config"),
-                    "split": receipt.get("split"),
-                    "n_rows": receipt.get("n_rows"),
-                    "n_prompts": receipt.get("n_prompts"),
-                    "max_tokens": receipt.get("max_tokens"),
-                    "ignore_eos": receipt.get("ignore_eos"),
-                    "algo_version": receipt.get("algo_version"),
-                    "seed_block_offset": receipt.get("seed_block_offset"),
-                    **{
-                        key: receipt[key]
-                        for key in (
-                            "request_interval_ms",
-                            "enable_thinking",
-                            "min_output_tokens",
-                            "followup_prompt",
-                            "eligible_row_indices",
-                            "qualification",
-                            "temperature",
-                            "temperature_range",
-                        )
-                        if key in receipt
-                    },
-                }
-            )
+            if rtype == AFFINE_RULE_TYPE:
+                from bench.affine_corpus import rule_from_receipt
+
+                rule = parse_sampling_rule(rule_from_receipt(receipt))
+            else:
+                rule = _hf_rule_from_receipt(receipt)
             formatter = None
             if rule["algo_version"] >= CHAT_TEMPLATE_ALGO_VERSION:
                 formatter = prompt_formatter
@@ -234,7 +245,12 @@ def materialize_round_trace(
                 seed_hex=str(
                     receipt.get("seed_hex") or round_row.get("seed_hex") or ""
                 ),
-                row_fetcher=row_fetcher or (lambda idx: fetch_hf_row(rule, idx)),
+                row_fetcher=row_fetcher
+                or (
+                    default_row_fetcher(rule)
+                    if rtype == AFFINE_RULE_TYPE
+                    else (lambda idx: fetch_hf_row(rule, idx))
+                ),
                 prompt_formatter=formatter,
                 sample_seed_block=int(receipt.get("sample_seed_block") or 0),
                 sample_seed_block_hash=str(receipt.get("sample_seed_block_hash") or ""),

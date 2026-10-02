@@ -365,7 +365,22 @@ def seed_synthetic_campaign(
     pool = list(workload_pool) if workload_pool is not None else None
     scoring = validate_scoring_rule(scoring_rule)
 
-    if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
+    if rule["type"] == "affine_corpus":
+        from bench.affine_corpus import (
+            preflight_affine_campaign,
+            require_qualification as require_affine_qualification,
+            sampling_context_for_campaign as affine_context,
+        )
+
+        affine_context(bench, engine_profile)
+        require_affine_qualification(rule, bench, engine_profile)
+        if status == "open":
+            preview = preflight_affine_campaign(rule, bench, engine_profile)
+            print(
+                f"Verified {len(preview.receipt['turn_ids'])} Affine corpus turns "
+                f"from manifest {rule['manifest_sha256']}"
+            )
+    elif rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
         sampling_context_for_campaign(bench, engine_profile)
         if status == "open":
             preview = preflight_trajectory_campaign(rule, bench, engine_profile)
