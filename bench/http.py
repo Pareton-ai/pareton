@@ -31,7 +31,6 @@ def post_completion(
     top_p: float | None = None,
     seed: int | None = 0,
     timeout: float = 60.0,
-    skip_special_tokens: bool | None = None,
 ) -> dict[str, Any]:
     """Serial non-streaming /v1/completions client (stdlib only)."""
     # vLLM accepts max_tokens=0 for echo-only scoring. SGLang rejects it.
@@ -48,8 +47,6 @@ def post_completion(
         body["top_p"] = top_p
     if seed is not None:
         body["seed"] = seed
-    if skip_special_tokens is not None:
-        body["skip_special_tokens"] = skip_special_tokens
     return post_json(base_url, "/v1/completions", body, timeout=timeout)
 
 
@@ -131,7 +128,6 @@ def post_completion_stream(
     timeout: float = 120.0,
     absolute_deadline_s: float | None = None,
     require_token_timing: bool = True,
-    skip_special_tokens: bool | None = None,
 ) -> StreamResult:
     """Streaming /v1/completions client; parses SSE and times TTFT/ITL."""
     url = base_url.rstrip("/") + "/v1/completions"
@@ -149,8 +145,6 @@ def post_completion_stream(
         body["seed"] = seed
     if ignore_eos:
         body["ignore_eos"] = True
-    if skip_special_tokens is not None:
-        body["skip_special_tokens"] = skip_special_tokens
     data = json.dumps(body).encode("utf-8")
     req = Request(
         url,

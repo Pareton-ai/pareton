@@ -273,7 +273,7 @@ SGLang omits tensor-parallel arguments or uses another accepted alias.
 Generate a trace with `bench.sampler.sample_workload` and the campaign's pinned
 sampling rule. Run the same trace against the baseline and candidate. For a new
 v5 campaign, run the full plan: two natural-output baseline qualification starts,
-freeze the eligible workload, two measured fixed-output baseline references,
+freeze the eligible workload, two measured baseline references,
 leader/candidate streaming replays, then shared correctness scoring. There are
 `5 + candidates` engine starts in all-mode. Existing v1-v4 campaigns retain their
 own replay contract; do not run the v5 plan against their saved workloads.
@@ -361,7 +361,7 @@ rewrite a live campaign's signed terms to change its fee.
 
 The launch helper is a template for a new campaign on four RTX 5090 GPUs using
 `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` and a 262144-token context. It pins
-`algo_version: 5`, `request_concurrency: 32`, `output_tokens: 3000` and
+`algo_version: 5`, `request_concurrency: 32` and
 `request_timeout_s: 600`. The timeout is an absolute per-request deadline from
 slot admission, shared by both natural qualification starts and all measured
 replays. Pin it before qualification and validate it on the target hardware;
@@ -385,16 +385,9 @@ minimum. They do not force continuation. Union short/degenerate exclusions acros
 both in-round qualification starts before leader or candidate execution; allow
 at most eight excluded request IDs and require every tier to remain nonempty.
 Freeze and hash the remaining workload. Measured baseline, leader and candidate
-replays then enforce exactly 3000 output tokens with `ignore_eos=true`. Every
-eligible request/repetition receives strict checks without forced-tail exemptions.
-The trusted scorer must independently tokenize every measured repetition's output
-without adding special tokens. V5 replay and trusted echo scoring preserve
-generated special tokens with `skip_special_tokens=false`. Independent counts
-may differ by at most `min(2, floor(output_tokens / 1000))` tokens (±2 at 3000),
-using the same bounded round-trip allowance for baselines and candidates.
-Review `token_count_checks` in correctness evidence: `matches` records exact
-equality; `within_tolerance` determines acceptance. Larger differences disqualify
-candidates or invalidate the baseline; investigate these during GPU qualification.
+replays retain normal EOS and the same 5120-token ceiling. Candidates must emit
+at least 90% of the measured baseline's reported token count per eligible request.
+Correctness checks cover natural outputs and their repetitions.
 Candidate-specific failures never remove requests from the eligible set.
 
 Pair v5 with `weighted_tier_completion_speedup`. Pin `tier_weights` in the scoring
@@ -600,9 +593,9 @@ rows, so that sequence does not promote a draft.
 Verify the returned ID through `GET /v1/campaigns/<id>`. Check the source and model
 revisions, both image digests, engine, patch surface, sampling rule, correctness
 bars, status, the 20% starting emission rule, initial fee history and customer signoff.
-For v5, also verify `algo_version`, `request_concurrency`, `output_tokens`,
+For v5, also verify `algo_version`, `request_concurrency`,
 `request_timeout_s`, `weighted_tier_completion_speedup`, all four `tier_weights`
-and `failure_penalty` in the API readback. Check concurrency, output budget and
+and `failure_penalty` in the API readback. Check concurrency, natural EOS, output ceiling and
 score details in the companion frontend. Keep the
 existing campaign and its manifest unchanged. Do not claim the new campaign is live until that readback
 succeeds and the deployed worker supports its engine request fields.

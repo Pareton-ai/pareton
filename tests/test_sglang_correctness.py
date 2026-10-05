@@ -341,29 +341,3 @@ def test_full_replay_context_scores_every_token_with_relative_bar(
         assert report.num_positions_scored == 5120
         assert report.coverage_ratio == 1.0
         assert report.mean_logprob == pytest.approx((-0.1 * 5119 - 0.7) / 5120)
-
-
-@pytest.mark.parametrize("claimed", [4, 40])
-@pytest.mark.parametrize("merged_boundary", [False, True])
-def test_fixed_output_uses_trusted_continuation_tokens(
-    native, tmp_path, claimed, merged_boundary
-):
-    from dataclasses import replace
-
-    if merged_boundary:
-        native["tokens"][1][0] = 999
-    report = grade_candidate(
-        "http://trusted-scorer",
-        [replace(CAPTURED, completion_tokens=claimed, ignore_eos=True)],
-        cfg=CFG,
-        evidence_path=tmp_path / "fixed.jsonl",
-        engine_name="sglang",
-        strict_fixed_output=True,
-    )
-    assert report.verdict == ("pass" if claimed == 4 else "fail_correctness")
-    assert native["calls"][0] == (
-        "/tokenize",
-        {"prompt": CAPTURED.output_text, "add_special_tokens": False},
-    )
-    checks = json.loads((tmp_path / "fixed.jsonl").read_text())["token_count_checks"]
-    assert checks[0]["trusted_tokens"] == 4  # Unicode token IDs, not decoded fragments

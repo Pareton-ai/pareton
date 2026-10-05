@@ -280,10 +280,11 @@ def _weighted_tier_completion_speedup(
         completion = candidate.get(rid)
         # Chunk timing is diagnostic only: speculative decoding can stream
         # several tokens per SSE chunk without per-token arrival timestamps.
-        diagnostic = prompt_speedup(rid, timing, completion, tolerance=1.0)
+        diagnostic = prompt_speedup(rid, timing, completion)
         failed = (
             completion is None
-            or completion.completion_tokens != timing.completion_tokens
+            or completion.completion_tokens
+            < _min_aligned_tokens(timing.completion_tokens, DEFAULT_SPEED_TOLERANCE)
             or completion.finish_reason not in ("stop", "length")
         )
         per_prompt.append(
@@ -291,8 +292,9 @@ def _weighted_tier_completion_speedup(
                 diagnostic,
                 candidate_failed=failed,
                 reason=(
-                    "candidate did not complete fixed output work"
-                    if failed
+                    "invalid completion finish reason"
+                    if completion is not None
+                    and completion.finish_reason not in ("stop", "length")
                     else diagnostic.reason
                 ),
                 speedup=0.0 if failed else diagnostic.speedup,

@@ -166,7 +166,6 @@ def materialize_round_trace(
                         for key in (
                             "request_interval_ms",
                             "request_concurrency",
-                            "output_tokens",
                             "request_timeout_s",
                             "enable_thinking",
                             "min_output_tokens",

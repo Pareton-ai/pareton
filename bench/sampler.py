@@ -117,16 +117,14 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         "request_interval_ms",
         "enable_thinking",
         "request_concurrency",
-        "output_tokens",
         "request_timeout_s",
     }
     if algo_version != CONCURRENCY_ALGO_VERSION and {
         "request_concurrency",
-        "output_tokens",
         "request_timeout_s",
     }.intersection(rule):
         raise SamplerError(
-            "request_concurrency, output_tokens and request_timeout_s require algo_version 5"
+            "request_concurrency and request_timeout_s require algo_version 5"
         )
     if algo_version < TRAJECTORY_ALGO_VERSION and new_fields.intersection(rule):
         raise SamplerError(
@@ -152,7 +150,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             - set(parsed)
             - {"ignore_eos", "enable_thinking", "request_interval_ms"}
             - (
-                {"request_concurrency", "output_tokens", "request_timeout_s"}
+                {"request_concurrency", "request_timeout_s"}
                 if algo_version == 5
                 else set()
             )

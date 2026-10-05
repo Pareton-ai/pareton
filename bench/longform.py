@@ -119,13 +119,6 @@ def parse_longform_fields(rule, parsed):
     if minimum > parsed["max_tokens"]:
         raise SamplerError("min_output_tokens exceeds max_tokens")
     result = {"followup_prompt": prompt, "min_output_tokens": minimum}
-    if parsed["algo_version"] == 5:
-        budget = rule.get("output_tokens", minimum)
-        if type(budget) is not int or not 1 <= budget <= minimum:
-            raise SamplerError(
-                "output_tokens must be a positive integer <= min_output_tokens"
-            )
-        result["output_tokens"] = budget
     # Do not add a default field to old rules: their receipts and qualification
     # hashes must continue to reproduce exactly.
     result.update(generation_fields(rule))
@@ -358,7 +351,6 @@ def generate_longform_trace(
         **(
             {
                 "request_concurrency": rule["request_concurrency"],
-                "output_tokens": rule["output_tokens"],
                 "request_timeout_s": rule["request_timeout_s"],
             }
             if rule["algo_version"] == 5
@@ -427,14 +419,7 @@ def validate_longform_trace(requests, sampling):
         validate_request_timeout(sampling.get("request_timeout_s"))
         if "request_interval_ms" in sampling:
             raise SamplerError("version 5 trace cannot contain request_interval_ms")
-        budget = sampling.get("output_tokens")
-        if type(budget) is not int or not 1 <= budget <= sampling.get(
-            "min_output_tokens", 0
-        ):
-            raise SamplerError("invalid fixed output_tokens")
-    elif {"request_concurrency", "output_tokens", "request_timeout_s"}.intersection(
-        sampling
-    ):
+    elif {"request_concurrency", "request_timeout_s"}.intersection(sampling):
         raise SamplerError("concurrency settings require version 5")
     keys = ("max_tokens", "min_output_tokens")
     if sampling["algo_version"] == 4:

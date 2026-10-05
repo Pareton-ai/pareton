@@ -384,7 +384,6 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert manifest.sampling_rule["n_prompts"] == 32
     assert manifest.sampling_rule["max_tokens"] == 5120
     assert manifest.sampling_rule["request_concurrency"] == 32
-    assert manifest.sampling_rule["output_tokens"] == 3000
     assert "request_interval_ms" not in manifest.sampling_rule
     assert manifest.sampling_rule["enable_thinking"] is False
     assert not manifest.sampling_rule.get("ignore_eos", False)

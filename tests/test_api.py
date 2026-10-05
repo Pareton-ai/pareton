@@ -1162,9 +1162,7 @@ def test_baseline_report_exposes_input_lengths_without_inventing_scores(
     assert body["sla"]["timings"]["req-0"]["input_tokens"] == 2048
 
 
-def test_weighted_report_preserves_penalty_and_actual_output_budget(
-    monkeypatch, client
-):
+def test_weighted_report_preserves_penalty_and_output_ceiling(monkeypatch, client):
     from api import server
 
     row = _score_report_row()
@@ -1173,7 +1171,6 @@ def test_weighted_report_preserves_penalty_and_actual_output_budget(
         "algo_version": 5,
         "request_concurrency": 16,
         "request_timeout_s": 480,
-        "output_tokens": 3000,
         "enable_thinking": False,
         "requests": [
             {
@@ -1206,7 +1203,7 @@ def test_weighted_report_preserves_penalty_and_actual_output_budget(
     assert body["workload"]["request_concurrency"] == 16
     assert body["workload"]["request_timeout_s"] == 480
     assert "request_interval_ms" not in body["workload"]
-    assert body["prompts"][0]["max_tokens"] == 3000
+    assert body["prompts"][0]["max_tokens"] == 5120
 
 
 def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestClient):

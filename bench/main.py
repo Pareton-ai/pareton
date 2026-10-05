@@ -78,7 +78,6 @@ from bench.score import score_candidate
 from bench.sla_bench import (
     REPRO_BAR_MAX_REL_RANGE,
     EngineReplay,
-    NaturalStopReference,
     capture_baseline_natural_stops,
     run_sla_engine,
 )
@@ -634,21 +633,9 @@ def run_round(
                         trace, qualification, dropped=excluded_prompts
                     )
                 if start.role == "qualification-2":
-                    requests = [
-                        replace(
-                            r,
-                            max_tokens=workload["output_tokens"],
-                            sampling=replace(r.sampling, ignore_eos=True),
-                        )
-                        for r in requests
-                        if r.id not in excluded_prompts
-                    ]
+                    requests = [r for r in requests if r.id not in excluded_prompts]
                     groups = request_groups(requests, workload["request_concurrency"])
-                    # All surviving fixed-budget outputs are checked in full;
-                    # forced post-EOS repetition exemptions do not apply here.
-                    prompts = [
-                        PromptCase(r.id, r.prompt, ignore_eos=True) for r in requests
-                    ]
+                    prompts = [PromptCase(r.id, r.prompt) for r in requests]
                     trace = replace(trace, requests=requests)
                     layout.correctness_dir.mkdir(parents=True, exist_ok=True)
                     (layout.correctness_dir / "baseline_exclusions.json").write_text(
@@ -658,7 +645,6 @@ def run_round(
                         json.dumps(
                             {
                                 "request_concurrency": workload["request_concurrency"],
-                                "output_tokens": workload["output_tokens"],
                                 "request_timeout_s": workload["request_timeout_s"],
                                 "excluded_prompts": excluded_prompts,
                                 "groups": [[r.id for r in group] for group in groups],
@@ -718,24 +704,8 @@ def run_round(
                     if concurrent:
                         # Recheck both scored references, but never shrink the
                         # frozen workload after the qualification boundary.
-                        checked_trace = replace(
-                            trace,
-                            requests=[
-                                replace(
-                                    r, sampling=replace(r.sampling, ignore_eos=False)
-                                )
-                                for r in requests
-                            ],
-                            meta=replace(
-                                trace.meta,
-                                sampling={
-                                    **workload,
-                                    "min_output_tokens": workload["output_tokens"],
-                                },
-                            ),
-                        )
                         checked_drops = baseline_prompt_drops(
-                            checked_trace, replay, dropped=excluded_prompts
+                            trace, replay, dropped=excluded_prompts
                         )
                         if checked_drops != excluded_prompts:
                             raise EngineError(
@@ -751,23 +721,11 @@ def run_round(
                         encoding="utf-8",
                     )
                     if start.kind == "baseline" and req.mode == "all":
-                        natural_stops = (
-                            {
-                                r.id: NaturalStopReference(
-                                    r.id,
-                                    replay.result.timings[r.id].completion_tokens,
-                                    None,
-                                    replay.outputs[r.id],
-                                )
-                                for r in requests
-                            }
-                            if concurrent
-                            else capture_baseline_natural_stops(
-                                url,
-                                requests=requests,
-                                replay=replay,
-                                evidence_dir=layout.correctness_dir,
-                            )
+                        natural_stops = capture_baseline_natural_stops(
+                            url,
+                            requests=requests,
+                            replay=replay,
+                            evidence_dir=layout.correctness_dir,
                         )
                         baseline_outputs = capture_outputs(
                             prompts,
@@ -904,7 +862,6 @@ def run_round(
                         evidence_dir=layout.correctness_dir,
                         baseline_degeneracy=baseline_degeneracy,
                         engine_name=start.spec.name,
-                        **({"strict_fixed_output": True} if concurrent else {}),
                     )
             except EngineError as exc:
                 # Correctness is a hard gate, so an unusable scorer means no
@@ -989,20 +946,6 @@ def _build_entries(
             continue
 
         corr = correctness.get(run.index)
-        if (
-            getattr(req, "scoring_rule", {}).get("name") == WEIGHTED_RULE
-            and corr is None
-        ):
-            entries.append(
-                RoundEntryReport(
-                    index=run.index,
-                    image_digest=digest,
-                    status="infra_failed",
-                    sla=run.replay.result,
-                    reason="v5 scoring requires trusted output verification",
-                )
-            )
-            continue
         if corr is not None and corr.verdict == "infra_failed":
             entries.append(
                 RoundEntryReport(

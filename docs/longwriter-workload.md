@@ -32,11 +32,10 @@ use this absolute deadline from slot admission. Client queue waiting still count
 in tier completion time. Choose the budget on the target hardware before launch;
 600 seconds is an operator default, not a measured throughput guarantee. Legacy
 v1-v4 timeout behavior is unchanged.
-Natural-output qualification retains `max_tokens=5120` and normal EOS. Scored
-replays use the pinned `output_tokens` budget (3000 in the fixture), with
-`ignore_eos=true` and exact output-count validation. This is an explicit new
-campaign contract, not a change to historical natural-EOS campaigns. The budget
-must be positive and no larger than the qualification `min_output_tokens` floor.
+Qualification and measured replays retain `max_tokens=5120` as a ceiling and
+respect natural EOS. The 3000-token `min_output_tokens` floor qualifies baseline
+prompts; candidates must produce at least 90% of the measured baseline's reported
+output tokens for each eligible request. No fixed generation length is imposed.
 A long source answer alone does not establish that a row qualifies.
 
 ## Version 5 scheduling and scoring
@@ -53,10 +52,8 @@ from every measured repetition before either scored reference, leader, or
 challenger runs. The original trace contains eight requests per tier; the eligible
 set may be smaller. Existing exclusion limits remain, and every tier must retain
 at least one request. Excluded requests are never dispatched in scored runs.
-Both scored baseline references are measured anew on the eligible fixed-budget
-workload; a further baseline failure invalidates the round rather than removing
-more work. In all-mode, the scorer checks every eligible fixed-budget output;
-post-EOS repetition exemptions do not apply. There are `5 + candidates` engine
+Both scored baseline references are measured anew on the eligible workload; a further baseline failure invalidates the round rather than removing
+more work. In all-mode, the scorer checks every eligible natural output and its repetitions. There are `5 + candidates` engine
 starts in all-mode (two qualification, two measured reference, candidates, scorer).
 Warmup policy and prefix-cache reuse remain the same for each timed engine.
 
@@ -93,33 +90,20 @@ to one. Equal weights and a zero penalty are resolved defaults when omitted;
 the launch fixture explicitly sets penalty 0.1. Resolved weights and penalty are
 manifest-hashed. No tier is dropped and weights are never redistributed.
 Per-request aligned-token speedups remain diagnostics, not the ranking metric.
+The 90% minimum uses engine-reported counts, as in legacy scoring; independent
+count verification is outside this change. Natural output lengths can vary within
+the accepted range and affect tier completion times. This metric does not
+normalize completion time to an equal output length.
 V5 accepts multiple tokens per SSE chunk, including speculative/MTP decoding.
-Valid protocol completion, the exact fixed token count and a valid finish reason
-establish completion; unavailable aligned-token timings do not count as failures.
+Valid protocol completion, at least 90% of the baseline output count and a valid
+finish reason establish completion; unavailable aligned-token timings do not count as failures.
 The scorer also accepts batched-token baseline references. Rows mark unavailable
 per-token timing and concurrency observations list affected request IDs. These
 requests cannot establish diagnostic ITL goodput; no per-token gaps are invented.
-Before v5 speed credit, the separate trusted scorer tokenizes every measured
-output repetition with `add_special_tokens=false` and compares its output count
-with the claimed fixed budget. V5 replay and trusted echo scoring request
-`skip_special_tokens=false`, retaining generated special tokens without adding
-prompt/BOS/EOS tokens to the independent count. Decoding and re-encoding can
-merge sampled tokens or replace a truncated UTF-8 sequence, so the count check
-allows `min(2, floor(output_tokens / 1000))` tokens of difference in either
-direction: at most two tokens and at most 0.1%, with no allowance below 1000.
-The rule applies identically to baselines and candidates, independently of SSE
-chunk sizes. Evidence records exact equality, the difference, the allowance and
-`within_tolerance` per repetition. A difference outside this bound is a hard
-correctness failure; it cannot remove work or earn a partial score. This bounded
-text check is not proof of the original generated token IDs; larger round-trip
-differences still fail and require investigation during GPU qualification.
-An invalid baseline reference voids the round. Tokenizer errors leave the entry
-unscored. V5 timing-only runs without
-trusted correctness verification cannot produce eligible scores.
 Output correctness, absolute deadlines and tier-completion scoring still apply.
 
 The penalty counts each failed ID once, not repetitions, and excludes trusted
-baseline removals. Incomplete fixed work cannot earn positive credit by freeing
+baseline removals. Requests below the 90% minimum cannot earn positive credit by freeing
 capacity elsewhere. Runtime/stream failures and hard correctness failures retain
 their existing non-scored outcomes; a penalty does not make them eligible.
 Both request and replay deadlines are absolute. Delayed `[DONE]` occupies a slot
@@ -129,7 +113,7 @@ changes cannot cancel out.
 
 CPU and mock HTTP tests establish contract behavior only. Requalify the source
 pool with the v5 pins and run full GPU shadow rounds before activating a campaign.
-Timing noise, fixed-length output quality, promotion margins, and latency/deadline
+Timing noise, natural output-length variation, promotion margins, and latency/deadline
 limits still require qualification on the pinned serving image and hardware.
 
 New Qwen campaign fixtures pin `temperature_range=[0.1, 1.01]`. The sampler
@@ -249,7 +233,7 @@ repetitive, exclude that prompt from correctness and performance scoring for
 every candidate. Up to eight unique prompts may be excluded across both runs;
 a ninth exclusion or an empty retained tier fails the round as a baseline
 workload error. The eligible workload then stays frozen for the measured runs,
-which enforce fixed output length, correctness and complete-tier timing.
+which enforce the 90% output minimum, correctness and complete-tier timing.
 
 ## Open the campaign
 

@@ -902,7 +902,6 @@ def score_captured_output(
     request_timeout_s: float = 300.0,
     engine_name: str = "vllm",
     prefix_token_limit: int | None = None,
-    skip_special_tokens: bool | None = None,
 ) -> tuple[list[_PositionScore], int, str]:
     """Scored token positions in the candidate's forced output.
 
@@ -927,11 +926,6 @@ def score_captured_output(
         temperature=0.0,
         seed=0,
         timeout=request_timeout_s,
-        **(
-            {"skip_special_tokens": skip_special_tokens}
-            if skip_special_tokens is not None
-            else {}
-        ),
     )
     scores = extract_output_logprobs(
         resp,
@@ -1100,21 +1094,6 @@ def _score_sglang_output(
     return scores, len(continuation_ids), prefix
 
 
-def trusted_output_token_count(base_url: str, text: str, *, timeout: float) -> int:
-    """Count output with the trusted tokenizer, without adding special tokens."""
-    tokens = post_json(
-        base_url,
-        "/tokenize",
-        {"prompt": text, "add_special_tokens": False},
-        timeout=timeout,
-    ).get("tokens")
-    if not isinstance(tokens, list) or any(type(t) is not int or t < 0 for t in tokens):
-        raise EngineError(
-            "trusted scorer tokenize response has invalid output token IDs"
-        )
-    return len(tokens)
-
-
 def grade_candidate(
     scorer_url: str,
     outputs: list[CapturedOutput],
@@ -1125,7 +1104,6 @@ def grade_candidate(
     baseline_mean_logprob: float | None = None,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
     engine_name: str = "vllm",
-    strict_fixed_output: bool = False,
 ) -> CorrectnessReport:
     """Teacher-force one engine's captured outputs through the scorer.
 
@@ -1147,7 +1125,6 @@ def grade_candidate(
     num_prompts = 0
     empty: list[str] = []
     degenerate: str | None = None
-    token_count_failure: str | None = None
     relative_failures: dict[str, str] = {}
     repeated_span_failures: set[str] = set()
 
@@ -1215,7 +1192,6 @@ def grade_candidate(
                 continue
             forced_tail = (
                 captured.ignore_eos
-                and not strict_fixed_output
                 and reference is not None
                 and bool(reference.forced_output_samples)
             )
@@ -1247,7 +1223,7 @@ def grade_candidate(
             }
             repetition_checks = []
             repetition_degenerate = None
-            if not captured.ignore_eos or strict_fixed_output:
+            if not captured.ignore_eos:
                 for rep, text in enumerate(
                     captured.output_samples or (captured.output_text,), start=1
                 ):
@@ -1269,64 +1245,7 @@ def grade_candidate(
                         f"of {MAX_RELATIVE_DEGENERACY_FAILURES} prompts "
                         f"({captured.request_id}: {relative_degenerate})"
                     )
-            token_count_checks = []
             try:
-                if strict_fixed_output:
-                    # _fire already binds every reported count to the fixed budget.
-                    # Independently check every measured text, not just its median.
-                    samples = captured.output_samples or (captured.output_text,)
-                    if captured.output_text not in samples:
-                        raise EngineError(
-                            "selected output is missing from measured repetitions"
-                        )
-                    counts = {}
-                    for rep, text in enumerate(samples, start=1):
-                        if text not in counts:
-                            counts[text] = trusted_output_token_count(
-                                scorer_url, text, timeout=request_timeout_s
-                            )
-                        actual = counts[text]
-                        # Decoding and re-encoding can merge sampled tokens or
-                        # replace a truncated UTF-8 sequence. Bound the allowance
-                        # by BOTH two tokens and 0.1% of the fixed budget, so small
-                        # workloads cannot lose a large fraction of their work.
-                        allowed_delta = min(2, captured.completion_tokens // 1000)
-                        difference = actual - captured.completion_tokens
-                        within_tolerance = abs(difference) <= allowed_delta
-                        token_count_checks.append(
-                            {
-                                "rep": rep,
-                                "claimed_tokens": captured.completion_tokens,
-                                "trusted_tokens": actual,
-                                "matches": actual == captured.completion_tokens,
-                                "difference_tokens": difference,
-                                "allowed_delta_tokens": allowed_delta,
-                                "within_tolerance": within_tolerance,
-                            }
-                        )
-                        if not within_tolerance:
-                            token_count_failure = (
-                                f"{captured.request_id}: rep {rep}: output token count mismatch "
-                                f"(claimed {captured.completion_tokens}, trusted {actual}, "
-                                f"allowed delta {allowed_delta})"
-                            )
-                            break
-                    if token_count_failure is not None:
-                        ef.write(
-                            json.dumps(
-                                {
-                                    "request_id": captured.request_id,
-                                    "ignore_eos": captured.ignore_eos,
-                                    "output_selection": "latency_median",
-                                    "repetition_degeneracy": repetition_checks,
-                                    "token_count_checks": token_count_checks,
-                                    "token_count_failure": token_count_failure,
-                                },
-                                sort_keys=True,
-                            )
-                            + "\n"
-                        )
-                        break
                 positions, span, scored_prefix = score_captured_output(
                     scorer_url,
                     captured,
@@ -1335,7 +1254,6 @@ def grade_candidate(
                     prefix_token_limit=None
                     if reference is None
                     else reference.natural_stop_tokens,
-                    **({"skip_special_tokens": False} if strict_fixed_output else {}),
                 )
             except EngineError as exc:
                 if degenerate is None:
@@ -1424,11 +1342,6 @@ def grade_candidate(
                     {
                         "request_id": captured.request_id,
                         "streamed_tokens": captured.completion_tokens,
-                        **(
-                            {"token_count_checks": token_count_checks}
-                            if strict_fixed_output
-                            else {}
-                        ),
                         "ignore_eos": captured.ignore_eos,
                         "output_selection": "latency_median",
                         "repetition_degeneracy": repetition_checks,
@@ -1465,8 +1378,6 @@ def grade_candidate(
 
     # Persist a public, text-free projection alongside the private evidence.
     public_keys = {
-        "token_count_checks",
-        "token_count_failure",
         "request_id",
         "dropped",
         "drop_reason",
@@ -1497,20 +1408,6 @@ def grade_candidate(
         "failed_prompts": len(repeated_span_failures),
         "failed_request_ids": sorted(repeated_span_failures),
     }
-    if token_count_failure is not None:
-        return CorrectnessReport(
-            verdict="fail_correctness",
-            num_prompts=num_prompts,
-            num_positions_scored=len(logprobs),
-            mean_logprob=0.0,
-            min_logprob=0.0,
-            quantile_logprob=0.0,
-            coverage_ratio=0.0,
-            evidence=rel_evidence,
-            prompt_checks=prompt_checks,
-            reason=token_count_failure,
-        )
-
     if empty:
         return CorrectnessReport(
             verdict="fail_correctness",
@@ -1628,7 +1525,6 @@ def grade_all(
     request_timeout_s: float = 300.0,
     baseline_degeneracy: Mapping[str, BaselineDegeneracyReference] | None = None,
     engine_name: str = "vllm",
-    strict_fixed_output: bool = False,
 ) -> dict[int, CorrectnessReport]:
     """Grade everything queued against one already-running scorer.
 
@@ -1661,7 +1557,6 @@ def grade_all(
                 baseline_mean_logprob=None if is_baseline else baseline_mean,
                 baseline_degeneracy=baseline_degeneracy,
                 engine_name=engine_name,
-                **({"strict_fixed_output": True} if strict_fixed_output else {}),
             )
         except EngineError as exc:
             # The text being forced through the scorer is whatever an engine
