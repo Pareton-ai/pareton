@@ -542,3 +542,23 @@ def test_model_volume_rejects_mismatch_and_cleans_up(tmp_path, monkeypatch):
     assert evidence["extra"] == evidence["mismatched"] == []
     volume.close()
     assert calls[-1] == ("volume", "rm", volume.name)
+
+
+def test_diagnostic_metrics_accept_no_gaps_without_claiming_goodput():
+    from bench.sla_bench import aggregate_rep_metrics
+
+    rows = [
+        {
+            "request_id": "one",
+            "completion_tokens": 5,
+            "ttft_ms": 1,
+            "e2e_ms": 2,
+            "itl_ms": [],
+        }
+    ]
+    kwargs = {"wall_s": 1, "p99_ttft_ms": 100, "p99_itl_ms": 100}
+    with pytest.raises(EngineError, match="no inter-token"):
+        aggregate_rep_metrics(rows, **kwargs)
+    result = aggregate_rep_metrics(rows, **kwargs, require_token_timing=False)
+    assert result["sla_goodput_ratio"] == 0
+    assert result["output_tokens_per_s"] == 5

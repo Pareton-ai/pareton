@@ -123,8 +123,9 @@ def post_completion_stream(
     seed: int | None = 0,
     ignore_eos: bool = False,
     timeout: float = 120.0,
+    require_token_timing: bool = True,
 ) -> StreamResult:
-    """Streaming /v1/completions client; parses SSE and times TTFT/ITL."""
+    """Parse SSE. Disabling token timing is for chunk-timed diagnostics only."""
     url = base_url.rstrip("/") + "/v1/completions"
     body: dict[str, Any] = {
         "prompt": prompt,
@@ -234,7 +235,7 @@ def post_completion_stream(
     # under-count (full or partial coalesce). Do not require exact equality:
     # empty-text choice chunks can add extra gaps on real engines.
     expected_gaps = completion_tokens - 1
-    if completion_tokens > 1 and len(itl_s) < expected_gaps:
+    if require_token_timing and completion_tokens > 1 and len(itl_s) < expected_gaps:
         raise EngineError(
             f"completions stream from {url}: completion_tokens={completion_tokens} "
             f"but only {len(itl_s)} inter-token gap(s) "

@@ -196,3 +196,15 @@ a killed process can leave its uniquely named volume for manual cleanup.
 After a failed GPU launch, reuse `prepared/source_preview` and the prepared
 campaign fields, but choose a new output directory (for example `natural-volume`).
 No prompt preparation needs to be repeated.
+
+### Speculative streaming and timing
+
+This correctness-only diagnostic accepts multiple output tokens per SSE chunk,
+including a complete response in one chunk. It retains completion text, usage
+counts, request validation, output-length checks, and full scorer coverage.
+Chunk gaps do not measure per-token ITL: `summary.json` and the round's
+`bench_report.json` explicitly set `performance_score_valid: false`. Do not use
+this diagnostic's ITL, SLA, or speedup fields to qualify or score a campaign.
+Diagnostic goodput is conservatively zero; no per-token gaps are fabricated.
+The shared HTTP client and metrics helper keep strict token-timing defaults;
+only this CLI opts out via hooks scoped to its round. Speculation stays enabled.

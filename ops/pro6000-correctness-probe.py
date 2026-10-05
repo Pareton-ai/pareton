@@ -26,7 +26,7 @@ from uuid import uuid4
 
 import bench.main as harness
 from bench.correctness import BASELINE_INDEX, grade_all
-from bench.http import get_json
+from bench.http import get_json, post_completion_stream
 from bench.lifecycle import EngineContainer, EngineError
 from bench.longform import (
     input_group,
@@ -41,7 +41,11 @@ from bench.sampler import (
     parse_sampling_rule,
 )
 from bench.schemas import TraceMeta, WorkloadTrace
-from bench.sla_bench import capture_baseline_natural_stops, run_sla_engine
+from bench.sla_bench import (
+    aggregate_rep_metrics,
+    capture_baseline_natural_stops,
+    run_sla_engine,
+)
 from bench.trajectory import token_ids_sha256
 from bench.validate import (
     sha256_file,
@@ -618,6 +622,12 @@ def diagnostic_hooks(
             finally:
                 super().__exit__(*args)
 
+    def diagnostic_stream(url, **kwargs):
+        return post_completion_stream(url, **{**kwargs, "require_token_timing": False})
+
+    def diagnostic_metrics(rows, **kwargs):
+        return aggregate_rep_metrics(rows, **{**kwargs, "require_token_timing": False})
+
     def replay(url, **kwargs):
         return run_sla_engine(url, **{**kwargs, "request_timeout_s": timeout})
 
@@ -685,6 +695,8 @@ def diagnostic_hooks(
     try:
         with (
             patch("bench.main.EngineContainer", RecordedContainer),
+            patch("bench.sla_bench.post_completion_stream", diagnostic_stream),
+            patch("bench.sla_bench.aggregate_rep_metrics", diagnostic_metrics),
             patch("bench.main.run_sla_engine", replay),
             patch("bench.main.grade_all", grade),
             patch("bench.main.capture_baseline_natural_stops", natural_stops),
@@ -839,6 +851,8 @@ def main(argv=None):
     state = {
         "status": "failed",
         "diagnostic_only": True,
+        "performance_score_valid": False,
+        "stream_timing": "SSE chunk gaps, not per-token ITL; SLA and speedup scores are not qualification evidence",
         "case": args.case,
         "advertised_262144_context_qualified": False,
         "exact_21504_boundary_exercised": False,
@@ -947,7 +961,18 @@ def main(argv=None):
                     docker_model_volume=args.docker_model_volume,
                 ) as lifecycle,
             ):
+                print(
+                    "Correctness-only diagnostic: accepting multi-token SSE chunks; performance scores are invalid.",
+                    flush=True,
+                )
                 code = harness.run_bench(request_path, root / "round")
+                report_path = root / "round" / "bench_report.json"
+                if report_path.exists():
+                    report = json.loads(report_path.read_text())
+                    report["diagnostic_only"] = True
+                    report["performance_score_valid"] = False
+                    report["stream_timing"] = state["stream_timing"]
+                    save(report_path, report)
             if (
                 code
                 or lifecycle["starts"]

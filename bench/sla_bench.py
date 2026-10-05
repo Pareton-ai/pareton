@@ -94,6 +94,7 @@ def aggregate_rep_metrics(
     wall_s: float,
     p99_ttft_ms: float,
     p99_itl_ms: float,
+    require_token_timing: bool = True,
 ) -> dict:
     """One repetition's metrics from measured request rows (warmup excluded).
 
@@ -114,13 +115,13 @@ def aggregate_rep_metrics(
         n_tok = int(r.get("completion_tokens") or 0)
         # Multi-token replies must expose inter-token gaps; empty ITL would
         # otherwise vacuous-pass the ITL gate and report p99 ITL as 0.
-        if n_tok >= 2 and not req_itl:
+        if require_token_timing and n_tok >= 2 and not req_itl:
             raise EngineError(
                 f"sla_bench: request {r.get('request_id')!r} has {n_tok} "
                 f"completion tokens but no inter-token latency samples"
             )
         itl_ok = True if not req_itl else percentile(req_itl, 99) <= p99_itl_ms
-        if float(r["ttft_ms"]) <= p99_ttft_ms and itl_ok:
+        if require_token_timing and float(r["ttft_ms"]) <= p99_ttft_ms and itl_ok:
             good += 1
 
     return {
