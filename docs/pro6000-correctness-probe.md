@@ -213,7 +213,8 @@ only this CLI opts out via hooks scoped to its round. Speculation stays enabled.
 
 The scanner records exact file names and line numbers in `engine_log_review.json`.
 It recognizes the exact 262151-versus-262144 scorer headroom warning and complete,
-explicitly ignored `mimo_audio` TorchCodec loading tracebacks. Other tracebacks,
+explicitly ignored TorchCodec loading tracebacks from multimodal processors
+(including `mimo_audio` and `mimo_v2`). Other tracebacks,
 OOMs, and CUDA errors still fail review. These exemptions are specific to this
 text-only diagnostic and do not qualify the advertised context boundary.
 

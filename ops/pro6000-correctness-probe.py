@@ -386,7 +386,7 @@ def review_engine_logs(root):
     warnings, failures = [], []
     # Only a complete, explicitly ignored optional audio import block is exempt.
     optional = re.compile(
-        r"Ignore import error when loading sglang\.srt\.multimodal\.processors\.mimo_audio: "
+        r"Ignore import error when loading sglang\.srt\.multimodal\.processors\.[A-Za-z_][A-Za-z_0-9]*: "
         r"Could not load libtorchcodec\.(?:(?!\n\[\d{4}-).)*?"
         r"\[start of libtorchcodec loading traceback\]"
         r"(?:(?!\n\[\d{4}-).)*?\[end of libtorchcodec loading traceback\]",

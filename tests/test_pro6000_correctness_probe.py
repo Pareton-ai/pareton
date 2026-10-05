@@ -573,7 +573,8 @@ def test_diagnostic_metrics_accept_no_gaps_without_claiming_goodput():
         "Traceback (most recent call last):",
     ],
 )
-def test_log_review_known_warnings_preserves_real_failures(tmp_path, suffix):
+@pytest.mark.parametrize("processor", ["mimo_audio", "mimo_v2", "other_processor"])
+def test_log_review_known_warnings_preserves_real_failures(tmp_path, suffix, processor):
     logs = tmp_path / "round/evidence/correctness/engine_logs"
     logs.mkdir(parents=True)
     content = """Warning: User-specified context_length (262151) is greater than the derived context_length (262144). This may lead to incorrect model outputs or CUDA errors. Note that the derived context_length may differ from max_position_embeddings in the model's config.
@@ -583,7 +584,7 @@ Traceback (most recent call last):
 OSError: libavutil.so.60 missing
 [end of libtorchcodec loading traceback]
 """
-    (logs / "scorer.log").write_text(content + suffix)
+    (logs / "scorer.log").write_text(content.replace("mimo_audio", processor) + suffix)
     if suffix:
         with pytest.raises(EngineError, match="scorer.log:7"):
             PROBE["review_engine_logs"](tmp_path)
@@ -600,6 +601,20 @@ def test_log_review_does_not_ignore_incomplete_optional_traceback(tmp_path):
     (logs / "scorer.log").write_text(
         "Ignore import error when loading sglang.srt.multimodal.processors.mimo_audio: Could not load libtorchcodec.\n"
         "[start of libtorchcodec loading traceback]\nTraceback (most recent call last):\n"
+    )
+    with pytest.raises(EngineError):
+        PROBE["review_engine_logs"](tmp_path)
+
+
+@pytest.mark.parametrize("message", ["CUDA error: device-side assert", "out of memory"])
+def test_log_review_rejects_runtime_error_inside_optional_block(tmp_path, message):
+    logs = tmp_path / "round/evidence/correctness/engine_logs"
+    logs.mkdir(parents=True)
+    (logs / "scorer.log").write_text(
+        "Ignore import error when loading sglang.srt.multimodal.processors.mimo_v2: Could not load libtorchcodec.\n"
+        "[start of libtorchcodec loading traceback]\n"
+        + message
+        + "\n[end of libtorchcodec loading traceback]"
     )
     with pytest.raises(EngineError):
         PROBE["review_engine_logs"](tmp_path)
