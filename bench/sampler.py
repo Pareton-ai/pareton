@@ -118,13 +118,15 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         "enable_thinking",
         "request_concurrency",
         "output_tokens",
+        "request_timeout_s",
     }
     if algo_version != CONCURRENCY_ALGO_VERSION and {
         "request_concurrency",
         "output_tokens",
+        "request_timeout_s",
     }.intersection(rule):
         raise SamplerError(
-            "request_concurrency and output_tokens require algo_version 5"
+            "request_concurrency, output_tokens and request_timeout_s require algo_version 5"
         )
     if algo_version < TRAJECTORY_ALGO_VERSION and new_fields.intersection(rule):
         raise SamplerError(
@@ -149,7 +151,11 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             set(rule)
             - set(parsed)
             - {"ignore_eos", "enable_thinking", "request_interval_ms"}
-            - ({"request_concurrency", "output_tokens"} if algo_version == 5 else set())
+            - (
+                {"request_concurrency", "output_tokens", "request_timeout_s"}
+                if algo_version == 5
+                else set()
+            )
             - (
                 LONGFORM_RULE_FIELDS
                 if algo_version in LONGFORM_ALGO_VERSIONS
@@ -176,11 +182,14 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
                 f"algo_version {algo_version} requires a full dataset commit revision"
             )
         if algo_version == CONCURRENCY_ALGO_VERSION:
-            from bench.concurrency import validate_concurrency
+            from bench.concurrency import validate_concurrency, validate_request_timeout
 
             if "request_interval_ms" in rule:
                 raise SamplerError("request_interval_ms is retired in algo_version 5")
             try:
+                parsed["request_timeout_s"] = validate_request_timeout(
+                    rule.get("request_timeout_s", 600)
+                )
                 parsed["request_concurrency"] = validate_concurrency(
                     rule.get("request_concurrency")
                 )

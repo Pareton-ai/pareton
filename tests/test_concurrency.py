@@ -52,7 +52,9 @@ def tier_stats(seconds=10, n=8):
 
 
 def timings(n=8, seconds=1):
-    return {r.id: PromptTiming(seconds / 2, [seconds / 2], 2) for r in requests(n)}
+    return {
+        r.id: PromptTiming(seconds / 2, [seconds / 2], 2, "length") for r in requests(n)
+    }
 
 
 def test_weighted_score_and_failure_penalty():
@@ -74,10 +76,63 @@ def test_weighted_score_and_failure_penalty():
     assert score_candidate({"name": WEIGHTED_RULE}, **kwargs).score == 0
 
 
+@pytest.mark.parametrize("batch_baseline", [False, True])
+@pytest.mark.parametrize("gaps", [[], [0.1]])
+def test_batched_tokens_earn_tier_speedup_without_failure(batch_baseline, gaps):
+    baseline = {
+        rid: PromptTiming(1, [] if batch_baseline else [1] * 7, 8, "length")
+        for rid in timings()
+    }
+    candidate = {rid: PromptTiming(0.5, gaps, 8, "length") for rid in baseline}
+    result = score_candidate(
+        {"name": WEIGHTED_RULE, "failure_penalty": 0.1},
+        baseline=baseline,
+        candidate=candidate,
+        baseline_tiers=tier_stats(),
+        candidate_tiers=tier_stats(5),
+    )
+    assert result.score == 0.5
+    assert result.breakdown["failed_requests"] == 0
+    assert result.breakdown["penalty"] == 0
+    assert all(
+        p.reason == "insufficient timing" and not p.candidate_failed
+        for p in result.per_prompt
+    )
+
+
+@pytest.mark.parametrize(
+    "tokens,finish", [(1, "length"), (3, "length"), (2, None), (2, "error")]
+)
+def test_v5_completion_failures_still_cap_and_penalize(tokens, finish):
+    candidate = timings()
+    candidate["2k-0"] = PromptTiming(0.1, [], tokens, finish)
+    result = score_candidate(
+        {"name": WEIGHTED_RULE, "failure_penalty": 0.1},
+        baseline=timings(),
+        candidate=candidate,
+        baseline_tiers=tier_stats(),
+        candidate_tiers=tier_stats(5),
+    )
+    assert result.breakdown["failed_requests"] == 1
+    assert result.score == -0.1 / 32
+
+
+@pytest.mark.parametrize(
+    "timeout", [0, -1, True, "600", None, float("inf"), float("nan")]
+)
+def test_v5_rejects_invalid_request_timeout(timeout):
+    from test_longform_sampling import rule
+
+    v5 = rule(algo_version=5, request_concurrency=4, request_timeout_s=timeout)
+    del v5["request_interval_ms"]
+    with pytest.raises(SamplerError, match="request_timeout_s"):
+        parse_sampling_rule(v5)
+
+
 def test_parked_requests_lose_despite_better_median_latency():
     base = timings(seconds=10)
     candidate = timings(seconds=4)
-    candidate["2k-0"] = PromptTiming(60, [60], 2)
+    candidate["2k-0"] = PromptTiming(60, [60], 2, "length")
     legacy = score_candidate(
         {"name": "median_e2e_speedup"}, baseline=base, candidate=candidate
     )
@@ -311,18 +366,42 @@ def test_done_timestamp_is_separate_from_last_token(monkeypatch):
     )
 
 
-def test_v5_receipt_roundtrip_and_old_rule_unchanged():
-    from test_longform_sampling import formatter, rule, sample
+def test_v5_receipt_roundtrip_and_old_rule_unchanged(tmp_path):
+    from test_longform_sampling import fields, formatter, row, rule, sample
 
+    from bench.longform import qualification_contract
     from bench.validate import validate_workload_trace_dict
+    from worker.round_job import materialize_round_trace
 
     old = rule()
     assert parse_sampling_rule(old)["request_interval_ms"] == 2
     v5 = {k: v for k, v in old.items() if k != "request_interval_ms"}
     v5.update(algo_version=5, request_concurrency=4, output_tokens=6)
+    assert parse_sampling_rule(v5)["request_timeout_s"] == 600
+    v5["request_timeout_s"] = 480
     sampled = sample(rule=v5, prompt_formatter=formatter(v5))
     trace = validate_workload_trace_dict(json.loads(sampled.body))
     assert trace.meta.sampling["request_concurrency"] == 4
+    assert trace.meta.sampling["request_timeout_s"] == 480
+    assert sampled.receipt["request_timeout_s"] == 480
+    assert qualification_contract(
+        parse_sampling_rule(v5), {}, {}
+    ) != qualification_contract(
+        parse_sampling_rule({**v5, "request_timeout_s": 600}), {}, {}
+    )
+    path = materialize_round_trace(
+        {"sampled_trace_sha256": sampled.sha256, "sampling_receipt": sampled.receipt},
+        SimpleNamespace(bench=fields()["bench"], engine=fields()["engine"]),
+        tmp_path,
+        row_fetcher=row,
+        prompt_formatter=formatter(v5),
+    )
+    assert path.read_bytes() == sampled.body
+    for invalid in (0, float("inf"), None):
+        broken = json.loads(sampled.body)
+        broken["meta"]["sampling"]["request_timeout_s"] = invalid
+        with pytest.raises(ValueError, match="request_timeout_s"):
+            validate_workload_trace_dict(broken)
     assert "request_interval_ms" not in sampled.receipt
     replay = sample(
         rule=v5, prompt_formatter=formatter(v5), sampling_receipt=sampled.receipt
@@ -353,6 +432,7 @@ def test_baseline_exclusions_frozen_before_scored_runs(monkeypatch, tmp_path):
             sampling={
                 "algo_version": 5,
                 "request_concurrency": 4,
+                "request_timeout_s": 480,
                 "output_tokens": 2,
                 "min_output_tokens": 2,
             },
@@ -367,6 +447,7 @@ def test_baseline_exclusions_frozen_before_scored_runs(monkeypatch, tmp_path):
             yield start.role
 
     def replay(url, *, requests, **kwargs):
+        assert kwargs["request_timeout_s"] == 480
         calls.append((url, list(requests)))
         return SimpleNamespace(
             result=SimpleNamespace(role=url, timings={}, cross_rep_variance={}),
@@ -486,13 +567,31 @@ def test_reference_drift_cannot_cancel_between_tiers():
     assert baseline_drift(req, baseline, drift) == 0.5
 
 
-def test_full_v5_round_scores_fixed_work_and_verifies_baseline(monkeypatch, tmp_path):
+@pytest.mark.parametrize("batched", [False, True])
+def test_full_v5_round_scores_fixed_work_and_verifies_baseline(
+    monkeypatch, tmp_path, batched
+):
     from test_bench_cli import SAMPLE_REQUEST
 
     from bench import main as bm
     from bench.mock_engine import MockEngine, MockEngineConfig
     from bench.output import OutputLayout
     from bench.schemas import BenchRequest, TraceMeta, WorkloadTrace
+
+    if batched:
+        from bench.mock_engine import _Handler
+
+        write_sse = _Handler._write_sse
+
+        def write_batch(handler, chunk):
+            handler.pending_text = (
+                getattr(handler, "pending_text", "") + chunk["choices"][0]["text"]
+            )
+            if "usage" in chunk:
+                chunk["choices"][0]["text"] = handler.pending_text
+                write_sse(handler, chunk)
+
+        monkeypatch.setattr(_Handler, "_write_sse", write_batch)
 
     raw = json.loads(SAMPLE_REQUEST.read_text())
     raw["scoring_rule"] = {"name": WEIGHTED_RULE, "failure_penalty": 0.1}
@@ -505,6 +604,7 @@ def test_full_v5_round_scores_fixed_work_and_verifies_baseline(monkeypatch, tmp_
             sampling={
                 "algo_version": 5,
                 "request_concurrency": 4,
+                "request_timeout_s": 480,
                 "output_tokens": 2,
                 "min_output_tokens": 2,
             },
@@ -548,6 +648,13 @@ def test_full_v5_round_scores_fixed_work_and_verifies_baseline(monkeypatch, tmp_
         mock_engine=True,
     )
     assert entries and all(entry.status == "scored" for entry in entries)
+    assert entries[0].score_report["score_breakdown"]["failed_requests"] == 0
+    if batched:
+        assert all(not t.itl_s for t in baseline.result.timings.values())
+        assert all(
+            o["token_timing_unavailable_requests"]
+            for o in baseline.result.concurrency_observations
+        )
     assert entries[0].score_report["score_breakdown"]["failure_penalty"] == 0.1
     assert (
         entries[0].sla.eligible_workload_sha256
@@ -585,3 +692,51 @@ def test_fixed_budget_checks_degenerate_sibling_repetitions(tmp_path):
     assert evidence["ignore_eos"] is True
     assert len(evidence["repetition_degeneracy"]) == 2
     assert evidence["repetition_degeneracy"][1]["degenerate"]
+
+
+@pytest.mark.parametrize("budget, succeeds", [(120, False), (600, True)])
+def test_long_completion_uses_configured_absolute_deadline(
+    monkeypatch, budget, succeeds
+):
+    from test_http import _FakeResp, _sse
+
+    clock = [0.0]
+
+    class LongResponse(_FakeResp):
+        fp = SimpleNamespace(
+            raw=SimpleNamespace(_sock=SimpleNamespace(shutdown=lambda *_: None))
+        )
+
+        def __iter__(self):
+            clock[0] = 150.0
+            yield from super().__iter__()
+
+    def open_response(req, timeout):
+        assert timeout == budget
+        return LongResponse(
+            _sse(
+                {
+                    "choices": [{"text": "two tokens", "finish_reason": "length"}],
+                    "usage": {"completion_tokens": 2},
+                }
+            )
+        )
+
+    monkeypatch.setattr("bench.http.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr("bench.http.urlopen", open_response)
+
+    def complete():
+        return post_completion_stream(
+            "http://test",
+            prompt="prompt",
+            max_tokens=2,
+            timeout=budget,
+            absolute_deadline_s=budget,
+            require_token_timing=False,
+        )
+
+    if succeeds:
+        assert complete().e2e_s == 150
+    else:
+        with pytest.raises(EngineError, match="absolute deadline"):
+            complete()

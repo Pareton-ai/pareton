@@ -36,13 +36,15 @@ REASON_INSUFFICIENT_TIMING = "insufficient timing"
 class PromptTiming:
     """One prompt's timings from one engine, as the SLA replay recorded them.
 
-    ``itl_s`` holds the gap before each output token after the first, so the
-    wall time to token k is ``ttft_s + sum(itl_s[: k - 1])``.
+    With one token per chunk, ``itl_s`` holds each gap after the first token,
+    so time to token k is ``ttft_s + sum(itl_s[: k - 1])``. Batched streams
+    may lack those per-token timings; v5 validity uses completion evidence.
     """
 
     ttft_s: float
     itl_s: list[float] = field(default_factory=list)
     completion_tokens: int = 0
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -268,27 +270,34 @@ def _weighted_tier_completion_speedup(
         )
     if set(baseline_tiers) != set(TIERS) or set(candidate_tiers) != set(TIERS):
         raise ValueError("weighted score requires all four tiers")
-    per_prompt = [
-        prompt_speedup(rid, timing, candidate.get(rid), tolerance=1.0)
-        for rid, timing in baseline.items()
-    ]
-    per_prompt = [
-        replace(
-            p,
-            candidate_failed=True,
-            reason="candidate did not match fixed output work",
-            speedup=0.0,
-        )
-        if p.request_id in candidate
-        and candidate[p.request_id].completion_tokens
-        != baseline[p.request_id].completion_tokens
-        else p
-        for p in per_prompt
-    ]
     if any(
-        aligned_e2e_s(t, t.completion_tokens) in (None, 0) for t in baseline.values()
+        t.completion_tokens < 1 or t.finish_reason not in ("stop", "length")
+        for t in baseline.values()
     ):
-        raise ValueError("weighted score requires valid baseline request timings")
+        raise ValueError("weighted score requires valid baseline completions")
+    per_prompt = []
+    for rid, timing in baseline.items():
+        completion = candidate.get(rid)
+        # Chunk timing is diagnostic only: speculative decoding can stream
+        # several tokens per SSE chunk without per-token arrival timestamps.
+        diagnostic = prompt_speedup(rid, timing, completion, tolerance=1.0)
+        failed = (
+            completion is None
+            or completion.completion_tokens != timing.completion_tokens
+            or completion.finish_reason not in ("stop", "length")
+        )
+        per_prompt.append(
+            replace(
+                diagnostic,
+                candidate_failed=failed,
+                reason=(
+                    "candidate did not complete fixed output work"
+                    if failed
+                    else diagnostic.reason
+                ),
+                speedup=0.0 if failed else diagnostic.speedup,
+            )
+        )
     details, seen = {}, set()
     for tier in TIERS:
         b, c = baseline_tiers[tier], candidate_tiers[tier]

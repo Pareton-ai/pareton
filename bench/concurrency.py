@@ -16,6 +16,17 @@ def validate_concurrency(value):
     return value
 
 
+def validate_request_timeout(value):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError("request_timeout_s must be a finite positive number")
+    return float(value)
+
+
 def tier_weights(rule):
     weights = rule.get("tier_weights", dict.fromkeys(TIERS, 0.25))
     if not isinstance(weights, dict) or set(weights) != set(TIERS):
@@ -130,6 +141,11 @@ def concurrency_observations(rows):
                 "requested_concurrency": group[0]["requested_concurrency"],
                 "effective_concurrency": group[0]["effective_concurrency"],
                 "observed_peak": peak,
+                "token_timing_unavailable_requests": sorted(
+                    r["request_id"]
+                    for r in group
+                    if r.get("token_timing_available") is False
+                ),
                 "time_weighted_mean": area / duration if duration > 0 else 0,
             }
         )

@@ -136,13 +136,18 @@ def aggregate_rep_metrics(
     e2e = [float(r["e2e_ms"]) for r in rows]
     pooled_itl: list[float] = []
     for r in rows:
-        pooled_itl.extend(float(x) for x in (r.get("itl_ms") or []))
+        if r.get("token_timing_available", True):
+            pooled_itl.extend(float(x) for x in (r.get("itl_ms") or []))
 
     total_tokens = sum(int(r.get("completion_tokens") or 0) for r in rows)
     good = 0
     for r in rows:
         req_itl = [float(x) for x in (r.get("itl_ms") or [])]
         n_tok = int(r.get("completion_tokens") or 0)
+        if r.get("token_timing_available") is False:
+            # V5 accepts token batches, but absent token timing is not evidence
+            # of meeting the diagnostic ITL SLA. Never fabricate token gaps.
+            continue
         # Multi-token replies must expose inter-token gaps; empty ITL would
         # otherwise vacuous-pass the ITL gate and report p99 ITL as 0.
         if n_tok >= 2 and not req_itl:
@@ -228,7 +233,14 @@ def _fire(
             seed=0,
             ignore_eos=req.sampling.ignore_eos,
             timeout=timeout_s,
-            **({"absolute_deadline_s": admission + timeout_s} if not paced else {}),
+            **(
+                {
+                    "absolute_deadline_s": admission + timeout_s,
+                    "require_token_timing": False,
+                }
+                if not paced
+                else {}
+            ),
         )
         if req.input_tokens is not None and res.prompt_tokens != req.input_tokens:
             raise EngineError(
@@ -301,6 +313,11 @@ def _fire(
             input_length_group=req.input_length_group,
             requested_concurrency=concurrency,
             effective_concurrency=effective_concurrency,
+            request_timeout_s=timeout_s,
+            token_timing_available=(
+                row["completion_tokens"] is not None
+                and len(row["itl_ms"]) >= row["completion_tokens"] - 1
+            ),
         )
     with lock:
         out.append(row)
@@ -652,6 +669,9 @@ def _per_request(rows: list[dict]) -> tuple[dict[str, PromptTiming], dict[str, s
             ttft_s=float(row["ttft_ms"]) / 1000.0,
             itl_s=[float(x) / 1000.0 for x in (row.get("itl_ms") or [])],
             completion_tokens=int(row.get("completion_tokens") or 0),
+            finish_reason=row.get("finish_reason")
+            if "requested_concurrency" in row
+            else None,
         )
         outputs[rid] = str(row.get("text") or "")
     return timings, outputs

@@ -25,6 +25,13 @@ Versions 1 through 4 keep their existing behavior, trace bytes and receipt forma
 The model, engine, hardware, serving arguments, fees and emissions remain as
 configured in the seed helper. Version 5 retires `request_interval_ms` and requires
 `request_concurrency` (1, 2, 4, 8, 16 or 32). The fixture uses C32.
+V5 also resolves `request_timeout_s` to 600 seconds by default (explicit in the
+fixture), a finite positive campaign setting bound to the manifest, qualification
+hash, receipt and trace. All in-round qualification, warmup and measured requests
+use this absolute deadline from slot admission. Client queue waiting still counts
+in tier completion time. Choose the budget on the target hardware before launch;
+600 seconds is an operator default, not a measured throughput guarantee. Legacy
+v1-v4 timeout behavior is unchanged.
 Natural-output qualification retains `max_tokens=5120` and normal EOS. Scored
 replays use the pinned `output_tokens` budget (3000 in the fixture), with
 `ignore_eos=true` and exact output-count validation. This is an explicit new
@@ -86,6 +93,13 @@ to one. Equal weights and a zero penalty are resolved defaults when omitted;
 the launch fixture explicitly sets penalty 0.1. Resolved weights and penalty are
 manifest-hashed. No tier is dropped and weights are never redistributed.
 Per-request aligned-token speedups remain diagnostics, not the ranking metric.
+V5 accepts multiple tokens per SSE chunk, including speculative/MTP decoding.
+Valid protocol completion, the exact fixed token count and a valid finish reason
+establish completion; unavailable aligned-token timings do not count as failures.
+The scorer also accepts batched-token baseline references. Rows mark unavailable
+per-token timing and concurrency observations list affected request IDs. These
+requests cannot establish diagnostic ITL goodput; no per-token gaps are invented.
+Output correctness, absolute deadlines and tier-completion scoring still apply.
 
 The penalty counts each failed ID once, not repetitions, and excludes trusted
 baseline removals. Incomplete fixed work cannot earn positive credit by freeing

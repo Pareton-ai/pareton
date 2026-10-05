@@ -566,7 +566,12 @@ def run_round(
             "version 5 workloads require weighted_tier_completion_speedup and vice versa"
         )
     replay_kwargs = (
-        {"request_concurrency": workload["request_concurrency"]} if concurrent else {}
+        {
+            "request_concurrency": workload["request_concurrency"],
+            "request_timeout_s": workload["request_timeout_s"],
+        }
+        if concurrent
+        else {}
     )
     eligible_hash = None
     plan = plan_round_starts(
@@ -654,6 +659,7 @@ def run_round(
                             {
                                 "request_concurrency": workload["request_concurrency"],
                                 "output_tokens": workload["output_tokens"],
+                                "request_timeout_s": workload["request_timeout_s"],
                                 "excluded_prompts": excluded_prompts,
                                 "groups": [[r.id for r in group] for group in groups],
                                 "requests": trace.to_dict()["requests"],

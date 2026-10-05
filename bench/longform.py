@@ -359,6 +359,7 @@ def generate_longform_trace(
             {
                 "request_concurrency": rule["request_concurrency"],
                 "output_tokens": rule["output_tokens"],
+                "request_timeout_s": rule["request_timeout_s"],
             }
             if rule["algo_version"] == 5
             else {"request_interval_ms": rule["request_interval_ms"]}
@@ -420,9 +421,10 @@ def validate_longform_trace(requests, sampling):
     ):
         raise SamplerError("invalid long-form generation seed")
     if sampling["algo_version"] == 5:
-        from bench.concurrency import validate_concurrency
+        from bench.concurrency import validate_concurrency, validate_request_timeout
 
         validate_concurrency(sampling.get("request_concurrency"))
+        validate_request_timeout(sampling.get("request_timeout_s"))
         if "request_interval_ms" in sampling:
             raise SamplerError("version 5 trace cannot contain request_interval_ms")
         budget = sampling.get("output_tokens")
@@ -430,7 +432,9 @@ def validate_longform_trace(requests, sampling):
             "min_output_tokens", 0
         ):
             raise SamplerError("invalid fixed output_tokens")
-    elif {"request_concurrency", "output_tokens"}.intersection(sampling):
+    elif {"request_concurrency", "output_tokens", "request_timeout_s"}.intersection(
+        sampling
+    ):
         raise SamplerError("concurrency settings require version 5")
     keys = ("max_tokens", "min_output_tokens")
     if sampling["algo_version"] == 4:

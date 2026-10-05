@@ -356,6 +356,7 @@ class ReportWorkloadModel(BaseModel):
     request_interval_ms: int | None = None
     request_concurrency: int | None = None
     output_tokens: int | None = None
+    request_timeout_s: float | None = None
     enable_thinking: bool | None = None
     max_model_len: int | None = None
 
@@ -648,6 +649,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
                 {
                     "request_concurrency": receipt.get("request_concurrency"),
                     "output_tokens": receipt.get("output_tokens"),
+                    "request_timeout_s": receipt.get("request_timeout_s"),
                 }
                 if version == 5
                 else {"request_interval_ms": receipt.get("request_interval_ms", 200)}

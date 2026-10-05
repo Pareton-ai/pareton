@@ -127,6 +127,7 @@ def post_completion_stream(
     ignore_eos: bool = False,
     timeout: float = 120.0,
     absolute_deadline_s: float | None = None,
+    require_token_timing: bool = True,
 ) -> StreamResult:
     """Streaming /v1/completions client; parses SSE and times TTFT/ITL."""
     url = base_url.rstrip("/") + "/v1/completions"
@@ -260,11 +261,12 @@ def post_completion_stream(
         raise EngineError(
             f"completions stream from {url} omitted usage.completion_tokens"
         )
-    # ITL is inter-choice-chunk gaps; sla_bench treats them as inter-token. Reject
+    # Legacy scoring needs inter-token gaps. V5 may accept batched tokens and
+    # mark unavailable per-token timing in its diagnostics instead. Reject
     # under-count (full or partial coalesce). Do not require exact equality:
     # empty-text choice chunks can add extra gaps on real engines.
     expected_gaps = completion_tokens - 1
-    if completion_tokens > 1 and len(itl_s) < expected_gaps:
+    if require_token_timing and completion_tokens > 1 and len(itl_s) < expected_gaps:
         raise EngineError(
             f"completions stream from {url}: completion_tokens={completion_tokens} "
             f"but only {len(itl_s)} inter-token gap(s) "

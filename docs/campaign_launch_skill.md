@@ -361,7 +361,11 @@ rewrite a live campaign's signed terms to change its fee.
 
 The launch helper is a template for a new campaign on four RTX 5090 GPUs using
 `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` and a 262144-token context. It pins
-`algo_version: 5`, `request_concurrency: 32` and `output_tokens: 3000`.
+`algo_version: 5`, `request_concurrency: 32`, `output_tokens: 3000` and
+`request_timeout_s: 600`. The timeout is an absolute per-request deadline from
+slot admission, shared by both natural qualification starts and all measured
+replays. Pin it before qualification and validate it on the target hardware;
+existing campaigns keep their historical timeout behavior.
 `request_interval_ms` is rejected for v5; it remains valid for older campaigns.
 The sampler uses conversation history from the pinned
 [zai-org/LongWriter-6k](https://huggingface.co/datasets/zai-org/LongWriter-6k)
@@ -589,8 +593,9 @@ Verify the returned ID through `GET /v1/campaigns/<id>`. Check the source and mo
 revisions, both image digests, engine, patch surface, sampling rule, correctness
 bars, status, the 20% starting emission rule, initial fee history and customer signoff.
 For v5, also verify `algo_version`, `request_concurrency`, `output_tokens`,
-`weighted_tier_completion_speedup`, all four `tier_weights` and `failure_penalty`,
-and check their display in the companion frontend. Keep the
+`request_timeout_s`, `weighted_tier_completion_speedup`, all four `tier_weights`
+and `failure_penalty` in the API readback. Check concurrency, output budget and
+score details in the companion frontend. Keep the
 existing campaign and its manifest unchanged. Do not claim the new campaign is live until that readback
 succeeds and the deployed worker supports its engine request fields.
 

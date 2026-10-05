@@ -1172,6 +1172,7 @@ def test_weighted_report_preserves_penalty_and_actual_output_budget(
         "type": "hf_rows",
         "algo_version": 5,
         "request_concurrency": 16,
+        "request_timeout_s": 480,
         "output_tokens": 3000,
         "enable_thinking": False,
         "requests": [
@@ -1203,6 +1204,7 @@ def test_weighted_report_preserves_penalty_and_actual_output_budget(
     server.RoundEntryReportModel.model_validate(body)
     assert body["score_breakdown"] == breakdown
     assert body["workload"]["request_concurrency"] == 16
+    assert body["workload"]["request_timeout_s"] == 480
     assert "request_interval_ms" not in body["workload"]
     assert body["prompts"][0]["max_tokens"] == 3000
 

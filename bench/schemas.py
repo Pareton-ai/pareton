@@ -527,7 +527,14 @@ class EngineSlaResult:
                 if self.tier_completion is not None
                 else {}
             ),
-            "timings": {rid: asdict(t) for rid, t in self.timings.items()},
+            "timings": {
+                rid: {
+                    key: value
+                    for key, value in asdict(t).items()
+                    if key != "finish_reason" or self.tier_completion is not None
+                }
+                for rid, t in self.timings.items()
+            },
             "evidence": self.evidence,
         }
 
