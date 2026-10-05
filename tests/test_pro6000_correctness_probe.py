@@ -562,3 +562,44 @@ def test_diagnostic_metrics_accept_no_gaps_without_claiming_goodput():
     result = aggregate_rep_metrics(rows, **kwargs, require_token_timing=False)
     assert result["sla_goodput_ratio"] == 0
     assert result["output_tokens_per_s"] == 5
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "",
+        "CUDA error: device-side assert",
+        "out of memory",
+        "Traceback (most recent call last):",
+    ],
+)
+def test_log_review_known_warnings_preserves_real_failures(tmp_path, suffix):
+    logs = tmp_path / "round/evidence/correctness/engine_logs"
+    logs.mkdir(parents=True)
+    content = """Warning: User-specified context_length (262151) is greater than the derived context_length (262144). This may lead to incorrect model outputs or CUDA errors. Note that the derived context_length may differ from max_position_embeddings in the model's config.
+Ignore import error when loading sglang.srt.multimodal.processors.mimo_audio: Could not load libtorchcodec.
+[start of libtorchcodec loading traceback]
+Traceback (most recent call last):
+OSError: libavutil.so.60 missing
+[end of libtorchcodec loading traceback]
+"""
+    (logs / "scorer.log").write_text(content + suffix)
+    if suffix:
+        with pytest.raises(EngineError, match="scorer.log:7"):
+            PROBE["review_engine_logs"](tmp_path)
+    else:
+        result = PROBE["review_engine_logs"](tmp_path)
+        assert result["status"] == "passed"
+        assert len(result["warnings"]) == 2
+    assert not (tmp_path / "summary.json").exists()
+
+
+def test_log_review_does_not_ignore_incomplete_optional_traceback(tmp_path):
+    logs = tmp_path / "round/evidence/correctness/engine_logs"
+    logs.mkdir(parents=True)
+    (logs / "scorer.log").write_text(
+        "Ignore import error when loading sglang.srt.multimodal.processors.mimo_audio: Could not load libtorchcodec.\n"
+        "[start of libtorchcodec loading traceback]\nTraceback (most recent call last):\n"
+    )
+    with pytest.raises(EngineError):
+        PROBE["review_engine_logs"](tmp_path)

@@ -208,3 +208,24 @@ this diagnostic's ITL, SLA, or speedup fields to qualify or score a campaign.
 Diagnostic goodput is conservatively zero; no per-token gaps are fabricated.
 The shared HTTP client and metrics helper keep strict token-timing defaults;
 only this CLI opts out via hooks scoped to its round. Speculation stays enabled.
+
+### Review previously saved engine logs
+
+The scanner records exact file names and line numbers in `engine_log_review.json`.
+It recognizes the exact 262151-versus-262144 scorer headroom warning and complete,
+explicitly ignored `mimo_audio` TorchCodec loading tracebacks. Other tracebacks,
+OOMs, and CUDA errors still fail review. These exemptions are specific to this
+text-only diagnostic and do not qualify the advertised context boundary.
+
+To rescan a completed run without repeating inference, run from the checkout:
+
+```bash
+export PYTHONPATH=.
+nohup python -u -c 'import runpy,sys; from pathlib import Path; runpy.run_path("ops/pro6000-correctness-probe.py")["review_engine_logs"](Path(sys.argv[1]))' \
+  /path/to/results/natural-volume-v3 \
+  > /path/to/results/log-review.log 2>&1 < /dev/null &
+```
+
+This writes a separate log review; it preserves the original failed summary.
+A successful rescan alone is not a replacement for lifecycle, scorer, or capacity
+evidence.

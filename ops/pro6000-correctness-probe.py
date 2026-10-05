@@ -378,6 +378,79 @@ def require_reports(reports, count):
             raise EngineError("incomplete or failed correctness; see saved reports")
 
 
+def review_engine_logs(root):
+    """Review saved logs without changing the run's original summary or verdict."""
+    paths = sorted((root / "round/evidence/correctness/engine_logs").glob("*.log"))
+    if not paths:
+        raise EngineError("no retained engine logs found")
+    warnings, failures = [], []
+    # Only a complete, explicitly ignored optional audio import block is exempt.
+    optional = re.compile(
+        r"Ignore import error when loading sglang\.srt\.multimodal\.processors\.mimo_audio: "
+        r"Could not load libtorchcodec\.(?:(?!\n\[\d{4}-).)*?"
+        r"\[start of libtorchcodec loading traceback\]"
+        r"(?:(?!\n\[\d{4}-).)*?\[end of libtorchcodec loading traceback\]",
+        re.DOTALL,
+    )
+    context_warning = re.compile(
+        r"Warning: User-specified context_length \(262151\) is greater than the derived "
+        r"context_length \(262144\)\. This may lead to incorrect model outputs or CUDA errors\. "
+        r"Note that the derived context_length may differ from max_position_embeddings in the model's config\."
+    )
+    fatal = re.compile(
+        r"out of memory|CUDA error|Traceback \(most recent call last\)", re.IGNORECASE
+    )
+    for path in paths:
+        content = path.read_text()
+        lines = content.splitlines()
+        ignored_spans = []
+        for match in optional.finditer(content):
+            # Never exempt OOM/CUDA failures embedded in an optional import block.
+            if not re.search(r"out of memory|CUDA error", match.group(), re.IGNORECASE):
+                ignored_spans.append((match.start(), match.end()))
+                warnings.append(
+                    {
+                        "file": path.name,
+                        "line": content.count("\n", 0, match.start()) + 1,
+                        "kind": "ignored_optional_audio_import",
+                    }
+                )
+        for match in fatal.finditer(content):
+            line_number = content.count("\n", 0, match.start()) + 1
+            line = lines[line_number - 1]
+            if any(start <= match.start() < end for start, end in ignored_spans):
+                continue
+            if context_warning.search(line) and len(list(fatal.finditer(line))) == 1:
+                warnings.append(
+                    {
+                        "file": path.name,
+                        "line": line_number,
+                        "kind": "scorer_context_headroom_warning",
+                        "text": line,
+                    }
+                )
+                continue
+            failures.append({"file": path.name, "line": line_number, "text": line})
+    result = {
+        "status": "failed" if failures else "passed",
+        "warnings": warnings,
+        "failures": failures,
+        "files_reviewed": [p.name for p in paths],
+        "scope": "log review only; does not change original run summary",
+    }
+    save(root / "engine_log_review.json", result)
+    if failures:
+        first = failures[0]
+        raise EngineError(
+            f"engine log error at {first['file']}:{first['line']}; see engine_log_review.json"
+        )
+    print(
+        f"Log review passed; {len(warnings)} known warnings retained in engine_log_review.json",
+        flush=True,
+    )
+    return result
+
+
 class DockerModelVolume:
     """Copy locally verified weights through Docker's API, avoiding host binds."""
 
@@ -980,17 +1053,7 @@ def main(argv=None):
                 or lifecycle["scorer_repetitions"] != args.scorer_repetitions
             ):
                 raise EngineError(f"round/scorer incomplete (harness exit {code})")
-        for log in (root / "round" / "evidence" / "correctness" / "engine_logs").glob(
-            "*.log"
-        ):
-            if re.search(
-                r"out of memory|CUDA error|Traceback \(most recent call last\)",
-                log.read_text(),
-                re.IGNORECASE,
-            ):
-                raise EngineError(
-                    "engine logs contain a memory or runtime error; review retained logs"
-                )
+        review_engine_logs(root)
         state["status"] = "diagnostic_completed"
         # Even a successful 16k-band test is not an exact-boundary capacity proof.
         state["exact_21504_boundary_exercised"] = args.case == "capacity" and all(
