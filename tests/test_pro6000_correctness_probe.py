@@ -472,3 +472,56 @@ def test_source_preview_fills_seven_missing_16k_slots_without_balanced_quotas(
     assert all(r["sampling"]["ignore_eos"] for r in trace["requests"])
     with pytest.raises(ValueError, match="even with shorter fallback"):
         PROBE["build_source_preview"](f, tmp_path / "insufficient", 33)
+
+
+def test_model_volume_copies_verifies_reuses_and_rewrites(tmp_path, monkeypatch):
+    source = tmp_path / "weights"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    volume = PROBE["DockerModelVolume"](tmp_path)
+    calls = []
+    expected = {"config.json": PROBE["sha256_file"](source / "config.json")}
+
+    def command(*args):
+        calls.append(args)
+        return json.dumps(expected) if args[0] == "run" else ""
+
+    monkeypatch.setattr(volume, "command", command)
+    volume.prepare(source, "pinned-image")
+    volume.prepare(source, "pinned-image")
+    assert sum(c[0] == "cp" for c in calls) == 1
+    assert ("cp", str(source) + "/.", volume.name + "-copy:/model") in calls
+    assert json.loads((tmp_path / "model_volume.json").read_text())["verified"]
+    seen = []
+    runner = volume.wrap_runner(lambda cmd, **kw: seen.append(cmd))
+    runner(["docker", "run", "-v", f"{source}:/model:ro", "pinned-image"])
+    assert seen[0][2:] == [
+        "--mount",
+        f"type=volume,src={volume.name},dst=/model,readonly,volume-nocopy",
+        "pinned-image",
+    ]
+    runner(["docker", "inspect", "engine"])
+    assert seen[-1] == ["docker", "inspect", "engine"]
+    with pytest.raises(EngineError, match="exactly one"):
+        runner(["docker", "run", "image"])
+    volume.close()
+    assert calls[-1] == ("volume", "rm", volume.name)
+
+
+def test_model_volume_rejects_mismatch_and_cleans_up(tmp_path, monkeypatch):
+    source = tmp_path / "weights"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    volume = PROBE["DockerModelVolume"](tmp_path)
+    calls = []
+
+    def command(*args):
+        calls.append(args)
+        return "{}" if args[0] == "run" else ""
+
+    monkeypatch.setattr(volume, "command", command)
+    with pytest.raises(EngineError, match="hashes differ"):
+        volume.prepare(source, "image")
+    assert volume.source is None
+    volume.close()
+    assert calls[-1] == ("volume", "rm", volume.name)

@@ -374,14 +374,149 @@ def require_reports(reports, count):
             raise EngineError("incomplete or failed correctness; see saved reports")
 
 
+class DockerModelVolume:
+    """Copy locally verified weights through Docker's API, avoiding host binds."""
+
+    def __init__(self, root):
+        self.root = root
+        self.name = "pareton-pro6000-model-" + uuid4().hex
+        self.source = None
+        self.created = False
+
+    def command(self, *args):
+        result = subprocess.run(
+            ["docker", *args], capture_output=True, text=True, timeout=7200, check=False
+        )
+        if result.returncode:
+            raise EngineError(f"model volume {args[0]} failed: {result.stderr}")
+        return result.stdout
+
+    def prepare(self, source, image):
+        source = source.resolve()
+        if self.source is not None:
+            if source != self.source:
+                raise EngineError("model path changed during diagnostic")
+            return
+        print(
+            "Copying staged weights into a Docker-managed model volume...", flush=True
+        )
+        expected = {
+            str(path.relative_to(source)): sha256_file(path)
+            for path in sorted(source.rglob("*"))
+            if path.is_file()
+        }
+        if not expected or any(path.is_symlink() for path in source.rglob("*")):
+            raise EngineError(
+                "model volume requires nonempty, symlink-free staged weights"
+            )
+        self.command("pull", image)
+        self.command("volume", "create", self.name)
+        self.created = True
+        helper = self.name + "-copy"
+        try:
+            self.command(
+                "create",
+                "--name",
+                helper,
+                "--network",
+                "none",
+                "--mount",
+                f"type=volume,src={self.name},dst=/model,volume-nocopy",
+                "--entrypoint",
+                "/bin/true",
+                image,
+            )
+            self.command("cp", str(source) + "/.", helper + ":/model")
+        finally:
+            self.command("rm", "-f", helper)
+        # Read back every copied file inside the daemon's mount namespace.
+        verify = """import hashlib, json, pathlib
+root = pathlib.Path('/model')
+result = {}
+for path in sorted(root.rglob('*')):
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+        result[str(path.relative_to(root))] = digest.hexdigest()
+print(json.dumps(result))
+"""
+        actual = json.loads(
+            self.command(
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--mount",
+                f"type=volume,src={self.name},dst=/model,readonly,volume-nocopy",
+                "--entrypoint",
+                "python3",
+                image,
+                "-c",
+                verify,
+            )
+        )
+        if actual != expected:
+            raise EngineError(
+                "Docker model volume file hashes differ from staged weights"
+            )
+        self.source = source
+        save(
+            self.root / "model_volume.json",
+            {
+                "name": self.name,
+                "source": str(source),
+                "sha256": expected,
+                "verified": True,
+            },
+        )
+        print("Docker model volume verified; starting engine lifecycle.", flush=True)
+
+    def wrap_runner(self, runner):
+        def run(cmd, **kwargs):
+            cmd = list(cmd)
+            if cmd[:2] == ["docker", "run"]:
+                old = f"{self.source}:/model:ro"
+                matches = [
+                    i
+                    for i in range(1, len(cmd))
+                    if cmd[i - 1] == "-v" and cmd[i] == old
+                ]
+                if len(matches) != 1:
+                    raise EngineError("expected exactly one staged model bind mount")
+                i = matches[0]
+                cmd[i - 1 : i + 1] = [
+                    "--mount",
+                    f"type=volume,src={self.name},dst=/model,readonly,volume-nocopy",
+                ]
+            return runner(cmd, **kwargs)
+
+        return run
+
+    def close(self):
+        if self.created:
+            self.command("volume", "rm", self.name)
+
+
 @contextmanager
-def diagnostic_hooks(root, fields, trace, *, capacity, timeout, scorer_repetitions):
+def diagnostic_hooks(
+    root,
+    fields,
+    trace,
+    *,
+    capacity,
+    timeout,
+    scorer_repetitions,
+    docker_model_volume=False,
+):
     """Hooks are confined to this CLI process; shared harness files stay untouched."""
     state = {"starts": [], "scorer_repetitions": 0}
     context = sampling_context_for_campaign(fields["bench"], fields["engine"])
     preflight_trace = WorkloadTrace.from_dict(trace)
     preflight_trace.meta = TraceMeta("diagnostic", sampling={"context": context})
     count = len(trace["requests"])
+    volume = DockerModelVolume(root) if docker_model_volume else None
 
     class RecordedContainer(EngineContainer):
         def __enter__(self):
@@ -397,10 +532,14 @@ def diagnostic_hooks(root, fields, trace, *, capacity, timeout, scorer_repetitio
                     "env": self.spec.env,
                     "mount_engine_cache": self.mount_engine_cache,
                     "gpu_count": self.gpu_count,
+                    "docker_model_volume": volume.name if volume else None,
                 },
             )
             if self.gpu_count != 1:
                 raise EngineError("harness changed the requested GPU count")
+            if volume is not None:
+                volume.prepare(self.weights_dir, self.spec.image)
+                self.runner = volume.wrap_runner(self.runner)
             handle = super().__enter__()
             try:
                 info = get_json(handle.base_url, "/server_info", timeout=timeout)
@@ -531,6 +670,8 @@ def diagnostic_hooks(root, fields, trace, *, capacity, timeout, scorer_repetitio
             yield state
     finally:
         save(root / "lifecycle.json", state)
+        if volume is not None:
+            volume.close()
 
 
 @contextmanager
@@ -648,6 +789,11 @@ def main(argv=None):
         "--source-preview",
         type=Path,
         help="Existing preview directory (trace and receipt)",
+    )
+    parser.add_argument(
+        "--docker-model-volume",
+        action="store_true",
+        help="Copy and verify weights in a temporary Docker volume; avoid host bind mounts",
     )
     parser.add_argument("--scorer-repetitions", type=int, default=3)
     parser.add_argument("--request-timeout", type=float, default=1800)
@@ -776,6 +922,7 @@ def main(argv=None):
                     capacity=args.case == "capacity",
                     timeout=args.request_timeout,
                     scorer_repetitions=args.scorer_repetitions,
+                    docker_model_volume=args.docker_model_volume,
                 ) as lifecycle,
             ):
                 code = harness.run_bench(request_path, root / "round")

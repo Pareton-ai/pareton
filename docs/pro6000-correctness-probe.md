@@ -106,6 +106,7 @@ Each output directory must be new.
 for PRO6000_CASE in natural capacity; do
   PYTHONPATH=. python ops/pro6000-correctness-probe.py \
     --campaign-fields "$PRO6000_FIELDS" \
+    --docker-model-volume \
     --source-preview "$PRO6000_RUN_ROOT/prepared/source_preview" \
     --generation-memory-fraction "$PRO6000_GENERATION_FRACTION" \
     --scorer-memory-fraction "$PRO6000_SCORER_FRACTION" \
@@ -178,3 +179,20 @@ for example, 25 eligible 16k inputs plus seven shorter inputs can fill the
 32-prompt diagnostic. Completed older balanced previews remain supported through
 `--source-preview`; their available shorter rows can also fill a 16k shortfall.
 The production campaign sampler and qualification policy remain unchanged.
+
+### Docker model bind-mount failures
+
+Use `--docker-model-volume` on GPU launches if the pod's local staged path cannot
+be bind-mounted by its Docker daemon (OCI `procfd` / `/model` mount failure).
+This option copies the already staged weights through `docker cp` into a unique
+Docker-managed volume, verifies every file with SHA-256 inside the daemon's
+namespace, and mounts that volume read-only for all generation and scorer phases.
+It preserves the model revision, engine image, serving flags, and offline engine
+network. Allow disk space for an additional complete copy of the model and time
+for copying and hashing. The volume is removed on normal exit or handled failure;
+a killed process can leave its uniquely named volume for manual cleanup.
+`model_volume.json` records successful verification.
+
+After a failed GPU launch, reuse `prepared/source_preview` and the prepared
+campaign fields, but choose a new output directory (for example `natural-volume`).
+No prompt preparation needs to be repeated.
