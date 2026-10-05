@@ -107,7 +107,9 @@ def parse_longform_fields(rule, parsed):
     if parsed["enable_thinking"]:
         raise SamplerError("long-form sampling requires enable_thinking=false")
     if parsed["n_prompts"] < 4 or parsed["n_prompts"] % 4:
-        raise SamplerError("algo_version 4 requires n_prompts to be a multiple of 4")
+        raise SamplerError(
+            "long-form sampling requires n_prompts to be a multiple of 4"
+        )
     prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip():
         raise SamplerError("followup_prompt must be nonempty text")
@@ -248,7 +250,7 @@ def candidate_for_row(row_index, row, formatter, rule, context):
 def request_for_candidate(candidate, rule, index, *, generation_seed=""):
     return {
         "id": f"hf-{index:03d}",
-        "arrival_offset_ms": index * rule["request_interval_ms"],
+        "arrival_offset_ms": index * rule.get("request_interval_ms", 0),
         "prompt": candidate["prompt"],
         "max_tokens": rule["max_tokens"],
         "sampling": generation_sampling(
@@ -282,7 +284,7 @@ def generate_longform_trace(
         or not formatter.receipt.get("tokenizer")
     ):
         raise SamplerError(
-            "algo_version 4 requires a pinned chat formatter and tokenizer"
+            "long-form sampling requires a pinned chat formatter and tokenizer"
         )
     if formatter.receipt.get("chat_template", {}).get("enable_thinking") is not False:
         raise SamplerError("formatter thinking mode does not match sampling_rule")
@@ -343,10 +345,17 @@ def generate_longform_trace(
         for i, item in enumerate(selected)
     ]
     workload = {
-        "algo_version": 4,
+        "algo_version": rule["algo_version"],
         "enable_thinking": False,
         "context": context,
-        "request_interval_ms": rule["request_interval_ms"],
+        **(
+            {
+                "request_concurrency": rule["request_concurrency"],
+                "request_timeout_s": rule["request_timeout_s"],
+            }
+            if rule["algo_version"] == 5
+            else {"request_interval_ms": rule["request_interval_ms"]}
+        ),
         "max_tokens": rule["max_tokens"],
         "min_output_tokens": rule["min_output_tokens"],
         "length_groups": groups,
@@ -391,7 +400,7 @@ def generate_longform_trace(
 
 def validate_longform_trace(requests, sampling):
     if (
-        sampling.get("algo_version") != 4
+        sampling.get("algo_version") not in (4, 5)
         or sampling.get("enable_thinking") is not False
     ):
         raise SamplerError("invalid long-form trace mode")
@@ -403,7 +412,19 @@ def validate_longform_trace(requests, sampling):
         r"[0-9a-f]{64}", str(generation_seed)
     ):
         raise SamplerError("invalid long-form generation seed")
-    for key in ("request_interval_ms", "max_tokens", "min_output_tokens"):
+    if sampling["algo_version"] == 5:
+        from bench.concurrency import validate_concurrency, validate_request_timeout
+
+        validate_concurrency(sampling.get("request_concurrency"))
+        validate_request_timeout(sampling.get("request_timeout_s"))
+        if "request_interval_ms" in sampling:
+            raise SamplerError("version 5 trace cannot contain request_interval_ms")
+    elif {"request_concurrency", "request_timeout_s"}.intersection(sampling):
+        raise SamplerError("concurrency settings require version 5")
+    keys = ("max_tokens", "min_output_tokens")
+    if sampling["algo_version"] == 4:
+        keys += ("request_interval_ms",)
+    for key in keys:
         value = sampling.get(key)
         if type(value) is not int or value < (0 if key == "request_interval_ms" else 1):
             raise SamplerError(f"invalid long-form {key}")
@@ -442,7 +463,8 @@ def validate_longform_trace(requests, sampling):
                 {**settings, "ignore_eos": False},
             )
             or type(request.get("arrival_offset_ms")) is not int
-            or request["arrival_offset_ms"] != i * sampling["request_interval_ms"]
+            or request["arrival_offset_ms"]
+            != i * sampling.get("request_interval_ms", 0)
         ):
             raise SamplerError(
                 "invalid long-form request or forced generation settings"

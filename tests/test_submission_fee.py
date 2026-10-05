@@ -215,7 +215,12 @@ def test_insert_preserves_valid_history_or_defaults_none(monkeypatch, supplied):
 
     class Cursor:
         def execute(self, _sql, params):
-            recorded.append(params[-1].adapted)
+            columns = _sql.split("INSERT INTO campaigns (")[1].split(") VALUES")[0]
+            columns = [column.strip() for column in columns.split(",")]
+            recorded.append(params[columns.index("submission_fee_history")].adapted)
+            assert params[columns.index("patch_visibility")].adapted == {
+                "mode": "private"
+            }
 
         def fetchone(self):
             return [manifest.campaign_id]

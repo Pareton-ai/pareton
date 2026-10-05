@@ -9,6 +9,8 @@ so the CLI maps them to exit code 3.
 from __future__ import annotations
 
 import json
+import socket
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -111,6 +113,7 @@ class StreamResult:
     prompt_tokens: int | None = None
     dispatch_monotonic_s: float | None = None
     completion_monotonic_s: float | None = None
+    protocol_completion_monotonic_s: float | None = None
 
 
 def post_completion_stream(
@@ -123,6 +126,8 @@ def post_completion_stream(
     seed: int | None = 0,
     ignore_eos: bool = False,
     timeout: float = 120.0,
+    absolute_deadline_s: float | None = None,
+    require_token_timing: bool = True,
 ) -> StreamResult:
     """Streaming /v1/completions client; parses SSE and times TTFT/ITL."""
     url = base_url.rstrip("/") + "/v1/completions"
@@ -159,6 +164,25 @@ def post_completion_stream(
     except TimeoutError as exc:
         raise EngineError(f"completions timed out for {url}") from exc
 
+    deadline_timer = None
+    expired = threading.Event()
+    if absolute_deadline_s is not None:
+        # urllib's socket timeout is an inactivity timeout. Shut down the
+        # socket at the absolute deadline even if a server keeps trickling SSE.
+        sock = resp.fp.raw._sock
+
+        def expire():
+            expired.set()
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        deadline_timer = threading.Timer(
+            max(0, absolute_deadline_s - time.monotonic()), expire
+        )
+        deadline_timer.daemon = True
+        deadline_timer.start()
     text_parts: list[str] = []
     itl_s: list[float] = []
     finish_reason: str | None = None
@@ -215,8 +239,15 @@ def post_completion_stream(
     except TimeoutError as exc:
         raise EngineError(f"completions stream timed out for {url}") from exc
     finally:
+        protocol_completed = time.monotonic()
+        if deadline_timer is not None:
+            deadline_timer.cancel()
         resp.close()
 
+    if expired.is_set() or (
+        absolute_deadline_s is not None and protocol_completed > absolute_deadline_s
+    ):
+        raise EngineError(f"completions stream from {url} exceeded absolute deadline")
     if not saw_done:
         raise EngineError(f"completions stream from {url} ended without [DONE]")
     if last_chunk is None:
@@ -230,11 +261,12 @@ def post_completion_stream(
         raise EngineError(
             f"completions stream from {url} omitted usage.completion_tokens"
         )
-    # ITL is inter-choice-chunk gaps; sla_bench treats them as inter-token. Reject
+    # Legacy scoring needs inter-token gaps. V5 may accept batched tokens and
+    # mark unavailable per-token timing in its diagnostics instead. Reject
     # under-count (full or partial coalesce). Do not require exact equality:
     # empty-text choice chunks can add extra gaps on real engines.
     expected_gaps = completion_tokens - 1
-    if completion_tokens > 1 and len(itl_s) < expected_gaps:
+    if require_token_timing and completion_tokens > 1 and len(itl_s) < expected_gaps:
         raise EngineError(
             f"completions stream from {url}: completion_tokens={completion_tokens} "
             f"but only {len(itl_s)} inter-token gap(s) "
@@ -251,4 +283,5 @@ def post_completion_stream(
         prompt_tokens=prompt_tokens,
         dispatch_monotonic_s=send,
         completion_monotonic_s=last_chunk,
+        protocol_completion_monotonic_s=protocol_completed,
     )

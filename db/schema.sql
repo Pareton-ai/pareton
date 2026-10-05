@@ -26,6 +26,13 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'run db/migrations/20260917_campaign_fee_history.sql before reapplying db/schema.sql';
   END IF;
+  IF to_regclass('campaigns') IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('campaigns')
+      AND attname = 'patch_visibility' AND NOT attisdropped
+  ) THEN
+    RAISE EXCEPTION 'run db/migrations/20261001_campaign_patch_visibility.sql before reapplying db/schema.sql';
+  END IF;
 END;
 $$;
 
@@ -87,7 +94,33 @@ BEGIN
 END;
 $$;
 
+-- Canonical disclosure policy. Kept outside manifest_hash and customer_signoff.
+CREATE OR REPLACE FUNCTION valid_campaign_patch_visibility(policy JSONB)
+RETURNS BOOLEAN LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF policy IS NULL OR jsonb_typeof(policy) <> 'object' THEN
+    RETURN FALSE;
+  END IF;
+  IF policy = '{"mode":"private"}'::jsonb THEN
+    RETURN TRUE;
+  END IF;
+  RETURN COALESCE(
+    policy->>'mode' = 'public_after_reveal'
+    AND policy ?& ARRAY['mode', 'reveal_delay_s']
+    AND (policy - ARRAY['mode', 'reveal_delay_s']) = '{}'::jsonb
+    AND jsonb_typeof(policy->'reveal_delay_s') = 'number'
+    AND policy->>'reveal_delay_s' ~ '^[0-9]+$'
+    AND (policy->>'reveal_delay_s')::NUMERIC BETWEEN 0 AND 2147483647,
+    FALSE
+  );
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+  RETURN FALSE;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS campaigns (
+  patch_visibility JSONB NOT NULL DEFAULT '{"mode":"private"}'::jsonb
+    CONSTRAINT campaigns_patch_visibility_check CHECK (valid_campaign_patch_visibility(patch_visibility)),
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   profile_id UUID REFERENCES profiles(id),
   baseline_repo TEXT NOT NULL,

@@ -129,6 +129,7 @@ def test_longform_qualification_is_required_before_campaign_or_profile_insert(
             allow_placeholders=True,
             status=status,
             sampling_rule=rule,
+            scoring_rule={"name": "weighted_tier_completion_speedup"},
             bench_max_model_len=262144,
         )
     assert captured["inserts"] == 0
@@ -481,10 +482,11 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
     assert request["hardware"]["gpu_count"] == 4
     assert request["hardware"]["gpu_sku_expected"] == "RTX5090"
     assert manifest.gpu_skus == ["RTX5090"]
-    assert manifest.sampling_rule["algo_version"] == 4
+    assert manifest.sampling_rule["algo_version"] == 5
     assert manifest.sampling_rule["n_prompts"] == 32
     assert manifest.sampling_rule["max_tokens"] == 5120
-    assert manifest.sampling_rule["request_interval_ms"] == 2
+    assert manifest.sampling_rule["request_concurrency"] == 32
+    assert "request_interval_ms" not in manifest.sampling_rule
     assert manifest.sampling_rule["enable_thinking"] is False
     assert not manifest.sampling_rule.get("ignore_eos", False)
     assert manifest.sampling_rule["dataset"] == "zai-org/LongWriter-6k"
@@ -994,3 +996,41 @@ def test_seed_requires_fee_even_if_removed_environment_variable_is_set(
     assert "--submission-fee-tao" in capsys.readouterr().err
     assert captured["inserts"] == 0
     assert captured["profile_data"] is None
+
+
+@pytest.mark.parametrize(
+    "policy", [None, {"mode": "public_after_reveal", "reveal_delay_s": 3600}]
+)
+def test_seed_persists_visibility_with_unchanged_signoff(monkeypatch, policy):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15", allow_placeholders=True, patch_visibility=policy
+    )
+    manifest = captured["manifest"]
+    assert manifest.patch_visibility == (policy or {"mode": "private"})
+    assert manifest.customer_signoff.approved_manifest_hash == manifest.manifest_hash
+
+
+def test_seed_visibility_flags(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        seed, "seed_synthetic_campaign", lambda **kwargs: captured.update(kwargs)
+    )
+    assert (
+        main(
+            [
+                "--submission-fee-tao",
+                "0",
+                "--patch-visibility",
+                "public_after_reveal",
+                "--patch-reveal-delay-s",
+                "0",
+            ]
+        )
+        == 0
+    )
+    assert captured["patch_visibility"] == {
+        "mode": "public_after_reveal",
+        "reveal_delay_s": 0,
+    }
+    assert main(["--submission-fee-tao", "0", "--patch-reveal-delay-s", "60"]) == 1

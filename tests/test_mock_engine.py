@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import socket
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from bench.mock_engine import (
     GARBAGE_TEXT,
     MockEngine,
     MockEngineConfig,
+    MockEngineServer,
     _latency_at,
     build_completion_response,
     mock_tokenize,
@@ -69,6 +72,16 @@ def test_response_shape_matches_checked_in_fixture():
     choice = fixture["example"]["choices"][0]
     assert "logprobs" in choice
     assert choice["logprobs"]["token_logprobs"][0] is None
+
+
+def test_server_accept_queue_handles_c32_burst():
+    # Pause accepting altogether to simulate a busy CI host at initial dispatch.
+    # All C32 connections must fit without relying on accept-thread scheduling.
+    with MockEngineServer(MockEngineConfig()) as server, ExitStack() as clients:
+        for _ in range(32):
+            clients.enter_context(
+                socket.create_connection(server.server_address, timeout=1)
+            )
 
 
 def test_http_server_completions():
