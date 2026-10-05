@@ -22,15 +22,24 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import bench.main as harness
 from bench.correctness import BASELINE_INDEX, grade_all
 from bench.http import get_json
 from bench.lifecycle import EngineContainer, EngineError
-from bench.longform import input_group, sampling_context_for_campaign
-from bench.preview_longform import preview
-from bench.sampler import build_prompt_formatter
+from bench.longform import (
+    input_group,
+    request_for_candidate,
+    sampling_context_for_campaign,
+    source_messages,
+)
+from bench.sampler import (
+    PromptRenderError,
+    build_prompt_formatter,
+    fetch_hf_row,
+    parse_sampling_rule,
+)
 from bench.schemas import TraceMeta, WorkloadTrace
 from bench.sla_bench import capture_baseline_natural_stops, run_sla_engine
 from bench.trajectory import token_ids_sha256
@@ -142,20 +151,133 @@ def prepare_fields(fields, generation_fraction, scorer_fraction):
     return fields
 
 
+def build_source_preview(fields, output_dir, count):
+    """Scan the pinned corpus without balanced-tier quotas; retain the longest N.
+
+    Shorter fallback uses complete rendered conversations, never padding,
+    truncation, or duplicated prompts. Only this diagnostic changes selection.
+    """
+    rule = parse_sampling_rule(fields["sampling_rule"])
+    model = fields["bench"]["model"]
+    context = sampling_context_for_campaign(fields["bench"], fields["engine"])
+    formatter = build_prompt_formatter(
+        rule, model_repo=model["hf_repo"], model_revision=model["hf_revision"]
+    )
+    retained = {}
+    seen = set()
+    eligible = 0
+    eligible_16k = 0
+    for index in range(rule["n_rows"]):
+        messages = source_messages(fetch_hf_row(rule, index), rule)
+        if messages is None:
+            continue
+        try:
+            prompt = formatter.render(messages)
+            ids = formatter.encode(prompt)
+        except PromptRenderError:
+            continue
+        size = len(ids)
+        if (
+            not 1 <= size <= min(MAX_INPUT, context["max_input_tokens"])
+            or size + MAX_OUTPUT + context["engine_reserve"] > context["max_model_len"]
+        ):
+            continue
+        digest = token_ids_sha256(ids)
+        if digest in seen:
+            continue
+        seen.add(digest)
+        eligible += 1
+        eligible_16k += input_group(size) == "16k"
+        retained[digest] = {
+            "row_index": index,
+            "prompt": prompt,
+            "input_tokens": size,
+            "input_ids_sha256": digest,
+            "input_length_group": input_group(size) or "shorter",
+        }
+        if len(retained) > count:
+            shortest = min(
+                retained,
+                key=lambda key: (
+                    retained[key]["input_tokens"],
+                    -retained[key]["row_index"],
+                ),
+            )
+            del retained[shortest]
+    if len(retained) < count:
+        raise ValueError(
+            f"not enough distinct eligible prompts even with shorter fallback: {len(retained)}/{count}"
+        )
+    selected = sorted(
+        retained.values(), key=lambda r: (-r["input_tokens"], r["row_index"])
+    )
+    generation_rule = {**rule, "max_tokens": MAX_OUTPUT}
+    source = {
+        "schema_version": 1,
+        "meta": {
+            "name": "PAR-144-longest-available-source",
+            "pro6000_source_version": 1,
+            "context": context,
+        },
+        "requests": [
+            request_for_candidate(item, generation_rule, i, generation_seed="c" * 64)
+            for i, item in enumerate(selected)
+        ],
+    }
+    output_dir.mkdir(parents=True, exist_ok=False)
+    path = output_dir / "workload_trace.json"
+    save(path, source)
+    receipt = {
+        "dataset": rule["dataset"],
+        "revision": rule["revision"],
+        "config": rule["config"],
+        "split": rule["split"],
+        **formatter.receipt,
+        "sampled_trace_sha256": sha256_file(path),
+        "context": context,
+        "diagnostic_only": True,
+        "selection": "longest_available_with_shorter_fallback",
+        "rows_scanned": rule["n_rows"],
+        "eligible_distinct_prompts": eligible,
+        "eligible_16k_prompts": eligible_16k,
+        "requests": [
+            {k: v for k, v in item.items() if k != "prompt"} for item in selected
+        ],
+    }
+    save(output_dir / "sampling_receipt.json", receipt)
+    print(
+        f"Selected {count} longest available prompts; {eligible_16k} distinct 16k-tier prompts in corpus",
+        flush=True,
+    )
+
+
 def longest_trace(source, fields, *, count, prefixes, capacity):
-    """Use verified rendered inputs, with no padding or shorter-tier fallback."""
+    """Prefer longest inputs and fill with shorter distinct inputs as necessary."""
     if fields["bench"]["model"]["max_model_len"] < MAX_INPUT + MAX_OUTPUT + 2:
         raise ValueError("input plus output and engine reservation exceed context")
     original = validate_workload_trace_dict(source)
-    if not original.meta.sampling or original.meta.sampling.get("algo_version") != 4:
-        raise ValueError("source must be a token-counted LongWriter v4 preview")
     context = sampling_context_for_campaign(fields["bench"], fields["engine"])
-    if original.meta.sampling["context"] != context:
+    if original.meta.sampling and original.meta.sampling.get("algo_version") == 4:
+        source_context = original.meta.sampling["context"]
+    elif source.get("meta", {}).get("pro6000_source_version") == 1:
+        source_context = source["meta"].get("context")
+    else:
+        raise ValueError(
+            "source must be a LongWriter v4 preview or diagnostic source preview"
+        )
+    if source_context != context:
         raise ValueError("source context differs from campaign")
-    candidates = sorted(
-        (r for r in source["requests"] if input_group(r["input_tokens"]) == "16k"),
-        key=lambda r: (-r["input_tokens"], r["id"]),
-    )
+    for request in source["requests"]:
+        size = request.get("input_tokens")
+        if (
+            type(size) is not int
+            or not 1 <= size <= MAX_INPUT
+            or not isinstance(request.get("prompt"), str)
+            or not request["prompt"].strip()
+            or not request.get("input_ids_sha256")
+        ):
+            raise ValueError("invalid token-counted source input")
+    candidates = sorted(source["requests"], key=lambda r: (-r["input_tokens"], r["id"]))
     unique = {r["input_ids_sha256"]: r for r in reversed(candidates)}
     candidates = sorted(unique.values(), key=lambda r: (-r["input_tokens"], r["id"]))
     if (
@@ -164,7 +286,7 @@ def longest_trace(source, fields, *, count, prefixes, capacity):
         or (prefixes == "distinct" and len(candidates) < count)
     ):
         raise ValueError(
-            "not enough distinct 16k prompts; generate a larger source preview"
+            "not enough distinct eligible prompts even with shorter fallback; generate a larger source preview"
         )
     selected = candidates[:count] if prefixes == "distinct" else [candidates[0]] * count
     requests = []
@@ -185,6 +307,16 @@ def longest_trace(source, fields, *, count, prefixes, capacity):
         "meta": {
             "name": "PAR-144-longest-tier-diagnostic",
             "description": "Not a campaign qualification trace",
+            "selection": "longest_available_with_shorter_fallback",
+            "shorter_fallbacks": [
+                {
+                    "request_id": req["id"],
+                    "source_request_id": item["id"],
+                    "input_tokens": req["input_tokens"],
+                }
+                for req, item in zip(requests, selected, strict=True)
+                if input_group(req["input_tokens"]) != "16k"
+            ],
         },
         "requests": requests,
     }
@@ -560,17 +692,10 @@ def main(argv=None):
             source_dir = args.source_preview
         else:
             source_dir = root / "source_preview"
-            preview_fields = copy.deepcopy(fields)
-            rule = preview_fields["sampling_rule"]
-            rule.pop("qualification", None)
-            rule.pop("eligible_row_indices", None)
-            rule["n_prompts"] = max(4, args.prompt_count * 4)
-            preview(
-                fields=preview_fields,
-                output_dir=source_dir,
-                campaign_id=UUID("00000000-0000-0000-0000-000000000001"),
-                seed_block=1,
-                block_hash="c" * 64,
+            build_source_preview(
+                fields,
+                source_dir,
+                args.prompt_count if args.prefixes == "distinct" else 1,
             )
         source_path = source_dir / "workload_trace.json"
         receipt = json.loads((source_dir / "sampling_receipt.json").read_text())
@@ -594,6 +719,13 @@ def main(argv=None):
             count=args.prompt_count,
             prefixes=args.prefixes,
             capacity=args.case == "capacity",
+        )
+        state["shorter_fallbacks"] = trace["meta"]["shorter_fallbacks"]
+        state["shorter_fallback_count"] = len(state["shorter_fallbacks"])
+        state["selection"] = trace["meta"]["selection"]
+        print(
+            f"Shorter input fallbacks: {state['shorter_fallback_count']}/{len(trace['requests'])}; output target remains {MAX_OUTPUT} tokens",
+            flush=True,
         )
         trace_path = root / "workload_trace.json"
         save(trace_path, trace)

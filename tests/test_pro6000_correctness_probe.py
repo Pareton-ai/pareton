@@ -136,7 +136,7 @@ def test_context_override_cannot_undo_scorer_headroom():
         PROBE["prepare_fields"](f, 0.8, 0.6)
 
 
-def test_longest_tier_no_padding_or_silent_shorter_fallback():
+def test_longest_inputs_use_explicit_shorter_fallback_without_padding():
     f = fields()
     source = source_trace(f)
     for capacity in (False, True):
@@ -147,8 +147,16 @@ def test_longest_tier_no_padding_or_silent_shorter_fallback():
         assert result["requests"][0]["max_tokens"] == 5120
         assert result["requests"][0]["sampling"]["ignore_eos"] is capacity
         assert "sampling" not in result["meta"]  # diagnostic, not a qualified v4 trace
+    fallback = PROBE["longest_trace"](
+        source, f, count=2, prefixes="distinct", capacity=True
+    )
+    assert [r["input_tokens"] for r in fallback["requests"]] == [16384, 8192]
+    assert fallback["meta"]["shorter_fallbacks"] == [
+        {"request_id": "probe-001", "source_request_id": "hf-2", "input_tokens": 8192}
+    ]
+    assert fallback["requests"][1]["prompt"] == source["requests"][2]["prompt"]
     with pytest.raises(ValueError, match="not enough distinct"):
-        PROBE["longest_trace"](source, f, count=2, prefixes="distinct", capacity=True)
+        PROBE["longest_trace"](source, f, count=5, prefixes="distinct", capacity=True)
     result = PROBE["longest_trace"](
         source, f, count=32, prefixes="repeated", capacity=True
     )
@@ -410,3 +418,57 @@ def test_gpu_sampling_failure_cannot_be_reported_as_success(tmp_path, monkeypatc
     ):
         assert sampled.wait(2)
     assert json.loads((tmp_path / "telemetry.json").read_text())["errors"]
+
+
+def test_source_preview_fills_seven_missing_16k_slots_without_balanced_quotas(
+    tmp_path, monkeypatch
+):
+    f = fields()
+    f["sampling_rule"]["n_rows"] = 35
+    sizes = list(range(16000, 15975, -1)) + list(range(14000, 13993, -1))
+    texts = ["x" * size for size in sizes] + ["x" * 16000, "x" * 16385, ""]
+    formatter = SimpleNamespace(
+        render=lambda messages: messages[1]["content"],
+        encode=lambda text: [1] * len(text),
+        receipt={
+            "chat_template": {
+                "model_repo": f["bench"]["model"]["hf_repo"],
+                "model_revision": f["bench"]["model"]["hf_revision"],
+            }
+        },
+    )
+    calls = []
+
+    def fetch(rule, index):
+        calls.append(index)
+        return {
+            "messages": [
+                {"role": "user", "content": "write"},
+                {"role": "assistant", "content": texts[index]},
+            ]
+        }
+
+    globals_ = PROBE["build_source_preview"].__globals__
+    monkeypatch.setitem(globals_, "build_prompt_formatter", lambda *a, **kw: formatter)
+    monkeypatch.setitem(globals_, "fetch_hf_row", fetch)
+    root = tmp_path / "source"
+    PROBE["build_source_preview"](f, root, 32)
+    assert calls == list(range(35))
+    receipt = json.loads((root / "sampling_receipt.json").read_text())
+    assert receipt["eligible_16k_prompts"] == 25
+    assert receipt["eligible_distinct_prompts"] == 32
+    assert receipt["diagnostic_only"] is True
+    assert receipt["sampled_trace_sha256"] == PROBE["sha256_file"](
+        root / "workload_trace.json"
+    )
+    source = json.loads((root / "workload_trace.json").read_text())
+    trace = PROBE["longest_trace"](
+        source, f, count=32, prefixes="distinct", capacity=True
+    )
+    assert [r["input_tokens"] for r in trace["requests"]] == sizes
+    assert len(trace["meta"]["shorter_fallbacks"]) == 7
+    assert len({r["input_ids_sha256"] for r in trace["requests"]}) == 32
+    assert all(r["max_tokens"] == 5120 for r in trace["requests"])
+    assert all(r["sampling"]["ignore_eos"] for r in trace["requests"])
+    with pytest.raises(ValueError, match="even with shorter fallback"):
+        PROBE["build_source_preview"](f, tmp_path / "insufficient", 33)

@@ -11,8 +11,11 @@ runs the actual round harness with the pinned baseline image as its own candidat
 
 1. Generate a CPU LongWriter preview with the pinned tokenizer/template, retaining
    the source trace and sampling receipt. An existing preview may be supplied.
-2. Select the longest distinct inputs from the 16k tier; no padding or shorter-tier
-   fallback is allowed. Retokenize and check input hashes before starting a GPU.
+2. Select the longest distinct rendered inputs up to 16,384 tokens. If the 16k
+   tier is scarce, fill the remaining slots with the longest available shorter
+   inputs, including inputs between the usual tier bands. Record every fallback;
+   never pad, truncate, or duplicate distinct-mode inputs. Retokenize and check
+   input hashes before starting a GPU.
 3. Run baseline, drift baseline, and identical-image candidate containers with
    the usual cold/cached-prefix warmups and three measured repetitions.
 4. Stop generation containers, start the trusted scorer with the production
@@ -51,8 +54,9 @@ receipt. It still uses the production tokenizer/capacity preflight for each
 running generation engine.
 
 The LongWriter envelope is at most 16,384 input + 5,120 generated tokens. The 16k
-input tier permits 90–100% of that input bound, including template/history. The
-summary records actual input lengths. A successful capacity run claims an exact
+input tier permits 90–100% of that input bound, including template/history.
+Fallback inputs can be below that band. The summary records actual input lengths
+and every fallback, which cannot establish the maximum-input boundary. A successful capacity run claims an exact
 21,504-token boundary exercise only if every selected input is exactly 16,384
 and the captured/scored continuations reach 5,120. It never establishes 262,144
 context support. Natural EOS runs are correctness evidence at observed lengths;
@@ -85,9 +89,12 @@ PYTHONPATH=. python ops/pro6000-correctness-probe.py \
 ```
 
 Preparation fetches source/tokenizer assets but starts no engine, downloads no
-model weights, and performs no GPU work. For 32 distinct longest-tier prompts it
-samples a 128-prompt balanced source preview, then selects the 32 longest 16k
-inputs. Insufficient eligible rows fail explicitly. Review the input lengths,
+model weights, and performs no GPU work. It scans the pinned corpus without
+balanced-tier quotas and selects the 32 longest eligible distinct inputs at or
+below 16,384 tokens. A shortage of 16k inputs is filled by shorter inputs, not
+by reducing the requested prompt count. Fewer than 32 distinct eligible inputs
+in total still fails. The summary lists `shorter_fallback_count` and each
+`shorter_fallbacks` entry with its source ID and actual length. Review the input lengths,
 model/image pins, thresholds, and generated request before proceeding.
 
 Run a natural-EOS control and a separately labelled forced-capacity test with the
@@ -112,8 +119,9 @@ Capacity sets `ignore_eos=true` only on the diagnostic trace. The shared harness
 still captures the trusted natural-stop reference and uses its normal correctness
 checks. Every scored continuation must cover all 5,120 tokens, all requested
 prompts must remain, every correctness report must pass the original thresholds,
-and observed scoring coverage must be 100%. A shorter, excluded, missing,
-mis-tokenized, or truncated response fails the diagnostic. A forced token count
+and observed scoring coverage must be 100%. A shorter-than-5,120-token output, excluded or missing result,
+mis-tokenized response, or truncated scoring span fails the capacity diagnostic.
+Shorter input fallback does not relax the output length or correctness checks. A forced token count
 that changes when retokenized for teacher forcing is retained as a failure to
 confirm the target scorer span, not silently accepted.
 
@@ -158,3 +166,15 @@ retractions/evictions, and remaining headroom. CUDA/OOM/traceback log matches,
 container death/restart, failed telemetry, or failed scoring make the run fail.
 Subprocess and protocol failures retain evidence; an operator termination can
 leave the summary at failed. Preserve output directories for comparison.
+
+
+## Retrying an older preparation failure
+
+If preparation reported `insufficient distinct long-form prompts ... '16k': 7`,
+update the diagnostic branch (`git pull --ff-only` in its clean checkout) and
+repeat preparation with a new `PRO6000_RUN_ROOT`. Do not reuse the failed output
+directory. The new preparation removes the balanced 128-prompt prerequisite;
+for example, 25 eligible 16k inputs plus seven shorter inputs can fill the
+32-prompt diagnostic. Completed older balanced previews remain supported through
+`--source-preview`; their available shorter rows can also fill a 16k shortfall.
+The production campaign sampler and qualification policy remain unchanged.
