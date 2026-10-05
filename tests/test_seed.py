@@ -181,11 +181,11 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
                 str(root / "ops" / helper_name),
                 engine_ref,
-                "0.23",
+                *([] if pro6000 else ["0.23"]),
                 str(path),
             ],
             cwd=root,
@@ -228,11 +228,10 @@ def test_pro6000_launch_helper_preserves_fp8_tp1_args_through_worker(
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
                 str(root / "ops/seed-sglang-qwen38-27b-pro6000.sh"),
                 engine_ref,
-                "0.23",
                 str(fixture / "sampling_rule.json"),
             ],
             cwd=root,
@@ -253,9 +252,24 @@ def test_pro6000_launch_helper_preserves_fp8_tp1_args_through_worker(
     assert manifest.baseline_commit == SGLANG_COMMIT
     assert manifest.base_image_digest == engine_ref
     assert manifest.status == "open"
-    assert manifest.submission_fee["amount_tao"] == "0.23"
-    for key in ("sampling_rule", "scoring_rule", "emission_rule", "engine"):
+    assert manifest.submission_fee["amount_tao"] == "0.1"
+    for key in (
+        "sampling_rule",
+        "scoring_rule",
+        "emission_rule",
+        "engine",
+        "patch_visibility",
+    ):
         assert getattr(manifest, key) == fields[key]
+    assert manifest.patch_visibility == {"mode": "private"}
+    assert manifest.to_public_dict()["patch_visibility"] == {"mode": "private"}
+    assert "--patch-visibility" in argv
+    assert manifest.sampling_rule["algo_version"] == 5
+    assert manifest.sampling_rule["n_prompts"] == 32
+    assert manifest.sampling_rule["request_concurrency"] == 4
+    assert manifest.sampling_rule["request_timeout_s"] == 600
+    assert "request_interval_ms" not in manifest.sampling_rule
+    assert manifest.scoring_rule["name"] == "weighted_tier_completion_speedup"
     trace = tmp_path / "trace.json"
     trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 32}))
     request = build_round_request(
@@ -296,6 +310,71 @@ def test_pro6000_launch_helper_preserves_fp8_tp1_args_through_worker(
             for i, a in enumerate(args)
             if a == "--context-length"
         )
+
+
+def test_pro6000_v5_trace_uses_c4_and_rejects_stale_qualification():
+    from test_longform_sampling import formatter, row
+
+    from bench.concurrency import request_groups
+    from bench.longform import qualification_contract, require_qualification
+    from bench.sampler import (
+        SamplerError,
+        generate_trace,
+        parse_sampling_rule,
+        sampling_context_for_rule,
+    )
+    from bench.schemas import WorkloadTrace
+
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_qwen38_27b_pro6000"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    assert fields["sampling_rule"] == json.loads(
+        (fixture / "sampling_rule.json").read_text()
+    )
+    assert fields["scoring_rule"] == json.loads(
+        (fixture / "scoring_rule.json").read_text()
+    )
+    rule = parse_sampling_rule(fields["sampling_rule"])
+    rule["eligible_row_indices"] = list(range(64))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(
+            rule, fields["bench"], fields["engine"]
+        ),
+        "repetitions": 2,
+    }
+    require_qualification(rule, fields["bench"], fields["engine"])
+    sampled = generate_trace(
+        rule=rule,
+        seed_hex="a" * 64,
+        row_fetcher=row,
+        prompt_formatter=formatter(rule),
+        sampling_context=sampling_context_for_rule(
+            rule, fields["bench"], fields["engine"]
+        ),
+    )
+    trace = WorkloadTrace.from_dict(json.loads(sampled.body))
+    assert len(trace.requests) == 32
+    assert trace.meta.sampling["algo_version"] == 5
+    assert trace.meta.sampling["request_concurrency"] == 4
+    assert trace.meta.sampling["request_timeout_s"] == 600
+    assert "request_interval_ms" not in trace.meta.sampling
+    assert "output_tokens" not in trace.meta.sampling
+    assert all(
+        r.max_tokens == 5120 and not r.sampling.ignore_eos for r in trace.requests
+    )
+    groups = request_groups(trace.requests, 4)
+    assert [len(group) for group in groups] == [8, 8, 8, 8]
+    assert [{r.input_length_group for r in group} for group in groups] == [
+        {"2k"},
+        {"4k"},
+        {"8k"},
+        {"16k"},
+    ]
+    for key, value in (("request_concurrency", 32), ("request_timeout_s", 900)):
+        with pytest.raises(SamplerError, match="baseline qualification"):
+            require_qualification(
+                {**rule, key: value}, fields["bench"], fields["engine"]
+            )
 
 
 def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monkeypatch):
@@ -427,7 +506,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
                 str(helper),
                 engine_ref,
@@ -973,7 +1052,7 @@ def test_seed_rejects_recipient_the_miner_would_refuse(monkeypatch):
 @pytest.mark.parametrize(
     "name", ["seed-sglang-qwen38-27b.sh", "seed-sglang-qwen38-27b-pro6000.sh"]
 )
-def test_launch_helper_requires_explicit_initial_fee(name):
+def test_launch_helper_requires_its_launch_inputs(name):
     helper = Path(__file__).resolve().parents[1] / "ops" / name
     result = subprocess.run(
         ["bash", str(helper), "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE],
@@ -982,7 +1061,9 @@ def test_launch_helper_requires_explicit_initial_fee(name):
         check=False,
     )
     assert result.returncode == 2
-    assert "INITIAL_FEE_TAO" in result.stderr
+    assert (
+        "QUALIFIED_SAMPLING_RULE_JSON" if "pro6000" in name else "INITIAL_FEE_TAO"
+    ) in result.stderr
 
 
 def test_seed_requires_fee_even_if_removed_environment_variable_is_set(

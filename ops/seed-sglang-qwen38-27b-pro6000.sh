@@ -5,19 +5,18 @@
 # lmsysorg/sglang runtime image lacks the trusted offline miner-build installer.
 # The harness mounts pinned weights at /model and manages Docker networking,
 # listen address, port and GPU allocation separately from these serving flags.
-# Draft: after #187 merges, migrate sampling/scoring to the v5 C4 contract
-# and requalify before launch. The engine capacity remains 32 requests.
+# Uses the v5 32-request workload at C4; engine capacity remains 32.
+# Patches remain private with no timed public reveal.
 # Qualify this TP1/FP8/MTP configuration on RTXPRO6000 before opening.
 # Do not reuse TP4/NVFP4 qualification or its memory-fraction overrides.
 set -euo pipefail
-if [[ $# -ne 3 ]]; then
-  echo 'Usage: seed-sglang-qwen38-27b-pro6000.sh ENGINE_DIGEST_REF INITIAL_FEE_TAO QUALIFIED_SAMPLING_RULE_JSON' >&2
+if [[ $# -ne 2 ]]; then
+  echo 'Usage: seed-sglang-qwen38-27b-pro6000.sh ENGINE_DIGEST_REF QUALIFIED_SAMPLING_RULE_JSON' >&2
   echo 'Creates a new campaign. For an existing campaign use python -m campaign.set_fee.' >&2
   exit 2
 fi
 engine_ref=$1
-initial_fee_tao=$2
-sampling_rule=$3
+sampling_rule=$2
 if [[ ! -f "$sampling_rule" || ! -r "$sampling_rule" ]]; then
   echo "Qualified sampling rule must be a readable file: $sampling_rule" >&2
   exit 2
@@ -27,11 +26,12 @@ if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@
   exit 2
 fi
 
-# Store the initial fee with the open row, with no delayed activation window.
+# Store the agreed 0.1 TAO initial fee with the open row, with no activation delay.
 # seed validates whole RAO and the locally trusted recipient before insertion.
 python -m campaign.seed \
-  --submission-fee-tao "$initial_fee_tao" \
+  --submission-fee-tao 0.1 \
   --engine sglang \
+  --patch-visibility private \
   --baseline-repo https://github.com/sgl-project/sglang.git \
   --baseline-commit 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
   --base-image-digest "$engine_ref" \

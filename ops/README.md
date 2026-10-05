@@ -42,93 +42,245 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ### RTX PRO 6000 Qwen3.8 FP8 campaign (draft)
 
-`ops/seed-sglang-qwen38-27b-pro6000.sh` prepares a campaign for one `RTXPRO6000`,
-with `Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, FP8
-quantization, BF16 activation dtype, and SGLang commit
-`4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. The model revision is a Hugging Face
-pin, not an engine source commit.
+This new campaign uses the merged #186 privacy policy and #187 v5 contract:
 
-**Draft dependency:** after [PR #187](https://github.com/Pareton-ai/pareton/pull/187)
-merges, revise this campaign to sampler v5, `request_concurrency: 4`, the fixed
-output budget, and `weighted_tier_completion_speedup` with explicit tier weights
-and failure penalty. Until then, these fixtures retain main's 32-prompt v4
-interval workload and `median_e2e_speedup` only for development validation.
-That interval workload does not enforce sustained C32 or C4. Requalify the final
-C4 contract and run its full shadow round before opening the campaign. Do not
-launch this interim draft. Verify the backend and frontend activation dependencies
-in #187 before launch.
+- `patch_visibility: {"mode": "private"}`: no public reveal, including after
+  evaluation or campaign closure. Private mode has no reveal delay. This policy
+  is operational and deliberately outside `manifest_hash`; never enable public
+  disclosure for this campaign. Keep patch storage and candidate registries private.
+- `algo_version: 5`, **32 requests at C4**, eight requests per 2k/4k/8k/16k tier
+  before baseline exclusions. Each tier drains before the next starts; FIFO slot
+  refill caps admitted requests at four. Exclusions/final drain can lower occupancy.
+  Engine `--max-running-requests 32` remains capacity, not benchmark concurrency.
+- Natural EOS, 5120-token ceiling, 3000-token baseline minimum, thinking disabled,
+  and an absolute 600-second request timeout. Both baseline runs establish the
+  union of exclusions (at most eight, with no empty tier). Candidates must emit
+  at least 90% of the measured baseline's reported tokens per eligible request.
+- `weighted_tier_completion_speedup`, equal 0.25 tier weights, failure penalty 0.1.
+  Tier completion includes client queueing; any scoreable failure caps speed
+  credit at zero before the failure deduction. There is no fixed-output mode.
+- Initial fee **0.1 TAO**, supplied by the seed helper; emissions start at 0.20
+  and decline to zero over 201600 leader-held blocks.
 
-The qualification fixture
-`fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json` reuses both
-image pins from the original Qwen campaign: the finished Pareton engine at
+The fixture pins one `RTXPRO6000`,
+`Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, BF16 activation
+dtype, FP8 quantization, 262144 context, and SGLang
+`4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. Its serving arguments retain TP1,
+`qwen3_coder` tool parsing, `qwen3` reasoning parsing, data-parallel multimodal
+encoding, and EAGLE with three steps, top-k one and four draft tokens.
+
+Both image fields reuse the original campaign's finished Pareton engine:
 `ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431`.
-This is `engine_image` in the original `image-pins.json`, not its bootstrap
-`build_base_image`. It includes the offline miner installer and warmed build
-cache. A GPU-specific rebuild is not required merely because TP or GPU count
-changes. Matching the source commit alone does not establish compatible CUDA,
-kernel binaries, drivers, or runtime behavior; qualify the existing digest on
-RTX PRO 6000. If compatibility requires a rebuild, pin the new finished engine
-in both fields and use it throughout qualification and seeding.
+This is `engine_image`, not the bootstrap `build_base_image`. No target-GPU build
+is required solely for TP1, but runtime compatibility and the full workload must
+be qualified on RTX PRO 6000. A replacement engine requires updating both fixture
+image fields and fresh qualification. TP4, v4, C32 or other-model receipts do not
+qualify this contract. The context limit does not make this a full-context or
+multimodal benchmark.
 
-| vLLM configuration | Pinned SGLang serving argument |
-| --- | --- |
-| `--tensor-parallel-size 1` | `--tp 1` |
-| `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder` | `--tool-call-parser qwen3_coder` (no separate auto-tool-choice switch) |
-| `--reasoning-parser qwen3` | `--reasoning-parser qwen3` |
-| `--max-model-len 262144` | `--context-length 262144` |
-| `--max-num-seqs 32` | `--max-running-requests 32` |
-| `--mm-encoder-tp-mode data` | `--mm-enable-dp-encoder` |
-| `--speculative-config {"method":"mtp","num_speculative_tokens":3}` | `--speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4` |
+#### 1. Deployment and host prerequisites
 
-All these SGLang flags are stored in `bench.serve_args` and hashed into the
-manifest. Engine capacity remains 32 even when benchmark concurrency becomes C4.
-The speculative settings require runtime qualification on the target GPU.
+Keep this PR draft until target-GPU qualification and a complete shadow round
+pass. These are operator instructions, not evidence that deployment or launch has
+occurred. Use the updated [campaign launch skill](../docs/campaign_launch_skill.md).
+Verify the deployed API/workers contain #186, #187 and this PR, the fee-history
+and `20261001_campaign_patch_visibility.sql` migrations are applied, and compatible
+frontend support from frontend PRs #88 and #89 is deployed. Follow the existing
+[privacy migration/runbook](../docs/patch-visibility.md#rollout) and release
+coordinator; do not replace a live worker checkout with this branch. Confirm the
+private object-store/registry access controls and private patch API behavior.
 
-Before any campaign launch, run `bench/qualify_longform.py` through its module
-entry point on the Linux RTX PRO 6000 host, from the repository root with the
-Pareton Python environment activated. First start the trusted baseline container
-with the fixture's model revision and serving arguments, pinned weights mounted
-at `/model`, and its API port published to `127.0.0.1:30000`. Use a Docker port
-mapping, not host networking: the qualifier verifies the container's identity,
-image digest and published endpoint. In the same shell, run:
+On an idle, dedicated Linux host with one RTX PRO 6000, working NVIDIA drivers,
+NVIDIA Container Toolkit, Docker and repo Python dependencies, use a separate
+checkout of the reviewed PR commit. Authenticate to GHCR through the existing
+credential mechanism if needed. Run the following in one Bash shell with the
+Pareton virtualenv active; `curl` and `jq` are also required:
 
 ```bash
-PRO6000_ENGINE_REF=$(python -c 'import json; print(json.load(open("fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json"))["base_image_digest"])')
-PRO6000_BASELINE_CONTAINER=pareton-pro6000-baseline  # actual running container name
-PRO6000_QUALIFICATION_DIR=$(mktemp -d /var/tmp/pareton-pro6000-qualification-XXXXXX)
+set -euo pipefail
+umask 077
+export PRO6000_FIELDS=fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json
+export PRO6000_RUN_DIR=$(mktemp -d /var/tmp/pareton-pro6000-XXXXXX)
+export PRO6000_ENGINE_REF=$(python -c 'import json,os; print(json.load(open(os.environ["PRO6000_FIELDS"]))["base_image_digest"])')
+export PRO6000_BASELINE_CONTAINER="$(basename "$PRO6000_RUN_DIR")-qualification"
+export PRO6000_QUAL_NET="$(basename "$PRO6000_RUN_DIR")-network"
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+nvidia-smi --query-gpu=name,memory.total --format=csv
+# Verify this is the intended idle RTX PRO 6000 before proceeding.
+docker pull "$PRO6000_ENGINE_REF"
+docker network create --internal "$PRO6000_QUAL_NET"
+```
+
+Retain `PRO6000_RUN_DIR` and its evidence. On interruption, stop/remove only the
+named qualification container and network from this run; do not prune shared
+Docker or build caches.
+
+#### 2. Start the exact baseline and qualify a fresh source pool
+
+This stages the immutable weights on the host, mounts them read-only, and starts
+SGLang with the fixture's arguments. The qualifier needs a published loopback
+port; host networking is unsupported. Ensure port 30000 is free.
+
+```bash
+python - <<'PYTHON'
+import json, os, subprocess
+from pathlib import Path
+from bench.schemas import ModelSpec
+from bench.weights import stage_weights
+
+fields = json.loads(Path(os.environ["PRO6000_FIELDS"]).read_text())
+bench = fields["bench"]
+model = bench["model"]
+assert fields["base_image_digest"] == bench["baseline_engine_image_digest"]
+staged = stage_weights(ModelSpec.from_dict(model))
+args = ["--model-path", "/model", "--dtype", model["dtype"],
+        "--quantization", model["quantization"], *bench["serve_args"],
+        "--host", "0.0.0.0", "--port", "30000"]
+subprocess.run([
+    "docker", "run", "-d", "--name", os.environ["PRO6000_BASELINE_CONTAINER"],
+    "--gpus", "device=0", "--ipc", "host", "--shm-size", "16g",
+    "--network", os.environ["PRO6000_QUAL_NET"],
+    "-p", "127.0.0.1:30000:30000", "-v", f"{staged.path}:/model:ro",
+    "-e", "HF_HUB_OFFLINE=1", "-e", "TRANSFORMERS_OFFLINE=1",
+    "--entrypoint", "python3", os.environ["PRO6000_ENGINE_REF"],
+    "-m", "sglang.launch_server", *args,
+], check=True)
+PYTHON
+PRO6000_HEALTH_DEADLINE=$((SECONDS + PARETON_BENCH_HEALTH_TIMEOUT_S))
+until curl -fsS http://127.0.0.1:30000/v1/models > "$PRO6000_RUN_DIR/models.json"; do
+  if (( SECONDS >= PRO6000_HEALTH_DEADLINE )); then
+    docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/startup.log" 2>&1
+    echo 'Baseline health timeout; inspect startup.log before retrying.' >&2
+    exit 1
+  fi
+  sleep 5
+done
 python -m bench.qualify_longform \
-  --campaign-fields fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json \
+  --campaign-fields "$PRO6000_FIELDS" \
   --base-url http://127.0.0.1:30000 \
-  --container "$PRO6000_BASELINE_CONTAINER" \
-  --engine-ref "$PRO6000_ENGINE_REF" \
-  --output-dir "$PRO6000_QUALIFICATION_DIR" \
-  --pool-size 64 --repetitions 2 --concurrency 4
+  --container "$PRO6000_BASELINE_CONTAINER" --engine-ref "$PRO6000_ENGINE_REF" \
+  --output-dir "$PRO6000_RUN_DIR/qualification" \
+  --pool-size 64 --repetitions 2 --concurrency 4 --timeout 600
+docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/qualification-container.log" 2>&1
+docker stop "$PRO6000_BASELINE_CONTAINER"
+docker rm "$PRO6000_BASELINE_CONTAINER"
+docker network rm "$PRO6000_QUAL_NET"
 ```
 
-The qualifier writes `sampling_rule.json` and evidence into the fresh output
-directory. Its `--concurrency 4` controls pool qualification only; it does not
-set the scored replay's concurrency. The command above works with the interim
-v4 fixture; after the #187 migration, rerun it with the final v5 fixture and
-follow #187's full shadow-round procedure. Earlier v4 receipts do not qualify v5.
+`qualification/sampling_rule.json` is the qualified output to use below. The
+qualifier's `--concurrency 4` controls source screening; the fixture's separate
+`request_concurrency: 4` controls scored replay. Do not use an old pool or modify
+its qualified settings. Failed qualification must be investigated and rerun into
+a fresh directory, without relaxing correctness or privacy implicitly.
 
-Only after the C4 migration, fresh qualification, and full GPU round including
-the trusted scorer succeed, configure `PARETON_DATABASE_URL` and the explicit
-initial fee, then seed a new campaign using the qualified output:
+#### 3. Generate the C4 trace and a worker-derived shadow request
+
+Use an unchanged baseline as the candidate to validate the complete harness
+before opening. The stock `ops/sglang-sample-round/run.sh` is TP4/NVFP4-specific
+and must not be used for this campaign. CPU preview below reproduces the sampled
+trace from its receipt, but does not replace GPU validation.
 
 ```bash
-bash -n ops/seed-sglang-qwen38-27b-pro6000.sh
-ops/seed-sglang-qwen38-27b-pro6000.sh \
-  "$PRO6000_ENGINE_REF" "$INITIAL_FEE_TAO" \
-  "$PRO6000_QUALIFICATION_DIR/sampling_rule.json"
+python -m bench.preview_longform \
+  --campaign-fields "$PRO6000_FIELDS" \
+  --sampling-rule "$PRO6000_RUN_DIR/qualification/sampling_rule.json" \
+  --output-dir "$PRO6000_RUN_DIR/preview"
+python - <<'PYTHON'
+import json, os
+from pathlib import Path
+from types import SimpleNamespace
+from uuid import uuid4
+from bench.longform import require_qualification
+from bench.sampler import parse_sampling_rule
+from bench.validate import load_workload_trace, sha256_file
+from campaign.models import SLA
+from worker.round_job import build_round_request
+
+root = Path(os.environ["PRO6000_RUN_DIR"]).resolve()
+fields = json.loads(Path(os.environ["PRO6000_FIELDS"]).read_text())
+rule = parse_sampling_rule(json.loads((root / "qualification/sampling_rule.json").read_text()))
+require_qualification(rule, fields["bench"], fields["engine"])
+assert rule["algo_version"] == 5 and rule["request_concurrency"] == 4
+assert rule["n_prompts"] == 32 and rule["request_timeout_s"] == 600
+assert fields["patch_visibility"] == {"mode": "private"}
+trace = root / "preview/workload_trace.json"
+trace_hash = sha256_file(trace)
+parsed_trace = load_workload_trace(trace, expected_sha256=trace_hash)
+assert len(parsed_trace.requests) == 32
+assert parsed_trace.meta.sampling["request_concurrency"] == 4
+campaign = SimpleNamespace(bench=fields["bench"], engine=fields["engine"],
+                           sla=SLA.from_dict(fields["sla"]))
+engine_ref = fields["bench"]["baseline_engine_image_digest"]
+request = build_round_request(
+    {"gpu_sku": fields["gpu_skus"][0], "sampled_trace_sha256": trace_hash,
+     "scoring_rule": fields["scoring_rule"]}, campaign,
+    [{"role": "baseline", "engine_image_ref": engine_ref},
+     {"role": "challenger", "engine_image_ref": engine_ref}],
+    task_id=str(uuid4()), trace_path=str(trace),
+)
+(root / "bench_request.json").write_text(json.dumps(request, indent=2) + "\n")
+PYTHON
+python -m bench --request "$PRO6000_RUN_DIR/bench_request.json" \
+  --output-dir "$PRO6000_RUN_DIR/shadow"
+jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
 ```
 
-The helper preserves the supplied qualified rule unchanged. No TP4 memory
-fractions or qualification receipts are copied. The scorer inherits this
-campaign's flags with the harness's context headroom and logprob settings.
-Validate any required memory adjustment in both the helper and fixture before
-qualification. The 262144 context setting does not make LongWriter a full-context
-or multimodal test. Image reuse does not reuse TP4 performance or correctness
-qualification.
+Inspect the complete report and retained evidence, not just process exit status:
+unchanged candidate must be scored, baseline/candidate correctness must pass,
+all four tiers must survive exclusions, and drift/repeatability gates must pass.
+Review `evidence/correctness/baseline_exclusions.json`, queue-inclusive tier times,
+the 0.25 weights, failure deduction, natural output lengths and observed C4
+occupancy (allowing exclusions and final drain). Both baseline runs establish
+exclusions before the candidate; they are not extra qualification starts.
+Verify GPU count, peak VRAM, scorer headroom and cleanup. Confirm the existing
+nonempty offline miner-build/native-probe checks for the reused engine; baseline
+self-comparison alone does not prove that changed CUDA/Rust kernels execute.
+If serving or memory settings change, update both helper and fixture and restart
+qualification. Preserve all evidence under this run directory.
+
+#### 4. Seed once on the configured controller, then verify
+
+Only after deployment checks, qualification and shadow validation pass, transfer
+`qualification/sampling_rule.json` and its evidence to owner-only storage on the
+controller. Load its existing protected environment and activate its virtualenv.
+Set the path below to the transferred qualified file, and use the reviewed
+checkout whose fixture matches the GPU run. **This command creates an open row**;
+do not seed a draft first or rerun it to change a fee.
+
+```bash
+cd /opt/pareton
+source .venv/bin/activate
+set -a
+source .env
+set +a
+umask 077
+PRO6000_QUALIFIED_RULE=/absolute/path/to/pro6000-qualification/sampling_rule.json
+PRO6000_ENGINE_REF=$(python -c 'import json; print(json.load(open("fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json"))["base_image_digest"])')
+bash ops/seed-sglang-qwen38-27b-pro6000.sh \
+  "$PRO6000_ENGINE_REF" "$PRO6000_QUALIFIED_RULE"
+read -r -p 'New campaign UUID printed by seed: ' PRO6000_CAMPAIGN_ID
+curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" \
+  > /tmp/pro6000-campaign-readback.json
+jq -e '
+  .status == "open" and .patch_visibility == {"mode":"private"} and
+  .sampling_rule.algo_version == 5 and .sampling_rule.n_prompts == 32 and
+  .sampling_rule.request_concurrency == 4 and .sampling_rule.request_timeout_s == 600 and
+  .scoring_rule.name == "weighted_tier_completion_speedup" and
+  .scoring_rule.tier_weights == {"2k":0.25,"4k":0.25,"8k":0.25,"16k":0.25} and
+  .scoring_rule.failure_penalty == 0.1 and .submission_fee.amount_tao == "0.1" and
+  .gpu_skus == ["RTXPRO6000"] and .bench.gpu_count == 1
+' /tmp/pro6000-campaign-readback.json
+```
+
+Also compare both image digests, source/model revisions, serving arguments,
+correctness thresholds, natural-EOS policy, emissions, block-zero initial fee
+history/recipient and signoff against the reviewed pins. Inspect the first live
+report and frontend C4/tier display. For a real submission, verify the scoped
+`patch-availability` response remains private with no download location and the
+`patch` route returns 403 `patch_private`, including after a finalized evaluation.
+Do not change this campaign to `public_after_reveal`; privacy is mutable outside
+`manifest_hash`, so monitor the operational policy separately. Existing campaigns
+and their signed contracts remain unchanged.
 
 ### Correctness scorer memory
 
