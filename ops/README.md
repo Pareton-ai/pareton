@@ -69,6 +69,12 @@ dtype, FP8 quantization, 262144 context, and SGLang
 `qwen3_coder` tool parsing, `qwen3` reasoning parsing, data-parallel multimodal
 encoding, and EAGLE with three steps, top-k one and four draft tokens.
 
+The operator reports a successful run of the [#189 diagnostic](https://github.com/Pareton-ai/pareton/pull/189)
+with generation memory fraction `0.80` and scorer fraction `0.60`. These are now
+pinned as `--mem-fraction-static` in `bench.serve_args` and
+`bench.correctness.serve_args`, respectively. The diagnostic does not replace
+fresh qualification and a complete shadow round for this v5 C4 contract.
+
 Both image fields reuse the original campaign's finished Pareton engine:
 `ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431`.
 This is `engine_image`, not the bootstrap `build_base_image`. No target-GPU build

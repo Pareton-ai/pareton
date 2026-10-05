@@ -289,8 +289,20 @@ def test_pro6000_launch_helper_preserves_fp8_tp1_args_through_worker(
     parsed = validate_bench_request_dict(request)
     assert request["hardware"]["gpu_count"] == 1
     assert request["hardware"]["gpu_sku_expected"] == "RTXPRO6000"
-    for start in plan_round_starts(parsed.engines):
+    assert parsed.correctness.serve_args == ["--mem-fraction-static", "0.60"]
+    for start in plan_round_starts(
+        parsed.engines, correctness_serve_args=parsed.correctness.serve_args
+    ):
         args = start.spec.serve_args
+        memory_fractions = [
+            args[i + 1]
+            for i, flag in enumerate(args)
+            if flag == "--mem-fraction-static"
+        ]
+        # Scorer overrides follow inherited generation flags; argparse uses the last.
+        assert memory_fractions == (
+            ["0.80", "0.60"] if start.kind == "scorer" else ["0.80"]
+        )
         for flag, value in (
             ("--tp", "1"),
             ("--max-running-requests", "32"),

@@ -50,7 +50,9 @@ python -m campaign.seed \
   --bench-serve-args=--speculative-num-steps --bench-serve-args=3 \
   --bench-serve-args=--speculative-eagle-topk --bench-serve-args=1 \
   --bench-serve-args=--speculative-num-draft-tokens --bench-serve-args=4 \
+  --bench-serve-args=--mem-fraction-static --bench-serve-args=0.80 \
   --bench-correctness-num-prompts 32 \
+  --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.60 \
   --bench-correctness-min-mean-logprob=-4 \
   --bench-correctness-min-token-logprob=-16 \
   --bench-correctness-min-token-quantile=0.001 \
