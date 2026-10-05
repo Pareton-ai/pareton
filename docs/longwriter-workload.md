@@ -27,7 +27,7 @@ configured in the seed helper. Version 5 retires `request_interval_ms` and requi
 `request_concurrency` (1, 2, 4, 8, 16 or 32). The fixture uses C32.
 V5 also resolves `request_timeout_s` to 600 seconds by default (explicit in the
 fixture), a finite positive campaign setting bound to the manifest, qualification
-hash, receipt and trace. All in-round qualification, warmup and measured requests
+hash, receipt and trace. All in-round warmup and measured requests
 use this absolute deadline from slot admission. Client queue waiting still counts
 in tier completion time. Choose the budget on the target hardware before launch;
 600 seconds is an operator default, not a measured throughput guarantee. Legacy
@@ -47,19 +47,18 @@ sampled order within a tier. A shared FIFO refills a slot on valid stream
 termination, until no requests remain. Groups never overlap. With eight requests
 per tier, C8/C16/C32 are full-group bursts, not sustained concurrency trials.
 
-Two baseline qualification starts inspect natural outputs and union exclusions
-from every measured repetition before either scored reference, leader, or
-challenger runs. The original trace contains eight requests per tier; the eligible
-set may be smaller. Existing exclusion limits remain, and every tier must retain
-at least one request. Excluded requests are never dispatched in scored runs.
-Both scored baseline references are measured anew on the eligible workload; a further baseline failure invalidates the round rather than removing
-more work. In all-mode, the scorer checks every eligible natural output and its repetitions. There are `5 + candidates` engine
-starts in all-mode (two qualification, two measured reference, candidates, scorer).
-Warmup policy and prefix-cache reuse remain the same for each timed engine.
+The existing baseline and baseline-drift runs inspect natural outputs and union
+short/degenerate prompt exclusions before the leader or challengers run. Both
+baselines replay the original trace. Retained baseline tier durations use those
+runs' recorded group starts and retained request completions. Candidates replay
+only the retained set, which must leave every tier nonempty. No extra baseline
+starts are added: all-mode uses `3 + candidates` starts, including the shared
+scorer. A leader plus five challengers therefore uses eight benchmark stages and
+one scorer. Warmup and repetition settings remain unchanged.
 
-`evidence/sla_bench/eligible_workload.json` records excluded IDs, reasons, group
-membership, and actual timed requests. Its SHA-256 travels with each scored
-engine result. Requested/effective concurrency, observed slot occupancy, group
+`evidence/correctness/baseline_exclusions.json` records excluded IDs and reasons.
+The same retained set applies to both reference scores and every candidate;
+candidate failures cannot remove requests from it. Requested/effective concurrency, observed slot occupancy, group
 start, admission, dispatch, last-choice, protocol completion and slot release are
 recorded separately. A C32 workload with 29 survivors has effective concurrency
 29. No duplicates or unqualified replacement requests are inserted.
@@ -227,12 +226,12 @@ bash ops/sglang-sample-round/run.sh \
 
 The standalone runner uses the fixture's published baseline image. Qualify that
 same image when using this runner. Inspect `bench_report.json` and its evidence.
-Both natural-output baseline qualification runs finish before the measured
-baseline and candidate runs. If any qualification repetition is short or
+Baseline and baseline-drift finish before leader and candidate runs. If any
+baseline repetition is short or
 repetitive, exclude that prompt from correctness and performance scoring for
 every candidate. Up to eight unique prompts may be excluded across both runs;
 a ninth exclusion or an empty retained tier fails the round as a baseline
-workload error. The eligible workload then stays frozen for the measured runs,
+workload error. The eligible workload then stays frozen for leader and candidate runs,
 which enforce the 90% output minimum, correctness and complete-tier timing.
 
 ## Open the campaign

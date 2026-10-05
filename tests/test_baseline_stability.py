@@ -218,10 +218,7 @@ def test_empty_correctness_subset_aborts_before_candidates(
     )
 
 
-@pytest.mark.parametrize("version", [2, 3])
-def test_round_plan_marker_survives_teardown_without_stale_engine_fields(
-    monkeypatch, version
-):
+def test_round_plan_marker_survives_teardown_without_stale_engine_fields(monkeypatch):
     from worker.round_job import _round_phase_writer
 
     writes = []
@@ -233,7 +230,7 @@ def test_round_plan_marker_survives_teardown_without_stale_engine_fields(
         job_id=1,
         attempt=1,
         phase="sla_bench",
-        progress={"plan_version": version, "role": "baseline-drift", "step": 2},
+        progress={"plan_version": 2, "role": "baseline-drift", "step": 2},
     )
     write(job_id=1, attempt=1, phase="teardown")
-    assert writes[-1]["progress"] == {"plan_version": version}
+    assert writes[-1]["progress"] == {"plan_version": 2}

@@ -429,7 +429,7 @@ def test_v5_receipt_roundtrip_and_old_rule_unchanged(tmp_path):
         parse_sampling_rule({**old, "request_concurrency": 4})
 
 
-def test_baseline_exclusions_frozen_before_scored_runs(monkeypatch, tmp_path):
+def test_baseline_exclusions_union_before_candidates(monkeypatch, tmp_path):
     from test_bench_cli import SAMPLE_REQUEST
 
     from bench import main as bm
@@ -462,18 +462,46 @@ def test_baseline_exclusions_frozen_before_scored_runs(monkeypatch, tmp_path):
             yield start.role
 
     def replay(url, *, requests, **kwargs):
+        from bench.sla_bench import EngineReplay
+
         assert kwargs["request_timeout_s"] == 480
         calls.append((url, list(requests)))
-        return SimpleNamespace(
-            result=SimpleNamespace(role=url, timings={}, cross_rep_variance={}),
-            excluded_prompts={},
+        rows = []
+        for rep in range(1, req.sla_bench.repetitions + 1):
+            rep_rows = [
+                {
+                    "request_id": r.id,
+                    "rep": rep,
+                    "input_length_group": r.input_length_group,
+                    "group_start_offset_ms": 20000 * TIERS.index(r.input_length_group),
+                    "protocol_completion_offset_ms": 20000
+                    * TIERS.index(r.input_length_group)
+                    + (90000 if r.id in {"2k-0", "4k-0"} else 10000),
+                }
+                for r in requests
+            ]
+            path = layout.sla_bench_dir / url / f"rep_{rep}" / "requests.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(json.dumps(row) for row in rep_rows))
+            rows.extend(rep_rows)
+        return EngineReplay(
+            SimpleNamespace(
+                role=url,
+                timings={r.id: timings()[r.id] for r in requests},
+                tier_completion=tier_completion_metrics(
+                    rows, req.sla_bench.repetitions
+                ),
+                cross_rep_variance={},
+            ),
+            {},
+            {},
         )
 
     def drops(trace, replay, *, dropped):
         result = dict(dropped)
-        if replay.result.role == "qualification-1":
+        if replay.result.role == "baseline":
             result["2k-0"] = "degenerate"
-        if replay.result.role == "qualification-2":
+        if replay.result.role == "baseline-drift":
             result["4k-0"] = "degenerate"
         return result
 
@@ -482,20 +510,12 @@ def test_baseline_exclusions_frozen_before_scored_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "bench.workload_preflight.validate_engine_workload", lambda *a, **kw: None
     )
-    # run_round replaces the baseline dataclass to attach exclusion evidence.
-    from bench.sla_bench import EngineReplay
-
-    def replay_dataclass(url, **kwargs):
-        result = replay(url, **kwargs)
-        return EngineReplay(result.result, {}, {})
-
-    monkeypatch.setattr(bm, "run_sla_engine", replay_dataclass)
     layout = OutputLayout(tmp_path)
     layout.prepare()
-    bm.run_round(req=req, provider=Provider(), prompts=[], trace=trace, layout=layout)
-    assert [role for role, _ in calls[:4]] == [
-        "qualification-1",
-        "qualification-2",
+    baseline, drift, _, _ = bm.run_round(
+        req=req, provider=Provider(), prompts=[], trace=trace, layout=layout
+    )
+    assert [role for role, _ in calls[:2]] == [
         "baseline",
         "baseline-drift",
     ]
@@ -506,8 +526,17 @@ def test_baseline_exclusions_frozen_before_scored_runs(monkeypatch, tmp_path):
         for _, rs in calls[2:]
         for r in rs
     )
-    frozen = json.loads((layout.sla_bench_dir / "eligible_workload.json").read_text())
-    assert set(frozen["excluded_prompts"]) == {"2k-0", "4k-0"}
+    assert baseline.excluded_prompts == {"2k-0": "degenerate", "4k-0": "degenerate"}
+    assert bm.baseline_drift(req, baseline, drift) == 0
+    for reference in (baseline, drift):
+        assert len(reference.result.timings) == 30
+        assert all(
+            t["completion_s"] == 10 for t in reference.result.tier_completion.values()
+        )
+        assert all(
+            not set(t["request_ids"]) & {"2k-0", "4k-0"}
+            for t in reference.result.tier_completion.values()
+        )
 
 
 @pytest.mark.parametrize("c", [1, 4, 8, 16, 32])
@@ -618,6 +647,8 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
     monkeypatch.setattr(_Handler, "_write_sse", write_output)
 
     raw = json.loads(SAMPLE_REQUEST.read_text())
+    raw["engines"]["candidates"] = [raw["engines"]["candidates"][0]] * 6
+    raw["leader_candidate_index"] = 0
     raw["scoring_rule"] = {"name": WEIGHTED_RULE, "failure_penalty": 0.1}
     raw["sla_bench"]["repetitions"] = 1
     req = BenchRequest.from_dict(raw)
@@ -653,13 +684,12 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
     baseline, drift, runs, correctness = bm.run_round(
         req=req, provider=Provider(), prompts=[], trace=trace, layout=layout
     )
-    assert starts[:4] == [
-        "qualification-1",
-        "qualification-2",
+    assert starts == [
         "baseline",
         "baseline-drift",
+        *[f"candidate-{i}" for i in range(6)],
+        "scorer",
     ]
-    assert starts[-1] == "scorer"
     assert (layout.correctness_dir / "baseline.jsonl").is_file()
     assert all(report.verdict == "pass" for report in correctness.values())
     entries = bm._build_entries(
@@ -679,14 +709,6 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
             for o in baseline.result.concurrency_observations
         )
     assert entries[0].score_report["score_breakdown"]["failure_penalty"] == 0.1
-    assert (
-        entries[0].sla.eligible_workload_sha256
-        == baseline.result.eligible_workload_sha256
-    )
-    assert (
-        drift.result.eligible_workload_sha256
-        == baseline.result.eligible_workload_sha256
-    )
     assert all(t.completion_tokens == 2 for t in baseline.result.timings.values())
 
 

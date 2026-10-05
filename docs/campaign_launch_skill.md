@@ -272,13 +272,12 @@ SGLang omits tensor-parallel arguments or uses another accepted alias.
 
 Generate a trace with `bench.sampler.sample_workload` and the campaign's pinned
 sampling rule. Run the same trace against the baseline and candidate. For a new
-v5 campaign, run the full plan: two natural-output baseline qualification starts,
-freeze the eligible workload, two measured baseline references,
-leader/candidate streaming replays, then shared correctness scoring. There are
-`5 + candidates` engine starts in all-mode. Existing v1-v4 campaigns retain their
-own replay contract; do not run the v5 plan against their saved workloads.
-Verify `/v1/models`, streamed token counts, scoring coverage and cleanup.
-The model mount is `/model`; do not let the engine fetch a default model.
+v5 campaign, run baseline and baseline-drift before the leader and challengers,
+then the shared scorer. The two existing baseline runs establish exclusions;
+there are no additional qualification starts. All-mode uses `3 + candidates`
+engine starts: nine for a leader plus five challengers, including the scorer.
+Existing campaigns retain their replay contract. Verify `/v1/models`, streamed
+token counts, scoring coverage and cleanup.
 
 For an explicit SGLang `--context-length`, the scorer alone reserves seven extra
 context slots. At this pin, the scheduler requires input length strictly below
@@ -363,7 +362,7 @@ The launch helper is a template for a new campaign on four RTX 5090 GPUs using
 `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` and a 262144-token context. It pins
 `algo_version: 5`, `request_concurrency: 32` and
 `request_timeout_s: 600`. The timeout is an absolute per-request deadline from
-slot admission, shared by both natural qualification starts and all measured
+slot admission, shared by both baseline runs and all measured
 replays. Pin it before qualification and validate it on the target hardware;
 existing campaigns keep their historical timeout behavior.
 `request_interval_ms` is rejected for v5; it remains valid for older campaigns.
@@ -380,11 +379,11 @@ FIFO admission and slot refill continue until each group drains. Exclusions and
 final drain can lower actual occupancy; no duplicate requests fill empty slots.
 
 Thinking is disabled. Source-pool qualification and both in-round baseline
-qualification starts use normal EOS with a 5120-token ceiling and a 3000-token
+runs use normal EOS with a 5120-token ceiling and a 3000-token
 minimum. They do not force continuation. Union short/degenerate exclusions across
-both in-round qualification starts before leader or candidate execution; allow
+baseline and baseline-drift before leader or candidate execution; allow
 at most eight excluded request IDs and require every tier to remain nonempty.
-Freeze and hash the remaining workload. Measured baseline, leader and candidate
+Freeze the remaining request set before leader and candidate execution. All
 replays retain normal EOS and the same 5120-token ceiling. Candidates must emit
 at least 90% of the measured baseline's reported token count per eligible request.
 Correctness checks cover natural outputs and their repetitions.
@@ -565,7 +564,7 @@ bash ops/sglang-sample-round/run.sh \
 The standalone runner is pinned to the stock Qwen fixture. A different new model,
 image, hardware topology or serving configuration needs a matching qualified
 rule and worker-generated request, not a substituted digest in this command.
-Review qualified outputs, `eligible_workload.json`, all four tier timings and
+Review baseline outputs, `baseline_exclusions.json`, all four tier timings and
 weights, baseline/candidate gates, observed occupancy and the failure deduction.
 Retain the new artifacts separately from the existing campaign's evidence.
 

@@ -684,6 +684,17 @@ def _output_samples(rows: list[dict]) -> dict[str, tuple[str, ...]]:
     return {request_id: tuple(samples) for request_id, samples in by_id.items()}
 
 
+def read_replay_rows(base: Path, repetitions: int) -> list[dict]:
+    """Read measured request evidence, excluding repetition metadata."""
+    rows = (
+        json.loads(line)
+        for path in _rep_dir_paths(base, repetitions)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    )
+    return [row for row in rows if not row.get("_rep_meta")]
+
+
 def _rep_dir_paths(base: Path, repetitions: int) -> list[Path]:
     return [base / f"rep_{n}" / REQUESTS_FILENAME for n in range(1, repetitions + 1)]
 
@@ -762,14 +773,7 @@ def run_sla_engine(
     tiers = None
     if request_concurrency is not None:
         tiers = tier_completion_metrics(measured, cfg.repetitions)
-        persisted = []
-        for path in _rep_dir_paths(engine_evidence_dir, cfg.repetitions):
-            persisted.extend(
-                json.loads(line)
-                for line in path.read_text().splitlines()
-                if line.strip()
-            )
-        persisted = [r for r in persisted if not r.get("_rep_meta")]
+        persisted = read_replay_rows(engine_evidence_dir, cfg.repetitions)
         if tier_completion_metrics(persisted, cfg.repetitions) != tiers:
             raise EngineError("tier completion evidence does not reproduce metrics")
         cross_rep_variance["tier_completion_max_rel_range"] = max(
