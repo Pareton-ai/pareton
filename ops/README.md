@@ -40,7 +40,7 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ## A merge to `main` is a production deploy
 
-### RTX PRO 6000 Qwen3.8 FP8 campaign (draft)
+### RTX PRO 6000 Qwen3.8 FP8 campaign
 
 This new campaign uses the merged #186 privacy policy and #187 v5 contract:
 
@@ -86,8 +86,8 @@ multimodal benchmark.
 
 #### 1. Deployment and host prerequisites
 
-Keep this PR draft until target-GPU qualification and a complete shadow round
-pass. These are operator instructions, not evidence that deployment or launch has
+Before launching the campaign, complete target-GPU qualification and a full
+shadow round. These are operator instructions, not evidence that deployment or launch has
 occurred. Use the updated [campaign launch skill](../docs/campaign_launch_skill.md).
 Verify the deployed API/workers contain #186, #187 and this PR, the fee-history
 and `20261001_campaign_patch_visibility.sql` migrations are applied, and compatible
