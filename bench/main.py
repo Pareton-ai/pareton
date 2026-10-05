@@ -989,6 +989,20 @@ def _build_entries(
             continue
 
         corr = correctness.get(run.index)
+        if (
+            getattr(req, "scoring_rule", {}).get("name") == WEIGHTED_RULE
+            and corr is None
+        ):
+            entries.append(
+                RoundEntryReport(
+                    index=run.index,
+                    image_digest=digest,
+                    status="infra_failed",
+                    sla=run.replay.result,
+                    reason="v5 scoring requires trusted output verification",
+                )
+            )
+            continue
         if corr is not None and corr.verdict == "infra_failed":
             entries.append(
                 RoundEntryReport(

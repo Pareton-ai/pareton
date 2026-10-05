@@ -387,6 +387,9 @@ at most eight excluded request IDs and require every tier to remain nonempty.
 Freeze and hash the remaining workload. Measured baseline, leader and candidate
 replays then enforce exactly 3000 output tokens with `ignore_eos=true`. Every
 eligible request/repetition receives strict checks without forced-tail exemptions.
+The trusted scorer must independently tokenize every measured repetition's output
+without adding special tokens and verify the claimed fixed token count. Review
+`token_count_checks` in correctness evidence; mismatches disqualify candidates.
 Candidate-specific failures never remove requests from the eligible set.
 
 Pair v5 with `weighted_tier_completion_speedup`. Pin `tier_weights` in the scoring

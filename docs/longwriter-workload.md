@@ -99,6 +99,14 @@ establish completion; unavailable aligned-token timings do not count as failures
 The scorer also accepts batched-token baseline references. Rows mark unavailable
 per-token timing and concurrency observations list affected request IDs. These
 requests cannot establish diagnostic ITL goodput; no per-token gaps are invented.
+Before v5 speed credit, the separate trusted scorer tokenizes every measured
+output repetition with `add_special_tokens=false` and compares its visible output
+count with the claimed fixed budget. This excludes prompt/BOS/EOS additions and
+does not depend on SSE chunk sizes or candidate tokenization. A mismatch is a hard
+correctness failure, with claimed/trusted counts recorded per repetition; it
+cannot remove work or earn a partial score. An invalid baseline reference voids
+the round. Tokenizer errors leave the entry unscored. V5 timing-only runs without
+trusted correctness verification cannot produce eligible scores.
 Output correctness, absolute deadlines and tier-completion scoring still apply.
 
 The penalty counts each failed ID once, not repetitions, and excludes trusted

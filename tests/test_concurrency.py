@@ -567,9 +567,11 @@ def test_reference_drift_cannot_cancel_between_tiers():
     assert baseline_drift(req, baseline, drift) == 0.5
 
 
-@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(
+    "batched,forged", [(False, False), (True, False), (True, True)]
+)
 def test_full_v5_round_scores_fixed_work_and_verifies_baseline(
-    monkeypatch, tmp_path, batched
+    monkeypatch, tmp_path, batched, forged
 ):
     from test_bench_cli import SAMPLE_REQUEST
 
@@ -589,6 +591,8 @@ def test_full_v5_round_scores_fixed_work_and_verifies_baseline(
             )
             if "usage" in chunk:
                 chunk["choices"][0]["text"] = handler.pending_text
+                if forged and handler.server.cfg.model.startswith("candidate-"):
+                    chunk["choices"][0]["text"] = "OK"  # one token, still claims two
                 write_sse(handler, chunk)
 
         monkeypatch.setattr(_Handler, "_write_sse", write_batch)
@@ -638,7 +642,10 @@ def test_full_v5_round_scores_fixed_work_and_verifies_baseline(
     ]
     assert starts[-1] == "scorer"
     assert (layout.correctness_dir / "baseline.jsonl").is_file()
-    assert all(report.verdict == "pass" for report in correctness.values())
+    assert all(
+        report.verdict == ("fail_correctness" if forged else "pass")
+        for report in correctness.values()
+    )
     entries = bm._build_entries(
         req=req,
         baseline=baseline,
@@ -646,6 +653,23 @@ def test_full_v5_round_scores_fixed_work_and_verifies_baseline(
         correctness=correctness,
         digests=[],
         mock_engine=True,
+    )
+    if forged:
+        assert entries and all(
+            entry.status == "disqualified" and entry.score is None for entry in entries
+        )
+        assert all("output token count mismatch" in entry.reason for entry in entries)
+        return
+    unverified = bm._build_entries(
+        req=req,
+        baseline=baseline,
+        runs=runs,
+        correctness={},
+        digests=[],
+        mock_engine=True,
+    )
+    assert all(
+        entry.status == "infra_failed" and entry.score is None for entry in unverified
     )
     assert entries and all(entry.status == "scored" for entry in entries)
     assert entries[0].score_report["score_breakdown"]["failed_requests"] == 0
@@ -670,14 +694,15 @@ def test_full_v5_round_scores_fixed_work_and_verifies_baseline(
 def test_fixed_budget_checks_degenerate_sibling_repetitions(tmp_path):
     from dataclasses import replace
 
-    from test_correctness import LOOP_TEXT, PROSE_TEXT, _captured, _cfg
+    from test_correctness import PROSE_TEXT, _captured, _cfg
 
     from bench.correctness import grade_candidate
-    from bench.mock_engine import MockEngine, MockEngineConfig
+    from bench.mock_engine import MockEngine, MockEngineConfig, mock_tokenize
 
+    n = len(mock_tokenize(PROSE_TEXT))
     output = replace(
-        _captured("r1", "Hello world", PROSE_TEXT, ignore_eos=True),
-        output_samples=(PROSE_TEXT, LOOP_TEXT),
+        _captured("r1", "Hello world", PROSE_TEXT, tokens=n, ignore_eos=True),
+        output_samples=(PROSE_TEXT, " ".join(["loop"] * n)),
     )
     with MockEngine(MockEngineConfig(model="scorer")) as scorer:
         report = grade_candidate(
@@ -740,3 +765,100 @@ def test_long_completion_uses_configured_absolute_deadline(
     else:
         with pytest.raises(EngineError, match="absolute deadline"):
             complete()
+
+
+@pytest.mark.parametrize("sibling", [False, True])
+def test_fixed_output_rejects_inflated_usage_and_short_sibling(tmp_path, sibling):
+    from dataclasses import replace
+
+    from test_correctness import _cfg
+
+    from bench.correctness import CapturedOutput, grade_candidate
+    from bench.mock_engine import MockEngine, MockEngineConfig
+
+    short = " ".join(f"word{i}" for i in range(300))
+    full = " ".join(f"word{i}" for i in range(3000))
+    selected = full if sibling else short
+    output = CapturedOutput(
+        "forged",
+        "Question: ",
+        selected,
+        3000,
+        True,
+        (full, short, full) if sibling else (short,),
+    )
+    with MockEngine(
+        MockEngineConfig(model="trusted-scorer", logprob_slope=0)
+    ) as scorer:
+        report = grade_candidate(
+            scorer.base_url,
+            [output],
+            cfg=_cfg(num_prompts=1),
+            evidence_path=tmp_path / "forged.jsonl",
+            strict_fixed_output=True,
+        )
+        # The same short text clears the existing likelihood/repetition checks.
+        if not sibling:
+            legacy = grade_candidate(
+                scorer.base_url,
+                [replace(output, ignore_eos=False)],
+                cfg=_cfg(num_prompts=1),
+                evidence_path=tmp_path / "legacy.jsonl",
+            )
+            assert legacy.verdict == "pass"
+    assert report.verdict == "fail_correctness"
+    assert "claimed 3000, trusted 300" in report.reason
+    evidence = json.loads((tmp_path / "forged.jsonl").read_text())
+    assert evidence["token_count_checks"][-1] == {
+        "rep": 2 if sibling else 1,
+        "claimed_tokens": 3000,
+        "trusted_tokens": 300,
+        "matches": False,
+    }
+    assert (
+        report.prompt_checks[0]["token_count_checks"] == evidence["token_count_checks"]
+    )
+
+
+@pytest.mark.parametrize("tokens", [None, [True], [-1]])
+def test_invalid_trusted_tokenization_never_scores(monkeypatch, tmp_path, tokens):
+    from test_correctness import _cfg
+
+    from bench.correctness import CapturedOutput, PendingCorrectness, grade_all
+    from bench.mock_engine import MockEngine, MockEngineConfig
+
+    monkeypatch.setattr(
+        "bench.correctness.post_json", lambda *a, **kw: {"tokens": tokens}
+    )
+    with MockEngine(MockEngineConfig(model="trusted-scorer")) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            [PendingCorrectness(0, [CapturedOutput("r", "prompt", "OK", 1)])],
+            cfg=_cfg(num_prompts=1),
+            evidence_dir=tmp_path,
+            strict_fixed_output=True,
+        )
+    assert reports[0].verdict == "infra_failed"
+    assert "invalid output token IDs" in reports[0].reason
+
+
+def test_tokenizer_failure_does_not_erase_known_degeneracy(monkeypatch, tmp_path):
+    from test_correctness import LOOP_TEXT, _captured, _cfg
+
+    from bench.correctness import PendingCorrectness, grade_all
+    from bench.mock_engine import MockEngine, MockEngineConfig
+
+    def unavailable(*args, **kwargs):
+        raise EngineError("trusted tokenizer unavailable")
+
+    monkeypatch.setattr("bench.correctness.post_json", unavailable)
+    with MockEngine(MockEngineConfig(model="scorer")) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            [PendingCorrectness(0, [_captured("r", "prompt", LOOP_TEXT)])],
+            cfg=_cfg(num_prompts=1),
+            evidence_dir=tmp_path,
+            strict_fixed_output=True,
+        )
+    assert reports[0].verdict == "fail_correctness"
+    assert "degenerate output" in reports[0].reason

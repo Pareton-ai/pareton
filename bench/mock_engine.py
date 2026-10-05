@@ -361,6 +361,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/tokenize":
+            req = self._read_json()
+            tokens = list(range(len(mock_tokenize(str(req["prompt"])))))
+            self._write_json(200, {"tokens": tokens})
+            return
         if path != "/v1/completions":
             self._write_json(404, {"error": {"message": f"not found: {path}"}})
             return
