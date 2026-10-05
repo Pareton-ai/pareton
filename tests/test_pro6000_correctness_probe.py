@@ -3,6 +3,8 @@
 import copy
 import json
 import runpy
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -480,11 +482,22 @@ def test_model_volume_copies_verifies_reuses_and_rewrites(tmp_path, monkeypatch)
     (source / "config.json").write_text("{}")
     volume = PROBE["DockerModelVolume"](tmp_path)
     calls = []
-    expected = {"config.json": PROBE["sha256_file"](source / "config.json")}
 
     def command(*args):
         calls.append(args)
-        return json.dumps(expected) if args[0] == "run" else ""
+        if args[0] == "run":
+            # Execute the actual container-side hashing code on a local fixture.
+            # A canned expected response would hide hash-format differences.
+            script = args[-1].replace(
+                "pathlib.Path('/model')", f"pathlib.Path({str(source)!r})"
+            )
+            return subprocess.run(
+                [sys.executable, "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        return ""
 
     monkeypatch.setattr(volume, "command", command)
     volume.prepare(source, "pinned-image")
@@ -523,5 +536,9 @@ def test_model_volume_rejects_mismatch_and_cleans_up(tmp_path, monkeypatch):
     with pytest.raises(EngineError, match="hashes differ"):
         volume.prepare(source, "image")
     assert volume.source is None
+    evidence = json.loads((tmp_path / "model_volume.json").read_text())
+    assert evidence["verified"] is False
+    assert evidence["missing"] == ["config.json"]
+    assert evidence["extra"] == evidence["mismatched"] == []
     volume.close()
     assert calls[-1] == ("volume", "rm", volume.name)

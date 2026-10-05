@@ -439,7 +439,7 @@ for path in sorted(root.rglob('*')):
         with path.open('rb') as stream:
             for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b''):
                 digest.update(chunk)
-        result[str(path.relative_to(root))] = digest.hexdigest()
+        result[str(path.relative_to(root))] = "sha256:" + digest.hexdigest()
 print(json.dumps(result))
 """
         actual = json.loads(
@@ -458,8 +458,30 @@ print(json.dumps(result))
             )
         )
         if actual != expected:
+            missing = sorted(expected.keys() - actual.keys())
+            extra = sorted(actual.keys() - expected.keys())
+            mismatched = sorted(
+                key
+                for key in expected.keys() & actual.keys()
+                if expected[key] != actual[key]
+            )
+            save(
+                self.root / "model_volume.json",
+                {
+                    "name": self.name,
+                    "source": str(source),
+                    "verified": False,
+                    "expected_sha256": expected,
+                    "actual_sha256": actual,
+                    "missing": missing,
+                    "extra": extra,
+                    "mismatched": mismatched,
+                },
+            )
             raise EngineError(
-                "Docker model volume file hashes differ from staged weights"
+                "Docker model volume file hashes differ from staged weights: "
+                f"{len(missing)} missing, {len(extra)} extra, "
+                f"{len(mismatched)} mismatched; see model_volume.json"
             )
         self.source = source
         save(
