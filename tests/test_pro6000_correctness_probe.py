@@ -574,7 +574,10 @@ def test_diagnostic_metrics_accept_no_gaps_without_claiming_goodput():
     ],
 )
 @pytest.mark.parametrize("processor", ["mimo_audio", "mimo_v2", "other_processor"])
-def test_log_review_known_warnings_preserves_real_failures(tmp_path, suffix, processor):
+@pytest.mark.parametrize("context_label", ["User-specified", "Target model's"])
+def test_log_review_known_warnings_preserves_real_failures(
+    tmp_path, suffix, processor, context_label
+):
     logs = tmp_path / "round/evidence/correctness/engine_logs"
     logs.mkdir(parents=True)
     content = """Warning: User-specified context_length (262151) is greater than the derived context_length (262144). This may lead to incorrect model outputs or CUDA errors. Note that the derived context_length may differ from max_position_embeddings in the model's config.
@@ -584,7 +587,12 @@ Traceback (most recent call last):
 OSError: libavutil.so.60 missing
 [end of libtorchcodec loading traceback]
 """
-    (logs / "scorer.log").write_text(content.replace("mimo_audio", processor) + suffix)
+    (logs / "scorer.log").write_text(
+        content.replace("mimo_audio", processor).replace(
+            "User-specified", context_label
+        )
+        + suffix
+    )
     if suffix:
         with pytest.raises(EngineError, match="scorer.log:7"):
             PROBE["review_engine_logs"](tmp_path)

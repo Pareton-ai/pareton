@@ -393,7 +393,7 @@ def review_engine_logs(root):
         re.DOTALL,
     )
     context_warning = re.compile(
-        r"Warning: User-specified context_length \(262151\) is greater than the derived "
+        r"Warning: (?:User-specified|Target model's) context_length \(262151\) is greater than the derived "
         r"context_length \(262144\)\. This may lead to incorrect model outputs or CUDA errors\. "
         r"Note that the derived context_length may differ from max_position_embeddings in the model's config\."
     )
