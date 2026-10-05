@@ -114,7 +114,7 @@ export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
 nvidia-smi --query-gpu=name,memory.total --format=csv
 # Verify this is the intended idle RTX PRO 6000 before proceeding.
 docker pull "$PRO6000_ENGINE_REF"
-docker network create --internal "$PRO6000_QUAL_NET"
+docker network create "$PRO6000_QUAL_NET"
 ```
 
 Retain `PRO6000_RUN_DIR` and its evidence. On interruption, stop/remove only the
@@ -126,6 +126,14 @@ Docker or build caches.
 This stages the immutable weights on the host, mounts them read-only, and starts
 SGLang with the fixture's arguments. The qualifier needs a published loopback
 port; host networking is unsupported. Ensure port 30000 is free.
+
+Use an ordinary bridge network for this loopback-published qualification endpoint:
+Docker's internal-network port-publishing limitation prevents this procedure from
+reaching the server (see [moby#36174](https://github.com/moby/moby/issues/36174)).
+The port remains bound to `127.0.0.1`. Staged weights and `HF_HUB_OFFLINE=1` /
+`TRANSFORMERS_OFFLINE=1` avoid model downloads; they do not block outbound traffic.
+This qualification setup does not enforce network egress isolation. The shadow
+round harness retains its internal network and direct container-IP connection.
 
 ```bash
 python - <<'PYTHON'
