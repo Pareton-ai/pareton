@@ -220,6 +220,7 @@ def test_immediate_refill_and_full_protocol_occupancy(monkeypatch):
 
     def post(url, *, prompt, **kwargs):
         nonlocal active, peak
+        assert kwargs["skip_special_tokens"] is False
         started = time.monotonic()
         with lock:
             active += 1
@@ -814,10 +815,86 @@ def test_fixed_output_rejects_inflated_usage_and_short_sibling(tmp_path, sibling
         "claimed_tokens": 3000,
         "trusted_tokens": 300,
         "matches": False,
+        "difference_tokens": -2700,
+        "allowed_delta_tokens": 2,
+        "within_tolerance": False,
     }
     assert (
         report.prompt_checks[0]["token_count_checks"] == evidence["token_count_checks"]
     )
+
+
+@pytest.mark.parametrize(
+    "claimed, delta, allowed, passes",
+    [
+        (2, -1, 0, False),
+        (999, -1, 0, False),
+        (1000, -1, 1, True),
+        (1000, 1, 1, True),
+        (1000, 2, 1, False),
+        (3000, -3, 2, False),
+        (3000, -2, 2, True),
+        (3000, -1, 2, True),
+        (3000, 0, 2, True),
+        (3000, 1, 2, True),
+        (3000, 2, 2, True),
+        (3000, 3, 2, False),
+        (4000, -3, 2, False),
+    ],
+)
+def test_fixed_output_roundtrip_allowance_for_baseline_and_candidate(
+    monkeypatch, tmp_path, claimed, delta, allowed, passes
+):
+    from test_correctness import _cfg
+
+    from bench import correctness
+    from bench.correctness import (
+        BASELINE_INDEX,
+        CapturedOutput,
+        PendingCorrectness,
+        grade_all,
+    )
+    from bench.mock_engine import MockEngine, MockEngineConfig
+
+    # The trusted mock tokenizer sees claimed + delta decoded words. Model
+    # round-trip differences in either direction, independently of SSE chunks.
+    text = " ".join(f"word{i}" for i in range(claimed + delta))
+    exact = " ".join(f"word{i}" for i in range(claimed))
+    output = CapturedOutput("r", "Question: ", text, claimed, True, (exact, text))
+    calls = []
+    original = correctness.post_completion
+
+    def echo(url, **kwargs):
+        calls.append(kwargs)
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(correctness, "post_completion", echo)
+    with MockEngine(
+        MockEngineConfig(model="trusted-scorer", logprob_slope=0)
+    ) as scorer:
+        reports = grade_all(
+            scorer.base_url,
+            [PendingCorrectness(i, [output]) for i in (0, BASELINE_INDEX)],
+            cfg=_cfg(num_prompts=1),
+            evidence_dir=tmp_path,
+            strict_fixed_output=True,
+        )
+    expected = "pass" if passes else "fail_correctness"
+    assert {report.verdict for report in reports.values()} == {expected}
+    for report in reports.values():
+        check = report.prompt_checks[0]["token_count_checks"][-1]
+        assert check == {
+            "rep": 2,
+            "claimed_tokens": claimed,
+            "trusted_tokens": claimed + delta,
+            "matches": delta == 0,
+            "difference_tokens": delta,
+            "allowed_delta_tokens": allowed,
+            "within_tolerance": passes,
+        }
+    forced = [call for call in calls if call["prompt"] == "Question: " + text]
+    assert len(forced) == (2 if passes else 0)
+    assert all(call["skip_special_tokens"] is False for call in forced)
 
 
 @pytest.mark.parametrize("tokens", [None, [True], [-1]])

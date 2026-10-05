@@ -237,6 +237,7 @@ def _fire(
                 {
                     "absolute_deadline_s": admission + timeout_s,
                     "require_token_timing": False,
+                    "skip_special_tokens": False,
                 }
                 if not paced
                 else {}

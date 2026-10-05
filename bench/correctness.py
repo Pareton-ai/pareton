@@ -902,6 +902,7 @@ def score_captured_output(
     request_timeout_s: float = 300.0,
     engine_name: str = "vllm",
     prefix_token_limit: int | None = None,
+    skip_special_tokens: bool | None = None,
 ) -> tuple[list[_PositionScore], int, str]:
     """Scored token positions in the candidate's forced output.
 
@@ -926,6 +927,11 @@ def score_captured_output(
         temperature=0.0,
         seed=0,
         timeout=request_timeout_s,
+        **(
+            {"skip_special_tokens": skip_special_tokens}
+            if skip_special_tokens is not None
+            else {}
+        ),
     )
     scores = extract_output_logprobs(
         resp,
@@ -1095,7 +1101,7 @@ def _score_sglang_output(
 
 
 def trusted_output_token_count(base_url: str, text: str, *, timeout: float) -> int:
-    """Count visible output with the trusted scorer, without prompt/BOS/EOS tokens."""
+    """Count output with the trusted tokenizer, without adding special tokens."""
     tokens = post_json(
         base_url,
         "/tokenize",
@@ -1280,18 +1286,29 @@ def grade_candidate(
                                 scorer_url, text, timeout=request_timeout_s
                             )
                         actual = counts[text]
+                        # Decoding and re-encoding can merge sampled tokens or
+                        # replace a truncated UTF-8 sequence. Bound the allowance
+                        # by BOTH two tokens and 0.1% of the fixed budget, so small
+                        # workloads cannot lose a large fraction of their work.
+                        allowed_delta = min(2, captured.completion_tokens // 1000)
+                        difference = actual - captured.completion_tokens
+                        within_tolerance = abs(difference) <= allowed_delta
                         token_count_checks.append(
                             {
                                 "rep": rep,
                                 "claimed_tokens": captured.completion_tokens,
                                 "trusted_tokens": actual,
                                 "matches": actual == captured.completion_tokens,
+                                "difference_tokens": difference,
+                                "allowed_delta_tokens": allowed_delta,
+                                "within_tolerance": within_tolerance,
                             }
                         )
-                        if actual != captured.completion_tokens:
+                        if not within_tolerance:
                             token_count_failure = (
                                 f"{captured.request_id}: rep {rep}: output token count mismatch "
-                                f"(claimed {captured.completion_tokens}, trusted {actual})"
+                                f"(claimed {captured.completion_tokens}, trusted {actual}, "
+                                f"allowed delta {allowed_delta})"
                             )
                             break
                     if token_count_failure is not None:
@@ -1318,6 +1335,7 @@ def grade_candidate(
                     prefix_token_limit=None
                     if reference is None
                     else reference.natural_stop_tokens,
+                    **({"skip_special_tokens": False} if strict_fixed_output else {}),
                 )
             except EngineError as exc:
                 if degenerate is None:

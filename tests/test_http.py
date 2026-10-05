@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from bench.http import post_completion_stream
+from bench.http import post_completion, post_completion_stream
 from bench.lifecycle import EngineError
 
 
@@ -133,6 +133,31 @@ def test_stream_usage_only_chunk_without_choices(monkeypatch: pytest.MonkeyPatch
     assert res.completion_tokens == 2
     assert res.text == "ab"
     assert len(res.itl_s) == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_special_tokens_are_preserved_only_when_requested(monkeypatch, stream):
+    bodies = []
+    response = {
+        "choices": [{"text": "<|im_end|>", "finish_reason": "length"}],
+        "usage": {"completion_tokens": 1},
+    }
+
+    def fake_urlopen(req, timeout):
+        bodies.append(json.loads(req.data))
+        return _FakeResp(_sse(response))
+
+    def fake_post_json(url, path, body, **kwargs):
+        bodies.append(body)
+        return response
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    monkeypatch.setattr("bench.http.post_json", fake_post_json)
+    post = post_completion_stream if stream else post_completion
+    post("http://example", prompt="p", max_tokens=1)
+    post("http://example", prompt="p", max_tokens=1, skip_special_tokens=False)
+    assert "skip_special_tokens" not in bodies[0]
+    assert bodies[1]["skip_special_tokens"] is False
 
 
 def test_stream_missing_done_is_engine_error(monkeypatch: pytest.MonkeyPatch):

@@ -100,12 +100,21 @@ The scorer also accepts batched-token baseline references. Rows mark unavailable
 per-token timing and concurrency observations list affected request IDs. These
 requests cannot establish diagnostic ITL goodput; no per-token gaps are invented.
 Before v5 speed credit, the separate trusted scorer tokenizes every measured
-output repetition with `add_special_tokens=false` and compares its visible output
-count with the claimed fixed budget. This excludes prompt/BOS/EOS additions and
-does not depend on SSE chunk sizes or candidate tokenization. A mismatch is a hard
-correctness failure, with claimed/trusted counts recorded per repetition; it
-cannot remove work or earn a partial score. An invalid baseline reference voids
-the round. Tokenizer errors leave the entry unscored. V5 timing-only runs without
+output repetition with `add_special_tokens=false` and compares its output count
+with the claimed fixed budget. V5 replay and trusted echo scoring request
+`skip_special_tokens=false`, retaining generated special tokens without adding
+prompt/BOS/EOS tokens to the independent count. Decoding and re-encoding can
+merge sampled tokens or replace a truncated UTF-8 sequence, so the count check
+allows `min(2, floor(output_tokens / 1000))` tokens of difference in either
+direction: at most two tokens and at most 0.1%, with no allowance below 1000.
+The rule applies identically to baselines and candidates, independently of SSE
+chunk sizes. Evidence records exact equality, the difference, the allowance and
+`within_tolerance` per repetition. A difference outside this bound is a hard
+correctness failure; it cannot remove work or earn a partial score. This bounded
+text check is not proof of the original generated token IDs; larger round-trip
+differences still fail and require investigation during GPU qualification.
+An invalid baseline reference voids the round. Tokenizer errors leave the entry
+unscored. V5 timing-only runs without
 trusted correctness verification cannot produce eligible scores.
 Output correctness, absolute deadlines and tier-completion scoring still apply.
 

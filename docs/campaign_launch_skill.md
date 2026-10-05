@@ -388,8 +388,13 @@ Freeze and hash the remaining workload. Measured baseline, leader and candidate
 replays then enforce exactly 3000 output tokens with `ignore_eos=true`. Every
 eligible request/repetition receives strict checks without forced-tail exemptions.
 The trusted scorer must independently tokenize every measured repetition's output
-without adding special tokens and verify the claimed fixed token count. Review
-`token_count_checks` in correctness evidence; mismatches disqualify candidates.
+without adding special tokens. V5 replay and trusted echo scoring preserve
+generated special tokens with `skip_special_tokens=false`. Independent counts
+may differ by at most `min(2, floor(output_tokens / 1000))` tokens (±2 at 3000),
+using the same bounded round-trip allowance for baselines and candidates.
+Review `token_count_checks` in correctness evidence: `matches` records exact
+equality; `within_tolerance` determines acceptance. Larger differences disqualify
+candidates or invalidate the baseline; investigate these during GPU qualification.
 Candidate-specific failures never remove requests from the eligible set.
 
 Pair v5 with `weighted_tier_completion_speedup`. Pin `tier_weights` in the scoring
