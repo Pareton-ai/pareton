@@ -1,4 +1,10 @@
 {
-  "name": "median_e2e_speedup",
-  "failure_penalty": 0.1
+  "name": "weighted_tier_completion_speedup",
+  "failure_penalty": 0.1,
+  "tier_weights": {
+    "2k": 0.25,
+    "4k": 0.25,
+    "8k": 0.25,
+    "16k": 0.25
+  }
 }

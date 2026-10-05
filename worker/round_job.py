@@ -165,6 +165,8 @@ def materialize_round_trace(
                         key: receipt[key]
                         for key in (
                             "request_interval_ms",
+                            "request_concurrency",
+                            "request_timeout_s",
                             "enable_thinking",
                             "min_output_tokens",
                             "followup_prompt",

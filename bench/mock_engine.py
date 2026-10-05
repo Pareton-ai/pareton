@@ -406,6 +406,10 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class MockEngineServer(ThreadingHTTPServer):
+    # The stdlib default backlog of five can overflow on C32 dispatch bursts
+    # before the accept thread runs, especially on busy CI hosts.
+    request_queue_size = 128
+
     def __init__(self, cfg: MockEngineConfig) -> None:
         self.cfg = cfg
         super().__init__((cfg.host, cfg.port), _Handler)

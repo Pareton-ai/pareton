@@ -332,7 +332,7 @@ class RoundDetailModel(BaseModel):
 
 
 class PromptScoreModel(BaseModel):
-    """One prompt's contribution to an entry's score.
+    """Per-prompt diagnostics (score contributions only for the median rule).
 
     `speedup` is the fraction faster than baseline at the same output token
     count: 0.35 is 35 percent faster, and a negative value is slower. A
@@ -353,7 +353,10 @@ class PromptScoreModel(BaseModel):
 
 
 class ScoreBreakdownModel(BaseModel):
-    median_speedup: float
+    median_speedup: float | None = None
+    weighted_speedup: float | None = None
+    eligible_speedup: float | None = None
+    tiers: dict[str, Any] | None = None
     scheduled_requests: int
     failed_requests: int
     failure_rate: float
@@ -365,7 +368,9 @@ class ReportWorkloadModel(BaseModel):
     temperature: float | None = None
     temperature_range: list[float] | None = None
     algo_version: int
-    request_interval_ms: int
+    request_interval_ms: int | None = None
+    request_concurrency: int | None = None
+    request_timeout_s: float | None = None
     enable_thinking: bool | None = None
     max_model_len: int | None = None
 
@@ -617,10 +622,9 @@ def round_detail(round_id: UUID, response: Response):
 def round_entry_report(round_id: UUID, entry_id: int, response: Response):
     """The arithmetic behind one entry's score, prompt by prompt.
 
-    The round score is the named rule applied to `prompts`, so a miner can
-    re-derive it and see which prompts paid and which were gated. Absolute
-    seconds are served alongside the ratios: a speedup on its own cannot be
-    checked against a local run.
+    The named rule uses per-prompt timings or the tier completion breakdown.
+    Tier weights, absolute completion times, failures and deductions let miners
+    reconstruct weighted scores; per-prompt speedups remain diagnostics there.
 
     The baseline entry stores its SLA replay rather than a comparison, so it
     comes back with `sla` populated and `prompts` empty. It is the reference
@@ -656,7 +660,14 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
                 for key in ("temperature", "temperature_range")
                 if key in receipt
             },
-            "request_interval_ms": receipt.get("request_interval_ms", 200),
+            **(
+                {
+                    "request_concurrency": receipt.get("request_concurrency"),
+                    "request_timeout_s": receipt.get("request_timeout_s"),
+                }
+                if version == 5
+                else {"request_interval_ms": receipt.get("request_interval_ms", 200)}
+            ),
             "enable_thinking": receipt.get(
                 "enable_thinking", template.get("enable_thinking")
             ),

@@ -766,7 +766,9 @@ def baseline_prompt_drops(
     result = dict(dropped)
     sampling = trace.meta.sampling or {}
     minimum = (
-        sampling.get("min_output_tokens") if sampling.get("algo_version") == 4 else None
+        sampling.get("min_output_tokens")
+        if sampling.get("algo_version") in (4, 5)
+        else None
     )
     for request in trace.requests:
         if request.sampling.ignore_eos:
