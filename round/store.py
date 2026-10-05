@@ -10,6 +10,7 @@ existed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 from uuid import UUID
 
@@ -1508,6 +1509,33 @@ def mark_weight_set_result(row_id: int, *, ok: bool, error: str | None) -> None:
             )
 
 
+def list_patch_evaluation_times(
+    submission_ids: list[UUID | str],
+) -> dict[str, datetime | None]:
+    """First finalized scored/disqualified evaluation, regardless of enrollment.
+
+    Void/live rounds and infrastructure failures do not start the reveal clock.
+    """
+    if not submission_ids:
+        return {}
+    with (
+        db_connection(readonly=True) as conn,
+        conn.cursor(cursor_factory=RealDictCursor) as cur,
+    ):
+        cur.execute(
+            """
+            SELECT e.submission_id, MIN(r.completed_at) AS evaluated_at
+            FROM round_entries e
+            JOIN rounds r ON r.id = e.round_id AND r.status = 'complete'
+            WHERE e.submission_id = ANY(%s::uuid[])
+              AND e.status IN ('scored', 'disqualified')
+            GROUP BY e.submission_id
+            """,
+            ([str(sid) for sid in submission_ids],),
+        )
+        return {str(r["submission_id"]): r["evaluated_at"] for r in cur.fetchall()}
+
+
 def get_round_entry_report(
     round_id: UUID | str, entry_id: int
 ) -> dict[str, Any] | None:
@@ -1645,6 +1673,10 @@ def list_submission_round_entries(
     it won with, not a fresh ``pending``. A submission whose only entry is live
     still reports that entry, so the live assignment has one source of truth
     rather than being reconstructed from the ``round_assigned`` event.
+
+    ``_patch_evaluated_at`` is internal metadata for URL disclosure. Compute it
+    over the same entries before choosing the displayed round, so callers do
+    not need another database query for a leader's first finalized evaluation.
     """
     if not submission_ids:
         return {}
@@ -1658,7 +1690,11 @@ def list_submission_round_entries(
                 """
                 SELECT DISTINCT ON (e.submission_id)
                        e.submission_id, e.round_id, r.ordinal, e.status,
-                       e.score, e.disqualify_reason
+                       e.score, e.disqualify_reason,
+                       MIN(r.completed_at) FILTER (
+                           WHERE r.status = 'complete'
+                             AND e.status IN ('scored', 'disqualified')
+                       ) OVER (PARTITION BY e.submission_id) AS patch_evaluated_at
                 FROM round_entries e
                 JOIN rounds r ON r.id = e.round_id
                 WHERE e.submission_id = ANY(%s::uuid[]) AND r.status <> 'void'
@@ -1677,6 +1713,7 @@ def list_submission_round_entries(
             "status": r["status"],
             "score": r["score"],
             "disqualify_reason": r["disqualify_reason"],
+            "_patch_evaluated_at": r["patch_evaluated_at"],
         }
         for r in rows
     }

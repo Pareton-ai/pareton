@@ -52,7 +52,26 @@ campaign ID still returns an archived campaign. Internal `draft` remains a
 valid stored status but is not a public filter value.
 
 
-## 2026-09-23: Patches stay private permanently
+## 2026-10-01: Campaign-controlled patch disclosure
+
+Campaigns choose `patch_visibility.mode`: `private` (the default for new and
+existing campaigns) or `public_after_reveal`, with `reveal_delay_s` defaulting
+to 172800. The policy is stored and exposed in the manifest but excluded from
+`manifest_hash`, so updates preserve commitments and customer signoffs.
+
+The reveal clock starts at the first complete round with a scored or disqualified
+entry, even for submissions without an old enrollment event. Live/void rounds,
+infrastructure failures, and operator bans do not start it. Closing or archiving
+a campaign does not release private patches. Explicit patch availability and
+download requests publish eligible objects lazily using checksum-verified S3 copies;
+ordinary list/detail reads withhold links and never perform S3 I/O;
+private policy always suppresses publication and locations.
+
+The policy applies retrospectively to existing submissions. Changing policy
+cannot revoke files already published or downloaded. See
+[configuration and rollout](patch-visibility.md).
+
+## 2026-09-23: Patches stay private permanently (superseded)
 
 Miner patches never become public. The API has no patch download routes and
 never exposes retrieval locations: no `retrieval_url`, `patch_reveal_at`, or
