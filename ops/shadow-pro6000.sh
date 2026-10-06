@@ -29,6 +29,7 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+python -u -m ops.pro6000_preflight
 echo 'Generating the qualified C4 preview...'
 python -u -m bench.preview_longform \
   --campaign-fields "$PRO6000_FIELDS" \

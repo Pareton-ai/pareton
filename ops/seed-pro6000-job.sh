@@ -22,6 +22,7 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+python -u -m ops.pro6000_preflight
 engine_ref=$(python -u -c 'import json; print(json.load(open("fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json"))["base_image_digest"])')
 export PYTHONUNBUFFERED=1
 bash ops/seed-sglang-qwen38-27b-pro6000.sh "$engine_ref" "$PRO6000_QUALIFIED_RULE"

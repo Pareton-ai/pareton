@@ -2,6 +2,13 @@
 # Launch this entire controller under nohup; the runbook supplies redirections.
 set -euo pipefail
 umask 077
+reuse_baseline=false
+if [[ $# == 1 && "$1" == --reuse-baseline ]]; then
+  reuse_baseline=true
+elif [[ $# != 0 ]]; then
+  echo 'Usage: qualify-pro6000.sh [--reuse-baseline]' >&2
+  exit 2
+fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 : "${PRO6000_RUN_DIR:?Restore the step 1 environment first}"
 : "${PRO6000_FIELDS:?}"
@@ -38,6 +45,32 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+python -u -m ops.pro6000_preflight
+if "$reuse_baseline"; then
+  echo 'Verifying the existing baseline and its recorded model volume...'
+  python -u - <<'REUSE'
+import json, os, subprocess
+from pathlib import Path
+from bench.qualify_longform import verify_baseline_image
+
+verify_baseline_image(
+    engine_ref=os.environ["PRO6000_ENGINE_REF"], base_url="http://127.0.0.1:30000",
+    container=os.environ["PRO6000_BASELINE_CONTAINER"],
+)
+record = json.loads((Path(os.environ["PRO6000_RUN_DIR"]) / "model_volume.json").read_text())
+info = json.loads(subprocess.run(
+    ["docker", "inspect", os.environ["PRO6000_BASELINE_CONTAINER"]],
+    capture_output=True, text=True, check=True, timeout=30,
+).stdout)[0]
+if record.get("verified") is not True or not any(
+    mount.get("Type") == "volume" and mount.get("Name") == record.get("name")
+    and mount.get("Destination") == "/model" and mount.get("RW") is False
+    for mount in info.get("Mounts", [])
+):
+    raise RuntimeError("existing baseline does not use the recorded verified read-only model volume")
+print("Existing baseline identity and volume verified; skipping weight staging/startup.")
+REUSE
+else
 echo 'Staging weights, verifying the model volume and starting the baseline...'
 python -u - <<'PYTHON' 2>&1 | tee "$PRO6000_RUN_DIR/start-baseline.log"
 import json, os, subprocess
@@ -80,6 +113,7 @@ except BaseException:
     volume.close()
     raise
 PYTHON
+fi
 PRO6000_HEALTH_DEADLINE=$((SECONDS + PARETON_BENCH_HEALTH_TIMEOUT_S))
 while :; do
   # Fail immediately if startup did not create a running container.

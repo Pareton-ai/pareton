@@ -23,6 +23,9 @@ def environment(tmp_path, stage, *, fail="", hold=""):
     python.write_text(
         """#!/bin/bash
 case "$*" in
+  *ops.pro6000_preflight*)
+    if [[ "$TEST_FAIL" == preflight ]]; then echo 'missing tokenizers' >&2; exit 9; fi
+    exit 0 ;;
   *bench.preview_longform*) phase=preview ;;
   *ops.pro6000_model_volume*) phase=shadow ;;
   *campaign.seed*) phase=seed ;;
@@ -69,6 +72,8 @@ fi
 @pytest.mark.parametrize(
     ("stage", "fail", "expected"),
     [
+        ("step3", "preflight", []),
+        ("seed", "preflight", []),
         ("step3", "preview", ["preview"]),
         ("step3", "request", ["preview", "request"]),
         ("step3", "shadow", ["preview", "request", "shadow"]),
@@ -86,7 +91,8 @@ def test_later_jobs_stop_on_failure_and_record_status(tmp_path, stage, fail, exp
     status = 9 if fail else 0
     assert result.returncode == status, result.stderr
     assert (tmp_path / f"{stage}.exit-code").read_text().strip() == str(status)
-    assert (tmp_path / "calls").read_text().splitlines() == expected
+    calls = tmp_path / "calls"
+    assert (calls.read_text().splitlines() if calls.exists() else []) == expected
 
 
 def test_shadow_requires_completed_qualification(tmp_path):

@@ -23,6 +23,10 @@ command=$(basename "$0")
 printf '%s %s\\n' "$command" "$*" >> "$TEST_CALLS"
 case "$command" in
   python)
+    if [[ "$*" == *ops.pro6000_preflight* ]]; then
+      if [[ "$TEST_CASE" == missing_dependency ]]; then echo 'missing tokenizers' >&2; exit 6; fi
+      exit 0
+    fi
     if [[ "$*" == *bench.qualify_longform* ]]; then
       if [[ "$TEST_CASE" == qualification_failure ]]; then
         echo 'qualification failed' >&2; exit 9
@@ -90,6 +94,7 @@ esac
 @pytest.mark.parametrize(
     ("scenario", "status", "qualifies", "cleans"),
     [
+        ("missing_dependency", 6, False, False),
         ("start_failure", 7, False, False),
         ("missing_container", 1, False, False),
         ("exited_container", 1, False, False),
@@ -120,6 +125,9 @@ def test_step2_stops_before_dependent_work(
     assert ("docker rm" in calls) == cleans
     assert ("docker volume rm" in calls) == cleans
     assert ("docker network rm" in calls) == cleans
+    if scenario == "missing_dependency":
+        assert "missing tokenizers" in result.stderr
+        assert "docker " not in calls
     if scenario == "start_failure":
         assert "original startup error" in result.stderr
         assert "docker inspect" not in calls
@@ -194,3 +202,26 @@ def test_nohup_controller_survives_hangup_and_viewer_interrupt(tmp_path):
     calls = calls_path.read_text()
     assert calls.count("bench.qualify_longform") == 1
     assert "docker network rm" in calls
+
+
+def test_reuse_baseline_skips_weight_staging_and_startup(tmp_path):
+    env, script_calls = fake_environment(tmp_path, "success")
+    env["TEST_ROOT"] = str(tmp_path)
+    fake = tmp_path / "bin/fake"
+    fake.write_text(
+        fake.read_text().replace("cat >/dev/null", 'cat >> "$TEST_ROOT/python-input"')
+    )
+    result = subprocess.run(
+        ["bash", str(ROOT / "ops/qualify-pro6000.sh"), "--reuse-baseline"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = (tmp_path / "python-input").read_text()
+    assert "verify_baseline_image(" in payload
+    assert "stage_weights(" not in payload
+    assert "volume.prepare(" not in payload
+    assert "bench.qualify_longform" in script_calls.read_text()
+    assert (tmp_path / "step2.exit-code").read_text().strip() == "0"

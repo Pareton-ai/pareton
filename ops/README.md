@@ -96,6 +96,52 @@ frontend support from frontend PRs #88 and #89 is deployed. Follow the existing
 coordinator; do not replace a live worker checkout with this branch. Confirm the
 private object-store/registry access controls and private patch API behavior.
 
+Host Python dependencies must be installed **before step 1 creates a GPU run**.
+The engine container does not supply the host qualifier's packages. Use Python
+3.10+ with `venv` support (the reported host uses Python 3.12). On Ubuntu/Debian,
+if needed, install the host tools with
+`sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip git curl jq`.
+Docker, NVIDIA drivers and NVIDIA Container Toolkit must already work on this
+host; these Python setup commands do not install or modify them.
+
+From the root of the latest PR checkout, prepare its `.venv` as one background
+job. `requirements.txt` includes the API requirements and pins
+`tokenizers==0.22.2` and `jinja2==3.1.6`; do not install an arbitrary tokenizer
+version or rely on packages inside the SGLang image. No HF token is required for
+this public model; an existing `HF_TOKEN` can improve Hub rate limits.
+
+```bash
+set +e
+umask 077
+export PRO6000_SETUP_DIR=$(mktemp -d /var/tmp/pareton-pro6000-setup-XXXXXX)
+nohup bash ops/setup-pro6000.sh >> "$PRO6000_SETUP_DIR/setup.log" 2>&1 < /dev/null &
+printf 'Launched PID %s; setup evidence: %s\n' "$!" "$PRO6000_SETUP_DIR"
+```
+
+Watch separately; Ctrl-C stops only the viewer:
+
+```bash
+tail -n 60 -f "$PRO6000_SETUP_DIR/setup.log" || true
+```
+
+Do not proceed until `setup.exit-code` exists and contains `0`. If setup fails,
+inspect `setup.log`; do not create a baseline container. After successful setup,
+activate the installed environment in the interactive shell:
+
+```bash
+if [[ -f "$PRO6000_SETUP_DIR/setup.exit-code" ]] && \
+   [[ "$(cat "$PRO6000_SETUP_DIR/setup.exit-code")" == 0 ]]; then
+  source .venv/bin/activate
+else
+  printf 'Setup has not succeeded; inspect %s/setup.log before continuing.\n' "$PRO6000_SETUP_DIR"
+fi
+```
+
+The controllers repeat `ops.pro6000_preflight` with their actual Python
+interpreter. This checks required host imports, including the lazy tokenizer,
+dataset and worker imports, and the pinned tokenizer/template versions before
+weight staging or other expensive work. It does not establish GPU qualification.
+
 On an idle, dedicated Linux host with one RTX PRO 6000, working NVIDIA drivers,
 NVIDIA Container Toolkit, Docker and repo Python dependencies, use a separate
 checkout of the reviewed PR commit. Authenticate to GHCR through the existing
@@ -190,6 +236,38 @@ qualifier's `--concurrency 4` controls source screening; the fixture's separate
 `request_concurrency: 4` controls scored replay. Do not use an old pool or modify
 its qualified settings. Failed qualification must be investigated and rerun into
 a fresh directory, without relaxing correctness or privacy implicitly.
+
+#### Recover qualification after a host dependency failure
+
+For the reported missing-`tokenizers` failure, the baseline is already running
+and no qualification evidence was written. Keep that container and its volume.
+Install dependencies using the setup procedure above, then activate `.venv`.
+Do not rerun step 1: retain `PRO6000_BASELINE_CONTAINER`, `PRO6000_QUAL_NET`,
+`PRO6000_ENGINE_REF` and `PRO6000_FIELDS` from the failed run. Confirm that its
+controller has exited before continuing.
+
+Use a fresh output directory while retaining the old evidence. Copy only the
+verified volume receipt; the retry checks that the running container actually
+mounts that recorded volume read-only and verifies its image and loopback binding.
+It then reuses the baseline, requalifies from source and performs normal cleanup
+only after success. It does not loosen any v5/C4 settings.
+
+```bash
+export PRO6000_PREVIOUS_RUN_DIR="$PRO6000_RUN_DIR"
+export PRO6000_RUN_DIR=$(mktemp -d /var/tmp/pareton-pro6000-retry-XXXXXX)
+if cp "$PRO6000_PREVIOUS_RUN_DIR/model_volume.json" "$PRO6000_RUN_DIR/model_volume.json"; then
+  nohup bash ops/qualify-pro6000.sh --reuse-baseline >> "$PRO6000_RUN_DIR/step2.log" 2>&1 < /dev/null &
+  printf 'Launched recovery PID %s; log: %s/step2.log\n' "$!" "$PRO6000_RUN_DIR"
+fi
+```
+
+```bash
+tail -n 60 -f "$PRO6000_RUN_DIR/step2.log" || true
+```
+
+Require `step2.exit-code` to contain `0` and review the qualification artifacts,
+then use this **new** `PRO6000_RUN_DIR` for step 3. Missing/nonzero completion
+status is not permission to proceed. Do not manually write a success marker.
 
 #### 3. Generate the C4 trace and a worker-derived shadow request
 
