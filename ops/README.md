@@ -144,8 +144,31 @@ The port remains bound to `127.0.0.1`. Staged weights and `HF_HUB_OFFLINE=1` /
 This qualification setup does not enforce network egress isolation. The shadow
 round harness retains its internal network and direct container-IP connection.
 
+Paste the whole block below, including its parentheses. It runs in a Bash
+subshell with its own error and interrupt handling: failed startup, a missing or
+exited container, qualification failure, or Ctrl-C stops the remaining steps.
+On failure it prints retained log tails; qualification and success cleanup do
+not continue. The `nohup` Python process can survive shell interruption, so check
+its saved PID/log before retrying or manually cleaning up. Preserve the run
+directory; a fresh retry must not overwrite a still-running job's logs.
+
 ```bash
-python - <<'PYTHON'
+(
+# Paste this entire block, including the parentheses, into Bash.
+set -euo pipefail
+: "${PRO6000_RUN_DIR:?Restore the step 1 environment first}"
+trap 'rc=$?; if (( rc != 0 )); then
+  printf "Step 2 stopped (exit %s). Preserve this run; inspect logs before retrying.\n" "$rc" >&2
+  for log in start-baseline.log startup.log qualification.log; do
+    if [[ -f "$PRO6000_RUN_DIR/$log" ]]; then
+      printf "\n--- %s ---\n" "$log" >&2
+      tail -n 60 "$PRO6000_RUN_DIR/$log" >&2 || true
+    fi
+  done
+fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+nohup python -u - > "$PRO6000_RUN_DIR/start-baseline.log" 2>&1 <<'PYTHON' &
 import json, os, subprocess
 from pathlib import Path
 from bench.schemas import ModelSpec
@@ -186,27 +209,50 @@ except BaseException:
     volume.close()
     raise
 PYTHON
+PRO6000_START_PID=$!
+printf '%s\n' "$PRO6000_START_PID" > "$PRO6000_RUN_DIR/start-baseline.pid"
+printf 'PID: %s; log: %s\n' "$PRO6000_START_PID" "$PRO6000_RUN_DIR/start-baseline.log"
+# In the original shell, require success before the next step.
+wait "$PRO6000_START_PID"
 PRO6000_HEALTH_DEADLINE=$((SECONDS + PARETON_BENCH_HEALTH_TIMEOUT_S))
-until curl -fsS http://127.0.0.1:30000/v1/models > "$PRO6000_RUN_DIR/models.json"; do
+while :; do
+  # Fail immediately if startup did not create a running container.
+  PRO6000_CONTAINER_STATE=$(docker inspect --format '{{.State.Status}}' "$PRO6000_BASELINE_CONTAINER")
+  if [[ "$PRO6000_CONTAINER_STATE" != running ]]; then
+    docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/startup.log" 2>&1 || true
+    printf 'Baseline is %s; inspect startup.log before retrying.\n' "$PRO6000_CONTAINER_STATE" >&2
+    exit 1
+  fi
+  if curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:30000/v1/models \
+      > "$PRO6000_RUN_DIR/models.json" 2> "$PRO6000_RUN_DIR/health-error.log"; then
+    break
+  fi
   if (( SECONDS >= PRO6000_HEALTH_DEADLINE )); then
-    docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/startup.log" 2>&1
-    echo 'Baseline health timeout; inspect startup.log before retrying.' >&2
+    docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/startup.log" 2>&1 || true
+    echo 'Baseline health timeout; inspect startup.log and health-error.log before retrying.' >&2
     exit 1
   fi
   sleep 5
 done
-python -m bench.qualify_longform \
+nohup python -u -m bench.qualify_longform \
   --campaign-fields "$PRO6000_FIELDS" \
   --base-url http://127.0.0.1:30000 \
   --container "$PRO6000_BASELINE_CONTAINER" --engine-ref "$PRO6000_ENGINE_REF" \
   --output-dir "$PRO6000_RUN_DIR/qualification" \
-  --pool-size 64 --repetitions 2 --concurrency 4 --timeout 600
+  --pool-size 64 --repetitions 2 --concurrency 4 --timeout 600 \
+  > "$PRO6000_RUN_DIR/qualification.log" 2>&1 < /dev/null &
+PRO6000_QUALIFY_PID=$!
+printf '%s\n' "$PRO6000_QUALIFY_PID" > "$PRO6000_RUN_DIR/qualification.pid"
+printf 'PID: %s; log: %s\n' "$PRO6000_QUALIFY_PID" "$PRO6000_RUN_DIR/qualification.log"
+# In the original shell, require success before the next step.
+wait "$PRO6000_QUALIFY_PID"
 docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/qualification-container.log" 2>&1
 docker stop "$PRO6000_BASELINE_CONTAINER"
 docker rm "$PRO6000_BASELINE_CONTAINER"
 PRO6000_MODEL_VOLUME=$(jq -er '.name' "$PRO6000_RUN_DIR/model_volume.json")
 docker volume rm "$PRO6000_MODEL_VOLUME"
 docker network rm "$PRO6000_QUAL_NET"
+)
 ```
 
 `qualification/sampling_rule.json` is the qualified output to use below. The
