@@ -103,7 +103,8 @@ credential mechanism if needed. Run the following in one Bash shell with the
 Pareton virtualenv active; `curl` and `jq` are also required:
 
 ```bash
-set -euo pipefail
+# Keep error handling inside job scripts, not the interactive SSH shell.
+set +e
 umask 077
 export PRO6000_FIELDS=fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json
 export PRO6000_RUN_DIR=$(mktemp -d /var/tmp/pareton-pro6000-XXXXXX)
@@ -144,115 +145,44 @@ The port remains bound to `127.0.0.1`. Staged weights and `HF_HUB_OFFLINE=1` /
 This qualification setup does not enforce network egress isolation. The shadow
 round harness retains its internal network and direct container-IP connection.
 
-Paste the whole block below, including its parentheses. It runs in a Bash
-subshell with its own error and interrupt handling: failed startup, a missing or
-exited container, qualification failure, or Ctrl-C stops the remaining steps.
-On failure it prints retained log tails; qualification and success cleanup do
-not continue. The `nohup` Python process can survive shell interruption, so check
-its saved PID/log before retrying or manually cleaning up. Preserve the run
-directory; a fresh retry must not overwrite a still-running job's logs.
+The whole step runs as **one background job**: startup, health checks,
+qualification and success cleanup. Its Python children inherit `nohup`'s hangup
+handling. There is no foreground `wait` or coordinator to interrupt. Pull the
+latest PR branch first; `ops/qualify-pro6000.sh` and `ops/pro6000_model_volume.py`
+must both exist, and the virtualenv must be active.
+
+Launch once per fresh run directory:
 
 ```bash
-(
-# Paste this entire block, including the parentheses, into Bash.
-set -euo pipefail
-: "${PRO6000_RUN_DIR:?Restore the step 1 environment first}"
-trap 'rc=$?; if (( rc != 0 )); then
-  printf "Step 2 stopped (exit %s). Preserve this run; inspect logs before retrying.\n" "$rc" >&2
-  for log in start-baseline.log startup.log qualification.log; do
-    if [[ -f "$PRO6000_RUN_DIR/$log" ]]; then
-      printf "\n--- %s ---\n" "$log" >&2
-      tail -n 60 "$PRO6000_RUN_DIR/$log" >&2 || true
-    fi
-  done
-fi' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-nohup python -u - > "$PRO6000_RUN_DIR/start-baseline.log" 2>&1 <<'PYTHON' &
-import json, os, subprocess
-from pathlib import Path
-from bench.schemas import ModelSpec
-from bench.weights import stage_weights
-from ops.pro6000_model_volume import DockerModelVolume
+# Undo errexit in the interactive shell if an older runbook enabled it.
+set +e
+nohup bash ops/qualify-pro6000.sh >> "$PRO6000_RUN_DIR/step2.log" 2>&1 < /dev/null &
+printf 'Launched PID %s; log: %s/step2.log\n' "$!" "$PRO6000_RUN_DIR"
+```
 
-fields = json.loads(Path(os.environ["PRO6000_FIELDS"]).read_text())
-bench = fields["bench"]
-model = bench["model"]
-assert fields["base_image_digest"] == bench["baseline_engine_image_digest"]
-# A run directory owns one unique baseline name; never replace another container.
-existing = subprocess.run(
-    ["docker", "container", "inspect", os.environ["PRO6000_BASELINE_CONTAINER"]],
-    capture_output=True, check=False,
-)
-if existing.returncode == 0:
-    raise RuntimeError("baseline container already exists; inspect it before retrying")
-staged = stage_weights(ModelSpec.from_dict(model))
-volume = DockerModelVolume(Path(os.environ["PRO6000_RUN_DIR"]))
-args = ["--model-path", "/model", "--dtype", model["dtype"],
-        "--quantization", model["quantization"], *bench["serve_args"],
-        "--host", "0.0.0.0", "--port", "30000"]
-try:
-    volume.prepare(staged.path, os.environ["PRO6000_ENGINE_REF"])
-    subprocess.run([
-        "docker", "run", "-d", "--name", os.environ["PRO6000_BASELINE_CONTAINER"],
-        "--gpus", "device=0", "--ipc", "host", "--shm-size", "16g",
-        "--network", os.environ["PRO6000_QUAL_NET"],
-        "-p", "127.0.0.1:30000:30000", "--mount", volume.mount,
-        "-e", "HF_HUB_OFFLINE=1", "-e", "TRANSFORMERS_OFFLINE=1",
-        "--entrypoint", "python3", os.environ["PRO6000_ENGINE_REF"],
-        "-m", "sglang.launch_server", *args,
-    ], check=True)
-except BaseException:
-    # Failed docker run can leave a created container holding the model volume.
-    subprocess.run(["docker", "rm", "-f", os.environ["PRO6000_BASELINE_CONTAINER"]],
-                   capture_output=True, check=False)
-    volume.close()
-    raise
-PYTHON
-PRO6000_START_PID=$!
-printf '%s\n' "$PRO6000_START_PID" > "$PRO6000_RUN_DIR/start-baseline.pid"
-printf 'PID: %s; log: %s\n' "$PRO6000_START_PID" "$PRO6000_RUN_DIR/start-baseline.log"
-# In the original shell, require success before the next step.
-wait "$PRO6000_START_PID"
-PRO6000_HEALTH_DEADLINE=$((SECONDS + PARETON_BENCH_HEALTH_TIMEOUT_S))
-while :; do
-  # Fail immediately if startup did not create a running container.
-  PRO6000_CONTAINER_STATE=$(docker inspect --format '{{.State.Status}}' "$PRO6000_BASELINE_CONTAINER")
-  if [[ "$PRO6000_CONTAINER_STATE" != running ]]; then
-    docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/startup.log" 2>&1 || true
-    printf 'Baseline is %s; inspect startup.log before retrying.\n' "$PRO6000_CONTAINER_STATE" >&2
-    exit 1
-  fi
-  if curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:30000/v1/models \
-      > "$PRO6000_RUN_DIR/models.json" 2> "$PRO6000_RUN_DIR/health-error.log"; then
-    break
-  fi
-  if (( SECONDS >= PRO6000_HEALTH_DEADLINE )); then
-    docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/startup.log" 2>&1 || true
-    echo 'Baseline health timeout; inspect startup.log and health-error.log before retrying.' >&2
-    exit 1
-  fi
-  sleep 5
-done
-nohup python -u -m bench.qualify_longform \
-  --campaign-fields "$PRO6000_FIELDS" \
-  --base-url http://127.0.0.1:30000 \
-  --container "$PRO6000_BASELINE_CONTAINER" --engine-ref "$PRO6000_ENGINE_REF" \
-  --output-dir "$PRO6000_RUN_DIR/qualification" \
-  --pool-size 64 --repetitions 2 --concurrency 4 --timeout 600 \
-  > "$PRO6000_RUN_DIR/qualification.log" 2>&1 < /dev/null &
-PRO6000_QUALIFY_PID=$!
-printf '%s\n' "$PRO6000_QUALIFY_PID" > "$PRO6000_RUN_DIR/qualification.pid"
-printf 'PID: %s; log: %s\n' "$PRO6000_QUALIFY_PID" "$PRO6000_RUN_DIR/qualification.log"
-# In the original shell, require success before the next step.
-wait "$PRO6000_QUALIFY_PID"
-docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/qualification-container.log" 2>&1
-docker stop "$PRO6000_BASELINE_CONTAINER"
-docker rm "$PRO6000_BASELINE_CONTAINER"
-PRO6000_MODEL_VOLUME=$(jq -er '.name' "$PRO6000_RUN_DIR/model_volume.json")
-docker volume rm "$PRO6000_MODEL_VOLUME"
-docker network rm "$PRO6000_QUAL_NET"
-)
+Watch separately. **Ctrl-C here stops only the viewer**, and `|| true` also
+prevents an interactive shell with errexit enabled from closing:
+
+```bash
+tail -n 60 -f "$PRO6000_RUN_DIR/step2.log" || true
+```
+
+After reconnecting, restore the virtualenv and environment using the same run
+directory. Read `step2.pid` and `step2.log`; do not launch another job. The script
+claims `step2.lock` to reject duplicate runs and records its final status in
+`step2.exit-code`. Missing status means unfinished or interrupted unexpectedly,
+not success. Proceed to step 3 only after exit code `0` **and** review of the
+qualification artifacts. Nonzero status stops dependent work and success cleanup;
+inspect the logs before retrying. A failed run needs a fresh directory, after
+confirming its processes/containers are no longer using the GPU.
+
+```bash
+if [[ -f "$PRO6000_RUN_DIR/step2.exit-code" ]]; then
+  printf 'Step 2 exit code: '
+  cat "$PRO6000_RUN_DIR/step2.exit-code"
+else
+  printf 'No completion status yet; inspect %s/step2.log and step2.pid.\n' "$PRO6000_RUN_DIR"
+fi
 ```
 
 `qualification/sampling_rule.json` is the qualified output to use below. The

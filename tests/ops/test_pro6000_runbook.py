@@ -2,6 +2,8 @@
 
 import os
 import re
+import signal
+import time
 import subprocess
 from pathlib import Path
 
@@ -11,23 +13,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize(
-    ("scenario", "status", "qualifies", "cleans"),
-    [
-        ("start_failure", 7, False, False),
-        ("missing_container", 1, False, False),
-        ("exited_container", 1, False, False),
-        ("health_timeout", 1, False, False),
-        ("interrupt", 130, False, False),
-        ("qualification_failure", 9, True, False),
-        ("success", 0, True, True),
-    ],
-)
-def test_step2_stops_before_dependent_work(
-    tmp_path, scenario, status, qualifies, cleans
-):
-    section = (ROOT / "ops/README.md").read_text().split("#### 2.")[1]
-    block = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
+def fake_environment(tmp_path, scenario):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "fake"
@@ -43,6 +29,10 @@ case "$command" in
       fi
     else
       cat >/dev/null
+      if [[ "$TEST_CASE" == detached ]]; then
+        touch "$PRO6000_RUN_DIR/start-ready"
+        while [[ ! -f "$PRO6000_RUN_DIR/release" ]]; do /bin/sleep 0.05; done
+      fi
       if [[ "$TEST_CASE" == start_failure ]]; then
         echo 'original startup error' >&2; exit 7
       fi
@@ -94,15 +84,36 @@ esac
         "PRO6000_QUAL_NET": "test-network",
         "PARETON_BENCH_HEALTH_TIMEOUT_S": "0" if scenario == "health_timeout" else "60",
     }
+    return env, calls_path
+
+
+@pytest.mark.parametrize(
+    ("scenario", "status", "qualifies", "cleans"),
+    [
+        ("start_failure", 7, False, False),
+        ("missing_container", 1, False, False),
+        ("exited_container", 1, False, False),
+        ("health_timeout", 1, False, False),
+        ("interrupt", 130, False, False),
+        ("qualification_failure", 9, True, False),
+        ("success", 0, True, True),
+    ],
+)
+def test_step2_stops_before_dependent_work(
+    tmp_path, scenario, status, qualifies, cleans
+):
+    env, calls_path = fake_environment(tmp_path, scenario)
+    script = ROOT / "ops/qualify-pro6000.sh"
     # Deliberately disable the parent shell's errexit, as in an interactive paste.
     result = subprocess.run(
-        ["bash", "-c", "set +e\n" + block],
+        ["bash", str(script)],
         env=env,
         text=True,
         capture_output=True,
         timeout=10,
     )
     assert result.returncode == status, result.stderr
+    assert (tmp_path / "step2.exit-code").read_text().strip() == str(status)
     calls = calls_path.read_text()
     assert ("bench.qualify_longform" in calls) == qualifies
     assert ("docker stop" in calls) == cleans
@@ -121,3 +132,65 @@ esac
         assert "qualification failed" in result.stderr
     if status:
         assert "Step 2 stopped" in result.stderr
+
+
+def wait_for(path):
+    deadline = time.monotonic() + 5
+    while not path.exists():
+        assert time.monotonic() < deadline, f"timed out waiting for {path}"
+        time.sleep(0.02)
+
+
+def test_nohup_controller_survives_hangup_and_viewer_interrupt(tmp_path):
+    env, calls_path = fake_environment(tmp_path, "detached")
+    section = (ROOT / "ops/README.md").read_text().split("#### 2.")[1]
+    launch = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
+    # Job control models the interactive SSH shell's separate process groups.
+    subprocess.run(
+        ["bash", "-c", "set -m\n" + launch],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        start_new_session=True,
+        check=True,
+        timeout=5,
+    )
+    viewer = None
+    try:
+        wait_for(tmp_path / "start-ready")
+        pid = int((tmp_path / "step2.pid").read_text())
+        assert os.getpgid(pid) == pid
+        os.killpg(pid, signal.SIGHUP)
+        viewer = subprocess.Popen(
+            ["tail", "-f", str(tmp_path / "step2.log")],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        os.killpg(viewer.pid, signal.SIGINT)
+        assert viewer.wait(timeout=5) != 0
+        os.kill(pid, 0)  # The actual background controller is still alive.
+        assert not (tmp_path / "step2.exit-code").exists()
+
+        # An accidental duplicate launch must preserve the active PID/status.
+        duplicate = subprocess.run(
+            ["bash", str(ROOT / "ops/qualify-pro6000.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert duplicate.returncode != 0
+        assert int((tmp_path / "step2.pid").read_text()) == pid
+        assert not (tmp_path / "step2.exit-code").exists()
+    finally:
+        (tmp_path / "release").touch()
+        if viewer is not None and viewer.poll() is None:
+            viewer.kill()
+            viewer.wait(timeout=5)
+        wait_for(tmp_path / "step2.exit-code")
+    assert (tmp_path / "step2.exit-code").read_text().strip() == "0"
+    calls = calls_path.read_text()
+    assert calls.count("bench.qualify_longform") == 1
+    assert "docker network rm" in calls
