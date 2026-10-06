@@ -190,6 +190,8 @@ def prompt_speedup(
 
 def summarize_prompt_scores(
     prompts: Sequence[Mapping[str, Any]],
+    *,
+    rule: str | None = None,
 ) -> dict[str, Any]:
     """Counts behind one entry's score: how many prompts paid, and what did not.
 
@@ -202,6 +204,11 @@ def summarize_prompt_scores(
     the reasons apart because they mean different things to a miner: the
     tolerance gate is the patch answering less, while a timing gap is the
     harness having nothing to compare.
+
+    For weighted tier scoring, the existing scored/zeroed fields count valid
+    completions/failures instead: per-token timings do not determine credit.
+    Use the recorded candidate_failed flag, retaining the legacy fallback for
+    older reports without it. The stored per-prompt diagnostics stay intact.
     """
     total = 0
     zeroed_by_reason: dict[str, int] = {}
@@ -210,6 +217,12 @@ def summarize_prompt_scores(
             continue
         total += 1
         reason = p.get("reason")
+        if rule == WEIGHTED_RULE and isinstance(p.get("candidate_failed"), bool):
+            reason = (
+                reason or "candidate completion failed"
+                if p["candidate_failed"]
+                else None
+            )
         if reason:
             key = str(reason)
             zeroed_by_reason[key] = zeroed_by_reason.get(key, 0) + 1

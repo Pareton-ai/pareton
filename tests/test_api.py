@@ -1162,6 +1162,58 @@ def test_baseline_report_exposes_input_lengths_without_inventing_scores(
     assert body["sla"]["timings"]["req-0"]["input_tokens"] == 2048
 
 
+def test_weighted_report_counts_completions_without_rewriting_stored_evidence(
+    monkeypatch, client
+):
+    import copy
+
+    from api import server
+
+    row = _score_report_row()
+    row["scoring_rule"] = {"name": "weighted_tier_completion_speedup"}
+    report = row["report"]["score_report"]
+    report["rule"] = "weighted_tier_completion_speedup"
+    report["prompts"] = [
+        {
+            "request_id": f"hf-{i:03}",
+            "speedup": 0.0,
+            "aligned_tokens": 3000 if i < 3 else 5000,
+            "baseline_e2e_s": None,
+            "candidate_e2e_s": None,
+            "reason": (
+                "candidate output below tolerance" if i < 3 else "insufficient timing"
+            ),
+            "candidate_failed": i < 3,
+        }
+        for i in range(16)
+    ]
+    row["score"] = report["score"] = 0.010131644464675238 - 0.1 * 3 / 16
+    report["score_breakdown"] = {
+        "weighted_speedup": 0.010131644464675238,
+        "eligible_speedup": 0.010131644464675238,
+        "scheduled_requests": 16,
+        "failed_requests": 3,
+        "failure_rate": 3 / 16,
+        "failure_penalty": 0.1,
+        "penalty": 0.1 * 3 / 16,
+    }
+    original = copy.deepcopy(row)
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["prompt_summary"] == {
+        "total": 16,
+        "scored": 13,
+        "zeroed": 3,
+        "below_tolerance": 3,
+        "zeroed_by_reason": {"candidate output below tolerance": 3},
+    }
+    assert body["score"] == row["score"]
+    assert body["score_breakdown"] == report["score_breakdown"]
+    assert body["prompts"] == report["prompts"]
+    assert row == original
+
+
 def test_weighted_report_preserves_penalty_and_output_ceiling(monkeypatch, client):
     from api import server
 
