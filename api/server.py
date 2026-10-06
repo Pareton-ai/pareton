@@ -365,6 +365,7 @@ class ScoreBreakdownModel(BaseModel):
 
 
 class ReportWorkloadModel(BaseModel):
+    input_tiers: list[str] | None = None
     temperature: float | None = None
     temperature_range: list[float] | None = None
     algo_version: int
@@ -657,7 +658,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
             "algo_version": version,
             **{
                 key: receipt[key]
-                for key in ("temperature", "temperature_range")
+                for key in ("temperature", "temperature_range", "input_tiers")
                 if key in receipt
             },
             **(
