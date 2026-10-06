@@ -336,8 +336,10 @@ class PromptScoreModel(BaseModel):
 
     `speedup` is the fraction faster than baseline at the same output token
     count: 0.35 is 35 percent faster, and a negative value is slower. A
-    non-null `reason` means the prompt was forced to 0.0 and did not measure
-    anything; a 0.0 with no reason is a real result meaning baseline speed.
+    non-null `reason` means the diagnostic speedup is unavailable; a 0.0 with
+    no reason is a real result meaning baseline speed. For weighted tier
+    scoring, only `candidate_failed` identifies a request failure; missing
+    per-token timings do not remove tier speed credit.
     """
 
     request_id: str
@@ -377,7 +379,12 @@ class ReportWorkloadModel(BaseModel):
 
 
 class PromptSummaryModel(BaseModel):
-    """Counts over `prompts`, so the headline number needs no client math."""
+    """Counts over `prompts`, interpreted using the round's scoring rule.
+
+    For weighted tier scoring, scored/zeroed mean valid completions/failures;
+    missing per-token diagnostic timings do not count as failures. Historical
+    median reports retain their measured/zeroed per-prompt score counts.
+    """
 
     total: int
     scored: int
@@ -716,7 +723,9 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         "reason": row["disqualify_reason"] or raw.get("reason"),
         "engine_crashed": bool(raw.get("engine_crashed", False)),
         "scoring_rule": row["scoring_rule"] or {},
-        "prompt_summary": summarize_prompt_scores(prompts),
+        "prompt_summary": summarize_prompt_scores(
+            prompts, rule=(row["scoring_rule"] or {}).get("name")
+        ),
         "score_breakdown": score_report.get("score_breakdown") or None,
         "workload": workload,
         "prompts": prompts,

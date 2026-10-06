@@ -314,6 +314,43 @@ def test_summary_of_an_entry_that_never_scored_is_all_zeroes():
     }
 
 
+@pytest.mark.parametrize(
+    "rule", ["median_e2e_speedup", "weighted_tier_completion_speedup"]
+)
+def test_summary_distinguishes_completion_failure_from_missing_diagnostics(rule):
+    prompts = [
+        {"reason": "insufficient timing", "candidate_failed": False},
+        {"reason": REASON_BELOW_TOLERANCE, "candidate_failed": True},
+        {"reason": "invalid completion finish reason", "candidate_failed": True},
+        {"reason": None, "candidate_failed": False, "speedup": 0.0},
+    ]
+    summary = summarize_prompt_scores(prompts, rule=rule)
+    assert summary["total"] == 4
+    assert summary["below_tolerance"] == 1
+    assert summary["scored"] == (2 if rule.startswith("weighted") else 1)
+    assert summary["zeroed_by_reason"].get("insufficient timing", 0) == (
+        0 if rule.startswith("weighted") else 1
+    )
+    assert summary["zeroed"] == sum(summary["zeroed_by_reason"].values())
+
+
+def test_weighted_summary_preserves_unknown_flags_and_counts_unlabelled_failures():
+    summary = summarize_prompt_scores(
+        [
+            {"reason": "insufficient timing"},
+            {"reason": "insufficient timing", "candidate_failed": None},
+            {"reason": None, "candidate_failed": True},
+        ],
+        rule="weighted_tier_completion_speedup",
+    )
+    assert summary["scored"] == 0
+    assert summary["zeroed"] == 3
+    assert summary["zeroed_by_reason"] == {
+        "insufficient timing": 2,
+        "candidate completion failed": 1,
+    }
+
+
 def test_summary_skips_malformed_prompt_rows():
     """Reports are read back out of JSONB written by past harness versions."""
     summary = summarize_prompt_scores(
