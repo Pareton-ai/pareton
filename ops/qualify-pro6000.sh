@@ -6,7 +6,7 @@ reuse_baseline=false
 reuse_qualification=
 if [[ $# == 1 && "$1" == --reuse-baseline ]]; then
   reuse_baseline=true
-elif [[ $# == 2 && "$1" == --reuse-qualification ]]; then
+elif [[ $# == 2 && "$1" == --reuse-qualification && -n "$2" ]]; then
   reuse_qualification=$2
 elif [[ $# != 0 ]]; then
   echo 'Usage: qualify-pro6000.sh [--reuse-baseline | --reuse-qualification DIR]' >&2

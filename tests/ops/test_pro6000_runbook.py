@@ -273,3 +273,17 @@ def test_reuse_qualification_controller_never_starts_or_cleans_docker(
         and "curl " not in calls
         and "bench.qualify_longform" not in calls
     )
+
+
+def test_empty_reuse_source_cannot_fall_back_to_gpu_qualification(tmp_path):
+    env, calls_path = fake_environment(tmp_path, "success")
+    result = subprocess.run(
+        ["bash", str(ROOT / "ops/qualify-pro6000.sh"), "--reuse-qualification", ""],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2
+    assert not calls_path.exists()
+    assert not (tmp_path / "step2.lock").exists()
