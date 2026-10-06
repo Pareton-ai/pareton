@@ -3,19 +3,18 @@
 set -euo pipefail
 umask 077
 reuse_baseline=false
+reuse_qualification=
 if [[ $# == 1 && "$1" == --reuse-baseline ]]; then
   reuse_baseline=true
+elif [[ $# == 2 && "$1" == --reuse-qualification ]]; then
+  reuse_qualification=$2
 elif [[ $# != 0 ]]; then
-  echo 'Usage: qualify-pro6000.sh [--reuse-baseline]' >&2
+  echo 'Usage: qualify-pro6000.sh [--reuse-baseline | --reuse-qualification DIR]' >&2
   exit 2
 fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 : "${PRO6000_RUN_DIR:?Restore the step 1 environment first}"
 : "${PRO6000_FIELDS:?}"
-: "${PRO6000_ENGINE_REF:?}"
-: "${PRO6000_BASELINE_CONTAINER:?}"
-: "${PRO6000_QUAL_NET:?}"
-: "${PARETON_BENCH_HEALTH_TIMEOUT_S:?}"
 
 # One attempt per run directory. Refuse duplicate starts without replacing logs
 # or completion status. Retain the lock after failure as well as success.
@@ -46,6 +45,18 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 python -u -m ops.pro6000_preflight
+if [[ -n "$reuse_qualification" ]]; then
+  echo 'Verifying and narrowing saved qualification evidence (no GPU requests)...'
+  python -u -m ops.reuse_pro6000_qualification \
+    --source-dir "$reuse_qualification" --campaign-fields "$PRO6000_FIELDS" \
+    --output-dir "$PRO6000_RUN_DIR/qualification" \
+    2>&1 | tee "$PRO6000_RUN_DIR/qualification.log"
+  exit 0
+fi
+: "${PRO6000_ENGINE_REF:?}"
+: "${PRO6000_BASELINE_CONTAINER:?}"
+: "${PRO6000_QUAL_NET:?}"
+: "${PARETON_BENCH_HEALTH_TIMEOUT_S:?}"
 if "$reuse_baseline"; then
   echo 'Verifying the existing baseline and its recorded model volume...'
   python -u - <<'REUSE'

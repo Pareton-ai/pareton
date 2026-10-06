@@ -30,7 +30,10 @@ Qualification, warmups, replays and correctness use only those selected tiers.
 `max_baseline_prompt_drops` optionally tightens the existing maximum of eight;
 PRO6000 pins four. Each selected tier must still retain at least one request.
 Both options are bound to the manifest, qualification contract, receipt and trace.
-Changing them requires fresh qualification and a new shadow run.
+Changing them invalidates the old receipt. The exact PRO6000 four-to-two tier
+reduction supports [verified evidence reuse](../ops/pro6000-qualification-reuse.md)
+when execution/generation pins are unchanged; other changes require fresh
+qualification. Both paths require a new shadow run.
 
 The model, engine, hardware, serving arguments, fees and emissions remain as
 configured in the seed helper. Version 5 retires `request_interval_ms` and requires

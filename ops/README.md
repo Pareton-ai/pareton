@@ -52,9 +52,10 @@ pins Qwen3.8-27B-FP8, TP1, 262144 context, v5 **16 requests at C4**
 private patches and a **0.1 TAO** initial fee. Generation/scorer memory fractions are **0.80/0.60**,
 following [#189](https://github.com/Pareton-ai/pareton/pull/189).
 
-This reduced tier contract needs fresh qualification and a new run directory;
-32-request qualification/shadow artifacts do not qualify it. Deploy this version
-of the worker before launch.
+Use a new run directory and either fresh qualification or
+[verified reuse of the original successful qualification](pro6000-qualification-reuse.md).
+The old rule cannot be used directly. Both paths require a fresh 16-prompt shadow
+round. Deploy this version of the worker before launch.
 
 Every long stage runs under `nohup`. **Ctrl-C on `tail` stops only the viewer.**
 Proceed only when that stage's `.exit-code` file contains `0`; missing/nonzero

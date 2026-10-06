@@ -27,6 +27,10 @@ case "$command" in
       if [[ "$TEST_CASE" == missing_dependency ]]; then echo 'missing tokenizers' >&2; exit 6; fi
       exit 0
     fi
+    if [[ "$*" == *ops.reuse_pro6000_qualification* ]]; then
+      if [[ "$TEST_CASE" == reuse_failure ]]; then echo "reuse refused" >&2; exit 7; fi
+      exit 0
+    fi
     if [[ "$*" == *bench.qualify_longform* ]]; then
       if [[ "$TEST_CASE" == qualification_failure ]]; then
         echo 'qualification failed' >&2; exit 9
@@ -231,3 +235,41 @@ def test_reuse_baseline_skips_weight_staging_and_startup(tmp_path):
     assert "volume.prepare(" not in payload
     assert "bench.qualify_longform" in script_calls.read_text()
     assert (tmp_path / "step2.exit-code").read_text().strip() == "0"
+
+
+@pytest.mark.parametrize(
+    "scenario,status", [("reuse_success", 0), ("reuse_failure", 7)]
+)
+def test_reuse_qualification_controller_never_starts_or_cleans_docker(
+    tmp_path, scenario, status
+):
+    env, calls_path = fake_environment(tmp_path, scenario)
+    for key in (
+        "PRO6000_ENGINE_REF",
+        "PRO6000_BASELINE_CONTAINER",
+        "PRO6000_QUAL_NET",
+        "PARETON_BENCH_HEALTH_TIMEOUT_S",
+    ):
+        env.pop(key)
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "ops/qualify-pro6000.sh"),
+            "--reuse-qualification",
+            "/saved run/qualification",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == status, result.stderr
+    assert (tmp_path / "step2.exit-code").read_text().strip() == str(status)
+    calls = calls_path.read_text()
+    assert "ops.reuse_pro6000_qualification" in calls
+    assert "--source-dir /saved run/qualification" in calls
+    assert (
+        "docker " not in calls
+        and "curl " not in calls
+        and "bench.qualify_longform" not in calls
+    )

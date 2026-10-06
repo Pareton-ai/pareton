@@ -376,12 +376,16 @@ There is no 32k tier, padding or truncation.
 For a new v5 campaign with fewer tiers, explicitly pin `input_tiers` in ascending
 order and give exactly those tiers weights summing to one. PRO6000 uses
 `["8k", "16k"]`, `n_prompts: 16`, C4, weights 0.5/0.5 and
-`max_baseline_prompt_drops: 4`; qualify a fresh pool of 32 rows and run a fresh
+`max_baseline_prompt_drops: 4`; use a qualified pool of 32 rows and run a fresh
 shadow round using the [PRO6000 runbook](../ops/README.md#rtx-pro-6000-qwen38-fp8-campaign).
 Deploy the subset-aware worker before launch. Omitted tier/exclusion fields
 retain the four-tier/eight-exclusion defaults and existing hashes. Every selected
 tier must remain nonempty. Changing the tier set or exclusion allowance invalidates
-old qualification; never edit an existing campaign's signed workload in place.
+old receipts. For this exact PRO6000 narrowing, the
+[reuse helper](../ops/pro6000-qualification-reuse.md) can derive a new receipt from
+complete successful evidence without new GPU requests when execution/generation
+pins match. A new shadow round is still required. Never edit an existing
+campaign's signed workload in place.
 
 Supported concurrency values are 1, 2, 4, 8, 16 and 32. C1-C8 finish one tier
 before starting the next. C16 groups 2k+4k, then 8k+16k; C32 overlaps all four.
