@@ -207,50 +207,37 @@ path for this portable run so it cannot cause the same filesystem mismatch.
 Existing cache files are not removed. After a hard kill, inspect that run's named
 containers before manually removing its recorded volume; never prune shared data.
 
-```bash
-python -m bench.preview_longform \
-  --campaign-fields "$PRO6000_FIELDS" \
-  --sampling-rule "$PRO6000_RUN_DIR/qualification/sampling_rule.json" \
-  --output-dir "$PRO6000_RUN_DIR/preview"
-python - <<'PYTHON'
-import json, os
-from pathlib import Path
-from types import SimpleNamespace
-from uuid import uuid4
-from bench.longform import require_qualification
-from bench.sampler import parse_sampling_rule
-from bench.validate import load_workload_trace, sha256_file
-from campaign.models import SLA
-from worker.round_job import build_round_request
+The entire preview → request → shadow sequence runs in one `nohup` job. Pull
+the latest PR branch so `ops/shadow-pro6000.sh` is present. It requires
+`step2.exit-code` to contain `0`, stops at the first failed stage, rejects a
+second attempt in the same run directory, and records `step3.pid` plus
+`step3.exit-code`. Its output streams to `step3.log` and the individual stage logs.
+No foreground `wait` is needed, and it never seeds a campaign automatically.
 
-root = Path(os.environ["PRO6000_RUN_DIR"]).resolve()
-fields = json.loads(Path(os.environ["PRO6000_FIELDS"]).read_text())
-rule = parse_sampling_rule(json.loads((root / "qualification/sampling_rule.json").read_text()))
-require_qualification(rule, fields["bench"], fields["engine"])
-assert rule["algo_version"] == 5 and rule["request_concurrency"] == 4
-assert rule["n_prompts"] == 32 and rule["request_timeout_s"] == 600
-assert fields["patch_visibility"] == {"mode": "private"}
-trace = root / "preview/workload_trace.json"
-trace_hash = sha256_file(trace)
-parsed_trace = load_workload_trace(trace, expected_sha256=trace_hash)
-assert len(parsed_trace.requests) == 32
-assert parsed_trace.meta.sampling["request_concurrency"] == 4
-campaign = SimpleNamespace(bench=fields["bench"], engine=fields["engine"],
-                           sla=SLA.from_dict(fields["sla"]))
-engine_ref = fields["bench"]["baseline_engine_image_digest"]
-request = build_round_request(
-    {"gpu_sku": fields["gpu_skus"][0], "sampled_trace_sha256": trace_hash,
-     "scoring_rule": fields["scoring_rule"]}, campaign,
-    [{"role": "baseline", "engine_image_ref": engine_ref},
-     {"role": "challenger", "engine_image_ref": engine_ref}],
-    task_id=str(uuid4()), trace_path=str(trace),
-)
-(root / "bench_request.json").write_text(json.dumps(request, indent=2) + "\n")
-PYTHON
-unset PARETON_BENCH_ENGINE_CACHE_DIR
-python -m ops.pro6000_model_volume --request "$PRO6000_RUN_DIR/bench_request.json" \
-  --output-dir "$PRO6000_RUN_DIR/shadow"
-jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
+```bash
+set +e
+nohup bash ops/shadow-pro6000.sh >> "$PRO6000_RUN_DIR/step3.log" 2>&1 < /dev/null &
+printf 'Launched PID %s; log: %s/step3.log\n' "$!" "$PRO6000_RUN_DIR"
+```
+
+Watch separately; Ctrl-C stops only the viewer:
+
+```bash
+tail -n 60 -f "$PRO6000_RUN_DIR/step3.log" || true
+```
+
+After reconnecting, restore the existing run's variables and read its PID/logs;
+do not relaunch. Only a recorded exit code `0` permits report review below. A
+missing status is not success: the job may still be running or may have failed
+before recording status. On failure, inspect the logs before attempting recovery.
+
+```bash
+if [[ -f "$PRO6000_RUN_DIR/step3.exit-code" ]] && \
+   [[ "$(cat "$PRO6000_RUN_DIR/step3.exit-code")" == 0 ]]; then
+  jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
+else
+  printf 'Step 3 has not succeeded; inspect %s/step3.log and step3.exit-code.\n' "$PRO6000_RUN_DIR"
+fi
 ```
 
 Inspect the complete report and retained evidence, not just process exit status:
@@ -275,29 +262,56 @@ Set the path below to the transferred qualified file, and use the reviewed
 checkout whose fixture matches the GPU run. **This command creates an open row**;
 do not seed a draft first or rerun it to change a fee.
 
+Start the reviewed seed operation as one background job; the wrapper records
+`seed.pid`, `seed.log` and `seed.exit-code` under a protected directory. Keep that
+directory path across reconnects. Its lock prevents reuse of the same directory,
+but is **not database idempotency**: never create a fresh directory just to retry
+an uncertain seed result. Inspect database/API state first.
+
 ```bash
+set +e
 cd /opt/pareton
 source .venv/bin/activate
 set -a
 source .env
 set +a
 umask 077
-PRO6000_QUALIFIED_RULE=/absolute/path/to/pro6000-qualification/sampling_rule.json
-PRO6000_ENGINE_REF=$(python -c 'import json; print(json.load(open("fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json"))["base_image_digest"])')
-bash ops/seed-sglang-qwen38-27b-pro6000.sh \
-  "$PRO6000_ENGINE_REF" "$PRO6000_QUALIFIED_RULE"
-read -r -p 'New campaign UUID printed by seed: ' PRO6000_CAMPAIGN_ID
-curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" \
-  > /tmp/pro6000-campaign-readback.json
-jq -e '
-  .status == "open" and .patch_visibility == {"mode":"private"} and
-  .sampling_rule.algo_version == 5 and .sampling_rule.n_prompts == 32 and
-  .sampling_rule.request_concurrency == 4 and .sampling_rule.request_timeout_s == 600 and
-  .scoring_rule.name == "weighted_tier_completion_speedup" and
-  .scoring_rule.tier_weights == {"2k":0.25,"4k":0.25,"8k":0.25,"16k":0.25} and
-  .scoring_rule.failure_penalty == 0.1 and .submission_fee.amount_tao == "0.1" and
-  .gpu_skus == ["RTXPRO6000"] and .bench.gpu_count == 1
-' /tmp/pro6000-campaign-readback.json
+export PRO6000_QUALIFIED_RULE=/absolute/path/to/pro6000-qualification/sampling_rule.json
+export PRO6000_SEED_DIR=$(mktemp -d /var/tmp/pareton-pro6000-seed-XXXXXX)
+nohup bash ops/seed-pro6000-job.sh >> "$PRO6000_SEED_DIR/seed.log" 2>&1 < /dev/null &
+printf 'Launched PID %s; evidence: %s\n' "$!" "$PRO6000_SEED_DIR"
+```
+
+Watch separately; Ctrl-C stops only the viewer:
+
+```bash
+tail -n 60 -f "$PRO6000_SEED_DIR/seed.log" || true
+```
+
+Only after `seed.exit-code` contains `0`, review `seed.log` for the new UUID and
+run the readback below. Missing/nonzero status requires investigation of both
+logs and database/API state before any retry. Readback is a separate manual step;
+interrupting its prompt or HTTP request cannot cancel the detached seed job.
+
+```bash
+if [[ -f "$PRO6000_SEED_DIR/seed.exit-code" ]] && \
+   [[ "$(cat "$PRO6000_SEED_DIR/seed.exit-code")" == 0 ]]; then
+  cat "$PRO6000_SEED_DIR/seed.log"
+  read -r -p 'New campaign UUID printed by seed: ' PRO6000_CAMPAIGN_ID &&
+  curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" \
+    > /tmp/pro6000-campaign-readback.json &&
+  jq -e '
+    .status == "open" and .patch_visibility == {"mode":"private"} and
+    .sampling_rule.algo_version == 5 and .sampling_rule.n_prompts == 32 and
+    .sampling_rule.request_concurrency == 4 and .sampling_rule.request_timeout_s == 600 and
+    .scoring_rule.name == "weighted_tier_completion_speedup" and
+    .scoring_rule.tier_weights == {"2k":0.25,"4k":0.25,"8k":0.25,"16k":0.25} and
+    .scoring_rule.failure_penalty == 0.1 and .submission_fee.amount_tao == "0.1" and
+    .gpu_skus == ["RTXPRO6000"] and .bench.gpu_count == 1
+  ' /tmp/pro6000-campaign-readback.json
+else
+  printf 'Seed success is unconfirmed; inspect %s and database/API state before proceeding.\n' "$PRO6000_SEED_DIR"
+fi
 ```
 
 Also compare both image digests, source/model revisions, serving arguments,
