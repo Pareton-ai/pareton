@@ -152,7 +152,13 @@ def wait_for(path):
 def test_nohup_controller_survives_hangup_and_viewer_interrupt(tmp_path):
     env, calls_path = fake_environment(tmp_path, "detached")
     section = (ROOT / "ops/README.md").read_text().split("#### 2.")[1]
-    launch = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
+    block = re.search(r"```bash\n(.*?)```", section, re.S).group(1)
+    # Host setup is supplied by the fixture; exercise only the documented launch.
+    launch = next(
+        line.strip()
+        for line in block.splitlines()
+        if line.lstrip().startswith("nohup ")
+    )
     # Job control models the interactive SSH shell's separate process groups.
     subprocess.run(
         ["bash", "-c", "set -m\n" + launch],

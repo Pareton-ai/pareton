@@ -42,365 +42,136 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ### RTX PRO 6000 Qwen3.8 FP8 campaign
 
-This new campaign uses the merged #186 privacy policy and #187 v5 contract:
+Use a fresh **Ubuntu GPU VM with one RTX PRO 6000, NVIDIA drivers, Docker and
+NVIDIA Container Toolkit preinstalled**. Run the VM commands as root in Bash;
+port 30000 must be free. Allow disk space for the model cache plus a volume copy.
 
-- `patch_visibility: {"mode": "private"}`: no public reveal, including after
-  evaluation or campaign closure. Private mode has no reveal delay. This policy
-  is operational and deliberately outside `manifest_hash`; never enable public
-  disclosure for this campaign. Keep patch storage and candidate registries private.
-- `algo_version: 5`, **32 requests at C4**, eight requests per 2k/4k/8k/16k tier
-  before baseline exclusions. Each tier drains before the next starts; FIFO slot
-  refill caps admitted requests at four. Exclusions/final drain can lower occupancy.
-  Engine `--max-running-requests 32` remains capacity, not benchmark concurrency.
-- Natural EOS, 5120-token ceiling, 3000-token baseline minimum, thinking disabled,
-  and an absolute 600-second request timeout. Both baseline runs establish the
-  union of exclusions (at most eight, with no empty tier). Candidates must emit
-  at least 90% of the measured baseline's reported tokens per eligible request.
-- `weighted_tier_completion_speedup`, equal 0.25 tier weights, failure penalty 0.1.
-  Tier completion includes client queueing; any scoreable failure caps speed
-  credit at zero before the failure deduction. There is no fixed-output mode.
-- Initial fee **0.1 TAO**, supplied by the seed helper; emissions start at 0.20
-  and decline to zero over 201600 leader-held blocks.
+The [fixture](../fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json)
+pins Qwen3.8-27B-FP8, TP1, 262144 context, v5 **32 requests at C4**, private patches
+and a **0.1 TAO** initial fee. Generation/scorer memory fractions are **0.80/0.60**,
+following [#189](https://github.com/Pareton-ai/pareton/pull/189).
 
-The fixture pins one `RTXPRO6000`,
-`Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`, BF16 activation
-dtype, FP8 quantization, 262144 context, and SGLang
-`4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc`. Its serving arguments retain TP1,
-`qwen3_coder` tool parsing, `qwen3` reasoning parsing, data-parallel multimodal
-encoding, and EAGLE with three steps, top-k one and four draft tokens.
+Every long stage runs under `nohup`. **Ctrl-C on `tail` stops only the viewer.**
+Proceed only when that stage's `.exit-code` file contains `0`; missing/nonzero
+status means inspect its log, not relaunch it. Never enable `set -e` in the
+interactive shell. Keep the run directory and evidence.
 
-The operator reports a successful run of the [#189 diagnostic](https://github.com/Pareton-ai/pareton/pull/189)
-with generation memory fraction `0.80` and scorer fraction `0.60`. These are now
-pinned as `--mem-fraction-static` in `bench.serve_args` and
-`bench.correctness.serve_args`, respectively. The diagnostic does not replace
-fresh qualification and a complete shadow round for this v5 C4 contract.
-
-Both image fields reuse the original campaign's finished Pareton engine:
-`ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431`.
-This is `engine_image`, not the bootstrap `build_base_image`. No target-GPU build
-is required solely for TP1, but runtime compatibility and the full workload must
-be qualified on RTX PRO 6000. A replacement engine requires updating both fixture
-image fields and fresh qualification. TP4, v4, C32 or other-model receipts do not
-qualify this contract. The context limit does not make this a full-context or
-multimodal benchmark.
-
-#### 1. Deployment and host prerequisites
-
-Before launching the campaign, complete target-GPU qualification and a full
-shadow round. These are operator instructions, not evidence that deployment or launch has
-occurred. Use the updated [campaign launch skill](../docs/campaign_launch_skill.md).
-Verify the deployed API/workers contain #186, #187 and this PR, the fee-history
-and `20261001_campaign_patch_visibility.sql` migrations are applied, and compatible
-frontend support from frontend PRs #88 and #89 is deployed. Follow the existing
-[privacy migration/runbook](../docs/patch-visibility.md#rollout) and release
-coordinator; do not replace a live worker checkout with this branch. Confirm the
-private object-store/registry access controls and private patch API behavior.
-
-Host Python dependencies must be installed **before step 1 creates a GPU run**.
-The engine container does not supply the host qualifier's packages. Use Python
-3.10+ with `venv` support (the reported host uses Python 3.12). On Ubuntu/Debian,
-if needed, install the host tools with
-`sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip git curl jq`.
-Docker, NVIDIA drivers and NVIDIA Container Toolkit must already work on this
-host; these Python setup commands do not install or modify them.
-
-From the root of the latest PR checkout, prepare its `.venv` as one background
-job. `requirements.txt` includes the API requirements and pins
-`tokenizers==0.22.2` and `jinja2==3.1.6`; do not install an arbitrary tokenizer
-version or rely on packages inside the SGLang image. No HF token is required for
-this public model; an existing `HF_TOKEN` can improve Hub rate limits.
+#### 1. Checkout and install dependencies
 
 ```bash
 set +e
 umask 077
-export PRO6000_SETUP_DIR=$(mktemp -d /var/tmp/pareton-pro6000-setup-XXXXXX)
-nohup bash ops/setup-pro6000.sh >> "$PRO6000_SETUP_DIR/setup.log" 2>&1 < /dev/null &
-printf 'Launched PID %s; setup evidence: %s\n' "$!" "$PRO6000_SETUP_DIR"
-```
+apt-get update && apt-get install -y python3 python3-venv python3-pip git curl jq
+mkdir -p /workspace
+cd /workspace
+git clone --branch arpan/pro6000-fp8-campaign https://github.com/Pareton-ai/pareton.git
+cd pareton
+nvidia-smi --query-gpu=name,memory.total --format=csv
+docker info >/dev/null
 
-Watch separately; Ctrl-C stops only the viewer:
-
-```bash
-tail -n 60 -f "$PRO6000_SETUP_DIR/setup.log" || true
-```
-
-Do not proceed until `setup.exit-code` exists and contains `0`. If setup fails,
-inspect `setup.log`; do not create a baseline container. After successful setup,
-activate the installed environment in the interactive shell:
-
-```bash
-if [[ -f "$PRO6000_SETUP_DIR/setup.exit-code" ]] && \
-   [[ "$(cat "$PRO6000_SETUP_DIR/setup.exit-code")" == 0 ]]; then
-  source .venv/bin/activate
-else
-  printf 'Setup has not succeeded; inspect %s/setup.log before continuing.\n' "$PRO6000_SETUP_DIR"
-fi
-```
-
-The controllers repeat `ops.pro6000_preflight` with their actual Python
-interpreter. This checks required host imports, including the lazy tokenizer,
-dataset and worker imports, and the pinned tokenizer/template versions before
-weight staging or other expensive work. It does not establish GPU qualification.
-
-On an idle, dedicated Linux host with one RTX PRO 6000, working NVIDIA drivers,
-NVIDIA Container Toolkit, Docker and repo Python dependencies, use a separate
-checkout of the reviewed PR commit. Authenticate to GHCR through the existing
-credential mechanism if needed. Run the following in one Bash shell with the
-Pareton virtualenv active; `curl` and `jq` are also required:
-
-```bash
-# Keep error handling inside job scripts, not the interactive SSH shell.
-set +e
-umask 077
-export PRO6000_FIELDS=fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json
 export PRO6000_RUN_DIR=$(mktemp -d /var/tmp/pareton-pro6000-XXXXXX)
-export PRO6000_ENGINE_REF=$(python -c 'import json,os; print(json.load(open(os.environ["PRO6000_FIELDS"]))["base_image_digest"])')
+export PRO6000_SETUP_DIR="$PRO6000_RUN_DIR/setup"
+mkdir "$PRO6000_SETUP_DIR"
+export PRO6000_FIELDS=fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json
+export PRO6000_ENGINE_REF=$(jq -er '.base_image_digest' "$PRO6000_FIELDS")
 export PRO6000_BASELINE_CONTAINER="$(basename "$PRO6000_RUN_DIR")-qualification"
 export PRO6000_QUAL_NET="$(basename "$PRO6000_RUN_DIR")-network"
 export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
-nvidia-smi --query-gpu=name,memory.total --format=csv
-# Verify this is the intended idle RTX PRO 6000 before proceeding.
-docker pull "$PRO6000_ENGINE_REF"
-docker network create "$PRO6000_QUAL_NET"
+declare -p PRO6000_RUN_DIR PRO6000_SETUP_DIR PRO6000_FIELDS PRO6000_ENGINE_REF \
+  PRO6000_BASELINE_CONTAINER PRO6000_QUAL_NET PARETON_BENCH_HEALTH_TIMEOUT_S \
+  > "$PRO6000_RUN_DIR/env.sh"
+printf 'Keep this run path: %s\n' "$PRO6000_RUN_DIR"
+nohup bash ops/setup-pro6000.sh >> "$PRO6000_SETUP_DIR/setup.log" 2>&1 < /dev/null &
 ```
 
-Retain `PRO6000_RUN_DIR` and its evidence. On interruption, stop/remove only the
-named qualification container, recorded model volume and network from this run;
-remove containers before their volume. Do not prune shared Docker or build caches.
-
-#### 2. Start the exact baseline and qualify a fresh source pool
-
-This stages the immutable weights locally, copies them through Docker's API into
-a named volume, verifies every copied file's SHA-256, then mounts the volume
-read-only. This avoids client-path bind mounts on containerized GPU hosts whose
-Docker daemon has a different filesystem. It needs disk for one additional model
-copy; copying and hashing can take several minutes. The implementation follows
-#189's volume workaround without its diagnostic workload changes.
-
-Use a checkout containing `ops/pro6000_model_volume.py`. The qualifier still
-requires the Docker daemon's published port to be reachable at
-`http://127.0.0.1:30000` from this shell; a remote daemon without local forwarding
-is unsupported. Ensure port 30000 is free. The model-volume fix addresses storage
-visibility, not network namespace reachability.
-
-Use an ordinary bridge network for this loopback-published qualification endpoint:
-Docker's internal-network port-publishing limitation prevents this procedure from
-reaching the server (see [moby#36174](https://github.com/moby/moby/issues/36174)).
-The port remains bound to `127.0.0.1`. Staged weights and `HF_HUB_OFFLINE=1` /
-`TRANSFORMERS_OFFLINE=1` avoid model downloads; they do not block outbound traffic.
-This qualification setup does not enforce network egress isolation. The shadow
-round harness retains its internal network and direct container-IP connection.
-
-The whole step runs as **one background job**: startup, health checks,
-qualification and success cleanup. Its Python children inherit `nohup`'s hangup
-handling. There is no foreground `wait` or coordinator to interrupt. Pull the
-latest PR branch first; `ops/qualify-pro6000.sh` and `ops/pro6000_model_volume.py`
-must both exist, and the virtualenv must be active.
-
-Launch once per fresh run directory:
+Setup creates `.venv`, installs `requirements.txt` (including pinned `tokenizers`),
+runs `pip check` and checks host imports. Authenticate with `docker login ghcr.io`
+if the image requires it. Watch setup, then check its result:
 
 ```bash
-# Undo errexit in the interactive shell if an older runbook enabled it.
-set +e
-nohup bash ops/qualify-pro6000.sh >> "$PRO6000_RUN_DIR/step2.log" 2>&1 < /dev/null &
-printf 'Launched PID %s; log: %s/step2.log\n' "$!" "$PRO6000_RUN_DIR"
+tail -f "$PRO6000_SETUP_DIR/setup.log" || true
+cat "$PRO6000_SETUP_DIR/setup.exit-code"
 ```
 
-Watch separately. **Ctrl-C here stops only the viewer**, and `|| true` also
-prevents an interactive shell with errexit enabled from closing:
+#### 2. Qualify the baseline
+
+After setup returns `0`, activate `.venv`. This job stages and verifies weights,
+starts the baseline, runs `bench.qualify_longform` with pool 64, two repetitions,
+concurrency 4 and timeout 600, then removes its container/network/volume on success.
 
 ```bash
-tail -n 60 -f "$PRO6000_RUN_DIR/step2.log" || true
-```
-
-After reconnecting, restore the virtualenv and environment using the same run
-directory. Read `step2.pid` and `step2.log`; do not launch another job. The script
-claims `step2.lock` to reject duplicate runs and records its final status in
-`step2.exit-code`. Missing status means unfinished or interrupted unexpectedly,
-not success. Proceed to step 3 only after exit code `0` **and** review of the
-qualification artifacts. Nonzero status stops dependent work and success cleanup;
-inspect the logs before retrying. A failed run needs a fresh directory, after
-confirming its processes/containers are no longer using the GPU.
-
-```bash
-if [[ -f "$PRO6000_RUN_DIR/step2.exit-code" ]]; then
-  printf 'Step 2 exit code: '
-  cat "$PRO6000_RUN_DIR/step2.exit-code"
-else
-  printf 'No completion status yet; inspect %s/step2.log and step2.pid.\n' "$PRO6000_RUN_DIR"
-fi
-```
-
-`qualification/sampling_rule.json` is the qualified output to use below. The
-qualifier's `--concurrency 4` controls source screening; the fixture's separate
-`request_concurrency: 4` controls scored replay. Do not use an old pool or modify
-its qualified settings. Failed qualification must be investigated and rerun into
-a fresh directory, without relaxing correctness or privacy implicitly.
-
-#### Recover qualification after a host dependency failure
-
-For the reported missing-`tokenizers` failure, the baseline is already running
-and no qualification evidence was written. Keep that container and its volume.
-Install dependencies using the setup procedure above, then activate `.venv`.
-Do not rerun step 1: retain `PRO6000_BASELINE_CONTAINER`, `PRO6000_QUAL_NET`,
-`PRO6000_ENGINE_REF` and `PRO6000_FIELDS` from the failed run. Confirm that its
-controller has exited before continuing.
-
-Use a fresh output directory while retaining the old evidence. Copy only the
-verified volume receipt; the retry checks that the running container actually
-mounts that recorded volume read-only and verifies its image and loopback binding.
-It then reuses the baseline, requalifies from source and performs normal cleanup
-only after success. It does not loosen any v5/C4 settings.
-
-```bash
-export PRO6000_PREVIOUS_RUN_DIR="$PRO6000_RUN_DIR"
-export PRO6000_RUN_DIR=$(mktemp -d /var/tmp/pareton-pro6000-retry-XXXXXX)
-if cp "$PRO6000_PREVIOUS_RUN_DIR/model_volume.json" "$PRO6000_RUN_DIR/model_volume.json"; then
-  nohup bash ops/qualify-pro6000.sh --reuse-baseline >> "$PRO6000_RUN_DIR/step2.log" 2>&1 < /dev/null &
-  printf 'Launched recovery PID %s; log: %s/step2.log\n' "$!" "$PRO6000_RUN_DIR"
+source .venv/bin/activate
+if docker network create "$PRO6000_QUAL_NET"; then
+  nohup bash ops/qualify-pro6000.sh >> "$PRO6000_RUN_DIR/step2.log" 2>&1 < /dev/null &
 fi
 ```
 
 ```bash
-tail -n 60 -f "$PRO6000_RUN_DIR/step2.log" || true
+tail -f "$PRO6000_RUN_DIR/step2.log" || true
+cat "$PRO6000_RUN_DIR/step2.exit-code"
 ```
 
-Require `step2.exit-code` to contain `0` and review the qualification artifacts,
-then use this **new** `PRO6000_RUN_DIR` for step 3. Missing/nonzero completion
-status is not permission to proceed. Do not manually write a success marker.
+After reconnecting: `cd /workspace/pareton`, source the saved run's `env.sh`, then
+`source .venv/bin/activate`. Inspect the existing job; do not repeat setup.
 
-#### 3. Generate the C4 trace and a worker-derived shadow request
+#### 3. Run the C4 shadow benchmark
 
-Use an unchanged baseline as the candidate to validate the complete harness
-before opening. The stock `ops/sglang-sample-round/run.sh` is TP4/NVFP4-specific
-and must not be used for this campaign. CPU preview below reproduces the sampled
-trace from its receipt, but does not replace GPU validation.
-
-The opt-in `ops.pro6000_model_volume` runner below executes the normal v5 harness
-and only replaces its model bind mount with a verified Docker volume. It does not
-change the request, source pool, C4 scheduling, natural EOS, thresholds or scorer.
-A separate volume is prepared for the shadow round and removed on exit; evidence
-is retained in `shadow/model_volume.json`. Unset the optional engine-cache bind
-path for this portable run so it cannot cause the same filesystem mismatch.
-Existing cache files are not removed. After a hard kill, inspect that run's named
-containers before manually removing its recorded volume; never prune shared data.
-
-The entire preview → request → shadow sequence runs in one `nohup` job. Pull
-the latest PR branch so `ops/shadow-pro6000.sh` is present. It requires
-`step2.exit-code` to contain `0`, stops at the first failed stage, rejects a
-second attempt in the same run directory, and records `step3.pid` plus
-`step3.exit-code`. Its output streams to `step3.log` and the individual stage logs.
-No foreground `wait` is needed, and it never seeds a campaign automatically.
+After step 2 returns `0`, generate the trace/request and benchmark the unchanged
+baseline as candidate. The job preserves the normal v5 C4 workload and scorer.
 
 ```bash
-set +e
 nohup bash ops/shadow-pro6000.sh >> "$PRO6000_RUN_DIR/step3.log" 2>&1 < /dev/null &
-printf 'Launched PID %s; log: %s/step3.log\n' "$!" "$PRO6000_RUN_DIR"
 ```
-
-Watch separately; Ctrl-C stops only the viewer:
 
 ```bash
-tail -n 60 -f "$PRO6000_RUN_DIR/step3.log" || true
+tail -f "$PRO6000_RUN_DIR/step3.log" || true
+cat "$PRO6000_RUN_DIR/step3.exit-code"
+jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
 ```
 
-After reconnecting, restore the existing run's variables and read its PID/logs;
-do not relaunch. Only a recorded exit code `0` permits report review below. A
-missing status is not success: the job may still be running or may have failed
-before recording status. On failure, inspect the logs before attempting recovery.
+Require exit `0`, a scored candidate, passing correctness, all four surviving
+tiers and passing drift/repeatability gates. Review the retained evidence; CPU
+checks and #189's diagnostic do not replace this GPU run. Before seeding, also
+confirm offline miner-build/native-probe checks for the pinned engine and the
+[deployment/privacy requirements](../docs/patch-visibility.md#rollout), including
+#186/#187 backend migrations and compatible frontend support (#88/#89).
 
-```bash
-if [[ -f "$PRO6000_RUN_DIR/step3.exit-code" ]] && \
-   [[ "$(cat "$PRO6000_RUN_DIR/step3.exit-code")" == 0 ]]; then
-  jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
-else
-  printf 'Step 3 has not succeeded; inspect %s/step3.log and step3.exit-code.\n' "$PRO6000_RUN_DIR"
-fi
-```
+#### 4. Seed once on the configured controller
 
-Inspect the complete report and retained evidence, not just process exit status:
-unchanged candidate must be scored, baseline/candidate correctness must pass,
-all four tiers must survive exclusions, and drift/repeatability gates must pass.
-Review `evidence/correctness/baseline_exclusions.json`, queue-inclusive tier times,
-the 0.25 weights, failure deduction, natural output lengths and observed C4
-occupancy (allowing exclusions and final drain). Both baseline runs establish
-exclusions before the candidate; they are not extra qualification starts.
-Verify GPU count, peak VRAM, scorer headroom and cleanup. Confirm the existing
-nonempty offline miner-build/native-probe checks for the reused engine; baseline
-self-comparison alone does not prove that changed CUDA/Rust kernels execute.
-If serving or memory settings change, update both helper and fixture and restart
-qualification. Preserve all evidence under this run directory.
-
-#### 4. Seed once on the configured controller, then verify
-
-Only after deployment checks, qualification and shadow validation pass, transfer
-`qualification/sampling_rule.json` and its evidence to owner-only storage on the
-controller. Load its existing protected environment and activate its virtualenv.
-Set the path below to the transferred qualified file, and use the reviewed
-checkout whose fixture matches the GPU run. **This command creates an open row**;
-do not seed a draft first or rerun it to change a fee.
-
-Start the reviewed seed operation as one background job; the wrapper records
-`seed.pid`, `seed.log` and `seed.exit-code` under a protected directory. Keep that
-directory path across reconnects. Its lock prevents reuse of the same directory,
-but is **not database idempotency**: never create a fresh directory just to retry
-an uncertain seed result. Inspect database/API state first.
+Transfer `qualification/sampling_rule.json` and its evidence to protected storage
+on the controller. Use the reviewed checkout and its prepared `.venv`/`.env`,
+following the [campaign launch skill](../docs/campaign_launch_skill.md).
+**This creates an open campaign.** Set the transferred file path below.
 
 ```bash
 set +e
 cd /opt/pareton
 source .venv/bin/activate
-set -a
-source .env
-set +a
+set -a; source .env; set +a
 umask 077
-export PRO6000_QUALIFIED_RULE=/absolute/path/to/pro6000-qualification/sampling_rule.json
+export PRO6000_QUALIFIED_RULE=/absolute/path/to/qualification/sampling_rule.json
 export PRO6000_SEED_DIR=$(mktemp -d /var/tmp/pareton-pro6000-seed-XXXXXX)
 nohup bash ops/seed-pro6000-job.sh >> "$PRO6000_SEED_DIR/seed.log" 2>&1 < /dev/null &
-printf 'Launched PID %s; evidence: %s\n' "$!" "$PRO6000_SEED_DIR"
+printf 'Keep this seed path: %s\n' "$PRO6000_SEED_DIR"
 ```
-
-Watch separately; Ctrl-C stops only the viewer:
 
 ```bash
-tail -n 60 -f "$PRO6000_SEED_DIR/seed.log" || true
+tail -f "$PRO6000_SEED_DIR/seed.log" || true
+cat "$PRO6000_SEED_DIR/seed.exit-code"
 ```
 
-Only after `seed.exit-code` contains `0`, review `seed.log` for the new UUID and
-run the readback below. Missing/nonzero status requires investigation of both
-logs and database/API state before any retry. Readback is a separate manual step;
-interrupting its prompt or HTTP request cannot cancel the detached seed job.
+After exit `0`, take the UUID from `seed.log` and verify the API result:
 
 ```bash
-if [[ -f "$PRO6000_SEED_DIR/seed.exit-code" ]] && \
-   [[ "$(cat "$PRO6000_SEED_DIR/seed.exit-code")" == 0 ]]; then
-  cat "$PRO6000_SEED_DIR/seed.log"
-  read -r -p 'New campaign UUID printed by seed: ' PRO6000_CAMPAIGN_ID &&
-  curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" \
-    > /tmp/pro6000-campaign-readback.json &&
-  jq -e '
-    .status == "open" and .patch_visibility == {"mode":"private"} and
-    .sampling_rule.algo_version == 5 and .sampling_rule.n_prompts == 32 and
-    .sampling_rule.request_concurrency == 4 and .sampling_rule.request_timeout_s == 600 and
-    .scoring_rule.name == "weighted_tier_completion_speedup" and
-    .scoring_rule.tier_weights == {"2k":0.25,"4k":0.25,"8k":0.25,"16k":0.25} and
-    .scoring_rule.failure_penalty == 0.1 and .submission_fee.amount_tao == "0.1" and
-    .gpu_skus == ["RTXPRO6000"] and .bench.gpu_count == 1
-  ' /tmp/pro6000-campaign-readback.json
-else
-  printf 'Seed success is unconfirmed; inspect %s and database/API state before proceeding.\n' "$PRO6000_SEED_DIR"
-fi
+read -r -p 'Campaign UUID: ' PRO6000_CAMPAIGN_ID &&
+curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" | jq .
 ```
 
-Also compare both image digests, source/model revisions, serving arguments,
-correctness thresholds, natural-EOS policy, emissions, block-zero initial fee
-history/recipient and signoff against the reviewed pins. Inspect the first live
-report and frontend C4/tier display. For a real submission, verify the scoped
-`patch-availability` response remains private with no download location and the
-`patch` route returns 403 `patch_private`, including after a finalized evaluation.
-Do not change this campaign to `public_after_reveal`; privacy is mutable outside
-`manifest_hash`, so monitor the operational policy separately. Existing campaigns
-and their signed contracts remain unchanged.
+Compare the returned pins/settings with the fixture: open status, private patches,
+v5 C4, 0.1 TAO fee, image/model revisions, memory fractions and emissions. Verify
+private patch access through the linked privacy runbook. If seed completion is
+uncertain, check the log and database/API before any retry; a new job directory
+does not prevent duplicate campaigns.
 
 ### Correctness scorer memory
 
