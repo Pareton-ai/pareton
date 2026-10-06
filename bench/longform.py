@@ -8,6 +8,7 @@ import math
 import re
 from typing import Any
 
+from bench.concurrency import input_tiers
 from bench.sampler import PromptRenderError, SampledTrace, SamplerError, encode_trace
 from bench.trajectory import token_ids_sha256
 
@@ -20,16 +21,18 @@ DEFAULT_FOLLOWUP_PROMPT = (
 )
 
 
-def length_groups(n_prompts):
-    """Keep 90-100% input bands, with equal quotas at 2K, 4K, 8K and 16K."""
+def length_groups(n_prompts, tiers=None):
+    """Keep 90-100% input bands, with equal quotas across selected tiers."""
+    tiers = input_tiers(tiers)
     return [
         {
             "name": f"{target // 1024}k",
             "min_tokens": (target * 9 + 9) // 10,
             "max_tokens": target,
-            "count": n_prompts // 4,
+            "count": n_prompts // len(tiers),
         }
         for target in (2048, 4096, 8192, 16384)
+        if f"{target // 1024}k" in tiers
     ]
 
 
@@ -101,14 +104,41 @@ def generation_sampling(rule, *, seed_key=""):
     return {"temperature": temperature, "top_p": 1.0}
 
 
+def tier_policy_fields(rule):
+    """Optional v5 pins, deliberately absent from legacy rules and receipts."""
+    fields = {}
+    if {"input_tiers", "max_baseline_prompt_drops"}.intersection(rule):
+        if rule.get("algo_version") != 5:
+            raise SamplerError(
+                "input_tiers and max_baseline_prompt_drops require version 5"
+            )
+    if "input_tiers" in rule:
+        if not isinstance(rule["input_tiers"], list):
+            raise SamplerError("input_tiers must be a list")
+        try:
+            fields["input_tiers"] = list(input_tiers(rule["input_tiers"]))
+        except ValueError as exc:
+            raise SamplerError(str(exc)) from exc
+    if "max_baseline_prompt_drops" in rule:
+        limit = rule["max_baseline_prompt_drops"]
+        if type(limit) is not int or not 0 <= limit <= 8:
+            raise SamplerError(
+                "max_baseline_prompt_drops must be an integer from 0 to 8"
+            )
+        fields["max_baseline_prompt_drops"] = limit
+    return fields
+
+
 def parse_longform_fields(rule, parsed):
     if parsed.get("ignore_eos"):
         raise SamplerError("long-form sampling requires normal EOS stopping")
     if parsed["enable_thinking"]:
         raise SamplerError("long-form sampling requires enable_thinking=false")
-    if parsed["n_prompts"] < 4 or parsed["n_prompts"] % 4:
+    policy = tier_policy_fields({**rule, "algo_version": parsed["algo_version"]})
+    tier_count = len(input_tiers(policy.get("input_tiers")))
+    if parsed["n_prompts"] < tier_count or parsed["n_prompts"] % tier_count:
         raise SamplerError(
-            "long-form sampling requires n_prompts to be a multiple of 4"
+            f"long-form sampling requires n_prompts to be a multiple of {tier_count}"
         )
     prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip():
@@ -122,6 +152,7 @@ def parse_longform_fields(rule, parsed):
     # Do not add a default field to old rules: their receipts and qualification
     # hashes must continue to reproduce exactly.
     result.update(generation_fields(rule))
+    result.update(policy)
     if "eligible_row_indices" in rule:
         rows = rule["eligible_row_indices"]
         if (
@@ -228,7 +259,7 @@ def candidate_for_row(row_index, row, formatter, rule, context):
     ids = formatter.encode(prompt)
     group = input_group(len(ids))
     if (
-        group is None
+        group not in input_tiers(rule.get("input_tiers"))
         or len(ids) > context["max_input_tokens"]
         or len(ids) + rule["max_tokens"] + context["engine_reserve"]
         > context["max_model_len"]
@@ -307,7 +338,7 @@ def generate_longform_trace(
             )
         ):
             raise SamplerError("invalid long-form receipt row selections")
-    groups = length_groups(rule["n_prompts"])
+    groups = length_groups(rule["n_prompts"], rule.get("input_tiers"))
     remaining = {g["name"]: g["count"] for g in groups}
     selected, seen_prompts = [], set()
     for index in indices:
@@ -361,6 +392,7 @@ def generate_longform_trace(
         "length_groups": groups,
     }
     workload.update(generation_fields(rule))
+    workload.update(tier_policy_fields(rule))
     if "temperature_range" in rule:
         workload["generation_seed"] = seed
     validate_longform_trace(requests, workload)
@@ -430,10 +462,12 @@ def validate_longform_trace(requests, sampling):
             raise SamplerError(f"invalid long-form {key}")
     if sampling["min_output_tokens"] > sampling["max_tokens"]:
         raise SamplerError("long-form output threshold exceeds allowance")
-    groups = length_groups(len(requests))
+    policy = tier_policy_fields(sampling)
+    tiers = input_tiers(policy.get("input_tiers"))
+    groups = length_groups(len(requests), tiers)
     if (
-        len(requests) < 4
-        or len(requests) % 4
+        len(requests) < len(tiers)
+        or len(requests) % len(tiers)
         or sampling.get("length_groups") != groups
     ):
         raise SamplerError("invalid long-form input tier contract")
@@ -470,7 +504,7 @@ def validate_longform_trace(requests, sampling):
                 "invalid long-form request or forced generation settings"
             )
         group = input_group(size)
-        if group is None or request.get("input_length_group") != group:
+        if group not in counts or request.get("input_length_group") != group:
             raise SamplerError("long-form request is outside its input tier")
         counts[group] += 1
     if counts != {g["name"]: g["count"] for g in groups}:

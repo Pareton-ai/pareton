@@ -374,10 +374,18 @@ def _write_rep(rep_dir: Path, rows: list[dict], wall_s: float) -> None:
 
 
 def _replay_concurrent(
-    base_url, requests, *, role, rep, is_warmup, timeout_s, request_concurrency
+    base_url,
+    requests,
+    *,
+    role,
+    rep,
+    is_warmup,
+    timeout_s,
+    request_concurrency,
+    input_tiers=None,
 ):
     """Bounded workers, fixed tier groups, and a deadline for the entire replay."""
-    groups = request_groups(requests, request_concurrency)
+    groups = request_groups(requests, request_concurrency, input_tiers)
     t0 = time.monotonic()
     deadline = t0 + timeout_s * len(requests)
     rows, errs = [], []
@@ -573,6 +581,7 @@ def _run_engine(
     timeout_s: float,
     warmup_repetitions: int,
     request_concurrency: int | None = None,
+    input_tiers: list[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Warmup + N measured reps for one engine.
 
@@ -586,7 +595,7 @@ def _run_engine(
     replay_kwargs = (
         {}
         if request_concurrency is None
-        else {"request_concurrency": request_concurrency}
+        else {"request_concurrency": request_concurrency, "input_tiers": input_tiers}
     )
     for warmup in range(warmup_repetitions):
         warm_rows, warm_wall, warm_errors = replay(
@@ -709,6 +718,7 @@ def run_sla_engine(
     request_timeout_s: float = 120.0,
     engine_name: str = "vllm",
     request_concurrency: int | None = None,
+    input_tiers: list[str] | None = None,
 ) -> EngineReplay:
     """Replay the trace against one healthy engine and persist its evidence.
 
@@ -735,7 +745,7 @@ def run_sla_engine(
         timeout_s=request_timeout_s,
         warmup_repetitions=2 if engine_name == "sglang" else 1,
         **(
-            {"request_concurrency": request_concurrency}
+            {"request_concurrency": request_concurrency, "input_tiers": input_tiers}
             if request_concurrency is not None
             else {}
         ),
@@ -772,9 +782,9 @@ def run_sla_engine(
 
     tiers = None
     if request_concurrency is not None:
-        tiers = tier_completion_metrics(measured, cfg.repetitions)
+        tiers = tier_completion_metrics(measured, cfg.repetitions, input_tiers)
         persisted = read_replay_rows(engine_evidence_dir, cfg.repetitions)
-        if tier_completion_metrics(persisted, cfg.repetitions) != tiers:
+        if tier_completion_metrics(persisted, cfg.repetitions, input_tiers) != tiers:
             raise EngineError("tier completion evidence does not reproduce metrics")
         cross_rep_variance["tier_completion_max_rel_range"] = max(
             t["relative_range"] for t in tiers.values()

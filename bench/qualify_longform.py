@@ -219,9 +219,10 @@ def qualify(
         raise SamplerError(
             "qualification needs >=2 repetitions and max_rows >= pool_size >= n_prompts"
         )
-    if pool_size % 4:
-        raise SamplerError("long-form pool_size must be a multiple of 4")
-    quotas = {group["name"]: group["count"] for group in length_groups(pool_size)}
+    groups = length_groups(pool_size, rule.get("input_tiers"))
+    if pool_size % len(groups):
+        raise SamplerError(f"long-form pool_size must be a multiple of {len(groups)}")
+    quotas = {group["name"]: group["count"] for group in groups}
     qualified_counts = dict.fromkeys(quotas, 0)
     # Requalification starts from source, not a previous winning subset.
     rule.pop("qualification", None)
@@ -460,7 +461,7 @@ def main(argv=None):
     parser.add_argument(
         "--pool-size",
         type=int,
-        help="Default: twice n_prompts, split equally across four input tiers",
+        help="Default: twice n_prompts, split equally across selected input tiers",
     )
     parser.add_argument("--max-rows", type=int, default=6000)
     parser.add_argument("--repetitions", type=int, default=2)

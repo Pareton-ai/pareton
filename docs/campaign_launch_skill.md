@@ -373,6 +373,23 @@ for a complete long-form work. Before baseline exclusions, each round has eight
 inputs per tier: 2k, 4k, 8k and 16k, measured within 90-100% of the tier ceiling.
 There is no 32k tier, padding or truncation.
 
+For a new v5 campaign with fewer tiers, explicitly pin `input_tiers` in ascending
+order and give exactly those tiers weights summing to one. PRO6000 uses
+`["8k", "16k"]`, `n_prompts: 16`, C4, weights 0.5/0.5 and
+`max_baseline_prompt_drops: 4`; use a qualified pool of 32 rows and run a fresh
+shadow round using the [PRO6000 runbook](../ops/README.md#rtx-pro-6000-qwen38-fp8-campaign).
+Deploy the subset-aware worker and merge/deploy
+[frontend #91](https://github.com/Pareton-ai/pareton-frontend/pull/91) before launch;
+frontend #88/#89 alone do not render the 8k/16k tier subset correctly. Verify tier
+weights, entry score breakdowns and C4 scheduling labels in the dashboard.
+Omitted tier/exclusion fields retain the four-tier/eight-exclusion defaults and
+existing hashes. Every selected tier must remain nonempty. Changing the tier set or exclusion allowance invalidates
+old receipts. For this exact PRO6000 narrowing, the
+[reuse helper](../ops/pro6000-qualification-reuse.md) can derive a new receipt from
+complete successful evidence without new GPU requests when execution/generation
+pins match. A new shadow round is still required. Never edit an existing
+campaign's signed workload in place.
+
 Supported concurrency values are 1, 2, 4, 8, 16 and 32. C1-C8 finish one tier
 before starting the next. C16 groups 2k+4k, then 8k+16k; C32 overlaps all four.
 FIFO admission and slot refill continue until each group drains. Exclusions and
@@ -395,9 +412,9 @@ Each tier's completion time runs from its group's start through the last eligibl
 request's protocol completion, including client queueing. Use the median duration
 across repetitions and sum `weight * (1 - candidate_time / baseline_time)`.
 
-Retain `failure_penalty`, explicitly `0.1` in this template. For any scoreable
-request failure, cap the weighted speedup at zero before subtracting
-`failure_penalty * failed_eligible_requests / eligible_requests`. Count each
+Retain `failure_penalty`, explicitly `0.1` in this template. Subtract
+`failure_penalty * failed_eligible_requests / eligible_requests` directly from
+the weighted speedup, without capping positive speed credit. Count each
 failed ID once and exclude trusted baseline removals from the denominator. Hard
 runtime/correctness failures remain unscored. Use worst-tier baseline drift and
 repeatability gates rather than allowing tier changes to cancel out.

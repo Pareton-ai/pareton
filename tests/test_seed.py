@@ -138,8 +138,9 @@ def test_longform_qualification_is_required_before_campaign_or_profile_insert(
 
 @pytest.mark.parametrize("legacy_evidence_hash", [False, True])
 @pytest.mark.parametrize("status", ["draft", "open", "closed"])
+@pytest.mark.parametrize("pro6000", [False, True])
 def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
-    monkeypatch, tmp_path, legacy_evidence_hash, status
+    monkeypatch, tmp_path, legacy_evidence_hash, status, pro6000
 ):
     from test_longform_sampling import formatter, row
 
@@ -148,8 +149,14 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
 
     captured = _patch_store(monkeypatch)
     root = Path(__file__).resolve().parents[1]
+    fixture_name = "sglang_qwen38_27b_pro6000" if pro6000 else "sglang_qwen38_27b"
+    helper_name = (
+        "seed-sglang-qwen38-27b-pro6000.sh" if pro6000 else "seed-sglang-qwen38-27b.sh"
+    )
     fields = json.loads(
-        (root / "fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json").read_text()
+        (
+            root / "fixtures/campaigns" / fixture_name / "campaign-fields.json"
+        ).read_text()
     )
     engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
     fields["bench"]["baseline_engine_image_digest"] = engine_ref
@@ -174,11 +181,11 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
-                str(root / "ops/seed-sglang-qwen38-27b.sh"),
+                str(root / "ops" / helper_name),
                 engine_ref,
-                "0.23",
+                *([] if pro6000 else ["0.23"]),
                 str(path),
             ],
             cwd=root,
@@ -194,6 +201,195 @@ def test_launch_helper_accepts_qualified_rule_with_real_source_preflight(
     assert thresholds == fields["bench"]["correctness"]["thresholds"]
     assert thresholds["min_token_logprob"] == -16.0
     assert captured["inserts"] == 1
+
+
+def test_pro6000_launch_helper_preserves_fp8_tp1_args_through_worker(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from bench.main import SGLANG_SCORER_CONTEXT_HEADROOM, plan_round_starts
+    from bench.validate import sha256_file, validate_bench_request_dict
+    from worker.round_job import build_round_request
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed,
+        "preflight_longform_campaign",
+        lambda *args: SimpleNamespace(row_indices=tuple(range(32))),
+    )
+    monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_qwen38_27b_pro6000"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    engine_ref = "ghcr.io/pareton-ai/pareton-engine@" + REAL_ENGINE
+    argv = (
+        subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
+                "capture",
+                str(root / "ops/seed-sglang-qwen38-27b-pro6000.sh"),
+                engine_ref,
+                str(fixture / "sampling_rule.json"),
+            ],
+            cwd=root,
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    assert argv[:2] == ["-m", "campaign.seed"]
+    assert main(argv[2:]) == 0
+    manifest = captured["manifest"]
+    expected_bench = fields["bench"]
+    expected_bench["baseline_engine_image_digest"] = engine_ref
+    assert manifest.bench == expected_bench
+    assert manifest.gpu_skus == ["RTXPRO6000"]
+    assert manifest.bench["gpu_count"] == 1
+    assert manifest.bench["model"]["quantization"] == "fp8"
+    assert manifest.baseline_commit == SGLANG_COMMIT
+    assert manifest.base_image_digest == engine_ref
+    assert manifest.status == "open"
+    assert manifest.submission_fee["amount_tao"] == "0.1"
+    for key in (
+        "sampling_rule",
+        "scoring_rule",
+        "emission_rule",
+        "engine",
+        "patch_visibility",
+    ):
+        assert getattr(manifest, key) == fields[key]
+    assert manifest.patch_visibility == {"mode": "private"}
+    assert manifest.to_public_dict()["patch_visibility"] == {"mode": "private"}
+    assert "--patch-visibility" in argv
+    assert manifest.sampling_rule["algo_version"] == 5
+    assert manifest.sampling_rule["n_prompts"] == 16
+    assert manifest.sampling_rule["request_concurrency"] == 4
+    assert manifest.sampling_rule["request_timeout_s"] == 600
+    assert "request_interval_ms" not in manifest.sampling_rule
+    assert manifest.scoring_rule["name"] == "weighted_tier_completion_speedup"
+    trace = tmp_path / "trace.json"
+    trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))
+    request = build_round_request(
+        {
+            "gpu_sku": "RTXPRO6000",
+            "sampled_trace_sha256": sha256_file(trace),
+            "scoring_rule": manifest.scoring_rule,
+        },
+        manifest,
+        [
+            {"role": "baseline", "engine_image_ref": engine_ref},
+            {"role": "challenger", "engine_image_ref": engine_ref},
+        ],
+        task_id=str(uuid4()),
+        trace_path=str(trace),
+    )
+    parsed = validate_bench_request_dict(request)
+    assert request["hardware"]["gpu_count"] == 1
+    assert request["hardware"]["gpu_sku_expected"] == "RTXPRO6000"
+    assert parsed.correctness.serve_args == ["--mem-fraction-static", "0.60"]
+    for start in plan_round_starts(
+        parsed.engines, correctness_serve_args=parsed.correctness.serve_args
+    ):
+        args = start.spec.serve_args
+        memory_fractions = [
+            args[i + 1]
+            for i, flag in enumerate(args)
+            if flag == "--mem-fraction-static"
+        ]
+        # Scorer overrides follow inherited generation flags; argparse uses the last.
+        assert memory_fractions == (
+            ["0.80", "0.60"] if start.kind == "scorer" else ["0.80"]
+        )
+        for flag, value in (
+            ("--tp", "1"),
+            ("--max-running-requests", "32"),
+            ("--speculative-algorithm", "EAGLE"),
+            ("--speculative-num-steps", "3"),
+            ("--speculative-eagle-topk", "1"),
+            ("--speculative-num-draft-tokens", "4"),
+        ):
+            assert args[args.index(flag) + 1] == value
+        assert "--mm-enable-dp-encoder" in args
+        # Both the model-derived and explicit context flags must get scorer headroom.
+        context = 262144 + (
+            SGLANG_SCORER_CONTEXT_HEADROOM if start.kind == "scorer" else 0
+        )
+        assert all(
+            args[i + 1] == str(context)
+            for i, a in enumerate(args)
+            if a == "--context-length"
+        )
+
+
+def test_pro6000_v5_trace_uses_c4_and_rejects_stale_qualification():
+    from test_longform_sampling import formatter, row
+
+    from bench.concurrency import request_groups
+    from bench.longform import qualification_contract, require_qualification
+    from bench.sampler import (
+        SamplerError,
+        generate_trace,
+        parse_sampling_rule,
+        sampling_context_for_rule,
+    )
+    from bench.schemas import WorkloadTrace
+
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_qwen38_27b_pro6000"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    assert fields["sampling_rule"] == json.loads(
+        (fixture / "sampling_rule.json").read_text()
+    )
+    assert fields["scoring_rule"] == json.loads(
+        (fixture / "scoring_rule.json").read_text()
+    )
+    rule = parse_sampling_rule(fields["sampling_rule"])
+    rule["eligible_row_indices"] = list(range(64))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(
+            rule, fields["bench"], fields["engine"]
+        ),
+        "repetitions": 2,
+    }
+    require_qualification(rule, fields["bench"], fields["engine"])
+    sampled = generate_trace(
+        rule=rule,
+        seed_hex="a" * 64,
+        row_fetcher=row,
+        prompt_formatter=formatter(rule),
+        sampling_context=sampling_context_for_rule(
+            rule, fields["bench"], fields["engine"]
+        ),
+    )
+    trace = WorkloadTrace.from_dict(json.loads(sampled.body))
+    assert len(trace.requests) == 16
+    assert trace.meta.sampling["algo_version"] == 5
+    assert trace.meta.sampling["request_concurrency"] == 4
+    assert trace.meta.sampling["request_timeout_s"] == 600
+    assert "request_interval_ms" not in trace.meta.sampling
+    assert "output_tokens" not in trace.meta.sampling
+    assert all(
+        r.max_tokens == 5120 and not r.sampling.ignore_eos for r in trace.requests
+    )
+    groups = request_groups(trace.requests, 4, rule["input_tiers"])
+    assert [len(group) for group in groups] == [8, 8]
+    assert [{r.input_length_group for r in group} for group in groups] == [
+        {"8k"},
+        {"16k"},
+    ]
+    for key, value in (
+        ("request_concurrency", 32),
+        ("request_timeout_s", 900),
+        ("input_tiers", ["2k", "4k", "8k", "16k"]),
+        ("max_baseline_prompt_drops", 8),
+    ):
+        with pytest.raises(SamplerError, match="baseline qualification"):
+            require_qualification(
+                {**rule, key: value}, fields["bench"], fields["engine"]
+            )
 
 
 def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monkeypatch):
@@ -325,7 +521,7 @@ def test_sglang_launch_helper_produces_nvfp4_worker_request(monkeypatch, tmp_pat
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "$2" "$3" "$4"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
                 str(helper),
                 engine_ref,
@@ -868,15 +1064,21 @@ def test_seed_rejects_recipient_the_miner_would_refuse(monkeypatch):
     assert captured["profile_data"] is None
 
 
-def test_launch_helper_requires_explicit_initial_fee():
-    helper = Path(__file__).resolve().parents[1] / "ops/seed-sglang-qwen38-27b.sh"
+@pytest.mark.parametrize(
+    "name", ["seed-sglang-qwen38-27b.sh", "seed-sglang-qwen38-27b-pro6000.sh"]
+)
+def test_launch_helper_requires_its_launch_inputs(name):
+    helper = Path(__file__).resolve().parents[1] / "ops" / name
     result = subprocess.run(
         ["bash", str(helper), "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE],
         capture_output=True,
         text=True,
+        check=False,
     )
     assert result.returncode == 2
-    assert "INITIAL_FEE_TAO" in result.stderr
+    assert (
+        "QUALIFIED_SAMPLING_RULE_JSON" if "pro6000" in name else "INITIAL_FEE_TAO"
+    ) in result.stderr
 
 
 def test_seed_requires_fee_even_if_removed_environment_variable_is_set(

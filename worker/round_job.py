@@ -169,6 +169,8 @@ def materialize_round_trace(
                             "request_timeout_s",
                             "enable_thinking",
                             "min_output_tokens",
+                            "input_tiers",
+                            "max_baseline_prompt_drops",
                             "followup_prompt",
                             "eligible_row_indices",
                             "qualification",

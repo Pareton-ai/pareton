@@ -27,10 +27,33 @@ def validate_request_timeout(value):
     return float(value)
 
 
+def input_tiers(value=None):
+    """Validate an explicitly selected tier set; omission preserves old contracts."""
+    if value is None:
+        return TIERS
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or any(not isinstance(t, str) or t not in TIERS for t in value)
+        or tuple(value) != tuple(t for t in TIERS if t in value)
+    ):
+        raise ValueError(
+            "input_tiers must be a nonempty ordered subset of 2k, 4k, 8k, 16k"
+        )
+    return tuple(value)
+
+
+def validate_tier_contract(sampling, scoring):
+    if set(input_tiers(sampling.get("input_tiers"))) != set(tier_weights(scoring)):
+        raise ValueError("tier_weights must match sampling input_tiers")
+
+
 def tier_weights(rule):
     weights = rule.get("tier_weights", dict.fromkeys(TIERS, 0.25))
-    if not isinstance(weights, dict) or set(weights) != set(TIERS):
-        raise ValueError("tier_weights must name 2k, 4k, 8k and 16k")
+    if not isinstance(weights, dict) or not weights or not set(weights) <= set(TIERS):
+        raise ValueError(
+            "tier_weights must name a nonempty subset of 2k, 4k, 8k and 16k"
+        )
     if any(
         isinstance(w, bool)
         or not isinstance(w, (int, float))
@@ -39,26 +62,29 @@ def tier_weights(rule):
         for w in weights.values()
     ) or not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-9):
         raise ValueError("tier_weights must be finite, nonnegative and sum to one")
-    return {tier: float(weights[tier]) for tier in TIERS}
+    return {tier: float(weights[tier]) for tier in TIERS if tier in weights}
 
 
-def request_groups(requests, concurrency):
+def request_groups(requests, concurrency, tiers=None):
     from bench.lifecycle import EngineError
 
+    tiers = input_tiers(tiers)
     validate_concurrency(concurrency)
     tiers_per_group = max(1, concurrency // 8)
-    if any(r.input_length_group not in TIERS for r in requests):
+    if any(r.input_length_group not in tiers for r in requests):
         raise EngineError("concurrency replay requires LongWriter input tiers")
-    if any(not any(r.input_length_group == t for r in requests) for t in TIERS):
+    if any(not any(r.input_length_group == t for r in requests) for t in tiers):
         raise EngineError(
             "concurrency replay requires a nonempty eligible set in every tier"
         )
     groups = []
-    for offset in range(0, len(TIERS), tiers_per_group):
-        tiers = TIERS[offset : offset + tiers_per_group]
+    for offset in range(0, len(tiers), tiers_per_group):
+        group_tiers = tiers[offset : offset + tiers_per_group]
         # Round-robin tier admission keeps the initial mix independent of trace
         # selection density. FIFO order within each tier stays frozen.
-        queues = [[r for r in requests if r.input_length_group == t] for t in tiers]
+        queues = [
+            [r for r in requests if r.input_length_group == t] for t in group_tiers
+        ]
         groups.append(
             [
                 queue[i]
@@ -70,12 +96,15 @@ def request_groups(requests, concurrency):
     return groups
 
 
-def tier_completion_metrics(rows, repetitions):
+def tier_completion_metrics(rows, repetitions, tiers=None):
     """Reconstruct full-tier durations from complete, eligible replay rows."""
     from bench.lifecycle import EngineError
 
+    tiers = input_tiers(tiers)
+    if any(r["input_length_group"] not in tiers for r in rows):
+        raise EngineError("tier evidence contains an unselected input tier")
     result = {}
-    for tier in TIERS:
+    for tier in tiers:
         samples, expected_ids = [], None
         for rep in range(1, repetitions + 1):
             selected = [

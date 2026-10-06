@@ -15,6 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import config
+from bench.concurrency import validate_tier_contract
 from bench.longform import preflight_longform_campaign, require_qualification
 from bench.sampler import (
     LONGFORM_ALGO_VERSIONS,
@@ -373,6 +374,9 @@ def seed_synthetic_campaign(
         raise ValueError(
             "version 5 requires weighted_tier_completion_speedup and vice versa"
         )
+
+    if rule["algo_version"] == 5:
+        validate_tier_contract(rule, scoring)
 
     if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
         sampling_context_for_campaign(bench, engine_profile)

@@ -1206,6 +1206,43 @@ def test_weighted_report_preserves_penalty_and_output_ceiling(monkeypatch, clien
     assert body["prompts"][0]["max_tokens"] == 5120
 
 
+@pytest.mark.parametrize("kind", ["baseline", "scored", "infra_failed"])
+@pytest.mark.parametrize(
+    "input_tiers", [None, ["8k", "16k"], ["2k", "4k", "8k", "16k"]]
+)
+def test_entry_report_preserves_receipt_tiers_without_requiring_a_score(
+    monkeypatch, client: TestClient, kind, input_tiers
+):
+    from api import server
+
+    row = _score_report_row()
+    if kind == "baseline":
+        row.update(role="baseline", score=0, report={"metrics": {}, "timings": {}})
+    elif kind == "infra_failed":
+        row.update(status="infra_failed", score=None, report={})
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 5,
+        "request_concurrency": 4,
+    }
+    if input_tiers is not None:
+        row["sampling_receipt"]["input_tiers"] = input_tiers
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    response = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert response.status_code == 200
+    body = response.json()
+    typed = server.RoundEntryReportModel.model_validate(body)
+    assert typed.workload.input_tiers == input_tiers
+    if input_tiers is None:
+        # Historical receipts keep their absent-means-four-tiers contract.
+        assert "input_tiers" not in body["workload"]
+    else:
+        assert body["workload"]["input_tiers"] == input_tiers
+    if kind != "scored":
+        assert body["score_breakdown"] is None
+        assert body["prompts"] == []
+
+
 def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestClient):
     from api import server
 

@@ -7,7 +7,7 @@ then appends the pinned `followup_prompt` as a new user turn. The follow-up asks
 for a new complete work of approximately 4,000-6,000 words. Thinking is disabled.
 The source answer is context, not a reference target for the new response.
 
-Each 32-request round contains eight inputs in each tier. Length includes the
+The default 32-request round contains eight inputs in each tier. Length includes the
 entire rendered conversation and generation prefix, measured by the pinned
 model tokenizer:
 
@@ -21,6 +21,19 @@ model tokenizer:
 Rows outside these bands are skipped. Source messages are never padded or
 truncated. There is no 32k tier or fallback when a tier cannot be filled.
 Versions 1 through 4 keep their existing behavior, trace bytes and receipt formats.
+
+New v5 campaigns may pin `input_tiers` to a nonempty ascending subset of these
+bands. `n_prompts` must divide evenly across the selected tiers; omitted
+`input_tiers` retains all four without changing old receipts. PRO6000 selects
+`["8k", "16k"]` with 16 prompts (eight per tier), C4 and weights 0.5/0.5.
+Qualification, warmups, replays and correctness use only those selected tiers.
+`max_baseline_prompt_drops` optionally tightens the existing maximum of eight;
+PRO6000 pins four. Each selected tier must still retain at least one request.
+Both options are bound to the manifest, qualification contract, receipt and trace.
+Changing them invalidates the old receipt. The exact PRO6000 four-to-two tier
+reduction supports [verified evidence reuse](../ops/pro6000-qualification-reuse.md)
+when execution/generation pins are unchanged; other changes require fresh
+qualification. Both paths require a new shadow run.
 
 The model, engine, hardware, serving arguments, fees and emissions remain as
 configured in the seed helper. Version 5 retires `request_interval_ms` and requires
@@ -40,8 +53,9 @@ A long source answer alone does not establish that a row qualifies.
 
 ## Version 5 scheduling and scoring
 
-C1 through C8 run the four tiers separately in ascending order. C16 runs two
-fixed groups, 2k+4k followed by 8k+16k. C32 runs one group containing all tiers.
+C1 through C8 run selected tiers separately in ascending order. C16 groups up to
+two adjacent selected tiers; C32 groups all selected tiers. With the default
+four tiers, C16 runs 2k+4k followed by 8k+16k.
 Admission interleaves tiers deterministically within each mixed group and keeps
 sampled order within a tier. A shared FIFO refills a slot on valid stream
 termination, until no requests remain. Groups never overlap. With eight requests
@@ -80,14 +94,15 @@ tier. Shared group origins charge admission waiting in mixed groups. Calculate:
 ```
 weighted_speedup = sum(weight[t] * (1 - T_candidate[t] / T_baseline[t]))
 failure_rate = failed eligible request IDs / all eligible request IDs
-eligible_speedup = min(weighted_speedup, 0) if any request failed else weighted_speedup
-score = eligible_speedup - failure_penalty * failure_rate
+score = weighted_speedup - failure_penalty * failure_rate
 ```
 
-Weights must explicitly name all four tiers, be finite and nonnegative, and sum
-to one. Equal weights and a zero penalty are resolved defaults when omitted;
+Weights must name exactly the selected tiers, be finite and nonnegative, and sum
+to one. Omitted weights resolve to 0.25 for each of the original four tiers;
+subset campaigns must supply matching weights. Zero penalty is the default when omitted;
 the launch fixture explicitly sets penalty 0.1. Resolved weights and penalty are
-manifest-hashed. No tier is dropped and weights are never redistributed.
+manifest-hashed. No selected tier is dropped at runtime and weights are never
+redistributed.
 Per-request aligned-token speedups remain diagnostics, not the ranking metric.
 The 90% minimum uses engine-reported counts, as in legacy scoring; independent
 count verification is outside this change. Natural output lengths can vary within
@@ -102,8 +117,9 @@ requests cannot establish diagnostic ITL goodput; no per-token gaps are invented
 Output correctness, absolute deadlines and tier-completion scoring still apply.
 
 The penalty counts each failed ID once, not repetitions, and excludes trusted
-baseline removals. Requests below the 90% minimum cannot earn positive credit by freeing
-capacity elsewhere. Runtime/stream failures and hard correctness failures retain
+baseline removals. Scoreable request failures incur this proportional deduction
+without capping the weighted speedup. The report retains `eligible_speedup` as an
+alias of `weighted_speedup` for compatibility. Runtime/stream failures and hard correctness failures retain
 their existing non-scored outcomes; a penalty does not make them eligible.
 Both request and replay deadlines are absolute. Delayed `[DONE]` occupies a slot
 and is charged in T. Candidate repeatability uses the worst tier's relative

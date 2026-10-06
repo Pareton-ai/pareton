@@ -57,23 +57,27 @@ def timings(n=8, seconds=1):
     }
 
 
-def test_weighted_score_and_failure_penalty():
+@pytest.mark.parametrize("candidate_seconds,raw", [(5, 0.5), (10, 0.0), (12, -0.2)])
+def test_weighted_score_and_failure_penalty(candidate_seconds, raw):
     rule = {"name": WEIGHTED_RULE, "failure_penalty": 0.4}
     baseline, candidate = timings(), timings(seconds=0.5)
     kwargs = dict(
         baseline=baseline,
         candidate=candidate,
         baseline_tiers=tier_stats(),
-        candidate_tiers=tier_stats(5),
+        candidate_tiers=tier_stats(candidate_seconds),
     )
-    assert score_candidate(rule, **kwargs).score == 0.5
+    assert score_candidate(rule, **kwargs).score == pytest.approx(raw)
     del candidate["2k-0"]
     result = score_candidate(rule, **kwargs)
     assert result.breakdown["failed_requests"] == 1
     assert result.breakdown["failure_rate"] == 1 / 32
     assert result.breakdown["penalty"] == 0.4 / 32
-    assert result.score == -0.4 / 32  # failures cannot buy positive capacity credit
-    assert score_candidate({"name": WEIGHTED_RULE}, **kwargs).score == 0
+    assert result.score == pytest.approx(raw - 0.4 / 32)
+    assert result.breakdown["eligible_speedup"] == pytest.approx(raw)
+    assert score_candidate({"name": WEIGHTED_RULE}, **kwargs).score == pytest.approx(
+        raw
+    )
 
 
 @pytest.mark.parametrize("batch_baseline", [False, True])
@@ -100,8 +104,41 @@ def test_batched_tokens_earn_tier_speedup_without_failure(batch_baseline, gaps):
     )
 
 
+def test_pro6000_tier_times_keep_speed_credit_with_one_short_completion():
+    base_tiers = {k: v for k, v in tier_stats().items() if k in ("8k", "16k")}
+    candidate_tiers = copy.deepcopy(base_tiers)
+    for tier, base_s, candidate_s in (
+        ("8k", 152.82311489526182, 147.21855806559324),
+        ("16k", 155.4431369304657, 155.5390434982255),
+    ):
+        base_tiers[tier]["completion_s"] = base_s
+        candidate_tiers[tier]["completion_s"] = candidate_s
+    baseline = {
+        rid: PromptTiming(1, [], 100, "stop")
+        for tier in base_tiers.values()
+        for rid in tier["request_ids"]
+    }
+    candidate = dict(baseline)
+    candidate["8k-0"] = PromptTiming(1, [], 89, "stop")
+    result = score_candidate(
+        {
+            "name": WEIGHTED_RULE,
+            "tier_weights": {"8k": 0.5, "16k": 0.5},
+            "failure_penalty": 0.1,
+        },
+        baseline=baseline,
+        candidate=candidate,
+        baseline_tiers=base_tiers,
+        candidate_tiers=candidate_tiers,
+    )
+    assert result.breakdown["failed_requests"] == 1
+    assert result.breakdown["penalty"] == 0.00625
+    assert result.breakdown["eligible_speedup"] == result.breakdown["weighted_speedup"]
+    assert result.score == pytest.approx(0.01177825046504658)
+
+
 @pytest.mark.parametrize("tokens,finish", [(1, "length"), (2, None), (2, "error")])
-def test_v5_completion_failures_still_cap_and_penalize(tokens, finish):
+def test_v5_completion_failures_apply_proportional_penalty(tokens, finish):
     candidate = timings()
     candidate["2k-0"] = PromptTiming(0.1, [], tokens, finish)
     result = score_candidate(
@@ -112,7 +149,7 @@ def test_v5_completion_failures_still_cap_and_penalize(tokens, finish):
         candidate_tiers=tier_stats(5),
     )
     assert result.breakdown["failed_requests"] == 1
-    assert result.score == -0.1 / 32
+    assert result.score == 0.5 - 0.1 / 32
 
 
 @pytest.mark.parametrize("tokens", [89, 90, 91, 100, 110])
@@ -130,7 +167,7 @@ def test_natural_output_minimum_and_penalty(tokens):
     failed = tokens < 90
     assert result.breakdown["failed_requests"] == int(failed)
     assert result.breakdown["penalty"] == (0.4 / 32 if failed else 0)
-    assert result.score == (-0.4 / 32 if failed else 0.5)
+    assert result.score == 0.5 - (0.4 / 32 if failed else 0)
 
 
 @pytest.mark.parametrize(
@@ -196,7 +233,7 @@ def test_weights_and_longer_durations_are_monotonic():
     "weights",
     [
         [0.25] * 4,
-        {"2k": 1},
+        {"32k": 1},
         dict.fromkeys(TIERS, 0.3),
         dict.fromkeys(TIERS, float("nan")),
         dict(zip(TIERS, [True, 0, 0, 0])),
@@ -612,8 +649,9 @@ def test_reference_drift_cannot_cancel_between_tiers():
 
 
 @pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("selected_tiers", [None, ["8k", "16k"]])
 def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
-    monkeypatch, tmp_path, batched
+    monkeypatch, tmp_path, batched, selected_tiers
 ):
     from dataclasses import replace
 
@@ -651,6 +689,8 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
     raw["leader_candidate_index"] = 0
     raw["scoring_rule"] = {"name": WEIGHTED_RULE, "failure_penalty": 0.1}
     raw["sla_bench"]["repetitions"] = 1
+    if selected_tiers:
+        raw["scoring_rule"]["tier_weights"] = dict.fromkeys(selected_tiers, 0.5)
     req = BenchRequest.from_dict(raw)
     trace = WorkloadTrace(
         1,
@@ -661,9 +701,18 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
                 "request_concurrency": 4,
                 "request_timeout_s": 480,
                 "min_output_tokens": 2,
+                **(
+                    {"input_tiers": selected_tiers, "max_baseline_prompt_drops": 4}
+                    if selected_tiers
+                    else {}
+                ),
             },
         ),
-        [replace(r, max_tokens=8) for r in requests()],
+        [
+            replace(r, max_tokens=8)
+            for r in requests()
+            if r.input_length_group in (selected_tiers or TIERS)
+        ],
     )
     starts = []
 
@@ -700,6 +749,21 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
         digests=[],
         mock_engine=True,
     )
+    expected_count = 8 * len(selected_tiers or TIERS)
+    assert all(report.num_prompts == expected_count for report in correctness.values())
+    assert len(baseline.result.timings) == expected_count
+    assert set(baseline.result.tier_completion) == set(selected_tiers or TIERS)
+    for role in starts[:-1]:
+        for replay_pass in ("warmup", "rep_1"):
+            rows = [
+                json.loads(line)
+                for line in (
+                    layout.sla_bench_dir / role / replay_pass / "requests.jsonl"
+                )
+                .read_text()
+                .splitlines()
+            ]
+            assert len([r for r in rows if not r.get("_rep_meta")]) == expected_count
     assert entries and all(entry.status == "scored" for entry in entries)
     assert entries[0].score_report["score_breakdown"]["failed_requests"] == 0
     if batched:

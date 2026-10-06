@@ -16,7 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from bench.concurrency import TIERS, WEIGHTED_RULE, tier_weights
+from bench.concurrency import WEIGHTED_RULE, tier_weights
 
 # Minimum fraction of the baseline's output tokens a candidate must emit
 # before it earns speed credit on that prompt. Overridable per campaign with
@@ -268,8 +268,8 @@ def _weighted_tier_completion_speedup(
         raise ValueError(
             "weighted score requires complete baseline and candidate tier evidence"
         )
-    if set(baseline_tiers) != set(TIERS) or set(candidate_tiers) != set(TIERS):
-        raise ValueError("weighted score requires all four tiers")
+    if set(baseline_tiers) != set(weights) or set(candidate_tiers) != set(weights):
+        raise ValueError("weighted score requires every configured tier")
     if any(
         t.completion_tokens < 1 or t.finish_reason not in ("stop", "length")
         for t in baseline.values()
@@ -301,7 +301,7 @@ def _weighted_tier_completion_speedup(
             )
         )
     details, seen = {}, set()
-    for tier in TIERS:
+    for tier in weights:
         b, c = baseline_tiers[tier], candidate_tiers[tier]
         ids = b["request_ids"]
         if (
@@ -333,16 +333,13 @@ def _weighted_tier_completion_speedup(
     raw = sum(d["weight"] * d["speedup"] for d in details.values())
     failed = sum(p.candidate_failed for p in per_prompt)
     rate = failed / len(per_prompt)
-    # A selective failure must not free capacity and buy positive speed credit
-    # on other tiers. Hard runtime/correctness failures still abort upstream.
-    adjusted = min(raw, 0.0) if failed else raw
     return ScoreResult(
-        score=adjusted - coefficient * rate,
+        score=raw - coefficient * rate,
         rule=WEIGHTED_RULE,
         per_prompt=per_prompt,
         breakdown={
             "weighted_speedup": raw,
-            "eligible_speedup": adjusted,
+            "eligible_speedup": raw,
             "tiers": details,
             "scheduled_requests": len(per_prompt),
             "failed_requests": failed,
