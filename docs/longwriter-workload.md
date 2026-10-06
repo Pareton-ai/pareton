@@ -94,8 +94,7 @@ tier. Shared group origins charge admission waiting in mixed groups. Calculate:
 ```
 weighted_speedup = sum(weight[t] * (1 - T_candidate[t] / T_baseline[t]))
 failure_rate = failed eligible request IDs / all eligible request IDs
-eligible_speedup = min(weighted_speedup, 0) if any request failed else weighted_speedup
-score = eligible_speedup - failure_penalty * failure_rate
+score = weighted_speedup - failure_penalty * failure_rate
 ```
 
 Weights must name exactly the selected tiers, be finite and nonnegative, and sum
@@ -118,8 +117,9 @@ requests cannot establish diagnostic ITL goodput; no per-token gaps are invented
 Output correctness, absolute deadlines and tier-completion scoring still apply.
 
 The penalty counts each failed ID once, not repetitions, and excludes trusted
-baseline removals. Requests below the 90% minimum cannot earn positive credit by freeing
-capacity elsewhere. Runtime/stream failures and hard correctness failures retain
+baseline removals. Scoreable request failures incur this proportional deduction
+without capping the weighted speedup. The report retains `eligible_speedup` as an
+alias of `weighted_speedup` for compatibility. Runtime/stream failures and hard correctness failures retain
 their existing non-scored outcomes; a penalty does not make them eligible.
 Both request and replay deadlines are absolute. Delayed `[DONE]` occupies a slot
 and is charged in T. Candidate repeatability uses the worst tier's relative

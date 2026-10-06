@@ -412,9 +412,9 @@ Each tier's completion time runs from its group's start through the last eligibl
 request's protocol completion, including client queueing. Use the median duration
 across repetitions and sum `weight * (1 - candidate_time / baseline_time)`.
 
-Retain `failure_penalty`, explicitly `0.1` in this template. For any scoreable
-request failure, cap the weighted speedup at zero before subtracting
-`failure_penalty * failed_eligible_requests / eligible_requests`. Count each
+Retain `failure_penalty`, explicitly `0.1` in this template. Subtract
+`failure_penalty * failed_eligible_requests / eligible_requests` directly from
+the weighted speedup, without capping positive speed credit. Count each
 failed ID once and exclude trusted baseline removals from the denominator. Hard
 runtime/correctness failures remain unscored. Use worst-tier baseline drift and
 repeatability gates rather than allowing tier changes to cancel out.

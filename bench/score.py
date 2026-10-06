@@ -333,16 +333,13 @@ def _weighted_tier_completion_speedup(
     raw = sum(d["weight"] * d["speedup"] for d in details.values())
     failed = sum(p.candidate_failed for p in per_prompt)
     rate = failed / len(per_prompt)
-    # A selective failure must not free capacity and buy positive speed credit
-    # on other tiers. Hard runtime/correctness failures still abort upstream.
-    adjusted = min(raw, 0.0) if failed else raw
     return ScoreResult(
-        score=adjusted - coefficient * rate,
+        score=raw - coefficient * rate,
         rule=WEIGHTED_RULE,
         per_prompt=per_prompt,
         breakdown={
             "weighted_speedup": raw,
-            "eligible_speedup": adjusted,
+            "eligible_speedup": raw,
             "tiers": details,
             "scheduled_requests": len(per_prompt),
             "failed_requests": failed,
