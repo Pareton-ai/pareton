@@ -378,9 +378,12 @@ order and give exactly those tiers weights summing to one. PRO6000 uses
 `["8k", "16k"]`, `n_prompts: 16`, C4, weights 0.5/0.5 and
 `max_baseline_prompt_drops: 4`; use a qualified pool of 32 rows and run a fresh
 shadow round using the [PRO6000 runbook](../ops/README.md#rtx-pro-6000-qwen38-fp8-campaign).
-Deploy the subset-aware worker before launch. Omitted tier/exclusion fields
-retain the four-tier/eight-exclusion defaults and existing hashes. Every selected
-tier must remain nonempty. Changing the tier set or exclusion allowance invalidates
+Deploy the subset-aware worker and merge/deploy
+[frontend #91](https://github.com/Pareton-ai/pareton-frontend/pull/91) before launch;
+frontend #88/#89 alone do not render the 8k/16k tier subset correctly. Verify tier
+weights, entry score breakdowns and C4 scheduling labels in the dashboard.
+Omitted tier/exclusion fields retain the four-tier/eight-exclusion defaults and
+existing hashes. Every selected tier must remain nonempty. Changing the tier set or exclusion allowance invalidates
 old receipts. For this exact PRO6000 narrowing, the
 [reuse helper](../ops/pro6000-qualification-reuse.md) can derive a new receipt from
 complete successful evidence without new GPU requests when execution/generation

@@ -140,7 +140,10 @@ tiers and passing drift/repeatability gates. Review the retained evidence; CPU
 checks and #189's diagnostic do not replace this GPU run. Before seeding, also
 confirm offline miner-build/native-probe checks for the pinned engine and the
 [deployment/privacy requirements](../docs/patch-visibility.md#rollout), including
-#186/#187 backend migrations and compatible frontend support (#88/#89).
+#186/#187 backend rollout and compatible frontend support (#88/#89, plus
+[pareton-frontend#91](https://github.com/Pareton-ai/pareton-frontend/pull/91) for the
+8k/16k tier subset). Merge and deploy #91 before launch, then verify the campaign's
+tier weights, entry score breakdowns and C4 scheduling labels in the dashboard.
 
 #### 4. Seed once on the configured controller
 
