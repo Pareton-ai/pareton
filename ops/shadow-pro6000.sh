@@ -52,12 +52,13 @@ fields = json.loads(Path(os.environ["PRO6000_FIELDS"]).read_text())
 rule = parse_sampling_rule(json.loads((root / "qualification/sampling_rule.json").read_text()))
 require_qualification(rule, fields["bench"], fields["engine"])
 assert rule["algo_version"] == 5 and rule["request_concurrency"] == 4
-assert rule["n_prompts"] == 32 and rule["request_timeout_s"] == 600
+assert rule["n_prompts"] == 16 and rule["request_timeout_s"] == 600
+assert rule["input_tiers"] == ["8k", "16k"] and rule["max_baseline_prompt_drops"] == 4
 assert fields["patch_visibility"] == {"mode": "private"}
 trace = root / "preview/workload_trace.json"
 trace_hash = sha256_file(trace)
 parsed_trace = load_workload_trace(trace, expected_sha256=trace_hash)
-assert len(parsed_trace.requests) == 32
+assert len(parsed_trace.requests) == 16
 assert parsed_trace.meta.sampling["request_concurrency"] == 4
 campaign = SimpleNamespace(bench=fields["bench"], engine=fields["engine"],
                            sla=SLA.from_dict(fields["sla"]))

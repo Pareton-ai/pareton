@@ -27,6 +27,8 @@ CONCURRENCY_ALGO_VERSION = 5
 LONGFORM_ALGO_VERSIONS = frozenset({4, 5})
 LONGFORM_RULE_FIELDS = frozenset(
     {
+        "input_tiers",
+        "max_baseline_prompt_drops",
         "followup_prompt",
         "min_output_tokens",
         "eligible_row_indices",

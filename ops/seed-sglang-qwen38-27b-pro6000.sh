@@ -5,7 +5,7 @@
 # lmsysorg/sglang runtime image lacks the trusted offline miner-build installer.
 # The harness mounts pinned weights at /model and manages Docker networking,
 # listen address, port and GPU allocation separately from these serving flags.
-# Uses the v5 32-request workload at C4; engine capacity remains 32.
+# Uses the v5 16-request 8k/16k workload at C4; engine capacity remains 32.
 # Patches remain private with no timed public reveal.
 # Qualify this TP1/FP8/MTP configuration on RTXPRO6000 before opening.
 # Do not reuse TP4/NVFP4 qualification or its memory-fraction overrides.
@@ -51,7 +51,7 @@ python -m campaign.seed \
   --bench-serve-args=--speculative-eagle-topk --bench-serve-args=1 \
   --bench-serve-args=--speculative-num-draft-tokens --bench-serve-args=4 \
   --bench-serve-args=--mem-fraction-static --bench-serve-args=0.80 \
-  --bench-correctness-num-prompts 32 \
+  --bench-correctness-num-prompts 16 \
   --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.60 \
   --bench-correctness-min-mean-logprob=-4 \
   --bench-correctness-min-token-logprob=-16 \

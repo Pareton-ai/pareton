@@ -34,7 +34,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from bench import __version__
-from bench.concurrency import WEIGHTED_RULE, request_groups, tier_completion_metrics
+from bench.concurrency import (
+    WEIGHTED_RULE,
+    request_groups,
+    tier_completion_metrics,
+    validate_tier_contract,
+)
 from bench.correctness import (
     BASELINE_INDEX,
     BaselineDegeneracyReferences,
@@ -556,8 +561,14 @@ def run_round(
         raise RequestValidationError(
             "version 5 workloads require weighted_tier_completion_speedup and vice versa"
         )
+    if concurrent:
+        try:
+            validate_tier_contract(workload, req.scoring_rule)
+        except ValueError as exc:
+            raise RequestValidationError(str(exc)) from exc
     replay_kwargs = (
         {
+            "input_tiers": workload.get("input_tiers"),
             "request_concurrency": workload["request_concurrency"],
             "request_timeout_s": workload["request_timeout_s"],
         }
@@ -661,6 +672,11 @@ def run_round(
                             natural_stops,
                             replay.output_samples,
                             dropped=excluded_prompts,
+                            **(
+                                {"max_drops": workload["max_baseline_prompt_drops"]}
+                                if "max_baseline_prompt_drops" in workload
+                                else {}
+                            ),
                         )
                         if baseline_degeneracy is not None:
                             excluded_prompts.update(baseline_degeneracy.dropped)
@@ -677,7 +693,11 @@ def run_round(
                         raise EngineError("baseline has no stable correctness prompts")
                 if concurrent and start.kind == "drift":
                     requests = [r for r in requests if r.id not in excluded_prompts]
-                    request_groups(requests, workload["request_concurrency"])
+                    request_groups(
+                        requests,
+                        workload["request_concurrency"],
+                        workload.get("input_tiers"),
+                    )
                     prompts = [PromptCase(r.id, r.prompt) for r in requests]
                     trace = replace(trace, requests=requests)
                     for reference in (baseline, replay):
@@ -695,6 +715,7 @@ def run_round(
                                     if r["request_id"] not in excluded_prompts
                                 ],
                                 req.sla_bench.repetitions,
+                                workload.get("input_tiers"),
                             )
                             reference.result.timings = {
                                 rid: t

@@ -265,13 +265,13 @@ def test_pro6000_launch_helper_preserves_fp8_tp1_args_through_worker(
     assert manifest.to_public_dict()["patch_visibility"] == {"mode": "private"}
     assert "--patch-visibility" in argv
     assert manifest.sampling_rule["algo_version"] == 5
-    assert manifest.sampling_rule["n_prompts"] == 32
+    assert manifest.sampling_rule["n_prompts"] == 16
     assert manifest.sampling_rule["request_concurrency"] == 4
     assert manifest.sampling_rule["request_timeout_s"] == 600
     assert "request_interval_ms" not in manifest.sampling_rule
     assert manifest.scoring_rule["name"] == "weighted_tier_completion_speedup"
     trace = tmp_path / "trace.json"
-    trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 32}))
+    trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))
     request = build_round_request(
         {
             "gpu_sku": "RTXPRO6000",
@@ -365,7 +365,7 @@ def test_pro6000_v5_trace_uses_c4_and_rejects_stale_qualification():
         ),
     )
     trace = WorkloadTrace.from_dict(json.loads(sampled.body))
-    assert len(trace.requests) == 32
+    assert len(trace.requests) == 16
     assert trace.meta.sampling["algo_version"] == 5
     assert trace.meta.sampling["request_concurrency"] == 4
     assert trace.meta.sampling["request_timeout_s"] == 600
@@ -374,15 +374,18 @@ def test_pro6000_v5_trace_uses_c4_and_rejects_stale_qualification():
     assert all(
         r.max_tokens == 5120 and not r.sampling.ignore_eos for r in trace.requests
     )
-    groups = request_groups(trace.requests, 4)
-    assert [len(group) for group in groups] == [8, 8, 8, 8]
+    groups = request_groups(trace.requests, 4, rule["input_tiers"])
+    assert [len(group) for group in groups] == [8, 8]
     assert [{r.input_length_group for r in group} for group in groups] == [
-        {"2k"},
-        {"4k"},
         {"8k"},
         {"16k"},
     ]
-    for key, value in (("request_concurrency", 32), ("request_timeout_s", 900)):
+    for key, value in (
+        ("request_concurrency", 32),
+        ("request_timeout_s", 900),
+        ("input_tiers", ["2k", "4k", "8k", "16k"]),
+        ("max_baseline_prompt_drops", 8),
+    ):
         with pytest.raises(SamplerError, match="baseline qualification"):
             require_qualification(
                 {**rule, key: value}, fields["bench"], fields["engine"]

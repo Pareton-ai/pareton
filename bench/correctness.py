@@ -742,15 +742,18 @@ def capture_outputs(
 
 
 def _record_baseline_prompt_drop(
-    dropped: dict[str, str], request_id: str, reason: str
+    dropped: dict[str, str],
+    request_id: str,
+    reason: str,
+    max_drops: int = MAX_BASELINE_PROMPT_DROPS,
 ) -> None:
     drop_reason = f"baseline natural output is degenerate: {reason}"
     dropped[request_id] = drop_reason
-    if len(dropped) > MAX_BASELINE_PROMPT_DROPS:
+    if len(dropped) > max_drops:
         raise EngineError(
             f"baseline natural output is degenerate for {len(dropped)} "
             "correctness prompts, above the harness limit of "
-            f"{MAX_BASELINE_PROMPT_DROPS} (latest {request_id!r}: {reason})"
+            f"{max_drops} (latest {request_id!r}: {reason})"
         )
     logger.warning("dropping correctness prompt %r: %s", request_id, drop_reason)
 
@@ -765,6 +768,7 @@ def baseline_prompt_drops(
     """
     result = dict(dropped)
     sampling = trace.meta.sampling or {}
+    max_drops = sampling.get("max_baseline_prompt_drops", MAX_BASELINE_PROMPT_DROPS)
     minimum = (
         sampling.get("min_output_tokens")
         if sampling.get("algo_version") in (4, 5)
@@ -792,9 +796,9 @@ def baseline_prompt_drops(
                     break
         if reason is not None and request.id not in result:
             result[request.id] = f"{replay.result.role}: {reason}"
-    if len(result) > MAX_BASELINE_PROMPT_DROPS:
+    if len(result) > max_drops:
         raise EngineError(
-            f"baseline unstable for {len(result)} prompts, above the harness limit of {MAX_BASELINE_PROMPT_DROPS}"
+            f"baseline unstable for {len(result)} prompts, above the harness limit of {max_drops}"
         )
     if trace.requests and all(request.id in result for request in trace.requests):
         raise EngineError("baseline has no stable workload prompts")
@@ -807,6 +811,7 @@ def build_baseline_degeneracy_references(
     output_samples: Mapping[str, tuple[str, ...]] | None = None,
     *,
     dropped: Mapping[str, str] | None = None,
+    max_drops: int = MAX_BASELINE_PROMPT_DROPS,
 ) -> BaselineDegeneracyReferences:
     """Build bounds for prompts with a usable baseline natural-stop output.
 
@@ -862,7 +867,9 @@ def build_baseline_degeneracy_references(
             if sample_reason is not None:
                 break
         if sample_reason is not None:
-            _record_baseline_prompt_drop(dropped, captured.request_id, sample_reason)
+            _record_baseline_prompt_drop(
+                dropped, captured.request_id, sample_reason, max_drops
+            )
             continue
         sample_ratios = [graded_ratios(text) for text in samples]
         references[captured.request_id] = BaselineDegeneracyReference(

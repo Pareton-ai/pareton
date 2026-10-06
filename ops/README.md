@@ -47,9 +47,14 @@ NVIDIA Container Toolkit preinstalled**. Run the VM commands as root in Bash;
 port 30000 must be free. Allow disk space for the model cache plus a volume copy.
 
 The [fixture](../fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json)
-pins Qwen3.8-27B-FP8, TP1, 262144 context, v5 **32 requests at C4**, private patches
-and a **0.1 TAO** initial fee. Generation/scorer memory fractions are **0.80/0.60**,
+pins Qwen3.8-27B-FP8, TP1, 262144 context, v5 **16 requests at C4**
+(eight each at 8k/16k, equal 0.5 weights, at most four baseline exclusions),
+private patches and a **0.1 TAO** initial fee. Generation/scorer memory fractions are **0.80/0.60**,
 following [#189](https://github.com/Pareton-ai/pareton/pull/189).
+
+This reduced tier contract needs fresh qualification and a new run directory;
+32-request qualification/shadow artifacts do not qualify it. Deploy this version
+of the worker before launch.
 
 Every long stage runs under `nohup`. **Ctrl-C on `tail` stops only the viewer.**
 Proceed only when that stage's `.exit-code` file contains `0`; missing/nonzero
@@ -96,7 +101,7 @@ cat "$PRO6000_SETUP_DIR/setup.exit-code"
 #### 2. Qualify the baseline
 
 After setup returns `0`, activate `.venv`. This job stages and verifies weights,
-starts the baseline, runs `bench.qualify_longform` with pool 64, two repetitions,
+starts the baseline, runs `bench.qualify_longform` with pool 32, two repetitions,
 concurrency 4 and timeout 600, then removes its container/network/volume on success.
 
 ```bash
@@ -129,7 +134,7 @@ cat "$PRO6000_RUN_DIR/step3.exit-code"
 jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
 ```
 
-Require exit `0`, a scored candidate, passing correctness, all four surviving
+Require exit `0`, a scored candidate, passing correctness, both surviving
 tiers and passing drift/repeatability gates. Review the retained evidence; CPU
 checks and #189's diagnostic do not replace this GPU run. Before seeding, also
 confirm offline miner-build/native-probe checks for the pinned engine and the
@@ -168,7 +173,8 @@ curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" | jq .
 ```
 
 Compare the returned pins/settings with the fixture: open status, private patches,
-v5 C4, 0.1 TAO fee, image/model revisions, memory fractions and emissions. Verify
+v5 C4 with 16 prompts in 8k/16k, 0.5/0.5 weights, four-exclusion limit, 0.1 TAO
+fee, image/model revisions, memory fractions and emissions. Verify
 private patch access through the linked privacy runbook. If seed completion is
 uncertain, check the log and database/API before any retry; a new job directory
 does not prevent duplicate campaigns.

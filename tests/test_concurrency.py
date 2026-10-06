@@ -196,7 +196,7 @@ def test_weights_and_longer_durations_are_monotonic():
     "weights",
     [
         [0.25] * 4,
-        {"2k": 1},
+        {"32k": 1},
         dict.fromkeys(TIERS, 0.3),
         dict.fromkeys(TIERS, float("nan")),
         dict(zip(TIERS, [True, 0, 0, 0])),
@@ -612,8 +612,9 @@ def test_reference_drift_cannot_cancel_between_tiers():
 
 
 @pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("selected_tiers", [None, ["8k", "16k"]])
 def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
-    monkeypatch, tmp_path, batched
+    monkeypatch, tmp_path, batched, selected_tiers
 ):
     from dataclasses import replace
 
@@ -651,6 +652,8 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
     raw["leader_candidate_index"] = 0
     raw["scoring_rule"] = {"name": WEIGHTED_RULE, "failure_penalty": 0.1}
     raw["sla_bench"]["repetitions"] = 1
+    if selected_tiers:
+        raw["scoring_rule"]["tier_weights"] = dict.fromkeys(selected_tiers, 0.5)
     req = BenchRequest.from_dict(raw)
     trace = WorkloadTrace(
         1,
@@ -661,9 +664,18 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
                 "request_concurrency": 4,
                 "request_timeout_s": 480,
                 "min_output_tokens": 2,
+                **(
+                    {"input_tiers": selected_tiers, "max_baseline_prompt_drops": 4}
+                    if selected_tiers
+                    else {}
+                ),
             },
         ),
-        [replace(r, max_tokens=8) for r in requests()],
+        [
+            replace(r, max_tokens=8)
+            for r in requests()
+            if r.input_length_group in (selected_tiers or TIERS)
+        ],
     )
     starts = []
 
@@ -700,6 +712,21 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
         digests=[],
         mock_engine=True,
     )
+    expected_count = 8 * len(selected_tiers or TIERS)
+    assert all(report.num_prompts == expected_count for report in correctness.values())
+    assert len(baseline.result.timings) == expected_count
+    assert set(baseline.result.tier_completion) == set(selected_tiers or TIERS)
+    for role in starts[:-1]:
+        for replay_pass in ("warmup", "rep_1"):
+            rows = [
+                json.loads(line)
+                for line in (
+                    layout.sla_bench_dir / role / replay_pass / "requests.jsonl"
+                )
+                .read_text()
+                .splitlines()
+            ]
+            assert len([r for r in rows if not r.get("_rep_meta")]) == expected_count
     assert entries and all(entry.status == "scored" for entry in entries)
     assert entries[0].score_report["score_breakdown"]["failed_requests"] == 0
     if batched:

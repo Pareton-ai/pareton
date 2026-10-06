@@ -140,7 +140,7 @@ python -u -m bench.qualify_longform \
   --base-url http://127.0.0.1:30000 \
   --container "$PRO6000_BASELINE_CONTAINER" --engine-ref "$PRO6000_ENGINE_REF" \
   --output-dir "$PRO6000_RUN_DIR/qualification" \
-  --pool-size 64 --repetitions 2 --concurrency 4 --timeout 600 \
+  --pool-size 32 --repetitions 2 --concurrency 4 --timeout 600 \
   2>&1 | tee "$PRO6000_RUN_DIR/qualification.log"
 docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/qualification-container.log" 2>&1
 docker stop "$PRO6000_BASELINE_CONTAINER"
