@@ -118,14 +118,23 @@ docker network create "$PRO6000_QUAL_NET"
 ```
 
 Retain `PRO6000_RUN_DIR` and its evidence. On interruption, stop/remove only the
-named qualification container and network from this run; do not prune shared
-Docker or build caches.
+named qualification container, recorded model volume and network from this run;
+remove containers before their volume. Do not prune shared Docker or build caches.
 
 #### 2. Start the exact baseline and qualify a fresh source pool
 
-This stages the immutable weights on the host, mounts them read-only, and starts
-SGLang with the fixture's arguments. The qualifier needs a published loopback
-port; host networking is unsupported. Ensure port 30000 is free.
+This stages the immutable weights locally, copies them through Docker's API into
+a named volume, verifies every copied file's SHA-256, then mounts the volume
+read-only. This avoids client-path bind mounts on containerized GPU hosts whose
+Docker daemon has a different filesystem. It needs disk for one additional model
+copy; copying and hashing can take several minutes. The implementation follows
+#189's volume workaround without its diagnostic workload changes.
+
+Use a checkout containing `ops/pro6000_model_volume.py`. The qualifier still
+requires the Docker daemon's published port to be reachable at
+`http://127.0.0.1:30000` from this shell; a remote daemon without local forwarding
+is unsupported. Ensure port 30000 is free. The model-volume fix addresses storage
+visibility, not network namespace reachability.
 
 Use an ordinary bridge network for this loopback-published qualification endpoint:
 Docker's internal-network port-publishing limitation prevents this procedure from
@@ -141,24 +150,41 @@ import json, os, subprocess
 from pathlib import Path
 from bench.schemas import ModelSpec
 from bench.weights import stage_weights
+from ops.pro6000_model_volume import DockerModelVolume
 
 fields = json.loads(Path(os.environ["PRO6000_FIELDS"]).read_text())
 bench = fields["bench"]
 model = bench["model"]
 assert fields["base_image_digest"] == bench["baseline_engine_image_digest"]
+# A run directory owns one unique baseline name; never replace another container.
+existing = subprocess.run(
+    ["docker", "container", "inspect", os.environ["PRO6000_BASELINE_CONTAINER"]],
+    capture_output=True, check=False,
+)
+if existing.returncode == 0:
+    raise RuntimeError("baseline container already exists; inspect it before retrying")
 staged = stage_weights(ModelSpec.from_dict(model))
+volume = DockerModelVolume(Path(os.environ["PRO6000_RUN_DIR"]))
 args = ["--model-path", "/model", "--dtype", model["dtype"],
         "--quantization", model["quantization"], *bench["serve_args"],
         "--host", "0.0.0.0", "--port", "30000"]
-subprocess.run([
-    "docker", "run", "-d", "--name", os.environ["PRO6000_BASELINE_CONTAINER"],
-    "--gpus", "device=0", "--ipc", "host", "--shm-size", "16g",
-    "--network", os.environ["PRO6000_QUAL_NET"],
-    "-p", "127.0.0.1:30000:30000", "-v", f"{staged.path}:/model:ro",
-    "-e", "HF_HUB_OFFLINE=1", "-e", "TRANSFORMERS_OFFLINE=1",
-    "--entrypoint", "python3", os.environ["PRO6000_ENGINE_REF"],
-    "-m", "sglang.launch_server", *args,
-], check=True)
+try:
+    volume.prepare(staged.path, os.environ["PRO6000_ENGINE_REF"])
+    subprocess.run([
+        "docker", "run", "-d", "--name", os.environ["PRO6000_BASELINE_CONTAINER"],
+        "--gpus", "device=0", "--ipc", "host", "--shm-size", "16g",
+        "--network", os.environ["PRO6000_QUAL_NET"],
+        "-p", "127.0.0.1:30000:30000", "--mount", volume.mount,
+        "-e", "HF_HUB_OFFLINE=1", "-e", "TRANSFORMERS_OFFLINE=1",
+        "--entrypoint", "python3", os.environ["PRO6000_ENGINE_REF"],
+        "-m", "sglang.launch_server", *args,
+    ], check=True)
+except BaseException:
+    # Failed docker run can leave a created container holding the model volume.
+    subprocess.run(["docker", "rm", "-f", os.environ["PRO6000_BASELINE_CONTAINER"]],
+                   capture_output=True, check=False)
+    volume.close()
+    raise
 PYTHON
 PRO6000_HEALTH_DEADLINE=$((SECONDS + PARETON_BENCH_HEALTH_TIMEOUT_S))
 until curl -fsS http://127.0.0.1:30000/v1/models > "$PRO6000_RUN_DIR/models.json"; do
@@ -178,6 +204,8 @@ python -m bench.qualify_longform \
 docker logs "$PRO6000_BASELINE_CONTAINER" > "$PRO6000_RUN_DIR/qualification-container.log" 2>&1
 docker stop "$PRO6000_BASELINE_CONTAINER"
 docker rm "$PRO6000_BASELINE_CONTAINER"
+PRO6000_MODEL_VOLUME=$(jq -er '.name' "$PRO6000_RUN_DIR/model_volume.json")
+docker volume rm "$PRO6000_MODEL_VOLUME"
 docker network rm "$PRO6000_QUAL_NET"
 ```
 
@@ -193,6 +221,15 @@ Use an unchanged baseline as the candidate to validate the complete harness
 before opening. The stock `ops/sglang-sample-round/run.sh` is TP4/NVFP4-specific
 and must not be used for this campaign. CPU preview below reproduces the sampled
 trace from its receipt, but does not replace GPU validation.
+
+The opt-in `ops.pro6000_model_volume` runner below executes the normal v5 harness
+and only replaces its model bind mount with a verified Docker volume. It does not
+change the request, source pool, C4 scheduling, natural EOS, thresholds or scorer.
+A separate volume is prepared for the shadow round and removed on exit; evidence
+is retained in `shadow/model_volume.json`. Unset the optional engine-cache bind
+path for this portable run so it cannot cause the same filesystem mismatch.
+Existing cache files are not removed. After a hard kill, inspect that run's named
+containers before manually removing its recorded volume; never prune shared data.
 
 ```bash
 python -m bench.preview_longform \
@@ -234,7 +271,8 @@ request = build_round_request(
 )
 (root / "bench_request.json").write_text(json.dumps(request, indent=2) + "\n")
 PYTHON
-python -m bench --request "$PRO6000_RUN_DIR/bench_request.json" \
+unset PARETON_BENCH_ENGINE_CACHE_DIR
+python -m ops.pro6000_model_volume --request "$PRO6000_RUN_DIR/bench_request.json" \
   --output-dir "$PRO6000_RUN_DIR/shadow"
 jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
 ```
