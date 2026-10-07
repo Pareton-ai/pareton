@@ -137,6 +137,7 @@ class StaticSshProvider:
 
 
 def _gpu_name(value: str) -> str:
+    value = re.sub(r"\brtx[\s_-]*pro[\s_-]*(\d+)\b", r"rtxpro\1", value, flags=re.I)
     value = re.sub(r"\b(nvidia|geforce)\b", "", value.lower())
     value = re.sub(r"\brtx[\s_-]*(?=\d)", "rtx", value)
     return " ".join(re.findall(r"[a-z0-9]+", value))

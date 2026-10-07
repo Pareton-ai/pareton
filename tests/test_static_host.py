@@ -167,6 +167,20 @@ def test_cleanup_cli_reports_busy_without_touching_resources(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "names,expected,count,ok",
     [
+        (["NVIDIA RTX PRO 6000 Blackwell Server Edition"], "RTXPRO6000", 1, True),
+        (["NVIDIA RTX PRO 6000 Blackwell Workstation Edition"], "RTXPRO6000", 1, True),
+        (["NVIDIA RTX-PRO-6000 Blackwell Server Edition"], "RTXPRO6000", 1, True),
+        (["RTXPRO6000"], "NVIDIA RTX PRO 6000", 1, True),
+        (["NVIDIA RTX PRO 5000 Blackwell Server Edition"], "RTXPRO6000", 1, False),
+        (["NVIDIA RTX PRO 60000"], "RTXPRO6000", 1, False),
+        (["NVIDIA RTX 6000 Ada Generation"], "RTXPRO6000", 1, False),
+        (["NVIDIA RTX PRO 6000 Blackwell Server Edition"], "RTXPRO6000", 2, False),
+        (
+            ["NVIDIA RTX PRO 6000 Blackwell Server Edition", "NVIDIA RTX PRO 5000"],
+            "RTXPRO6000",
+            1,
+            False,
+        ),
         (["NVIDIA GeForce RTX 5090"] * 4, "RTX5090", 4, True),
         (["NVIDIA GeForce RTX 5090"] * 8, "NVIDIA-RTX5090", 4, True),
         (["NVIDIA GeForce RTX 5090"] * 4, "NVIDIA-H200", 4, False),
