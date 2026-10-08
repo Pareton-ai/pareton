@@ -1,4 +1,4 @@
-# Trusted SGLang build base for 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc.
+# Trusted SGLang build base for 11972e520709a76766f91744a672e92727fdcb09.
 # The final image digest pins the resolved OS, Python, CUDA and kernel wheels.
 # Build on linux/amd64, then use python -m builder --engine sglang for
 # the offline empty-patch baseline and the non-empty miner build check.
@@ -26,19 +26,19 @@ RUN pip install --upgrade pip \
 
 # Match the source commit's Torch ABI and its official CUDA 13 recipe.
 RUN pip install --index-url https://download.pytorch.org/whl/cu130 \
-        "torch==2.13.0" "torchvision==0.28.0" "torchaudio==2.11.0"
+        "torch==2.14.1" torchvision "torchaudio==2.11.0"
 COPY images/baseline-sglang/requirements-runtime.txt /tmp/requirements-runtime.txt
 RUN pip install -r /tmp/requirements-runtime.txt \
-    && python -c "import torch; assert torch.__version__.startswith('2.13.0'), torch.__version__; assert (torch.version.cuda or '').startswith('13'), torch.version.cuda"
+    && python -c "import torch; assert torch.__version__.startswith('2.14.1'), torch.__version__; assert (torch.version.cuda or '').startswith('13'), torch.version.cuda"
 
 # Bootstrap Rust and retain Cargo's resolved dependency sources. The native
 # stage below reenables Rust rebuilds against this offline dependency cache.
 WORKDIR /src
 RUN git init \
     && git remote add origin https://github.com/sgl-project/sglang.git \
-    && git fetch --depth=1 origin 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
+    && git fetch --depth=1 origin 11972e520709a76766f91744a672e92727fdcb09 \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = 4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc \
+    && test "$(git rev-parse HEAD)" = 11972e520709a76766f91744a672e92727fdcb09 \
     && CARGO_BUILD_JOBS=4 pip install --no-deps --no-build-isolation -e python/ \
     && python -c "from pathlib import Path; assert list(Path('/src/python/sglang').rglob('*.so')), 'Rust extensions missing'" \
     && pip check \
@@ -56,7 +56,7 @@ ENV SGLANG_BUILD_RUST_EXTS=none \
 
 LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
       org.opencontainers.image.description="Pareton hermetic SGLang baseline" \
-      ai.pareton.sglang.commit="4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc"
+      ai.pareton.sglang.commit="11972e520709a76766f91744a672e92727fdcb09"
 
 # Reuse the verified dependency/Rust bootstrap by digest. The subsequent trusted
 # empty-patch build replaces the prebuilt AOT package with the pinned source build.
