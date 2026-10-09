@@ -1160,6 +1160,10 @@ def main(argv=None):
     finally:
         state["elapsed_s"] = time.monotonic() - started
         save(root / "summary.json", state)
+        print(
+            f"Probe status: {state['status']}; summary: {root / 'summary.json'}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

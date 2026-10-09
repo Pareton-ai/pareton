@@ -300,7 +300,7 @@ def test_real_grade_hook_repeats_and_rejects_truncation(tmp_path, monkeypatch, s
 
 
 def test_prepare_only_never_touches_gpu_and_preserves_failure_evidence(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     f = fields()
     source = source_trace(f)
@@ -355,6 +355,8 @@ def test_prepare_only_never_touches_gpu_and_preserves_failure_evidence(
     summary = json.loads((output / "summary.json").read_text())
     assert summary["status"] == "prepared_only"
     assert summary["exact_21504_boundary_exercised"] is False
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    assert last == f"Probe status: prepared_only; summary: {output / 'summary.json'}"
     # Token-count forgery in a source trace is rejected before any GPU work.
     source["requests"][-1]["prompt"] = "short"
     PROBE["save"](source_dir / "workload_trace.json", source)

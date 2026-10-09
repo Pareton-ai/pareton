@@ -297,3 +297,132 @@ scorer runs closer to the generation shape. The scorer keeps DSPARK because
 appended arguments cannot remove the speculative flags. Input logprobs come from
 the target model's prefill; whether DSPARK at this pin returns them correctly is
 one of the things this run checks.
+
+### Run it in the background on 8×B300
+
+This run decides the Kimi K3 campaign's scorer `--mem-fraction-static`. Run it
+before the campaign preflight in #194. The fixture's 0.80 is confirmed only when
+both the natural and capacity runs exit `0` with status `diagnostic_completed`.
+The probe ends its log with `Probe status: <status>; summary: <path>`. The
+wrappers below also print each exit code with its meaning: `0` means the
+diagnostic completed with full scorer evidence; `1` means it failed, and
+`summary.json` gives the error.
+
+**1. Set up the host.** As root, check out this branch and merge the campaign
+branch locally. The merge brings in the Kimi fixture, `bench.draft_model` and
+the Kimi tokenizer support.
+
+```bash
+set +e
+apt-get update && apt-get install -y python3 python3-venv python3-pip git jq
+mkdir -p /workspace && cd /workspace
+git clone --branch arpan/par-144-pro6000-correctness-probe \
+  https://github.com/Pareton-ai/pareton.git pareton-probe
+cd pareton-probe
+git -c user.name=probe -c user.email=probe@localhost \
+  merge --no-edit origin/claude/kimi-k3-campaign-1n2dqm
+python3 -m venv .venv && source .venv/bin/activate
+python -m pip install -r requirements.txt && python -m pip check
+nvidia-smi --query-gpu=name --format=csv,noheader   # expect exactly 8 B300 lines
+docker info > /dev/null
+export HF_TOKEN=...   # Hugging Face token with access to both pinned repos
+export PYTHONPATH=.
+export PARETON_BENCH_HF_CACHE_DIR=/workspace/hf-cache
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+export PROBE_FIELDS=fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json
+export PROBE_GENERATION_FRACTION=0.88 PROBE_SCORER_FRACTION=0.80
+export PROBE_ROOT=$(mktemp -d /var/tmp/kimi-scorer-probe-XXXXXX)
+declare -px PYTHONPATH PARETON_BENCH_HF_CACHE_DIR \
+  PARETON_BENCH_HEALTH_TIMEOUT_S PROBE_FIELDS PROBE_GENERATION_FRACTION \
+  PROBE_SCORER_FRACTION PROBE_ROOT > /workspace/probe-env.sh
+chmod 600 /workspace/probe-env.sh
+```
+
+After reconnecting, run `cd /workspace/pareton-probe && source .venv/bin/activate && source /workspace/probe-env.sh`, and export `HF_TOKEN` again. The token isn't saved to that file.
+
+**2. Prepare the inputs.** This is CPU only. It samples and verifies the 32
+longest LongWriter inputs without starting a GPU.
+
+```bash
+nohup bash -c '
+  python -u ops/pro6000-correctness-probe.py \
+    --campaign-fields "$PROBE_FIELDS" \
+    --generation-memory-fraction "$PROBE_GENERATION_FRACTION" \
+    --scorer-memory-fraction "$PROBE_SCORER_FRACTION" \
+    --prompt-count 32 --prefixes distinct --case natural \
+    --output-dir "$PROBE_ROOT/prepared" --prepare-only
+  code=$?
+  echo "Prepare exit code: $code ($([ $code = 0 ] && echo prepared || echo "failed; see error in the summary"))"
+  echo "Summary JSON: $PROBE_ROOT/prepared/summary.json"
+' > "$PROBE_ROOT/prepare.log" 2>&1 < /dev/null &
+echo "Prepare PID: $!"
+echo "Prepare log: $PROBE_ROOT/prepare.log"
+```
+
+Review `shorter_fallback_count` and `input_tokens` before continuing:
+
+```bash
+jq '{status, error, shorter_fallback_count, input_tokens}' "$PROBE_ROOT/prepared/summary.json"
+```
+
+**3. Run the natural case, then the capacity case.** The capacity case starts
+only if the natural case exits `0`. Each case stages both models, starts
+baseline, drift baseline, candidate and then the scorer, and grades three times.
+
+```bash
+nohup bash -c '
+  for CASE in natural capacity; do
+    python -u ops/pro6000-correctness-probe.py \
+      --campaign-fields "$PROBE_FIELDS" \
+      --source-preview "$PROBE_ROOT/prepared/source_preview" \
+      --generation-memory-fraction "$PROBE_GENERATION_FRACTION" \
+      --scorer-memory-fraction "$PROBE_SCORER_FRACTION" \
+      --prompt-count 32 --prefixes distinct --case "$CASE" \
+      --scorer-repetitions 3 --request-timeout 1800 \
+      --output-dir "$PROBE_ROOT/$CASE"
+    code=$?
+    if [ $code = 0 ]; then meaning="diagnostic completed with full scorer evidence"
+    else meaning="failed; see error in the summary"; fi
+    echo "$CASE exit code: $code ($meaning)"
+    echo "$CASE summary JSON: $PROBE_ROOT/$CASE/summary.json"
+    [ $code = 0 ] || { echo "Scorer fraction $PROBE_SCORER_FRACTION: NOT confirmed"; exit $code; }
+  done
+  echo "Scorer fraction $PROBE_SCORER_FRACTION: confirmed by natural and capacity runs"
+' > "$PROBE_ROOT/probe.log" 2>&1 < /dev/null &
+echo "Probe PID: $!"
+echo "Probe log: $PROBE_ROOT/probe.log"
+```
+
+**4. Watch it and read the evidence.** Pressing Ctrl-C on `tail` stops only the
+viewer.
+
+```bash
+tail -f "$PROBE_ROOT/probe.log"
+pgrep -af pro6000-correctness-probe   # still running?
+watch -n 30 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv
+for CASE in natural capacity; do
+  jq '{status, error, elapsed_s, exact_21504_boundary_exercised}' "$PROBE_ROOT/$CASE/summary.json"
+  jq . "$PROBE_ROOT/$CASE/telemetry.json"   # peak used / minimum free GPU memory per phase
+done
+ls "$PROBE_ROOT"/natural/runtime/scorer/   # resolved scorer flags and server info
+```
+
+**5. If the scorer fails at startup**, add the mamba-cache fallback to the scorer
+arguments and repeat step 3 with a new `PROBE_ROOT`. Copy `prepared/` from the
+earlier root so preparation doesn't run again.
+
+```bash
+OLD_ROOT=$PROBE_ROOT
+export PROBE_ROOT=$(mktemp -d /var/tmp/kimi-scorer-probe-XXXXXX)
+cp -r "$OLD_ROOT/prepared" "$PROBE_ROOT/prepared"
+export PROBE_FIELDS="$PROBE_ROOT/fields-mamba16.json"
+jq '.bench.correctness.serve_args += ["--max-mamba-cache-size", "16", "--max-running-requests", "8"]' \
+  fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json > "$PROBE_FIELDS"
+declare -px PROBE_ROOT PROBE_FIELDS >> /workspace/probe-env.sh
+```
+
+To tune the fraction itself (0.76 after an out-of-memory error, 0.84 with ample
+headroom), set `PROBE_SCORER_FRACTION`, export it to `/workspace/probe-env.sh`,
+use a new `PROBE_ROOT` with `prepared/` copied over, and repeat step 3. Change
+one value at a time. Copy whichever setting passes into the campaign fixture's
+`bench.correctness.serve_args` and seed helper in #193.
