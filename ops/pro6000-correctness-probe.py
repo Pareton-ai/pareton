@@ -378,13 +378,27 @@ def longest_trace(source, fields, *, count, prefixes, capacity):
     return diagnostic
 
 
+def diagnostic_scoring_rule(rule):
+    """The harness pairs the weighted rule with version 5 tier traces only.
+
+    The diagnostic trace is deliberately not one (see longest_trace) and its
+    performance scores are invalid anyway, so score it with the median rule.
+    """
+    if rule["name"] != "weighted_tier_completion_speedup":
+        return rule
+    return {
+        "name": "median_e2e_speedup",
+        "failure_penalty": rule.get("failure_penalty", 0),
+    }
+
+
 def prepare_request(fields, trace_path):
     image = fields["bench"]["baseline_engine_image_digest"]
     request = build_round_request(
         {
             "gpu_sku": fields["gpu_skus"][0],
             "sampled_trace_sha256": sha256_file(trace_path),
-            "scoring_rule": fields["scoring_rule"],
+            "scoring_rule": diagnostic_scoring_rule(fields["scoring_rule"]),
         },
         SimpleNamespace(
             bench=fields["bench"], engine=fields["engine"], sla=SLA(**fields["sla"])

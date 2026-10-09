@@ -689,6 +689,11 @@ def test_kimi_k3_profile_keeps_tp8_and_dspark_draft_mount(tmp_path):
     req = PROBE["prepare_request"](f, path)
     assert req["hardware"]["gpu_count"] == 8
     assert "--speculative-draft-model-path" in req["engines"]["baseline"]["serve_args"]
+    # bench.main rejects a weighted rule unless the trace is a version 5 tier trace.
+    assert f["scoring_rule"]["name"] == "weighted_tier_completion_speedup"
+    assert trace["meta"].get("sampling", {}).get("algo_version") != 5
+    assert req["scoring_rule"] == {"name": "median_e2e_speedup", "failure_penalty": 0.1}
+    PROBE["validate_bench_request_dict"](req)
 
 
 @pytest.mark.parametrize(
