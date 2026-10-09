@@ -211,6 +211,8 @@ fixture, before seeding a new long-form campaign. Seeding needs the qualified
 rule it writes, and the campaign may open only if it exits `0`. It is not
 specific to one campaign: give it any SGLang v4/v5 fixture.
 
+**Prerequisite:** the scorer's `bench.correctness.serve_args` must already be settled. For Kimi K3, that means both the natural and capacity runs of the [#189 scorer memory probe](https://github.com/Pareton-ai/pareton/pull/189) exit `0` at the fixture's `--mem-fraction-static` (0.80), or the fixture is updated to the setting that passed. The logprob stage below grades with that scorer configuration.
+
 It starts the trusted baseline once, exactly as a round would. The request comes
 from the worker's builder and the start from the harness's plan, with `/model`
 and any `/draft` mounted read-only. On that one start it runs:
