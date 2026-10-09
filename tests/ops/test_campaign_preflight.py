@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import config
 from bench.correctness import _PositionScore
 from bench.http import StreamResult
 from bench.longform import qualification_contract
@@ -24,6 +25,11 @@ pytestmark = pytest.mark.unit
 
 FIELDS = ROOT / "fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json"
 INPUT_TOKENS = 16000
+
+
+@pytest.fixture(autouse=True)
+def restore_health_timeout(monkeypatch):
+    monkeypatch.setattr(config, "BENCH_HEALTH_TIMEOUT_S", config.BENCH_HEALTH_TIMEOUT_S)
 
 
 def fields():
@@ -177,6 +183,15 @@ def test_all_checks_pass_on_one_baseline_start(tmp_path, harness, capsys):
     assert summary["by_temperature"]["1.01"]["passed"] == 10
     rule = json.loads((tmp_path / "out/qualification/sampling_rule.json").read_text())
     assert rule["eligible_row_indices"] == list(range(32))
+
+
+def test_health_timeout_reaches_the_scorer_start(tmp_path, harness):
+    code, _ = run(tmp_path, "--health-timeout", "5400")
+    assert code == 0
+    (container,) = harness.containers
+    assert container["health_timeout_s"] == 5400
+    # The scorer's EngineContainer reads config, like every round start.
+    assert config.BENCH_HEALTH_TIMEOUT_S == 5400
 
 
 def test_low_logprob_slow_ttft_and_greedy_drift_each_fail(tmp_path, harness):

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import config
 from bench.longform import qualification_contract
 from bench.sampler import parse_sampling_rule
 
@@ -18,6 +19,11 @@ spec.loader.exec_module(shadow)
 pytestmark = pytest.mark.unit
 
 FIELDS = ROOT / "fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json"
+
+
+@pytest.fixture(autouse=True)
+def restore_health_timeout(monkeypatch):
+    monkeypatch.setattr(config, "BENCH_HEALTH_TIMEOUT_S", config.BENCH_HEALTH_TIMEOUT_S)
 
 
 def qualified_rule_file(tmp_path):
@@ -66,7 +72,7 @@ def harness(monkeypatch):
     return calls
 
 
-def run(tmp_path, rule):
+def run(tmp_path, rule, *extra):
     out = tmp_path / "out"
     code = shadow.main(
         [
@@ -76,6 +82,7 @@ def run(tmp_path, rule):
             str(rule),
             "--output-dir",
             str(out),
+            *extra,
         ]
     )
     return code, json.loads((out / "summary.json").read_text())
@@ -94,6 +101,16 @@ def test_unchanged_candidate_scored_passes(tmp_path, harness, capsys):
     assert summary["entries"][0]["status"] == "scored"
     last = capsys.readouterr().out.strip().splitlines()[-1]
     assert last.startswith("Shadow status: passed; summary: ")
+
+
+def test_round_engines_get_the_long_health_timeout(tmp_path, harness):
+    rule = qualified_rule_file(tmp_path)
+    assert run(tmp_path, rule)[0] == 0
+    assert config.BENCH_HEALTH_TIMEOUT_S == shadow._preflight.DEFAULT_HEALTH_TIMEOUT_S
+    assert shadow._preflight.DEFAULT_HEALTH_TIMEOUT_S >= 3600
+    (tmp_path / "out").rename(tmp_path / "first")
+    assert run(tmp_path, rule, "--health-timeout", "5400")[0] == 0
+    assert config.BENCH_HEALTH_TIMEOUT_S == 5400
 
 
 def test_disqualified_candidate_fails(tmp_path, harness):

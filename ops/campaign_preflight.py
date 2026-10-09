@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import subprocess
 import sys
@@ -44,6 +45,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import config
 from bench.correctness import CapturedOutput, quantile_low, score_captured_output
 from bench.http import post_completion_stream
 from bench.lifecycle import BenchNetwork, EngineContainer, EngineError, new_run_id
@@ -72,6 +74,15 @@ from worker.round_job import build_round_request
 TRACE_SEED = "0" * 64
 # The campaign SLA's quality floor: "greedy token-match >= 0.99 vs baseline".
 GREEDY_MATCH_FLOOR = 0.99
+
+
+# Kimi K3 needs far longer than config's 600 s default to load and capture graphs.
+DEFAULT_HEALTH_TIMEOUT_S = float(os.environ.get("PARETON_BENCH_HEALTH_TIMEOUT_S", 3600))
+
+
+def apply_health_timeout(seconds):
+    """Engine starts this module doesn't build (the scorer, rounds) read config."""
+    config.BENCH_HEALTH_TIMEOUT_S = seconds
 
 
 class CheckFailed(Exception):
@@ -448,8 +459,11 @@ def main(argv=None):
         type=float,
         help="Per-request timeout (default: the rule's request_timeout_s)",
     )
-    parser.add_argument("--health-timeout", type=float, default=3600)
+    parser.add_argument(
+        "--health-timeout", type=float, default=DEFAULT_HEALTH_TIMEOUT_S
+    )
     args = parser.parse_args(argv)
+    apply_health_timeout(args.health_timeout)
     if args.repetitions < 1 or (
         args.request_timeout is not None
         and (not math.isfinite(args.request_timeout) or args.request_timeout <= 0)

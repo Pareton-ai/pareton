@@ -38,6 +38,7 @@ _spec.loader.exec_module(_preflight)
 check_gpus = _preflight.check_gpus
 load_qualified_rule = _preflight.load_qualified_rule
 save = _preflight.save
+apply_health_timeout = _preflight.apply_health_timeout
 
 
 def round_request(fields, trace_path):
@@ -89,7 +90,14 @@ def main(argv=None):
         help="qualification/sampling_rule.json from the campaign preflight",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--health-timeout",
+        type=float,
+        default=_preflight.DEFAULT_HEALTH_TIMEOUT_S,
+        help="Seconds each engine may take to become healthy",
+    )
     args = parser.parse_args(argv)
+    apply_health_timeout(args.health_timeout)
     root = args.output_dir.resolve()
     root.mkdir(parents=True, exist_ok=False)
     state = {"status": "failed"}
