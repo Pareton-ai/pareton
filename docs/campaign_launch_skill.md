@@ -608,6 +608,8 @@ bash ops/sglang-sample-round/run.sh \
   "$NEW_CAMPAIGN_RUN_DIR/qualification/sampling_rule.json"
 ```
 
+For the Kimi K3 8×B300 fixture, run `python -m ops.qualify_kimi_k3_b300` instead. It starts the round's own baseline with the `/draft` mount and qualifies a 32-row pool; see [the ops runbook](../ops/README.md#kimi-k3-8b300-long-form-qualification).
+
 The standalone runner is pinned to the stock Qwen fixture. A different new model,
 image, hardware topology or serving configuration needs a matching qualified
 rule and worker-generated request, not a substituted digest in this command.
