@@ -239,3 +239,46 @@ def test_scoring_rule_extras_change_hash():
 def test_unknown_scoring_rule_is_refused():
     with pytest.raises(ValueError, match="scoring_rule.name must be one of"):
         build_manifest(**_manifest_kwargs(), scoring_rule={"name": "vibes"})
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"mode": "private"},
+        {"mode": "public_after_reveal"},
+        {"mode": "public_after_reveal", "reveal_delay_s": 0},
+        {"mode": "public_after_reveal", "reveal_delay_s": 86400},
+    ],
+)
+def test_visibility_is_public_metadata_but_never_hashed(policy):
+    kwargs = _manifest_kwargs()
+    original = build_manifest(**kwargs)
+    changed = build_manifest(**kwargs, patch_visibility=policy)
+    assert original.patch_visibility == {"mode": "private"}
+    assert changed.manifest_hash == original.manifest_hash
+    assert freeze_manifest_fields(
+        **kwargs, patch_visibility=policy
+    ) == freeze_manifest_fields(**kwargs)
+    assert changed.to_public_dict()["patch_visibility"] == changed.patch_visibility
+    if policy == {"mode": "public_after_reveal"}:
+        assert changed.patch_visibility["reveal_delay_s"] == 172800
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {},
+        "public",
+        [],
+        {"mode": "public"},
+        {"mode": "private", "reveal_delay_s": 0},
+        {"mode": "public_after_reveal", "extra": 1},
+        *[
+            {"mode": "public_after_reveal", "reveal_delay_s": v}
+            for v in (None, True, -1, 1.5, "0", 2147483648)
+        ],
+    ],
+)
+def test_invalid_visibility_is_rejected(policy):
+    with pytest.raises(ValueError, match="patch_visibility"):
+        build_manifest(**_manifest_kwargs(), patch_visibility=policy)

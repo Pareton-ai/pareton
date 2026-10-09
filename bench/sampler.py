@@ -19,12 +19,16 @@ _SHA256_HEX_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 ALGO_VERSION = 2
-SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3, 4})
+SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3, 4, 5})
 CHAT_TEMPLATE_ALGO_VERSION = 2
 TRAJECTORY_ALGO_VERSION = 3
 LONGFORM_ALGO_VERSION = 4
+CONCURRENCY_ALGO_VERSION = 5
+LONGFORM_ALGO_VERSIONS = frozenset({4, 5})
 LONGFORM_RULE_FIELDS = frozenset(
     {
+        "input_tiers",
+        "max_baseline_prompt_drops",
         "followup_prompt",
         "min_output_tokens",
         "eligible_row_indices",
@@ -111,7 +115,19 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         raise SamplerError("max_tokens must be >= 1")
     if algo_version not in SUPPORTED_ALGO_VERSIONS:
         raise SamplerError(f"unsupported algo_version: {algo_version}")
-    new_fields = {"request_interval_ms", "enable_thinking"}
+    new_fields = {
+        "request_interval_ms",
+        "enable_thinking",
+        "request_concurrency",
+        "request_timeout_s",
+    }
+    if algo_version != CONCURRENCY_ALGO_VERSION and {
+        "request_concurrency",
+        "request_timeout_s",
+    }.intersection(rule):
+        raise SamplerError(
+            "request_concurrency and request_timeout_s require algo_version 5"
+        )
     if algo_version < TRAJECTORY_ALGO_VERSION and new_fields.intersection(rule):
         raise SamplerError(
             "request_interval_ms and enable_thinking require algo_version 3"
@@ -135,7 +151,16 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             set(rule)
             - set(parsed)
             - {"ignore_eos", "enable_thinking", "request_interval_ms"}
-            - (LONGFORM_RULE_FIELDS if algo_version == LONGFORM_ALGO_VERSION else set())
+            - (
+                {"request_concurrency", "request_timeout_s"}
+                if algo_version == 5
+                else set()
+            )
+            - (
+                LONGFORM_RULE_FIELDS
+                if algo_version in LONGFORM_ALGO_VERSIONS
+                else set()
+            )
         )
         if unknown:
             raise SamplerError(
@@ -156,14 +181,30 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             raise SamplerError(
                 f"algo_version {algo_version} requires a full dataset commit revision"
             )
-        interval = rule.get("request_interval_ms", 200)
-        if type(interval) is not int or interval < 0:
-            raise SamplerError("request_interval_ms must be a nonnegative integer")
+        if algo_version == CONCURRENCY_ALGO_VERSION:
+            from bench.concurrency import validate_concurrency, validate_request_timeout
+
+            if "request_interval_ms" in rule:
+                raise SamplerError("request_interval_ms is retired in algo_version 5")
+            try:
+                parsed["request_timeout_s"] = validate_request_timeout(
+                    rule.get("request_timeout_s", 600)
+                )
+                parsed["request_concurrency"] = validate_concurrency(
+                    rule.get("request_concurrency")
+                )
+            except ValueError as exc:
+                raise SamplerError(str(exc)) from exc
+        else:
+            interval = rule.get("request_interval_ms", 200)
+            if type(interval) is not int or interval < 0:
+                raise SamplerError("request_interval_ms must be a nonnegative integer")
+            parsed["request_interval_ms"] = interval
         thinking = rule.get("enable_thinking", False)
         if not isinstance(thinking, bool):
             raise SamplerError("enable_thinking must be a boolean")
-        parsed.update(request_interval_ms=interval, enable_thinking=thinking)
-    if algo_version == LONGFORM_ALGO_VERSION:
+        parsed.update(enable_thinking=thinking)
+    if algo_version in LONGFORM_ALGO_VERSIONS:
         from bench.longform import parse_longform_fields
 
         parsed.update(parse_longform_fields(rule, parsed))
@@ -172,7 +213,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
 
 def sampling_context_for_rule(rule, bench, engine=None):
     """Resolve capacity without imposing SWE history tiers on writing prompts."""
-    if rule["algo_version"] == LONGFORM_ALGO_VERSION:
+    if rule["algo_version"] in LONGFORM_ALGO_VERSIONS:
         from bench.longform import sampling_context_for_campaign
     else:
         from bench.trajectory import sampling_context_for_campaign
@@ -586,7 +627,7 @@ def generate_trace(
 ) -> SampledTrace:
     """Build a trace from hash-selected rows. row_fetcher is injected in tests."""
     parsed = parse_sampling_rule(rule)
-    if parsed["algo_version"] == LONGFORM_ALGO_VERSION:
+    if parsed["algo_version"] in LONGFORM_ALGO_VERSIONS:
         from bench.longform import generate_longform_trace
 
         return generate_longform_trace(

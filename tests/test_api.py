@@ -159,7 +159,7 @@ def test_submissions_pagination_envelope(monkeypatch, client: TestClient):
     assert row["round"]["ordinal"] == 3
     assert row["round"]["score"] == 0.31
     assert "retrieval_url" not in row
-    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+    assert resp.headers.get("Cache-Control") == "no-store"
 
 
 def test_submissions_offset_past_end(monkeypatch, client: TestClient):
@@ -176,7 +176,7 @@ def test_submissions_offset_past_end(monkeypatch, client: TestClient):
     body = resp.json()
     assert body["total"] == 3
     assert body["submissions"] == []
-    assert resp.headers.get("Cache-Control") == V1_CACHE_CONTROL_EXPECTED
+    assert resp.headers.get("Cache-Control") == "no-store"
 
 
 @pytest.mark.parametrize(
@@ -541,10 +541,10 @@ def test_bare_submission_detail_unique_hash_unchanged(monkeypatch, client: TestC
     [
         ("building", "no-store"),
         ("bench_queued", "no-store"),
-        ("built", V1_CACHE_CONTROL_EXPECTED),
-        ("scored", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected", V1_CACHE_CONTROL_EXPECTED),
-        ("rejected_duplicate", V1_CACHE_CONTROL_EXPECTED),
+        ("built", "no-store"),
+        ("scored", "no-store"),
+        ("rejected", "no-store"),
+        ("rejected_duplicate", "no-store"),
     ],
 )
 def test_submission_detail_cache_control_by_state(
@@ -1162,6 +1162,139 @@ def test_baseline_report_exposes_input_lengths_without_inventing_scores(
     assert body["sla"]["timings"]["req-0"]["input_tokens"] == 2048
 
 
+def test_weighted_report_counts_completions_without_rewriting_stored_evidence(
+    monkeypatch, client
+):
+    import copy
+
+    from api import server
+
+    row = _score_report_row()
+    row["scoring_rule"] = {"name": "weighted_tier_completion_speedup"}
+    report = row["report"]["score_report"]
+    report["rule"] = "weighted_tier_completion_speedup"
+    report["prompts"] = [
+        {
+            "request_id": f"hf-{i:03}",
+            "speedup": 0.0,
+            "aligned_tokens": 3000 if i < 3 else 5000,
+            "baseline_e2e_s": None,
+            "candidate_e2e_s": None,
+            "reason": (
+                "candidate output below tolerance" if i < 3 else "insufficient timing"
+            ),
+            "candidate_failed": i < 3,
+        }
+        for i in range(16)
+    ]
+    row["score"] = report["score"] = 0.010131644464675238 - 0.1 * 3 / 16
+    report["score_breakdown"] = {
+        "weighted_speedup": 0.010131644464675238,
+        "eligible_speedup": 0.010131644464675238,
+        "scheduled_requests": 16,
+        "failed_requests": 3,
+        "failure_rate": 3 / 16,
+        "failure_penalty": 0.1,
+        "penalty": 0.1 * 3 / 16,
+    }
+    original = copy.deepcopy(row)
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["prompt_summary"] == {
+        "total": 16,
+        "scored": 13,
+        "zeroed": 3,
+        "below_tolerance": 3,
+        "zeroed_by_reason": {"candidate output below tolerance": 3},
+    }
+    assert body["score"] == row["score"]
+    assert body["score_breakdown"] == report["score_breakdown"]
+    assert body["prompts"] == report["prompts"]
+    assert row == original
+
+
+def test_weighted_report_preserves_penalty_and_output_ceiling(monkeypatch, client):
+    from api import server
+
+    row = _score_report_row()
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 5,
+        "request_concurrency": 16,
+        "request_timeout_s": 480,
+        "enable_thinking": False,
+        "requests": [
+            {
+                "request_id": "req-0",
+                "input_tokens": 2048,
+                "max_tokens": 5120,
+                "input_length_group": "2k",
+            }
+        ],
+    }
+    breakdown = {
+        "weighted_speedup": 0.3,
+        "eligible_speedup": 0,
+        "scheduled_requests": 30,
+        "failed_requests": 1,
+        "failure_rate": 1 / 30,
+        "failure_penalty": 0.1,
+        "penalty": 0.1 / 30,
+        "tiers": {"2k": {"weight": 0.25, "speedup": 0.3}},
+    }
+    row["scoring_rule"] = {
+        "name": "weighted_tier_completion_speedup",
+        "failure_penalty": 0.1,
+    }
+    row["report"]["score_report"]["score_breakdown"] = breakdown
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["score_breakdown"] == breakdown
+    assert body["workload"]["request_concurrency"] == 16
+    assert body["workload"]["request_timeout_s"] == 480
+    assert "request_interval_ms" not in body["workload"]
+    assert body["prompts"][0]["max_tokens"] == 5120
+
+
+@pytest.mark.parametrize("kind", ["baseline", "scored", "infra_failed"])
+@pytest.mark.parametrize(
+    "input_tiers", [None, ["8k", "16k"], ["2k", "4k", "8k", "16k"]]
+)
+def test_entry_report_preserves_receipt_tiers_without_requiring_a_score(
+    monkeypatch, client: TestClient, kind, input_tiers
+):
+    from api import server
+
+    row = _score_report_row()
+    if kind == "baseline":
+        row.update(role="baseline", score=0, report={"metrics": {}, "timings": {}})
+    elif kind == "infra_failed":
+        row.update(status="infra_failed", score=None, report={})
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 5,
+        "request_concurrency": 4,
+    }
+    if input_tiers is not None:
+        row["sampling_receipt"]["input_tiers"] = input_tiers
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    response = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report")
+    assert response.status_code == 200
+    body = response.json()
+    typed = server.RoundEntryReportModel.model_validate(body)
+    assert typed.workload.input_tiers == input_tiers
+    if input_tiers is None:
+        # Historical receipts keep their absent-means-four-tiers contract.
+        assert "input_tiers" not in body["workload"]
+    else:
+        assert body["workload"]["input_tiers"] == input_tiers
+    if kind != "scored":
+        assert body["score_breakdown"] is None
+        assert body["prompts"] == []
+
+
 def test_entry_report_of_a_live_round_is_not_cached(monkeypatch, client: TestClient):
     from api import server
 
@@ -1444,6 +1577,7 @@ def test_campaign_fee_routes_quote_latest_fee_without_chain(
     monkeypatch, client, amount
 ):
     import bittensor as bt
+
     from api import server
 
     history = [

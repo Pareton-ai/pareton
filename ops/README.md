@@ -40,6 +40,149 @@ self-updating copy is in [`runbook.md`](runbook.md).
 
 ## A merge to `main` is a production deploy
 
+### RTX PRO 6000 Qwen3.8 FP8 campaign
+
+Use a fresh **Ubuntu GPU VM with one RTX PRO 6000, NVIDIA drivers, Docker and
+NVIDIA Container Toolkit preinstalled**. Run the VM commands as root in Bash;
+port 30000 must be free. Allow disk space for the model cache plus a volume copy.
+
+The [fixture](../fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json)
+pins Qwen3.8-27B-FP8, TP1, 262144 context, v5 **16 requests at C4**
+(eight each at 8k/16k, equal 0.5 weights, at most four baseline exclusions),
+private patches and a **0.1 TAO** initial fee. Generation/scorer memory fractions are **0.80/0.60**,
+following [#189](https://github.com/Pareton-ai/pareton/pull/189).
+
+Use a new run directory and either fresh qualification or
+[verified reuse of the original successful qualification](pro6000-qualification-reuse.md).
+The old rule cannot be used directly. Both paths require a fresh 16-prompt shadow
+round. Deploy this version of the worker before launch.
+
+Every long stage runs under `nohup`. **Ctrl-C on `tail` stops only the viewer.**
+Proceed only when that stage's `.exit-code` file contains `0`; missing/nonzero
+status means inspect its log, not relaunch it. Never enable `set -e` in the
+interactive shell. Keep the run directory and evidence.
+
+#### 1. Checkout and install dependencies
+
+```bash
+set +e
+umask 077
+apt-get update && apt-get install -y python3 python3-venv python3-pip git curl jq
+mkdir -p /workspace
+cd /workspace
+git clone --branch arpan/pro6000-fp8-campaign https://github.com/Pareton-ai/pareton.git
+cd pareton
+nvidia-smi --query-gpu=name,memory.total --format=csv
+docker info >/dev/null
+
+export PRO6000_RUN_DIR=$(mktemp -d /var/tmp/pareton-pro6000-XXXXXX)
+export PRO6000_SETUP_DIR="$PRO6000_RUN_DIR/setup"
+mkdir "$PRO6000_SETUP_DIR"
+export PRO6000_FIELDS=fixtures/campaigns/sglang_qwen38_27b_pro6000/campaign-fields.json
+export PRO6000_ENGINE_REF=$(jq -er '.base_image_digest' "$PRO6000_FIELDS")
+export PRO6000_BASELINE_CONTAINER="$(basename "$PRO6000_RUN_DIR")-qualification"
+export PRO6000_QUAL_NET="$(basename "$PRO6000_RUN_DIR")-network"
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+declare -p PRO6000_RUN_DIR PRO6000_SETUP_DIR PRO6000_FIELDS PRO6000_ENGINE_REF \
+  PRO6000_BASELINE_CONTAINER PRO6000_QUAL_NET PARETON_BENCH_HEALTH_TIMEOUT_S \
+  > "$PRO6000_RUN_DIR/env.sh"
+printf 'Keep this run path: %s\n' "$PRO6000_RUN_DIR"
+nohup bash ops/setup-pro6000.sh >> "$PRO6000_SETUP_DIR/setup.log" 2>&1 < /dev/null &
+```
+
+Setup creates `.venv`, installs `requirements.txt` (including pinned `tokenizers`),
+runs `pip check` and checks host imports. Authenticate with `docker login ghcr.io`
+if the image requires it. Watch setup, then check its result:
+
+```bash
+tail -f "$PRO6000_SETUP_DIR/setup.log" || true
+cat "$PRO6000_SETUP_DIR/setup.exit-code"
+```
+
+#### 2. Qualify the baseline
+
+After setup returns `0`, activate `.venv`. This job stages and verifies weights,
+starts the baseline, runs `bench.qualify_longform` with pool 32, two repetitions,
+concurrency 4 and timeout 600, then removes its container/network/volume on success.
+
+```bash
+source .venv/bin/activate
+if docker network create "$PRO6000_QUAL_NET"; then
+  nohup bash ops/qualify-pro6000.sh >> "$PRO6000_RUN_DIR/step2.log" 2>&1 < /dev/null &
+fi
+```
+
+```bash
+tail -f "$PRO6000_RUN_DIR/step2.log" || true
+cat "$PRO6000_RUN_DIR/step2.exit-code"
+```
+
+After reconnecting: `cd /workspace/pareton`, source the saved run's `env.sh`, then
+`source .venv/bin/activate`. Inspect the existing job; do not repeat setup.
+
+#### 3. Run the C4 shadow benchmark
+
+After step 2 returns `0`, generate the trace/request and benchmark the unchanged
+baseline as candidate. The job preserves the normal v5 C4 workload and scorer.
+
+```bash
+nohup bash ops/shadow-pro6000.sh >> "$PRO6000_RUN_DIR/step3.log" 2>&1 < /dev/null &
+```
+
+```bash
+tail -f "$PRO6000_RUN_DIR/step3.log" || true
+cat "$PRO6000_RUN_DIR/step3.exit-code"
+jq '{verdict, entries, error}' "$PRO6000_RUN_DIR/shadow/bench_report.json"
+```
+
+Require exit `0`, a scored candidate, passing correctness, both surviving
+tiers and passing drift/repeatability gates. Review the retained evidence; CPU
+checks and #189's diagnostic do not replace this GPU run. Before seeding, also
+confirm offline miner-build/native-probe checks for the pinned engine and the
+[deployment/privacy requirements](../docs/patch-visibility.md#rollout), including
+#186/#187 backend rollout and compatible frontend support (#88/#89, plus
+[pareton-frontend#91](https://github.com/Pareton-ai/pareton-frontend/pull/91) for the
+8k/16k tier subset). Merge and deploy #91 before launch, then verify the campaign's
+tier weights, entry score breakdowns and C4 scheduling labels in the dashboard.
+
+#### 4. Seed once on the configured controller
+
+Transfer `qualification/sampling_rule.json` and its evidence to protected storage
+on the controller. Use the reviewed checkout and its prepared `.venv`/`.env`,
+following the [campaign launch skill](../docs/campaign_launch_skill.md).
+**This creates an open campaign.** Set the transferred file path below.
+
+```bash
+set +e
+cd /opt/pareton
+source .venv/bin/activate
+set -a; source .env; set +a
+umask 077
+export PRO6000_QUALIFIED_RULE=/absolute/path/to/qualification/sampling_rule.json
+export PRO6000_SEED_DIR=$(mktemp -d /var/tmp/pareton-pro6000-seed-XXXXXX)
+nohup bash ops/seed-pro6000-job.sh >> "$PRO6000_SEED_DIR/seed.log" 2>&1 < /dev/null &
+printf 'Keep this seed path: %s\n' "$PRO6000_SEED_DIR"
+```
+
+```bash
+tail -f "$PRO6000_SEED_DIR/seed.log" || true
+cat "$PRO6000_SEED_DIR/seed.exit-code"
+```
+
+After exit `0`, take the UUID from `seed.log` and verify the API result:
+
+```bash
+read -r -p 'Campaign UUID: ' PRO6000_CAMPAIGN_ID &&
+curl -fsS "https://api.pareton.ai/v1/campaigns/$PRO6000_CAMPAIGN_ID" | jq .
+```
+
+Compare the returned pins/settings with the fixture: open status, private patches,
+v5 C4 with 16 prompts in 8k/16k, 0.5/0.5 weights, four-exclusion limit, 0.1 TAO
+fee, image/model revisions, memory fractions and emissions. Verify
+private patch access through the linked privacy runbook. If seed completion is
+uncertain, check the log and database/API before any retry; a new job directory
+does not prevent duplicate campaigns.
+
 ### Optional RTX PRO 6000 scorer diagnostic
 
 [PAR-144 diagnostic instructions](../docs/pro6000-correctness-probe.md) describe
@@ -59,7 +202,7 @@ Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
 The Qwen seed helper supplies these through repeatable
 `--bench-correctness-serve-args` options. The round request carries them to the
 remote harness, which appends them only to the trusted scorer's serving arguments.
-The scorer inherits the campaign's TP and GPU allocation. All Qwen stages use TP4
+The scorer inherits the campaign's TP and GPU allocation. The original NVFP4 Qwen stages use TP4
 and four GPUs; timed baseline, candidate and drift stages retain memory fraction
 `0.85`. No scorer TP environment setting or additional GPUs are required.
 

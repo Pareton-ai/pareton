@@ -1,7 +1,7 @@
 ---
 name: campaign-launch
 description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with pinned emissions."
-version: 3.2.0
+version: 3.3.0
 category: ops
 metadata:
   hermes:
@@ -271,11 +271,13 @@ for compatibility with older requests. Scorer flags use this name, including whe
 SGLang omits tensor-parallel arguments or uses another accepted alias.
 
 Generate a trace with `bench.sampler.sample_workload` and the campaign's pinned
-sampling rule. Run the same trace against the baseline and candidate. Use all
-full plan: opening baseline, initial baseline repeatability run, candidate
-streaming replay, then shared correctness scoring.
-Verify `/v1/models`, streamed token counts, scoring coverage and cleanup.
-The model mount is `/model`; do not let the engine fetch a default model.
+sampling rule. Run the same trace against the baseline and candidate. For a new
+v5 campaign, run baseline and baseline-drift before the leader and challengers,
+then the shared scorer. The two existing baseline runs establish exclusions;
+there are no additional qualification starts. All-mode uses `3 + candidates`
+engine starts: nine for a leader plus five challengers, including the scorer.
+Existing campaigns retain their replay contract. Verify `/v1/models`, streamed
+token counts, scoring coverage and cleanup.
 
 For an explicit SGLang `--context-length`, the scorer alone reserves seven extra
 context slots. At this pin, the scheduler requires input length strictly below
@@ -326,7 +328,12 @@ scorer. For SGLang, tune `--mem-fraction-static`; vLLM uses
 `--gpu-memory-utilization`. Set the required timeout in the running worker's
 configuration before opening, using the normal deployment process.
 
-## 4. Open the Qwen campaign
+## 4. Open a future Qwen v5 campaign
+
+These v5 settings apply only to new campaigns; existing campaigns retain their
+pinned workload and scoring rules. Before opening a new v5 campaign, qualify its
+workload and deploy compatible backend and
+[frontend support](https://github.com/Pareton-ai/pareton-frontend/pull/89).
 
 ### Initial submission fee
 
@@ -334,6 +341,8 @@ Before seeding, verify the validator has the fee-history schema and code from
 PR #126. For an existing Neon database, apply the hand-run migration using the
 [fee rollout instructions](campaign-fees.md); deployment alone does not migrate.
 The migration's closed/open backfill policy applies only to existing rows.
+PR #187 introduces no database migration; do not rerun the historical fee backfill
+as part of its deployment.
 
 Choose the initial fee for this campaign explicitly. Pass
 `--submission-fee-tao DECIMAL` to `python -m campaign.seed`; the SGLang helper
@@ -349,24 +358,71 @@ Fee amounts and history are excluded from `manifest_hash`; never re-seed or
 rewrite a live campaign's signed terms to change its fee.
 
 
-The launch helper targets four RTX 5090 GPUs, `RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead`,
-a 262144-token context, and 32 requests spaced 2 ms apart. Sampler version 4
-uses conversation history from the pinned
+The launch helper is a template for a new campaign on four RTX 5090 GPUs using
+`RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead` and a 262144-token context. It pins
+`algo_version: 5`, `request_concurrency: 32` and
+`request_timeout_s: 600`. The timeout is an absolute per-request deadline from
+slot admission, shared by both baseline runs and all measured
+replays. Pin it before qualification and validate it on the target hardware;
+existing campaigns keep their historical timeout behavior.
+`request_interval_ms` is rejected for v5; it remains valid for older campaigns.
+The sampler uses conversation history from the pinned
 [zai-org/LongWriter-6k](https://huggingface.co/datasets/zai-org/LongWriter-6k)
 dataset. Each original user/assistant exchange is followed by a new user request
-for a complete long-form work. Each round has eight inputs per tier: 2k, 4k, 8k
-and 16k, measured within 90-100% of the tier ceiling. There is no 32k tier,
-padding or truncation.
+for a complete long-form work. Before baseline exclusions, each round has eight
+inputs per tier: 2k, 4k, 8k and 16k, measured within 90-100% of the tier ceiling.
+There is no 32k tier, padding or truncation.
 
-Thinking is disabled. EOS is respected, and 5120 is an output ceiling, not a
-minimum generation length. The failure coefficient remains 0.1. Before opening,
-qualify a source-row pool on the trusted baseline and use that sampling rule
-with the seed helper. See [LongWriter qualification](longwriter-workload.md).
-The qualifier requires at least 3000 generated tokens in each repeated response,
-without forcing continuation. A response that reaches the 5120 ceiling is eligible;
-this demonstrates sustained natural generation up to the cap, not natural EOS
-beyond it. Baseline and drift replay enforce the length floor again under the
-campaign's concurrent workload. Existing version 3 campaigns remain replayable.
+For a new v5 campaign with fewer tiers, explicitly pin `input_tiers` in ascending
+order and give exactly those tiers weights summing to one. PRO6000 uses
+`["8k", "16k"]`, `n_prompts: 16`, C4, weights 0.5/0.5 and
+`max_baseline_prompt_drops: 4`; use a qualified pool of 32 rows and run a fresh
+shadow round using the [PRO6000 runbook](../ops/README.md#rtx-pro-6000-qwen38-fp8-campaign).
+Deploy the subset-aware worker and merge/deploy
+[frontend #91](https://github.com/Pareton-ai/pareton-frontend/pull/91) before launch;
+frontend #88/#89 alone do not render the 8k/16k tier subset correctly. Verify tier
+weights, entry score breakdowns and C4 scheduling labels in the dashboard.
+Omitted tier/exclusion fields retain the four-tier/eight-exclusion defaults and
+existing hashes. Every selected tier must remain nonempty. Changing the tier set or exclusion allowance invalidates
+old receipts. For this exact PRO6000 narrowing, the
+[reuse helper](../ops/pro6000-qualification-reuse.md) can derive a new receipt from
+complete successful evidence without new GPU requests when execution/generation
+pins match. A new shadow round is still required. Never edit an existing
+campaign's signed workload in place.
+
+Supported concurrency values are 1, 2, 4, 8, 16 and 32. C1-C8 finish one tier
+before starting the next. C16 groups 2k+4k, then 8k+16k; C32 overlaps all four.
+FIFO admission and slot refill continue until each group drains. Exclusions and
+final drain can lower actual occupancy; no duplicate requests fill empty slots.
+
+Thinking is disabled. Source-pool qualification and both in-round baseline
+runs use normal EOS with a 5120-token ceiling and a 3000-token
+minimum. They do not force continuation. Union short/degenerate exclusions across
+baseline and baseline-drift before leader or candidate execution; allow
+at most eight excluded request IDs and require every tier to remain nonempty.
+Freeze the remaining request set before leader and candidate execution. All
+replays retain normal EOS and the same 5120-token ceiling. Candidates must emit
+at least 90% of the measured baseline's reported token count per eligible request.
+Correctness checks cover natural outputs and their repetitions.
+Candidate-specific failures never remove requests from the eligible set.
+
+Pair v5 with `weighted_tier_completion_speedup`. Pin `tier_weights` in the scoring
+rule; the template uses `{"2k": 0.25, "4k": 0.25, "8k": 0.25, "16k": 0.25}`.
+Each tier's completion time runs from its group's start through the last eligible
+request's protocol completion, including client queueing. Use the median duration
+across repetitions and sum `weight * (1 - candidate_time / baseline_time)`.
+
+Retain `failure_penalty`, explicitly `0.1` in this template. Subtract
+`failure_penalty * failed_eligible_requests / eligible_requests` directly from
+the weighted speedup, without capping positive speed credit. Count each
+failed ID once and exclude trusted baseline removals from the denominator. Hard
+runtime/correctness failures remain unscored. Use worst-tier baseline drift and
+repeatability gates rather than allowing tier changes to cancel out.
+
+Qualify a fresh source pool for this exact new contract, then GPU-validate its
+full round before seeding. Existing v1-v4 pools and CPU-only or historical GPU
+reports do not qualify v5. See [LongWriter qualification](longwriter-workload.md).
+
 The model revision is
 `009632fef96dd349150baa780c984e62e70e91fe`. Its
 [model configuration](https://huggingface.co/RadixArk/Qwen3.8-27B-NVFP4-BF16-LMHead/blob/009632fef96dd349150baa780c984e62e70e91fe/config.json)
@@ -421,6 +477,11 @@ Sample campaign entries, in addition to the source and image pins:
     "entrypoint": ["python3", "-m", "sglang.launch_server"],
     "cache_dir": "/root/.cache/sglang"
   },
+  "scoring_rule": {
+    "name": "weighted_tier_completion_speedup",
+    "tier_weights": {"2k": 0.25, "4k": 0.25, "8k": 0.25, "16k": 0.25},
+    "failure_penalty": 0.1
+  },
   "emission_rule": {
     "name": "linear_decay",
     "start_weight": 0.2,
@@ -449,7 +510,7 @@ Sample campaign entries, in addition to the source and image pins:
       "num_prompts": 32,
       "thresholds": {
         "min_mean_logprob": -4,
-        "min_token_logprob": -12,
+        "min_token_logprob": -16,
         "min_token_quantile": 0.001,
         "min_coverage_ratio": 0.5,
         "max_mean_logprob_drop": 2.5
@@ -493,10 +554,44 @@ Keep manually managed cloud VMs outside that `pt-...` naming
 pattern: the reaper also scans credentialed cloud providers and can delete
 expired resources with matching names, even when static SSH is selected.
 
-After successful image and GPU checks, run this once with the published engine ref:
+### Qualify and validate only when launching a new v5 campaign
+
+Use an idle, dedicated GPU host and the exact new model, engine digest and serving
+arguments. For the stock Qwen example below, start a trusted baseline container
+with the fixture's pins and publish its port on loopback; set `BASELINE_CONTAINER`
+and `NATIVE_ENGINE_REF` to that container and its published digest. Use a fresh
+output directory. The qualifier's C4 screening does not override the campaign's
+pinned C32 measured workload.
 
 ```bash
-INITIAL_FEE_TAO=0.15
+export NEW_CAMPAIGN_RUN_DIR="$(mktemp -d /workspace/pareton-new-campaign-XXXXXX)"
+python -m bench.qualify_longform \
+  --base-url http://127.0.0.1:8000 \
+  --container "$BASELINE_CONTAINER" --engine-ref "$NATIVE_ENGINE_REF" \
+  --campaign-fields fixtures/campaigns/sglang_qwen38_27b/campaign-fields.json \
+  --output-dir "$NEW_CAMPAIGN_RUN_DIR/qualification" \
+  --pool-size 64 --repetitions 2 --concurrency 4 --timeout 600
+# Release the dedicated qualification container's GPUs before the shadow round.
+docker stop "$BASELINE_CONTAINER"
+bash ops/sglang-sample-round/run.sh \
+  "$NEW_CAMPAIGN_RUN_DIR/shadow" \
+  "$NEW_CAMPAIGN_RUN_DIR/qualification/sampling_rule.json"
+```
+
+The standalone runner is pinned to the stock Qwen fixture. A different new model,
+image, hardware topology or serving configuration needs a matching qualified
+rule and worker-generated request, not a substituted digest in this command.
+Review baseline outputs, `baseline_exclusions.json`, all four tier timings and
+weights, baseline/candidate gates, observed occupancy and the failure deduction.
+Retain the new artifacts separately from the existing campaign's evidence.
+
+After those checks and backend/frontend deployment, use the new qualified rule
+on the configured controller. This is a separate, one-time **new campaign**
+creation action; stop here unless that launch has been requested. Set the fee
+explicitly and review the helper's emissions allocation for the new campaign:
+
+```bash
+read -r -p 'Initial submission fee in TAO for the new campaign: ' INITIAL_FEE_TAO
 bash ops/seed-sglang-qwen38-27b.sh "$NATIVE_ENGINE_REF" "$INITIAL_FEE_TAO" \
   /path/to/longwriter-qualification/sampling_rule.json
 ```
@@ -513,7 +608,11 @@ rows, so that sequence does not promote a draft.
 
 Verify the returned ID through `GET /v1/campaigns/<id>`. Check the source and model
 revisions, both image digests, engine, patch surface, sampling rule, correctness
-bars, status, the 20% starting emission rule, initial fee history and customer signoff. Keep the
+bars, status, the 20% starting emission rule, initial fee history and customer signoff.
+For v5, also verify `algo_version`, `request_concurrency`,
+`request_timeout_s`, `weighted_tier_completion_speedup`, all four `tier_weights`
+and `failure_penalty` in the API readback. Check concurrency, natural EOS, output ceiling and
+score details in the companion frontend. Keep the
 existing campaign and its manifest unchanged. Do not claim the new campaign is live until that readback
 succeeds and the deployed worker supports its engine request fields.
 

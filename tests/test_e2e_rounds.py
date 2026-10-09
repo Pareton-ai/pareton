@@ -703,7 +703,7 @@ def _seed_incumbent(campaign_id: UUID, sid: str, image_ref: str) -> str:
 
 def test_round_outcome_queries_ignore_live_and_void_entries():
     from campaign.store import append_event, list_campaign_submissions
-    from round.store import list_submission_round_entries
+    from round.store import list_patch_evaluation_times, list_submission_round_entries
 
     cid = _campaign()
     scored = _submission(cid, image_ref=IMAGE_A, block=10)
@@ -785,10 +785,19 @@ def test_round_outcome_queries_ignore_live_and_void_entries():
     assert outcomes[failed]["ordinal"] == 5
     assert outcomes[failed]["status"] == "disqualified"
     assert banned not in outcomes
-    assert all("_patch_evaluated_at" not in o for o in outcomes.values())
+    assert outcomes[scored]["_patch_evaluated_at"] == first
+    assert outcomes[disqualified]["_patch_evaluated_at"] == first
+    assert outcomes[failed]["_patch_evaluated_at"] is None
+    assert list_patch_evaluation_times(
+        [scored, disqualified, failed, banned, legacy]
+    ) == {scored: first, disqualified: first}
     page = list_campaign_submissions(cid)
     rows = {str(r["id"]): r for r in page["items"]}
-    assert all("_patch_evaluated_at" not in r for r in rows.values())
+    assert rows[scored]["_patch_evaluated_at"] == first
+    assert rows[disqualified]["_patch_evaluated_at"] == first
+    assert rows[failed]["_patch_evaluated_at"] is None
+    assert rows[legacy]["_patch_evaluated_at"] is None
+    assert all(r["_patch_visibility"] == {"mode": "private"} for r in rows.values())
     paged = list_campaign_submissions(cid, limit=2, offset=2)
     assert paged["total"] == page["total"]
     assert paged["items"] == page["items"][2:4]

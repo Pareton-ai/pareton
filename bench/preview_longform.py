@@ -10,7 +10,7 @@ from uuid import UUID
 
 from bench.longform import source_messages
 from bench.sampler import (
-    LONGFORM_ALGO_VERSION,
+    LONGFORM_ALGO_VERSIONS,
     SamplerError,
     build_prompt_formatter,
     compute_sample_seed,
@@ -23,8 +23,8 @@ from bench.sampler import (
 
 def preview(*, fields, output_dir, campaign_id, seed_block, block_hash):
     rule = parse_sampling_rule(fields["sampling_rule"])
-    if rule["algo_version"] != LONGFORM_ALGO_VERSION:
-        raise SamplerError("preview_longform requires algo_version 4")
+    if rule["algo_version"] not in LONGFORM_ALGO_VERSIONS:
+        raise SamplerError("preview_longform requires algo_version 4 or 5")
     model = fields["bench"]["model"]
     formatter = build_prompt_formatter(
         rule, model_repo=model["hf_repo"], model_revision=model["hf_revision"]

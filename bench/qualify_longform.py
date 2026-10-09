@@ -31,7 +31,7 @@ from bench.longform import (
     sampling_context_for_campaign,
 )
 from bench.sampler import (
-    LONGFORM_ALGO_VERSION,
+    LONGFORM_ALGO_VERSIONS,
     PromptRenderError,
     SamplerError,
     build_prompt_formatter,
@@ -211,17 +211,18 @@ def qualify(
     if type(concurrency) is not int or concurrency < 1:
         raise SamplerError("concurrency must be a positive integer")
     rule = parse_sampling_rule(fields["sampling_rule"])
-    if rule["algo_version"] != LONGFORM_ALGO_VERSION:
-        raise SamplerError("qualification requires algo_version 4")
+    if rule["algo_version"] not in LONGFORM_ALGO_VERSIONS:
+        raise SamplerError("qualification requires algo_version 4 or 5")
     if pool_size is None:
         pool_size = 2 * rule["n_prompts"]
     if repetitions < 2 or pool_size < rule["n_prompts"] or max_rows < pool_size:
         raise SamplerError(
             "qualification needs >=2 repetitions and max_rows >= pool_size >= n_prompts"
         )
-    if pool_size % 4:
-        raise SamplerError("version 4 pool_size must be a multiple of 4")
-    quotas = {group["name"]: group["count"] for group in length_groups(pool_size)}
+    groups = length_groups(pool_size, rule.get("input_tiers"))
+    if pool_size % len(groups):
+        raise SamplerError(f"long-form pool_size must be a multiple of {len(groups)}")
+    quotas = {group["name"]: group["count"] for group in groups}
     qualified_counts = dict.fromkeys(quotas, 0)
     # Requalification starts from source, not a previous winning subset.
     rule.pop("qualification", None)
@@ -460,7 +461,7 @@ def main(argv=None):
     parser.add_argument(
         "--pool-size",
         type=int,
-        help="Default: twice n_prompts, split equally across four input tiers",
+        help="Default: twice n_prompts, split equally across selected input tiers",
     )
     parser.add_argument("--max-rows", type=int, default=6000)
     parser.add_argument("--repetitions", type=int, default=2)

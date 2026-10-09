@@ -173,6 +173,13 @@ class LiumProvider:
             if gpu_count < want:
                 continue
             gpu_type = _normalize_gpu_type(str(_attr(ex, "gpu_type", "") or ""))
+            # SDK 0.0.32 reduces these names to "Edition", but retains machine_name.
+            if gpu_type.upper() == "EDITION" and re.fullmatch(
+                r"(?:NVIDIA\s+)?RTX PRO 6000 Blackwell (?:Server|Workstation) Edition",
+                str(_attr(ex, "machine_name", "") or "").strip(),
+                re.IGNORECASE,
+            ):
+                gpu_type = "RTXPRO6000"
             if spec.gpu_type and not _gpu_type_matches(
                 gpu_type, _normalize_gpu_type(spec.gpu_type)
             ):

@@ -34,6 +34,12 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from bench import __version__
+from bench.concurrency import (
+    WEIGHTED_RULE,
+    request_groups,
+    tier_completion_metrics,
+    validate_tier_contract,
+)
 from bench.correctness import (
     BASELINE_INDEX,
     BaselineDegeneracyReferences,
@@ -77,6 +83,7 @@ from bench.sla_bench import (
     REPRO_BAR_MAX_REL_RANGE,
     EngineReplay,
     capture_baseline_natural_stops,
+    read_replay_rows,
     run_sla_engine,
 )
 from bench.validate import (
@@ -546,6 +553,28 @@ def run_round(
 ]:
     """Execute the whole round against one pod. Returns the raw material."""
     requests = list(trace.requests)
+    workload = trace.meta.sampling or {}
+    concurrent = workload.get("algo_version") == 5
+    if concurrent:
+        prompts = [PromptCase(r.id, r.prompt) for r in requests]
+    if concurrent != (req.scoring_rule["name"] == WEIGHTED_RULE):
+        raise RequestValidationError(
+            "version 5 workloads require weighted_tier_completion_speedup and vice versa"
+        )
+    if concurrent:
+        try:
+            validate_tier_contract(workload, req.scoring_rule)
+        except ValueError as exc:
+            raise RequestValidationError(str(exc)) from exc
+    replay_kwargs = (
+        {
+            "input_tiers": workload.get("input_tiers"),
+            "request_concurrency": workload["request_concurrency"],
+            "request_timeout_s": workload["request_timeout_s"],
+        }
+        if concurrent
+        else {}
+    )
     plan = plan_round_starts(
         req.engines,
         mode=req.mode,
@@ -615,6 +644,7 @@ def run_round(
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
                         engine_name=start.spec.name,
+                        **replay_kwargs,
                     )
                     excluded_prompts = baseline_prompt_drops(
                         trace, replay, dropped=excluded_prompts
@@ -642,6 +672,11 @@ def run_round(
                             natural_stops,
                             replay.output_samples,
                             dropped=excluded_prompts,
+                            **(
+                                {"max_drops": workload["max_baseline_prompt_drops"]}
+                                if "max_baseline_prompt_drops" in workload
+                                else {}
+                            ),
                         )
                         if baseline_degeneracy is not None:
                             excluded_prompts.update(baseline_degeneracy.dropped)
@@ -656,6 +691,49 @@ def run_round(
                         )
                     if baseline_degeneracy is not None and not baseline_degeneracy:
                         raise EngineError("baseline has no stable correctness prompts")
+                if concurrent and start.kind == "drift":
+                    requests = [r for r in requests if r.id not in excluded_prompts]
+                    request_groups(
+                        requests,
+                        workload["request_concurrency"],
+                        workload.get("input_tiers"),
+                    )
+                    prompts = [PromptCase(r.id, r.prompt) for r in requests]
+                    trace = replace(trace, requests=requests)
+                    for reference in (baseline, replay):
+                        if excluded_prompts:
+                            rows = read_replay_rows(
+                                layout.sla_bench_dir / reference.result.role,
+                                req.sla_bench.repetitions,
+                            )
+                            # Preserve observed group origins and queueing; only
+                            # retained completions determine the tier endpoints.
+                            reference.result.tier_completion = tier_completion_metrics(
+                                [
+                                    r
+                                    for r in rows
+                                    if r["request_id"] not in excluded_prompts
+                                ],
+                                req.sla_bench.repetitions,
+                                workload.get("input_tiers"),
+                            )
+                            reference.result.timings = {
+                                rid: t
+                                for rid, t in reference.result.timings.items()
+                                if rid not in excluded_prompts
+                            }
+                        variance = max(
+                            t["relative_range"]
+                            for t in reference.result.tier_completion.values()
+                        )
+                        reference.result.cross_rep_variance[
+                            "tier_completion_max_rel_range"
+                        ] = variance
+                        if variance > REPRO_BAR_MAX_REL_RANGE:
+                            raise EngineError(
+                                "baseline tier completion repetitions are unstable"
+                            )
+
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
                 # scored against, so the round cannot continue without it.
@@ -668,7 +746,7 @@ def run_round(
                 # The relative correctness bar needs the baseline's own
                 # outputs through the same scorer (PAR-108). An older campaign
                 # without that bar keeps its original candidate-only path.
-                if req.mode == "all" and relative_correctness:
+                if req.mode == "all" and (relative_correctness or concurrent):
                     pending.append(
                         PendingCorrectness(
                             candidate_index=BASELINE_INDEX,
@@ -692,6 +770,7 @@ def run_round(
                         cfg=req.sla_bench,
                         evidence_dir=layout.sla_bench_dir,
                         engine_name=start.spec.name,
+                        **replay_kwargs,
                     )
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and
@@ -762,7 +841,7 @@ def run_round(
                 # entry in this round can be judged.
                 raise EngineError(str(exc), error_role="scorer") from exc
             baseline_report = correctness.pop(BASELINE_INDEX, None)
-            if relative_correctness and (
+            if (relative_correctness or concurrent) and (
                 baseline_report is None or baseline_report.verdict != "pass"
             ):
                 # The baseline runs the campaign's own pinned image, so a
@@ -868,7 +947,12 @@ def _build_entries(
             continue
 
         variance = run.replay.result.cross_rep_variance or {}
-        rel_range = float(variance.get("p99_e2e_ms_rel_range") or 0.0)
+        variance_key = (
+            "tier_completion_max_rel_range"
+            if getattr(req, "scoring_rule", {}).get("name") == WEIGHTED_RULE
+            else "p99_e2e_ms_rel_range"
+        )
+        rel_range = float(variance.get(variance_key) or 0.0)
         # A mock engine sleeps on the host clock, so its spread measures the
         # machine running the harness rather than the candidate.
         if not mock_engine and rel_range > REPRO_BAR_MAX_REL_RANGE:
@@ -880,7 +964,7 @@ def _build_entries(
                     sla=run.replay.result,
                     correctness=corr,
                     reason=(
-                        f"p99_e2e_ms_rel_range {rel_range:.4f} exceeds "
+                        f"{variance_key} {rel_range:.4f} exceeds "
                         f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
                     ),
                 )
@@ -895,6 +979,14 @@ def _build_entries(
                 if rid not in baseline.excluded_prompts
             },
             candidate=run.replay.result.timings,
+            **(
+                {
+                    "baseline_tiers": baseline.result.tier_completion,
+                    "candidate_tiers": run.replay.result.tier_completion,
+                }
+                if req.scoring_rule["name"] == WEIGHTED_RULE
+                else {}
+            ),
         )
         score_report = scored.to_report()
         score_report["excluded_prompts"] = baseline.excluded_prompts
@@ -921,7 +1013,7 @@ def baseline_drift(
     candidates. This does not measure hardware drift across the candidate
     cohort. The miner reliability deduction does not affect the comparison.
     """
-    return score_candidate(
+    result = score_candidate(
         {
             key: value
             for key, value in req.scoring_rule.items()
@@ -933,7 +1025,19 @@ def baseline_drift(
             if rid not in baseline.excluded_prompts
         },
         candidate=drift.result.timings,
-    ).score
+        **(
+            {
+                "baseline_tiers": baseline.result.tier_completion,
+                "candidate_tiers": drift.result.tier_completion,
+            }
+            if req.scoring_rule["name"] == WEIGHTED_RULE
+            else {}
+        ),
+    )
+    if req.scoring_rule["name"] == WEIGHTED_RULE:
+        # Opposing tier regressions must not cancel in the reference gate.
+        return max(abs(t["speedup"]) for t in result.breakdown["tiers"].values())
+    return result.score
 
 
 def _should_pull_image(image: str) -> bool:

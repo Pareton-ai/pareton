@@ -1,7 +1,8 @@
-"""SLA benchmark (open-loop trace replay, streaming).
+"""SLA benchmark with historical arrivals and v5 bounded tier concurrency.
 
-Per engine, per repetition: fire each trace request on its own thread after
-``arrival_offset_ms`` (open-loop: arrivals never block on capacity). Streaming
+Historical replays fire each trace request on its own thread after
+``arrival_offset_ms``. Version 5 uses fixed tier groups and bounded FIFO workers,
+charging completion through valid protocol termination. Streaming
 /v1/completions yields TTFT/ITL/e2e per request. ITL percentiles are computed
 over the pooled set of inter-token gaps across all requests in a repetition
 (decision: pooled ITL). Median across repetitions -> EngineSlaMetrics.
@@ -22,9 +23,17 @@ import logging
 import statistics
 import threading
 import time
+from collections import deque
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from bench.concurrency import (
+    concurrency_observations,
+    request_groups,
+    tier_completion_metrics,
+)
 from bench.http import post_completion_stream
 from bench.lifecycle import EngineError
 from bench.schemas import (
@@ -38,6 +47,28 @@ from bench.score import PromptTiming
 from bench.validate import RequestValidationError
 
 logger = logging.getLogger(__name__)
+
+
+def _bounded_completion(base_url, *, absolute_deadline_s, **kwargs):
+    """Bound header receipt as well as streaming; timed-out runs are aborted."""
+    result = Future()
+
+    def send():
+        try:
+            result.set_result(
+                post_completion_stream(
+                    base_url, absolute_deadline_s=absolute_deadline_s, **kwargs
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - propagate transport errors
+            result.set_exception(exc)
+
+    threading.Thread(target=send, daemon=True).start()
+    try:
+        return result.result(timeout=max(0, absolute_deadline_s - time.monotonic()))
+    except FutureTimeout as exc:
+        raise EngineError("completion exceeded absolute request deadline") from exc
+
 
 REQUESTS_FILENAME = "requests.jsonl"
 WARMUP_DIRNAME = "warmup"
@@ -106,13 +137,18 @@ def aggregate_rep_metrics(
     e2e = [float(r["e2e_ms"]) for r in rows]
     pooled_itl: list[float] = []
     for r in rows:
-        pooled_itl.extend(float(x) for x in (r.get("itl_ms") or []))
+        if r.get("token_timing_available", True):
+            pooled_itl.extend(float(x) for x in (r.get("itl_ms") or []))
 
     total_tokens = sum(int(r.get("completion_tokens") or 0) for r in rows)
     good = 0
     for r in rows:
         req_itl = [float(x) for x in (r.get("itl_ms") or [])]
         n_tok = int(r.get("completion_tokens") or 0)
+        if r.get("token_timing_available") is False:
+            # V5 accepts token batches, but absent token timing is not evidence
+            # of meeting the diagnostic ITL SLA. Never fabricate token gaps.
+            continue
         # Multi-token replies must expose inter-token gaps; empty ITL would
         # otherwise vacuous-pass the ITL gate and report p99 ITL as 0.
         if require_token_timing and n_tok >= 2 and not req_itl:
@@ -177,13 +213,19 @@ def _fire(
     out: list,
     lock: threading.Lock,
     errs: list,
+    paced: bool = True,
+    group_start_s: float | None = None,
+    concurrency: int | None = None,
+    effective_concurrency: int | None = None,
 ) -> None:
     delay = req.arrival_offset_ms / 1000.0 - (time.monotonic() - t0)
-    if delay > 0:
+    if paced and delay > 0:
         time.sleep(delay)
     dispatch = time.monotonic()
+    admission = dispatch
     try:
-        res = post_completion_stream(
+        post = post_completion_stream if paced else _bounded_completion
+        res = post(
             base_url,
             prompt=_require_text_prompt(req),
             max_tokens=req.max_tokens,
@@ -192,11 +234,21 @@ def _fire(
             seed=0,
             ignore_eos=req.sampling.ignore_eos,
             timeout=timeout_s,
+            **(
+                {
+                    "absolute_deadline_s": admission + timeout_s,
+                    "require_token_timing": False,
+                }
+                if not paced
+                else {}
+            ),
         )
         if req.input_tokens is not None and res.prompt_tokens != req.input_tokens:
             raise EngineError(
                 f"request {req.id}: engine input token count {res.prompt_tokens} differs from trace {req.input_tokens}"
             )
+        if not paced and res.finish_reason not in ("stop", "length"):
+            raise EngineError(f"request {req.id}: invalid completion finish reason")
         if (
             req.sampling.ignore_eos
             or (req.input_tokens is not None and res.finish_reason == "length")
@@ -207,6 +259,7 @@ def _fire(
             )
         dispatch = res.dispatch_monotonic_s or dispatch
         completed = res.completion_monotonic_s or time.monotonic()
+        protocol_completed = res.protocol_completion_monotonic_s or time.monotonic()
         row = {
             "rep": rep,
             "engine_role": role,
@@ -221,8 +274,9 @@ def _fire(
             "text": res.text,
             "error": None,
         }
-    except EngineError as exc:
+    except (EngineError, OSError, ValueError) as exc:
         completed = time.monotonic()
+        protocol_completed = completed
         row = {
             "rep": rep,
             "engine_role": role,
@@ -237,7 +291,7 @@ def _fire(
             "text": "",
             "error": str(exc),
         }
-        if not is_warmup:
+        if not is_warmup or not paced:
             errs.append(f"{role}/rep{rep}/{req.id}: {exc}")
     row.update(
         dispatch_offset_ms=round((dispatch - t0) * 1000, 3),
@@ -251,6 +305,21 @@ def _fire(
             "ignore_eos": req.sampling.ignore_eos,
         },
     )
+    if not paced:
+        row.update(
+            admission_offset_ms=(admission - t0) * 1000,
+            protocol_completion_offset_ms=(protocol_completed - t0) * 1000,
+            slot_release_offset_ms=(time.monotonic() - t0) * 1000,
+            group_start_offset_ms=(group_start_s - t0) * 1000,
+            input_length_group=req.input_length_group,
+            requested_concurrency=concurrency,
+            effective_concurrency=effective_concurrency,
+            request_timeout_s=timeout_s,
+            token_timing_available=(
+                row["completion_tokens"] is not None
+                and len(row["itl_ms"]) >= row["completion_tokens"] - 1
+            ),
+        )
     with lock:
         out.append(row)
 
@@ -303,6 +372,72 @@ def _write_rep(rep_dir: Path, rows: list[dict], wall_s: float) -> None:
             ef.write(json.dumps(row, sort_keys=True) + "\n")
         ef.write(json.dumps({"_rep_meta": True, "wall_s": wall_s}) + "\n")
     tmp.replace(path)
+
+
+def _replay_concurrent(
+    base_url,
+    requests,
+    *,
+    role,
+    rep,
+    is_warmup,
+    timeout_s,
+    request_concurrency,
+    input_tiers=None,
+):
+    """Bounded workers, fixed tier groups, and a deadline for the entire replay."""
+    groups = request_groups(requests, request_concurrency, input_tiers)
+    t0 = time.monotonic()
+    deadline = t0 + timeout_s * len(requests)
+    rows, errs = [], []
+    lock = threading.Lock()
+    for group in groups:
+        queue = deque(group)
+        group_start = time.monotonic()
+        effective = min(request_concurrency, len(group))
+
+        def work(queue=queue, group_start=group_start, effective=effective):
+            while True:
+                with lock:
+                    if not queue or errs:
+                        return
+                    req = queue.popleft()
+                try:
+                    _fire(
+                        base_url,
+                        req,
+                        role=role,
+                        rep=rep,
+                        is_warmup=is_warmup,
+                        timeout_s=timeout_s,
+                        t0=t0,
+                        out=rows,
+                        lock=lock,
+                        errs=errs,
+                        paced=False,
+                        group_start_s=group_start,
+                        concurrency=request_concurrency,
+                        effective_concurrency=effective,
+                    )
+                except Exception as exc:  # noqa: BLE001 - report worker failures to the parent
+                    with lock:
+                        errs.append(f"{role}/{req.id}: {type(exc).__name__}: {exc}")
+
+        workers = [threading.Thread(target=work, daemon=True) for _ in range(effective)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(max(0, deadline - time.monotonic()))
+        if any(worker.is_alive() for worker in workers):
+            error = "concurrency replay exceeded absolute replay deadline"
+            with lock:
+                errs.append(error)
+            raise EngineError(error)
+        if errs:
+            break
+    if len(rows) != len(requests) and not errs:
+        errs.append("concurrency replay omitted requests")
+    return rows, time.monotonic() - t0, errs
 
 
 @dataclass(frozen=True)
@@ -446,6 +581,8 @@ def _run_engine(
     engine_evidence_dir: Path,
     timeout_s: float,
     warmup_repetitions: int,
+    request_concurrency: int | None = None,
+    input_tiers: list[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Warmup + N measured reps for one engine.
 
@@ -455,23 +592,44 @@ def _run_engine(
     # trace, so a partial warmup leaves the first measured rep cold on
     # engines with prefix caching and inflates cross-rep variance past the
     # reproducibility bar.
+    replay = _replay if request_concurrency is None else _replay_concurrent
+    replay_kwargs = (
+        {}
+        if request_concurrency is None
+        else {"request_concurrency": request_concurrency, "input_tiers": input_tiers}
+    )
     for warmup in range(warmup_repetitions):
-        warm_rows, _, _ = _replay(
+        warm_rows, warm_wall, warm_errors = replay(
             base_url,
             requests,
             role=role,
             rep=0,
             is_warmup=True,
             timeout_s=timeout_s,
+            **replay_kwargs,
         )
         dirname = WARMUP_DIRNAME if warmup == 0 else f"warmup_{warmup + 1}"
-        _write_rep(engine_evidence_dir / dirname, warm_rows, 0.0)
+        _write_rep(
+            engine_evidence_dir / dirname,
+            warm_rows,
+            warm_wall if request_concurrency is not None else 0.0,
+        )
+        if request_concurrency is not None:
+            errors = warm_errors or [r["error"] for r in warm_rows if r.get("error")]
+            if errors:
+                raise EngineError(f"concurrency warmup failed: {errors[0]}")
 
     rep_metrics: list[dict] = []
     measured: list[dict] = []
     for rep in range(1, cfg.repetitions + 1):
-        rep_rows, wall_s, errs = _replay(
-            base_url, requests, role=role, rep=rep, is_warmup=False, timeout_s=timeout_s
+        rep_rows, wall_s, errs = replay(
+            base_url,
+            requests,
+            role=role,
+            rep=rep,
+            is_warmup=False,
+            timeout_s=timeout_s,
+            **replay_kwargs,
         )
         _write_rep(engine_evidence_dir / f"rep_{rep}", rep_rows, wall_s)
         if errs:
@@ -521,6 +679,9 @@ def _per_request(rows: list[dict]) -> tuple[dict[str, PromptTiming], dict[str, s
             ttft_s=float(row["ttft_ms"]) / 1000.0,
             itl_s=[float(x) / 1000.0 for x in (row.get("itl_ms") or [])],
             completion_tokens=int(row.get("completion_tokens") or 0),
+            finish_reason=row.get("finish_reason")
+            if "requested_concurrency" in row
+            else None,
         )
         outputs[rid] = str(row.get("text") or "")
     return timings, outputs
@@ -531,6 +692,17 @@ def _output_samples(rows: list[dict]) -> dict[str, tuple[str, ...]]:
     for row in rows:
         by_id.setdefault(str(row["request_id"]), []).append(str(row.get("text") or ""))
     return {request_id: tuple(samples) for request_id, samples in by_id.items()}
+
+
+def read_replay_rows(base: Path, repetitions: int) -> list[dict]:
+    """Read measured request evidence, excluding repetition metadata."""
+    rows = (
+        json.loads(line)
+        for path in _rep_dir_paths(base, repetitions)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    )
+    return [row for row in rows if not row.get("_rep_meta")]
 
 
 def _rep_dir_paths(base: Path, repetitions: int) -> list[Path]:
@@ -546,6 +718,8 @@ def run_sla_engine(
     evidence_dir: Path,
     request_timeout_s: float = 120.0,
     engine_name: str = "vllm",
+    request_concurrency: int | None = None,
+    input_tiers: list[str] | None = None,
 ) -> EngineReplay:
     """Replay the trace against one healthy engine and persist its evidence.
 
@@ -571,6 +745,11 @@ def run_sla_engine(
         engine_evidence_dir=engine_evidence_dir,
         timeout_s=request_timeout_s,
         warmup_repetitions=2 if engine_name == "sglang" else 1,
+        **(
+            {"request_concurrency": request_concurrency, "input_tiers": input_tiers}
+            if request_concurrency is not None
+            else {}
+        ),
     )
     metrics = _engine_metrics_from_reps(rep_metrics)
 
@@ -602,10 +781,24 @@ def run_sla_engine(
     )
     _assert_metrics_close(recomputed, metrics)
 
+    tiers = None
+    if request_concurrency is not None:
+        tiers = tier_completion_metrics(measured, cfg.repetitions, input_tiers)
+        persisted = read_replay_rows(engine_evidence_dir, cfg.repetitions)
+        if tier_completion_metrics(persisted, cfg.repetitions, input_tiers) != tiers:
+            raise EngineError("tier completion evidence does not reproduce metrics")
+        cross_rep_variance["tier_completion_max_rel_range"] = max(
+            t["relative_range"] for t in tiers.values()
+        )
     timings, outputs = _per_request(measured)
     result = EngineSlaResult(
         role=role,
         metrics=metrics,
+        tier_completion=tiers,
+        request_concurrency=request_concurrency,
+        concurrency_observations=concurrency_observations(measured)
+        if request_concurrency is not None
+        else None,
         cross_rep_variance=cross_rep_variance,
         timings=timings,
         evidence=f"evidence/sla_bench/{role}",

@@ -1,0 +1,142 @@
+{
+  "baseline_repo": "https://github.com/sgl-project/sglang.git",
+  "baseline_commit": "4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+  "gpu_skus": [
+    "RTXPRO6000"
+  ],
+  "sla": {
+    "p99_ttft_ms": 2000.0,
+    "p99_itl_ms": 50.0,
+    "quality_floor_spec": "greedy token-match >= 0.99 vs baseline"
+  },
+  "scoring_config_sha256": null,
+  "scoring_config_url": null,
+  "allowed_paths": [
+    "python/sglang/**",
+    "rust/**"
+  ],
+  "denied_paths": [
+    "tests/**",
+    "benchmarks/**",
+    ".github/**",
+    "docker/**",
+    "**/Dockerfile*",
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/requirements*.txt",
+    "test/**",
+    "benchmark/**",
+    "python/sglang/test/**",
+    "python/sglang/kernels/aot/tests/**",
+    "python/sglang/kernels/aot/python/sgl_kernel/test_utils.py",
+    "python/sglang/kernels/aot/python/sgl_kernel/testing/**",
+    "rust/**/tests/**",
+    "rust/**/benches/**"
+  ],
+  "status": "draft",
+  "priority_metric": "gpu_hours",
+  "success_threshold": ">=10% GPU-hour reduction at SLA",
+  "bench": {
+    "model": {
+      "hf_repo": "Qwen/Qwen3.8-27B-FP8",
+      "hf_revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+      "dtype": "bfloat16",
+      "quantization": "fp8",
+      "max_model_len": 262144
+    },
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:43d5d33c2d3f61923d7ff96b8c69b77b8ddee28f749c10bb876ed538169fd431",
+    "gpu_count": 1,
+    "serve_args": [
+      "--tp",
+      "1",
+      "--tool-call-parser",
+      "qwen3_coder",
+      "--reasoning-parser",
+      "qwen3",
+      "--context-length",
+      "262144",
+      "--max-running-requests",
+      "32",
+      "--mm-enable-dp-encoder",
+      "--speculative-algorithm",
+      "EAGLE",
+      "--speculative-num-steps",
+      "3",
+      "--speculative-eagle-topk",
+      "1",
+      "--speculative-num-draft-tokens",
+      "4",
+      "--mem-fraction-static",
+      "0.80"
+    ],
+    "correctness": {
+      "thresholds": {
+        "min_mean_logprob": -4.0,
+        "min_token_logprob": -16.0,
+        "min_token_quantile": 0.001,
+        "min_coverage_ratio": 0.5,
+        "max_mean_logprob_drop": 2.5
+      },
+      "num_prompts": 16,
+      "serve_args": [
+        "--mem-fraction-static",
+        "0.60"
+      ]
+    }
+  },
+  "engine": {
+    "name": "sglang",
+    "install_cmd": "/usr/local/bin/pareton-install-sglang",
+    "entrypoint": [
+      "python3",
+      "-m",
+      "sglang.launch_server"
+    ],
+    "cache_dir": "/root/.cache/sglang"
+  },
+  "scoring_rule": {
+    "name": "weighted_tier_completion_speedup",
+    "failure_penalty": 0.1,
+    "tier_weights": {
+      "8k": 0.5,
+      "16k": 0.5
+    }
+  },
+  "emission_rule": {
+    "name": "linear_decay",
+    "start_weight": 0.2,
+    "floor_weight": 0.0,
+    "decay_blocks": 201600
+  },
+  "sampling_rule": {
+    "algo_version": 5,
+    "config": "default",
+    "dataset": "zai-org/LongWriter-6k",
+    "enable_thinking": false,
+    "max_tokens": 5120,
+    "n_prompts": 16,
+    "n_rows": 6000,
+    "temperature_range": [
+      0.1,
+      1.01
+    ],
+    "revision": "0db15c0624f19d63e2efe1021595af933cc5b6cc",
+    "seed_block_offset": 10,
+    "split": "train",
+    "type": "hf_rows",
+    "min_output_tokens": 3000,
+    "followup_prompt": "Write a new, original, self-contained long-form work. Use the previous response as an example of depth and detail, but choose a different topic from coding, fiction, non-fiction, science, history, astronomy, or internet culture. Surprise me. Produce the complete work, not an outline, summary, or discussion of what you would write. Aim for approximately 4,000-6,000 words.",
+    "request_concurrency": 4,
+    "request_timeout_s": 600,
+    "input_tiers": [
+      "8k",
+      "16k"
+    ],
+    "max_baseline_prompt_drops": 4
+  },
+  "patch_visibility": {
+    "mode": "private"
+  }
+}

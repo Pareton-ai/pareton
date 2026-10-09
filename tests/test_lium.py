@@ -196,6 +196,65 @@ def test_parse_ssh_target():
         _parse_ssh_target("")
 
 
+@pytest.mark.parametrize("edition", ["Server", "Workstation"])
+def test_search_recovers_old_sdk_pro6000_identity(
+    provider: LiumProvider, client: FakeClient, edition: str
+):
+    name = f"NVIDIA RTX PRO 6000 Blackwell {edition} Edition"
+    # SDK 0.0.32 preserves both names, but parses gpu_type as the last word.
+    client.executors = [
+        FakeExecutor(
+            "e-pro6000",
+            name,
+            "Edition",
+            1,
+            1.29,
+            specs={
+                "sysbox_runtime": True,
+                "gpu": {"count": 1, "details": [{"name": name}]},
+            },
+        )
+    ]
+    offers = provider.search(PodSpec(gpu_type="RTXPRO6000", max_hourly_cents=200))
+    assert [o.instance_id for o in offers] == ["e-pro6000"]
+    assert offers[0].gpu_type == "RTXPRO6000"
+    assert offers[0].hourly_price_cents == 129
+    assert offers[0].gpu_count == 1
+
+
+@pytest.mark.parametrize(
+    "name,parsed",
+    [
+        ("NVIDIA RTX 6000 Ada Generation", "RTX6000"),
+        ("NVIDIA RTX A6000", "A6000"),
+        ("NVIDIA RTX PRO 6000D Blackwell Server Edition", "Edition"),
+        ("NVIDIA RTX PRO 6000D Blackwell Workstation Edition", "Edition"),
+        ("NVIDIA RTX PRO 6000 Blackwell Server Edition extra", "Edition"),
+        ("", "Edition"),
+    ],
+)
+def test_search_pro6000_rejects_other_models(
+    provider: LiumProvider, client: FakeClient, name: str, parsed: str
+):
+    client.executors = [FakeExecutor("other", name, parsed, 1, 1.29)]
+    assert provider.search(PodSpec(gpu_type="RTXPRO6000")) == []
+
+
+@pytest.mark.parametrize("parsed", ["Edition", "RTXPRO6000"])
+def test_search_pro6000_keeps_inventory_filters(
+    provider: LiumProvider, client: FakeClient, parsed: str
+):
+    name = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+    client.executors = [
+        FakeExecutor("valid", name, parsed, 1, 1.29),
+        FakeExecutor("no-dind", name, parsed, 1, 1.29, False),
+        FakeExecutor("pricey", name, parsed, 1, 3.0),
+        FakeExecutor("no-gpus", name, parsed, 0, 1.29),
+    ]
+    offers = provider.search(PodSpec(gpu_type="RTXPRO6000", max_hourly_cents=200))
+    assert [o.instance_id for o in offers] == ["valid"]
+
+
 def test_search_filters(provider: LiumProvider, client: FakeClient):
     client.executors = [
         FakeExecutor("e1", "cheap", "H200", 1, 1.5, True),
