@@ -183,6 +183,42 @@ private patch access through the linked privacy runbook. If seed completion is
 uncertain, check the log and database/API before any retry; a new job directory
 does not prevent duplicate campaigns.
 
+### Shadow round
+
+After the preflight exits `0`, run one full round with its qualified rule. The
+round samples the workload from that rule and builds its request with the
+worker's builder, using the baseline image as the only candidate. It then runs
+the production harness, including baseline, drift baseline, candidate, scorer,
+SLA replays and scoring. It passes when the harness exits `0`, the report's
+verdict is `pass`, and the unchanged candidate is `scored`, not disqualified.
+
+```bash
+source /workspace/preflight-env.sh
+export SHADOW_DIR="$PREFLIGHT_DIR/shadow" SHADOW_LOG="$PREFLIGHT_DIR/shadow.log"
+nohup bash -c '
+  python -u -m ops.shadow_round \
+    --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
+    --qualified-rule "$PREFLIGHT_DIR/run/qualification/sampling_rule.json" \
+    --output-dir "$SHADOW_DIR"
+  code=$?
+  case $code in
+    0) meaning="shadow round passed" ;;
+    1) meaning="the round ran and failed; see failures in the summary" ;;
+    *) meaning="the round could not complete; see error in the summary" ;;
+  esac
+  echo "Shadow exit code: $code ($meaning)"
+  echo "Summary JSON: $SHADOW_DIR/summary.json"
+  echo "Bench report: $SHADOW_DIR/round/bench_report.json"
+' > "$SHADOW_LOG" 2>&1 < /dev/null &
+echo "Shadow PID: $!"
+echo "Shadow log: $SHADOW_LOG"
+```
+
+Review the result with
+`jq '{verdict, baseline_drift, entries, error}' "$SHADOW_DIR/round/bench_report.json"`.
+Check the baseline exclusions and tier timings as well. Keep the directory with
+the preflight evidence.
+
 ### Correctness scorer memory
 
 Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
