@@ -183,43 +183,6 @@ private patch access through the linked privacy runbook. If seed completion is
 uncertain, check the log and database/API before any retry; a new job directory
 does not prevent duplicate campaigns.
 
-### Kimi K3 8×B300 long-form qualification
-
-The [Kimi K3 fixture](../fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json)
-reuses the PRO6000 workload contract (v5, 16 requests at C4, 8k/16k), but its
-source pool must be qualified on Kimi K3 itself. Token counts, tiers and natural
-output lengths depend on the model, so the PRO6000 pool and receipt do not
-carry over. Seeding refuses the fixture's rule until this step writes a
-qualified one.
-
-Use a dedicated host with one node of eight B300 GPUs, Docker, the NVIDIA
-Container Toolkit and room for about 1.6 TB of weights plus the draft. Don't
-use a static host that the reaper manages: the baseline runs under a
-`pareton-bench-` name. From a checkout of this branch, with `requirements.txt`
-installed (it now includes `tiktoken`) and Hugging Face access:
-
-```bash
-export KIMI_RUN_DIR=$(mktemp -d /var/tmp/pareton-kimi-k3-XXXXXX)
-nohup python -u -m ops.qualify_kimi_k3_b300 --output-dir "$KIMI_RUN_DIR/run" \
-  >> "$KIMI_RUN_DIR/qualify.log" 2>&1 < /dev/null &
-tail -f "$KIMI_RUN_DIR/qualify.log"
-```
-
-The runner refuses anything but eight B300 GPUs. It builds the round's bench
-request with the worker's own builder and starts the planned baseline: Kimi K3
-at `/model`, the DSPARK draft at `/draft`, both read-only, with the fixture's
-serving arguments and the port published on 127.0.0.1. It waits up to an hour
-for the baseline to load (`--health-timeout`). It then runs
-`bench.qualify_longform` with pool 32, two repetitions (temperatures 0.1 and
-1.01), concurrency 4 and a 600 s timeout, and removes the container. Exit 0
-prints the path of `run/qualification/sampling_rule.json`. Check
-`run/qualification/summary.json` for 16 rows in each tier, and keep
-`qualification.jsonl` with the run.
-
-Pass that rule to `ops/seed-sglang-kimi-k3-b300.sh` only after the
-[temperature check](https://github.com/Pareton-ai/pareton/pull/194) and a full
-shadow round with the qualified rule have passed.
-
 ### Correctness scorer memory
 
 Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
@@ -241,31 +204,70 @@ uses `--mem-fraction-static 0.4` and the campaign's TP and GPU count, and requir
 completed baseline and candidate correctness reports. To restore the baseline
 memory setting, remove the correctness memory override and update the manifest.
 
-### Temperature-extremes logprob check
+### Campaign preflight
 
-Run this on the campaign's GPU host, with the exact fixture, before opening a new
-campaign. The trusted baseline generates one sampled campaign prompt ten times at
-each end of the sampling rule's `temperature_range` (0.1 and 1.01 in the v5
-LongWriter rule), with natural EOS and seeds 0 to 9. The campaign's scorer then
-grades every output separately against the campaign's absolute bars: mean
-logprob, the token logprob at `min_token_quantile` (production applies
-`min_token_logprob` there), and coverage. `results.json` also records each
-output's raw minimum token logprob and whether it is below `min_token_logprob`.
+Run `ops/campaign_preflight.py` once on the campaign's GPU host, with the final
+fixture, before seeding a new long-form campaign. Seeding needs the qualified
+rule it writes, and the campaign may open only if it exits `0`. It is not
+specific to one campaign: give it any SGLang v4/v5 fixture.
+
+It starts the trusted baseline once, exactly as a round would. The request comes
+from the worker's builder and the start from the harness's plan, with `/model`
+and any `/draft` mounted read-only. On that one start it runs:
+
+1. **Qualification.** `bench.qualify_longform` runs with pool `2 × n_prompts`,
+   two repetitions (both ends of `temperature_range`) and concurrency 4. It writes
+   `qualification/sampling_rule.json`, which the seed helper takes.
+   `--qualified-rule PATH` reuses a rule qualified earlier for the same pins,
+   for example after a later stage failed.
+2. **Highest-tier prompt.** The qualified rule samples a fixed-seed trace, and one
+   request from its highest input tier (16k for LongWriter) is used for every
+   later stage. The engine's prompt-token count must equal the trace's.
+3. **Temperature extremes.** That prompt is generated 10 times at each end of
+   `temperature_range` (0.1 and 1.01), seeds 0 to 9, with natural EOS. Requests
+   run in waves of the rule's `request_concurrency`.
+4. **Greedy repeatability.** One greedy reference runs alone, then a full
+   concurrent wave of the same greedy request. Each output must match the
+   reference's tokens position by position at the SLA quality floor (0.99).
+5. **SLA.** Every streamed request above counts toward p99 TTFT and p99
+   inter-chunk latency, checked against the campaign's `sla` (2000 ms and
+   50 ms). With speculative decoding a chunk can carry several tokens, so
+   `summary.json` also records p99 time per output token and whether per-token
+   timing was available. Rounds report the SLA as goodput but don't gate on it.
+   This check shows whether the baseline itself meets the published numbers.
+6. **Logprobs.** The campaign's own scorer grades each temperature-extreme output
+   separately against the absolute bars: mean logprob, the token logprob at
+   `min_token_quantile` (where production applies `min_token_logprob`), and
+   coverage. `results.json` also records each output's raw minimum token
+   logprob and whether it is below `min_token_logprob`.
 
 ```bash
-export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
-PYTHONPATH=. nohup python -u ops/temperature_logprob_check.py \
+export PREFLIGHT_DIR=$(mktemp -d /var/tmp/pareton-preflight-XXXXXX)
+nohup python -u -m ops.campaign_preflight \
   --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
-  --output-dir "$(mktemp -u /var/tmp/pareton-temperature-check-XXXXXX)" \
-  > temperature-check.log 2>&1 < /dev/null &
+  --output-dir "$PREFLIGHT_DIR/run" > "$PREFLIGHT_DIR/preflight.log" 2>&1 < /dev/null &
+tail -f "$PREFLIGHT_DIR/preflight.log"
 ```
 
-Exit `0` means all twenty outputs passed; `1` means at least one failed a bar
-(listed in `summary.json` as `failed_samples`); `2` or `3` means the check could
-not complete. A failure at 1.01 with a pass at 0.1 suggests the thresholds are
-too strict for the campaign's own sampling range: revisit them with the
-campaign owner before launch rather than narrowing the temperature range.
-`--request-index` selects another prompt from the same fixed-seed trace.
+The host needs exactly the fixture's GPUs (eight B300 for Kimi K3), Docker, the
+NVIDIA Container Toolkit, `requirements.txt` (which includes `tiktoken`) and
+Hugging Face access. Kimi K3 also needs room for about 1.6 TB of weights plus
+the draft. Don't use a static host that the reaper manages, because the
+baseline runs under a `pareton-bench-` name.
+
+Exit codes:
+
+- `0`: every check passed.
+- `1`: a check failed. `summary.json` lists each one under `failures`:
+  qualification, logprob samples, SLA or greedy match.
+- `2` or `3`: the run could not complete.
+
+A logprob failure at 1.01 with a pass at 0.1 suggests the thresholds are too
+strict for the campaign's own sampling range. Revisit them with the campaign
+owner rather than narrowing the range. `--request-index` selects another
+highest-tier prompt from the same trace. Keep the whole output directory with
+the campaign's launch evidence, then run the shadow round with the qualified
+rule before seeding.
 
 ### Deployment lifecycle
 

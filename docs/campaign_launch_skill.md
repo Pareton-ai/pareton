@@ -277,10 +277,12 @@ verify that an honest baseline passes and that the harness extracts enough
 logprobs. Record actual observations separately.
 
 For a new campaign, run the
-[temperature-extremes logprob check](../ops/README.md#temperature-extremes-logprob-check)
+[campaign preflight](../ops/README.md#campaign-preflight)
 on the campaign GPU with the final fixture, and require exit `0` before opening.
-It grades the baseline's outputs at both ends of `temperature_range` against
-these thresholds.
+It qualifies the source pool. On a highest-tier prompt it then grades the
+baseline's outputs at both ends of `temperature_range` against these thresholds,
+checks greedy repeatability against the SLA quality floor, and measures p99
+TTFT and ITL against the SLA.
 
 Build a full round request through `worker.round_job.build_round_request`, using
 the baseline engine as an unchanged candidate, or the native mutation probe after
@@ -608,7 +610,7 @@ bash ops/sglang-sample-round/run.sh \
   "$NEW_CAMPAIGN_RUN_DIR/qualification/sampling_rule.json"
 ```
 
-For the Kimi K3 8×B300 fixture, run `python -m ops.qualify_kimi_k3_b300` instead. It starts the round's own baseline with the `/draft` mount and qualifies a 32-row pool; see [the ops runbook](../ops/README.md#kimi-k3-8b300-long-form-qualification).
+For a fixture this runner doesn't cover, such as Kimi K3 with its `/draft` mount, run `python -m ops.campaign_preflight` instead. It qualifies the pool on the round's own baseline start and runs the remaining pre-launch checks; see [the ops runbook](../ops/README.md#campaign-preflight).
 
 The standalone runner is pinned to the stock Qwen fixture. A different new model,
 image, hardware topology or serving configuration needs a matching qualified
