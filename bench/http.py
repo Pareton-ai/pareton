@@ -129,7 +129,7 @@ def post_completion_stream(
     absolute_deadline_s: float | None = None,
     require_token_timing: bool = True,
 ) -> StreamResult:
-    """Streaming /v1/completions client; parses SSE and times TTFT/ITL."""
+    """Parse SSE. Disabling token timing is for chunk-timed diagnostics only."""
     url = base_url.rstrip("/") + "/v1/completions"
     body: dict[str, Any] = {
         "prompt": prompt,

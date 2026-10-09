@@ -282,3 +282,24 @@ def test_post_completion_clamps_zero_max_tokens(monkeypatch: pytest.MonkeyPatch)
     post_completion("http://example", prompt="probe", max_tokens=0, echo=True)
     assert captured["body"]["max_tokens"] == 1
     assert captured["body"]["echo"] is True
+
+
+@pytest.mark.parametrize("texts", [["abcde"], ["ab", "cde"]])
+def test_diagnostic_chunk_timing_preserves_text_and_counts(monkeypatch, texts):
+    def fake_urlopen(req, timeout=60):
+        chunks = [
+            {"choices": [{"text": text, "finish_reason": None}]} for text in texts
+        ]
+        chunks[-1]["choices"][0]["finish_reason"] = "length"
+        chunks[-1]["usage"] = {"completion_tokens": 5, "prompt_tokens": 1}
+        return _FakeResp(_sse(*chunks))
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    result = post_completion_stream(
+        "http://example", prompt="p", require_token_timing=False
+    )
+    assert result.text == "abcde"
+    assert result.completion_tokens == 5
+    assert len(result.itl_s) == len(texts) - 1
+    with pytest.raises(EngineError, match="coalesced stream"):
+        post_completion_stream("http://example", prompt="p")
