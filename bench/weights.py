@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CACHE = Path.home() / ".cache" / "pareton" / "hf"
 
 _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
-_TOKENIZER_NAMES = frozenset({"tokenizer.json", "tokenizer.model"})
+_TOKENIZER_NAMES = frozenset({"tokenizer.json", "tokenizer.model", "tiktoken.model"})
 _STAGING_ATTEMPTS = 5
 _TRANSIENT_STAGING = (
     BrokenPipeError,
@@ -117,7 +117,9 @@ def assert_complete(root: Path, *, require_tokenizer: bool = True) -> None:
     if not has_weights:
         missing.append("weights (*.safetensors|*.bin|*.pt)")
     if require_tokenizer and not has_tokenizer:
-        missing.append("tokenizer (tokenizer.json|tokenizer.model|vocab.*)")
+        missing.append(
+            "tokenizer (tokenizer.json|tokenizer.model|tiktoken.model|vocab.*)"
+        )
     if missing:
         raise WeightsError(
             f"incomplete weights snapshot under {root}: missing {', '.join(missing)}"

@@ -1,7 +1,7 @@
 ---
 name: campaign-launch
 description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with pinned emissions."
-version: 3.4.0
+version: 3.5.0
 category: ops
 metadata:
   hermes:
@@ -466,6 +466,15 @@ inputs produced identical text and token IDs. RadixArk's padding token differs
 from Qwen FP8, but the template does not use it and the sampler disables padding.
 See the [tokenizer validation record](../fixtures/campaigns/sglang_qwen38_27b/tokenizer-validation.json)
 for hashes, inputs and the scope of this CPU check.
+
+Check the model revision's file list before choosing a model. The sampler needs
+`tokenizer.json` and a Jinja chat template (`chat_template` in
+`tokenizer_config.json` or `chat_template.jinja`). Kimi K3 has neither: it ships
+`tiktoken.model`, a transformers tokenizer class and a stdlib chat encoder
+(`encoding_k3.py`). Such a model needs an entry in `TIKTOKEN_CHAT_MODELS` in
+`bench/tiktoken_chat.py` for its exact revision. The harness then rebuilds the
+tiktoken encoding and runs only the pinned stdlib encoder; the trusted engine's
+`/tokenize` check still compares every prompt's token IDs before a round.
 
 The native images and the earlier one-H200, 8192-context FP8 configuration
 passed validation on 2026-09-09
