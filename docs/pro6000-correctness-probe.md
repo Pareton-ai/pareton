@@ -283,6 +283,14 @@ the static memory target changes:
   starting point, not a measured requirement.
 - Scoring is sequential, so the smaller KV pool does not limit grading.
 
+Kimi K3's MXFP4 weights take about 200 GB per GPU, roughly 70% of a B300, so a
+fraction near 0.6 or below cannot hold them. At 0.80 only about 30 GB per GPU
+remains for MLA KV and KDA state, and the scorer inherits the 320-slot
+`--max-mamba-cache-size`. If 0.80 fails at startup, append
+`--max-mamba-cache-size 16` and `--max-running-requests 8` to the scorer
+arguments before lowering the fraction further. Scoring is sequential, so
+neither limit slows grading.
+
 Change one value at a time. If the scorer runs out of memory, try 0.76. If
 `gpu-memory.jsonl` shows ample headroom across all repetitions, try 0.84 so the
 scorer runs closer to the generation shape. The scorer keeps DSPARK because
