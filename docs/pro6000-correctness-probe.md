@@ -243,7 +243,7 @@ accepted alongside v4 for both profiles. The diagnostic still replays its own
 The round harness stages only the target model at `/model`. For this profile the
 diagnostic also stages the pinned DSPARK draft,
 `RadixArk/Kimi-K3-DSpark@3c5bac301d9cf392706189d82ed947feca6c2f0f`, through the
-same weights cache and bind-mounts it read-only at `/root/models/kimi-k3-dspark`
+same weights cache and bind-mounts it read-only at `/draft`
 on every engine start, including the scorer. Generation and scorer arguments must
 both resolve `--speculative-draft-model-path` to that path. The draft's path and
 aggregate hash are saved to `draft_model.json`. `--docker-model-volume` is
@@ -253,15 +253,13 @@ the roughly 1.6 TB base model would dominate the run.
 Pre-download both models into the bench weights cache
 (`PARETON_BENCH_HF_CACHE_DIR`, laid out as `<repo with / as -->/<revision>`) so the
 run reuses them instead of downloading again. Then follow steps 1 to 6 above with
-the Kimi K3 fixture from the campaign branch, substituting the published
-`11972e5` engine digest when the fixture still carries a placeholder:
+the Kimi K3 fixture from the campaign branch, which pins the published `11972e5`
+engine:
 
 ```bash
 git fetch origin claude/kimi-k3-campaign-1n2dqm
 PRO6000_FIELDS="$PRO6000_TASK_ROOT/campaign-fields.json"
 git show FETCH_HEAD:fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
-  | jq --arg ref "$(cat /path/to/out/engine-image.txt)" \
-      '.base_image_digest = $ref | .bench.baseline_engine_image_digest = $ref' \
   > "$PRO6000_FIELDS"
 export PARETON_BENCH_HF_CACHE_DIR=/workspace/hf-cache
 export PARETON_BENCH_HEALTH_TIMEOUT_S=3600

@@ -90,7 +90,7 @@ PROFILES = {
         "draft": {
             "hf_repo": "RadixArk/Kimi-K3-DSpark",
             "hf_revision": "3c5bac301d9cf392706189d82ed947feca6c2f0f",
-            "mount": "/root/models/kimi-k3-dspark",
+            "mount": "/draft",
         },
     },
 }
@@ -694,7 +694,10 @@ def diagnostic_hooks(
     def mount_draft(runner):
         def run(cmd, **kwargs):
             cmd = list(cmd)
-            if cmd[:2] == ["docker", "run"]:
+            # A harness that stages bench.draft_model already mounts /draft.
+            if cmd[:2] == ["docker", "run"] and not any(
+                arg.endswith(f":{draft['mount']}:ro") for arg in cmd
+            ):
                 cmd[2:2] = ["-v", f"{draft_dir}:{draft['mount']}:ro"]
             return runner(cmd, **kwargs)
 

@@ -633,7 +633,7 @@ KIMI_SERVE_ARGS = [
     "--max-running-requests", "64", "--enable-cache-report", "--enable-metrics",
     "--trust-remote-code", "--tool-call-parser", "kimi_k3", "--dcp-size", "8",
     "--max-mamba-cache-size", "320", "--speculative-algorithm", "DSPARK",
-    "--speculative-draft-model-path", "/root/models/kimi-k3-dspark",
+    "--speculative-draft-model-path", "/draft",
     "--speculative-dspark-block-size", "3", "--enable-linear-replayssm-spec",
     "--watchdog-timeout", "3600", "--reasoning-parser", "kimi_k3",
     "--cuda-graph-backend-prefill", "breakable", "--cuda-graph-max-bs-prefill", "4608",
@@ -714,6 +714,7 @@ def test_kimi_k3_draft_is_staged_and_mounted_read_only(tmp_path, monkeypatch):
 
     def enter(self):
         self.runner(["docker", "run", "-d", "image"])
+        self.runner(["docker", "run", "-v", "/staged:/draft:ro", "image"])
         raise EngineError("stop after launch command")
 
     monkeypatch.setattr(EngineContainer, "__enter__", enter)
@@ -738,10 +739,11 @@ def test_kimi_k3_draft_is_staged_and_mounted_read_only(tmp_path, monkeypatch):
             "docker",
             "run",
             "-v",
-            f"{draft}:/root/models/kimi-k3-dspark:ro",
+            f"{draft}:/draft:ro",
             "-d",
             "image",
-        ]
+        ],
+        ["docker", "run", "-v", "/staged:/draft:ro", "image"],
     ]
     with pytest.raises(ValueError, match="draft model"):
         with PROBE["diagnostic_hooks"](
