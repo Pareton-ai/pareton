@@ -1149,7 +1149,7 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
     root = Path(__file__).resolve().parents[1]
     fixture = root / "fixtures/campaigns/sglang_kimi_k3_b300"
     fields = json.loads((fixture / "campaign-fields.json").read_text())
-    engine_ref = "ghcr.io/pareton-ai/pareton-baseline@" + REAL_ENGINE
+    engine_ref = fields["base_image_digest"]
     argv = (
         subprocess.check_output(
             [
@@ -1209,6 +1209,9 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
     )
     parsed = validate_bench_request_dict(request)
     assert request["hardware"]["gpu_count"] == 8
+    assert request["draft_model"] == fields["bench"]["draft_model"]
+    assert parsed.draft_model is not None
+    assert manifest.base_image_digest == fields["base_image_digest"] == engine_ref
     for start in plan_round_starts(
         parsed.engines, correctness_serve_args=parsed.correctness.serve_args
     ):
@@ -1221,9 +1224,7 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
             args[i + 1] for i, a in enumerate(args) if a == "--mem-fraction-static"
         ]
         assert fractions[-1] == ("0.80" if start.kind == "scorer" else "0.88")
-        assert args[args.index("--speculative-draft-model-path") + 1] == (
-            "/root/models/kimi-k3-dspark"
-        )
+        assert args[args.index("--speculative-draft-model-path") + 1] == "/draft"
         context = 1048576 + (
             SGLANG_SCORER_CONTEXT_HEADROOM if start.kind == "scorer" else 0
         )
@@ -1232,3 +1233,17 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
             for i, a in enumerate(args)
             if a == "--context-length"
         )
+
+
+def test_draft_model_flags_must_be_paired(monkeypatch):
+    _patch_store(monkeypatch)
+    rc = main(
+        [
+            "--submission-fee-tao",
+            "0.1",
+            "--bench-draft-model-repo",
+            "RadixArk/Kimi-K3-DSpark",
+            "--allow-placeholders",
+        ]
+    )
+    assert rc != 0

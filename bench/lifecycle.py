@@ -530,6 +530,8 @@ class EngineContainer:
     role: str = "engine"
     gpu_count: int = 0
     weights_dir: Path | None = None
+    # Speculative-decoding draft weights, mounted read-only at /draft.
+    draft_dir: Path | None = None
     port: int | None = None
     publish_port: bool = False
     pull: bool = True
@@ -685,6 +687,8 @@ class EngineContainer:
             run_cmd.extend(["-v", f"{cache_path.resolve()}:{self.spec.cache_dir}"])
         if self.weights_dir is not None:
             run_cmd.extend(["-v", f"{self.weights_dir.resolve()}:/model:ro"])
+        if self.draft_dir is not None:
+            run_cmd.extend(["-v", f"{self.draft_dir.resolve()}:/draft:ro"])
         if self._env_file is not None:
             run_cmd.extend(["--env-file", str(self._env_file)])
         run_cmd.append(self.spec.image)

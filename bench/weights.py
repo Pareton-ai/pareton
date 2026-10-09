@@ -20,7 +20,7 @@ from typing import Any
 from huggingface_hub import snapshot_download
 
 from bench.lifecycle import HostEnvironmentError
-from bench.schemas import ModelSpec
+from bench.schemas import DraftModelSpec, ModelSpec
 from bench.validate import sha256_file
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ def assert_no_symlinks(root: Path) -> None:
             raise WeightsError(f"symlink found under staged weights: {rel}")
 
 
-def assert_complete(root: Path) -> None:
+def assert_complete(root: Path, *, require_tokenizer: bool = True) -> None:
     has_config = False
     has_weights = False
     has_tokenizer = False
@@ -116,7 +116,7 @@ def assert_complete(root: Path) -> None:
         missing.append("config.json")
     if not has_weights:
         missing.append("weights (*.safetensors|*.bin|*.pt)")
-    if not has_tokenizer:
+    if require_tokenizer and not has_tokenizer:
         missing.append("tokenizer (tokenizer.json|tokenizer.model|vocab.*)")
     if missing:
         raise WeightsError(
@@ -124,10 +124,10 @@ def assert_complete(root: Path) -> None:
         )
 
 
-def validate_staged_tree(root: Path) -> None:
+def validate_staged_tree(root: Path, *, require_tokenizer: bool = True) -> None:
     """No-symlink + completeness (identical for cache hits and post-download)."""
     assert_no_symlinks(root)
-    assert_complete(root)
+    assert_complete(root, require_tokenizer=require_tokenizer)
 
 
 def build_weights_manifest(
@@ -178,8 +178,10 @@ def _is_transient_staging_error(exc: BaseException) -> bool:
     return False
 
 
-def _finalize(root: Path, model: ModelSpec) -> StagedWeights:
-    validate_staged_tree(root)
+def _finalize(
+    root: Path, model: ModelSpec | DraftModelSpec, *, require_tokenizer: bool = True
+) -> StagedWeights:
+    validate_staged_tree(root, require_tokenizer=require_tokenizer)
     manifest, aggregate, n_files, total = build_weights_manifest(
         root, repo=model.hf_repo, revision=model.hf_revision
     )
@@ -193,7 +195,7 @@ def _finalize(root: Path, model: ModelSpec) -> StagedWeights:
 
 
 def _download_to_partial(
-    model: ModelSpec,
+    model: ModelSpec | DraftModelSpec,
     *,
     partial: Path,
     token_env: str,
@@ -229,12 +231,17 @@ def _download_to_partial(
 
 
 def stage_weights(
-    model: ModelSpec,
+    model: ModelSpec | DraftModelSpec,
     *,
     token_env: str = "HF_TOKEN",
     cache_dir: Path | None = None,
+    require_tokenizer: bool = True,
 ) -> StagedWeights:
-    """Download (or reuse) pinned HF weights; return staged path + aggregate hash."""
+    """Download (or reuse) pinned HF weights; return staged path + aggregate hash.
+
+    A speculative draft can share its target's tokenizer, so drafts are staged
+    with ``require_tokenizer=False``.
+    """
     cache_root = _cache_root(cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
 
@@ -243,7 +250,7 @@ def stage_weights(
 
     if final.is_dir():
         try:
-            return _finalize(final, model)
+            return _finalize(final, model, require_tokenizer=require_tokenizer)
         except WeightsError as exc:
             logger.warning(
                 "invalid cache at %s (%s); deleting and redownloading",
@@ -261,7 +268,7 @@ def stage_weights(
     _download_to_partial(model, partial=partial, token_env=token_env)
 
     try:
-        validate_staged_tree(partial)
+        validate_staged_tree(partial, require_tokenizer=require_tokenizer)
     except WeightsError:
         _rm_tree(partial)
         raise
@@ -277,4 +284,4 @@ def stage_weights(
             f"OSError publishing staged weights for {model.hf_repo}@{model.hf_revision}"
         ) from None
 
-    return _finalize(final, model)
+    return _finalize(final, model, require_tokenizer=require_tokenizer)

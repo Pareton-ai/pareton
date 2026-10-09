@@ -1,7 +1,7 @@
 {
   "baseline_repo": "https://github.com/sgl-project/sglang.git",
   "baseline_commit": "11972e520709a76766f91744a672e92727fdcb09",
-  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:53f6abe1774050fef2620b00afe1e86a08a2aae4e34e695c6c67c8b28c3b6cb8",
   "gpu_skus": [
     "B300"
   ],
@@ -46,7 +46,11 @@
       "quantization": null,
       "max_model_len": 1048576
     },
-    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "draft_model": {
+      "hf_repo": "RadixArk/Kimi-K3-DSpark",
+      "hf_revision": "3c5bac301d9cf392706189d82ed947feca6c2f0f"
+    },
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:53f6abe1774050fef2620b00afe1e86a08a2aae4e34e695c6c67c8b28c3b6cb8",
     "gpu_count": 8,
     "serve_args": [
       "--served-model-name",
@@ -71,7 +75,7 @@
       "--speculative-algorithm",
       "DSPARK",
       "--speculative-draft-model-path",
-      "/root/models/kimi-k3-dspark",
+      "/draft",
       "--speculative-dspark-block-size",
       "3",
       "--enable-linear-replayssm-spec",

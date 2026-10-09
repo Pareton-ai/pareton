@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# DRAFT: not ready to run. Open launch questions are listed in the PR.
+# Do not run until the PR's B300 validation and correctness checks pass.
 # Run once, after image publication, miner build verification and GPU calibration.
 # PARETON_DATABASE_URL must be configured. This creates a public open campaign.
 # Use the Pareton engine built at SGLang 11972e5 by ops/build-sglang-baseline.sh.
 # The harness mounts pinned weights at /model and adds --model-path itself; the
-# serving flags below must not repeat it. The DSPARK draft is expected at
-# /root/models/kimi-k3-dspark, which the production harness does not stage yet.
+# serving flags below must not repeat it. The pinned DSPARK draft is staged the
+# same way and mounted read-only at /draft.
 # Uses the v5 16-request 8k/16k workload at C4; engine capacity remains 64.
 # Patches remain private with no timed public reveal.
 set -euo pipefail
@@ -39,6 +39,8 @@ python -m campaign.seed \
   --bench-model-repo moonshotai/Kimi-K3 \
   --bench-model-revision f831ab66814297da540d832a5235f8e904f29d06 \
   --bench-dtype bfloat16 --bench-max-model-len 1048576 \
+  --bench-draft-model-repo RadixArk/Kimi-K3-DSpark \
+  --bench-draft-model-revision 3c5bac301d9cf392706189d82ed947feca6c2f0f \
   --bench-serve-args=--served-model-name --bench-serve-args=Kimi-K3 \
   --bench-serve-args=--tp --bench-serve-args=8 \
   --bench-serve-args=--context-length --bench-serve-args=1048576 \
@@ -51,7 +53,7 @@ python -m campaign.seed \
   --bench-serve-args=--dcp-size --bench-serve-args=8 \
   --bench-serve-args=--max-mamba-cache-size --bench-serve-args=320 \
   --bench-serve-args=--speculative-algorithm --bench-serve-args=DSPARK \
-  --bench-serve-args=--speculative-draft-model-path --bench-serve-args=/root/models/kimi-k3-dspark \
+  --bench-serve-args=--speculative-draft-model-path --bench-serve-args=/draft \
   --bench-serve-args=--speculative-dspark-block-size --bench-serve-args=3 \
   --bench-serve-args=--enable-linear-replayssm-spec \
   --bench-serve-args=--watchdog-timeout --bench-serve-args=3600 \
