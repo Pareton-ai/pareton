@@ -428,7 +428,7 @@ def require_reports(reports, count):
             raise EngineError("incomplete or failed correctness; see saved reports")
 
 
-def review_engine_logs(root):
+def review_engine_logs(root, max_model_len=262144):
     """Review saved logs without changing the run's original summary or verdict."""
     paths = sorted((root / "round/evidence/correctness/engine_logs").glob("*.log"))
     if not paths:
@@ -442,9 +442,11 @@ def review_engine_logs(root):
         r"(?:(?!\n\[\d{4}-).)*?\[end of libtorchcodec loading traceback\]",
         re.DOTALL,
     )
+    # The scorer serves the model context plus the harness's scorer headroom.
+    scorer_context = max_model_len + harness.SGLANG_SCORER_CONTEXT_HEADROOM
     context_warning = re.compile(
-        r"Warning: (?:User-specified|Target model's) context_length \(262151\) is greater than the derived "
-        r"context_length \(262144\)\. This may lead to incorrect model outputs or CUDA errors\. "
+        rf"Warning: (?:User-specified|Target model's) context_length \({scorer_context}\) is greater than the derived "
+        r"context_length \(\d+\)\. This may lead to incorrect model outputs or CUDA errors\. "
         r"Note that the derived context_length may differ from max_position_embeddings in the model's config\."
     )
     fatal = re.compile(
@@ -1146,7 +1148,7 @@ def main(argv=None):
                 or lifecycle["scorer_repetitions"] != args.scorer_repetitions
             ):
                 raise EngineError(f"round/scorer incomplete (harness exit {code})")
-        review_engine_logs(root)
+        review_engine_logs(root, fields["bench"]["model"]["max_model_len"])
         state["status"] = "diagnostic_completed"
         # Even a successful 16k-band test is not an exact-boundary capacity proof.
         state["exact_21504_boundary_exercised"] = args.case == "capacity" and all(

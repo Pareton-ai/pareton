@@ -605,6 +605,23 @@ OSError: libavutil.so.60 missing
     assert not (tmp_path / "summary.json").exists()
 
 
+@pytest.mark.parametrize("context_label", ["User-specified", "Target model's"])
+def test_log_review_accepts_kimi_scorer_headroom_warning(tmp_path, context_label):
+    logs = tmp_path / "round/evidence/correctness/engine_logs"
+    logs.mkdir(parents=True)
+    (logs / "scorer.log").write_text(
+        f"[2026-10-10 01:00:00 TP0] Warning: {context_label} context_length (1048583) is greater than the derived context_length (1048576). This may lead to incorrect model outputs or CUDA errors. Note that the derived context_length may differ from max_position_embeddings in the model's config.\n"
+    )
+    result = PROBE["review_engine_logs"](tmp_path, 1048576)
+    assert result["status"] == "passed"
+    assert [w["kind"] for w in result["warnings"]] == [
+        "scorer_context_headroom_warning"
+    ]
+    # Any other requested context is not the scorer's headroom.
+    with pytest.raises(EngineError, match="scorer.log:1"):
+        PROBE["review_engine_logs"](tmp_path)
+
+
 def test_log_review_does_not_ignore_incomplete_optional_traceback(tmp_path):
     logs = tmp_path / "round/evidence/correctness/engine_logs"
     logs.mkdir(parents=True)

@@ -213,7 +213,8 @@ only this CLI opts out via hooks scoped to its round. Speculation stays enabled.
 ### Review previously saved engine logs
 
 The scanner records exact file names and line numbers in `engine_log_review.json`.
-It recognizes the exact 262151-versus-262144 scorer headroom warning and complete,
+It recognizes SGLang's scorer headroom warning for exactly the model context
+plus seven (262151 for the PRO6000 fixture, 1048583 for Kimi K3) and complete,
 explicitly ignored TorchCodec loading tracebacks from multimodal processors
 (including `mimo_audio` and `mimo_v2`). Other tracebacks,
 OOMs, and CUDA errors still fail review. These exemptions are specific to this
@@ -228,6 +229,8 @@ nohup python -u -c 'import runpy,sys; from pathlib import Path; runpy.run_path("
   > /path/to/results/log-review.log 2>&1 < /dev/null &
 ```
 
+For a Kimi K3 run, pass the model context too:
+`...["review_engine_logs"](Path(sys.argv[1]), 1048576)`.
 This writes a separate log review; it preserves the original failed summary.
 A successful rescan alone is not a replacement for lifecycle, scorer, or capacity
 evidence.
