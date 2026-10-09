@@ -40,7 +40,7 @@ from bench.sampler import (
     fetch_hf_row,
     parse_sampling_rule,
 )
-from bench.schemas import TraceMeta, WorkloadTrace
+from bench.schemas import ModelSpec, TraceMeta, WorkloadTrace
 from bench.sla_bench import (
     aggregate_rep_metrics,
     capture_baseline_natural_stops,
@@ -52,6 +52,7 @@ from bench.validate import (
     validate_bench_request_dict,
     validate_workload_trace_dict,
 )
+from bench.weights import stage_weights
 from bench.workload_preflight import validate_engine_workload
 from campaign.models import SLA
 from gpu.static_host import REMOTE_LOCK, check_idle_gpu, host_lock
@@ -68,6 +69,42 @@ SCALARS = {
     "--pp-size": "pp_size",
     "--pipeline-parallel-size": "pp_size",
 }
+
+
+# Reviewed hardware/model pairs. Any v4 or v5 LongWriter fixture replays the
+# diagnostic's own 2 ms burst trace; v5's closed-loop schedule is not exercised.
+PROFILES = {
+    ("RTXPRO6000", "Qwen/Qwen3.8-27B-FP8"): {
+        "gpu_count": 1,
+        "gpu_name": "RTX PRO 6000",
+        "tp_size": 1,
+        "quantization": "fp8",
+    },
+    # MXFP4 is detected from the checkpoint, so the fixture pins no quantization.
+    # The harness stages only /model; this diagnostic stages the DSPARK draft.
+    ("B300", "moonshotai/Kimi-K3"): {
+        "gpu_count": 8,
+        "gpu_name": "B300",
+        "tp_size": 8,
+        "quantization": None,
+        "draft": {
+            "hf_repo": "RadixArk/Kimi-K3-DSpark",
+            "hf_revision": "3c5bac301d9cf392706189d82ed947feca6c2f0f",
+            "mount": "/root/models/kimi-k3-dspark",
+        },
+    },
+}
+
+
+def profile_for(fields):
+    skus = fields["gpu_skus"]
+    key = (skus[0] if len(skus) == 1 else None, fields["bench"]["model"]["hf_repo"])
+    if key not in PROFILES:
+        raise ValueError(
+            "requires a fixture matching a reviewed profile: "
+            + ", ".join(f"{sku} {repo}" for sku, repo in PROFILES)
+        )
+    return PROFILES[key]
 
 
 def save(path, data):
@@ -114,16 +151,18 @@ def prepare_fields(fields, generation_fraction, scorer_fraction):
     fields = copy.deepcopy(fields)
     bench = fields["bench"]
     model = bench["model"]
+    profile = profile_for(fields)
     if (
         fields["engine"]["name"] != "sglang"
-        or fields["gpu_skus"] != ["RTXPRO6000"]
-        or bench["gpu_count"] != 1
-        or model["hf_repo"] != "Qwen/Qwen3.8-27B-FP8"
-        or model["quantization"] != "fp8"
+        or bench["gpu_count"] != profile["gpu_count"]
+        or model.get("quantization") != profile["quantization"]
         or fields["sampling_rule"]["dataset"] != "zai-org/LongWriter-6k"
-        or fields["sampling_rule"]["algo_version"] != 4
+        or fields["sampling_rule"]["algo_version"] not in (4, 5)
     ):
-        raise ValueError("requires a TP1 RTXPRO6000 SGLang FP8 LongWriter v4 fixture")
+        raise ValueError(
+            f"requires an SGLang LongWriter v4/v5 fixture with {profile['gpu_count']} "
+            f"GPU(s) and quantization {profile['quantization']}"
+        )
     for value in (generation_fraction, scorer_fraction):
         if not math.isfinite(value) or not 0 < value < 1:
             raise ValueError("memory fractions must be finite and between 0 and 1")
@@ -139,10 +178,21 @@ def prepare_fields(fields, generation_fraction, scorer_fraction):
     for args in (bench["serve_args"], bench["serve_args"] + corr["serve_args"]):
         effective = scalar_args(args)
         if (
-            int(effective.get("tp_size", 1)) != 1
+            int(effective.get("tp_size", 1)) != profile["tp_size"]
             or int(effective.get("pp_size", 1)) != 1
         ):
-            raise ValueError("diagnostic requires TP1/PP1")
+            raise ValueError(f"diagnostic requires TP{profile['tp_size']}/PP1")
+    draft = profile.get("draft")
+    if draft is not None:
+        for args in (bench["serve_args"], bench["serve_args"] + corr["serve_args"]):
+            paths = [
+                args[i + 1]
+                for i, arg in enumerate(args[:-1])
+                if arg
+                in ("--speculative-draft-model-path", "--speculative-draft-model")
+            ]
+            if not paths or paths[-1] != draft["mount"]:
+                raise ValueError(f"draft model path must be {draft['mount']}")
     # Context overrides would invalidate admission and the scorer's +7 contract.
     for args in (bench["serve_args"], corr["serve_args"]):
         context = scalar_args(args).get("context_length")
@@ -332,7 +382,7 @@ def prepare_request(fields, trace_path):
     image = fields["bench"]["baseline_engine_image_digest"]
     request = build_round_request(
         {
-            "gpu_sku": "RTXPRO6000",
+            "gpu_sku": fields["gpu_skus"][0],
             "sampled_trace_sha256": sha256_file(trace_path),
             "scoring_rule": fields["scoring_rule"],
         },
@@ -616,6 +666,39 @@ def diagnostic_hooks(
     preflight_trace.meta = TraceMeta("diagnostic", sampling={"context": context})
     count = len(trace["requests"])
     volume = DockerModelVolume(root) if docker_model_volume else None
+    gpu_count = fields["bench"]["gpu_count"]
+    draft = profile_for(fields).get("draft")
+    if draft is not None and docker_model_volume:
+        raise ValueError("--docker-model-volume does not stage the draft model")
+    draft_dir = None
+    if draft is not None:
+        staged = stage_weights(
+            ModelSpec(
+                hf_repo=draft["hf_repo"],
+                hf_revision=draft["hf_revision"],
+                dtype=fields["bench"]["model"]["dtype"],
+                quantization=None,
+                max_model_len=fields["bench"]["model"]["max_model_len"],
+            )
+        )
+        draft_dir = staged.path.resolve()
+        save(
+            root / "draft_model.json",
+            {
+                **draft,
+                "path": str(draft_dir),
+                "weights_sha256": staged.weights_sha256,
+            },
+        )
+
+    def mount_draft(runner):
+        def run(cmd, **kwargs):
+            cmd = list(cmd)
+            if cmd[:2] == ["docker", "run"]:
+                cmd[2:2] = ["-v", f"{draft_dir}:{draft['mount']}:ro"]
+            return runner(cmd, **kwargs)
+
+        return run
 
     class RecordedContainer(EngineContainer):
         def __enter__(self):
@@ -634,11 +717,13 @@ def diagnostic_hooks(
                     "docker_model_volume": volume.name if volume else None,
                 },
             )
-            if self.gpu_count != 1:
+            if self.gpu_count != gpu_count:
                 raise EngineError("harness changed the requested GPU count")
             if volume is not None:
                 volume.prepare(self.weights_dir, self.spec.image)
                 self.runner = volume.wrap_runner(self.runner)
+            if draft_dir is not None:
+                self.runner = mount_draft(self.runner)
             handle = super().__enter__()
             try:
                 info = get_json(handle.base_url, "/server_info", timeout=timeout)
@@ -863,7 +948,7 @@ def memory_samples(root):
             raise EngineError("GPU memory sampling failed; see telemetry.json")
 
 
-def verify_hardware(root):
+def verify_hardware(root, profile):
     result = subprocess.run(
         [
             "nvidia-smi",
@@ -877,8 +962,13 @@ def verify_hardware(root):
     )
     save(root / "hardware.json", {"query": result.stdout})
     rows = result.stdout.strip().splitlines()
-    if len(rows) != 1 or "RTX PRO 6000" not in rows[0]:
-        raise ValueError("requires a dedicated host exposing exactly one RTX PRO 6000")
+    if len(rows) != profile["gpu_count"] or any(
+        profile["gpu_name"] not in row for row in rows
+    ):
+        raise ValueError(
+            f"requires a dedicated host exposing exactly {profile['gpu_count']} "
+            f"{profile['gpu_name']} GPU(s)"
+        )
 
 
 def main(argv=None):
@@ -1020,7 +1110,7 @@ def main(argv=None):
         lock = Path(REMOTE_LOCK)
         lock.parent.mkdir(parents=True, exist_ok=True)
         with host_lock(lock):
-            verify_hardware(root)
+            verify_hardware(root, profile_for(fields))
             check_idle_gpu()
             with (
                 memory_samples(root),

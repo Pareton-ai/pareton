@@ -6,7 +6,8 @@ harness, scoring rule, launcher, or pinned memory fraction. Neither the campaign
 launcher nor the concurrency/scoring work depends on merging this diagnostic.
 This is partial support for PAR-144, not completion of its GPU acceptance criteria.
 
-The tool targets Qwen3.8-27B-FP8 on one dedicated RTX PRO 6000 with TP1/PP1. It
+The tool targets Qwen3.8-27B-FP8 on one dedicated RTX PRO 6000 with TP1/PP1, or
+[Kimi K3 on eight B300 GPUs](#kimi-k3-on-eight-b300-gpus) with TP8/PP1. It
 runs the actual round harness with the pinned baseline image as its own candidate:
 
 1. Generate a CPU LongWriter preview with the pinned tokenizer/template, retaining
@@ -230,3 +231,63 @@ nohup python -u -c 'import runpy,sys; from pathlib import Path; runpy.run_path("
 This writes a separate log review; it preserves the original failed summary.
 A successful rescan alone is not a replacement for lifecycle, scorer, or capacity
 evidence.
+
+## Kimi K3 on eight B300 GPUs
+
+The same tool accepts a second reviewed profile: `moonshotai/Kimi-K3` on one host
+exposing exactly eight B300 GPUs, TP8/PP1, with MXFP4 detected from the
+checkpoint (the fixture pins no `quantization`). LongWriter v5 fixtures are
+accepted alongside v4 for both profiles. The diagnostic still replays its own
+2 ms burst trace; it does not exercise v5's closed-loop C4 schedule.
+
+The round harness stages only the target model at `/model`. For this profile the
+diagnostic also stages the pinned DSPARK draft,
+`RadixArk/Kimi-K3-DSpark@3c5bac301d9cf392706189d82ed947feca6c2f0f`, through the
+same weights cache and bind-mounts it read-only at `/root/models/kimi-k3-dspark`
+on every engine start, including the scorer. Generation and scorer arguments must
+both resolve `--speculative-draft-model-path` to that path. The draft's path and
+aggregate hash are saved to `draft_model.json`. `--docker-model-volume` is
+rejected for this profile: it does not stage the draft, and copying and hashing
+the roughly 1.6 TB base model would dominate the run.
+
+Pre-download both models into the bench weights cache
+(`PARETON_BENCH_HF_CACHE_DIR`, laid out as `<repo with / as -->/<revision>`) so the
+run reuses them instead of downloading again. Then follow steps 1 to 6 above with
+the Kimi K3 fixture from the campaign branch, substituting the published
+`11972e5` engine digest when the fixture still carries a placeholder:
+
+```bash
+git fetch origin claude/kimi-k3-campaign-1n2dqm
+PRO6000_FIELDS="$PRO6000_TASK_ROOT/campaign-fields.json"
+git show FETCH_HEAD:fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
+  | jq --arg ref "$(cat /path/to/out/engine-image.txt)" \
+      '.base_image_digest = $ref | .bench.baseline_engine_image_digest = $ref' \
+  > "$PRO6000_FIELDS"
+export PARETON_BENCH_HF_CACHE_DIR=/workspace/hf-cache
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+PRO6000_GENERATION_FRACTION=0.88
+PRO6000_SCORER_FRACTION=0.80
+```
+
+### Suggested starting scorer arguments
+
+Start with `bench.correctness.serve_args: ["--mem-fraction-static", "0.80"]`. The
+scorer inherits every generation argument and appends these, so it keeps TP8,
+DCP8, DSPARK, the 320-slot mamba cache and the breakable prefill CUDA graphs. Only
+the static memory target changes:
+
+- Generation reserves 88% of each GPU for weights, KV and KDA state. The scorer
+  also materializes full-vocabulary float32 logits for each teacher-forced prefill
+  chunk, gathered on every TP rank, so it needs more free memory outside the
+  static pool than generation does.
+- Lowering the fraction to 0.80 leaves about 23 GB more per 288 GB B300,
+  comparable to the 19 GB the PRO 6000 profile freed with 0.80 to 0.60. This is a
+  starting point, not a measured requirement.
+- Scoring is sequential, so the smaller KV pool does not limit grading.
+
+Change one value at a time. If the scorer runs out of memory, try 0.76. If
+`gpu-memory.jsonl` shows ample headroom across all repetitions, try 0.84 so the
+scorer runs closer to the generation shape. The scorer keeps DSPARK because
+appended arguments cannot remove the speculative flags. Input logprobs come from
+the target model's prefill; whether DSPARK at this pin returns them correctly is
+one of the things this run checks.

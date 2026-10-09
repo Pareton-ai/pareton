@@ -626,3 +626,147 @@ def test_log_review_rejects_runtime_error_inside_optional_block(tmp_path, messag
     )
     with pytest.raises(EngineError):
         PROBE["review_engine_logs"](tmp_path)
+
+
+KIMI_SERVE_ARGS = [
+    "--served-model-name", "Kimi-K3", "--tp", "8", "--mem-fraction-static", "0.88",
+    "--max-running-requests", "64", "--enable-cache-report", "--enable-metrics",
+    "--trust-remote-code", "--tool-call-parser", "kimi_k3", "--dcp-size", "8",
+    "--max-mamba-cache-size", "320", "--speculative-algorithm", "DSPARK",
+    "--speculative-draft-model-path", "/root/models/kimi-k3-dspark",
+    "--speculative-dspark-block-size", "3", "--enable-linear-replayssm-spec",
+    "--watchdog-timeout", "3600", "--reasoning-parser", "kimi_k3",
+    "--cuda-graph-backend-prefill", "breakable", "--cuda-graph-max-bs-prefill", "4608",
+]  # fmt: skip
+
+
+def kimi_fields():
+    value = fields()
+    value["gpu_skus"] = ["B300"]
+    value["bench"]["gpu_count"] = 8
+    value["bench"]["model"].update(
+        hf_repo="moonshotai/Kimi-K3",
+        hf_revision="f831ab66814297da540d832a5235f8e904f29d06",
+        quantization=None,
+        max_model_len=1048576,
+    )
+    value["bench"]["serve_args"] = list(KIMI_SERVE_ARGS)
+    value["bench"]["correctness"]["serve_args"] = ["--mem-fraction-static", "0.80"]
+    return value
+
+
+def test_kimi_k3_profile_keeps_tp8_and_dspark_draft_mount(tmp_path):
+    f = PROBE["prepare_fields"](kimi_fields(), 0.88, 0.80)
+    scorer = PROBE["scalar_args"](
+        f["bench"]["serve_args"] + f["bench"]["correctness"]["serve_args"]
+    )
+    assert scorer["tp_size"] == "8"
+    assert scorer["mem_fraction_static"] == "0.8"
+    trace = PROBE["longest_trace"](
+        source_trace(f), f, count=1, prefixes="distinct", capacity=True
+    )
+    path = tmp_path / "trace.json"
+    path.write_text(json.dumps(trace))
+    req = PROBE["prepare_request"](f, path)
+    assert req["hardware"]["gpu_count"] == 8
+    assert "--speculative-draft-model-path" in req["engines"]["baseline"]["serve_args"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda f: f["bench"]["serve_args"].extend(["--tp", "4"]),
+        lambda f: f["bench"]["serve_args"].extend(
+            ["--speculative-draft-model-path", "RadixArk/Kimi-K3-DSpark"]
+        ),
+        lambda f: f["bench"].update(gpu_count=4),
+        lambda f: f.update(gpu_skus=["H200"]),
+    ],
+)
+def test_kimi_k3_profile_rejects_other_shapes(change):
+    f = kimi_fields()
+    change(f)
+    with pytest.raises(ValueError, match="TP8|draft model path|GPU|reviewed profile"):
+        PROBE["prepare_fields"](f, 0.88, 0.80)
+
+
+def test_kimi_k3_draft_is_staged_and_mounted_read_only(tmp_path, monkeypatch):
+    from bench.lifecycle import BenchNetwork, EngineContainer
+    from bench.schemas import EngineSpec
+
+    f = PROBE["prepare_fields"](kimi_fields(), 0.88, 0.80)
+    trace = PROBE["longest_trace"](
+        source_trace(f), f, count=1, prefixes="distinct", capacity=True
+    )
+    draft = tmp_path / "draft"
+    draft.mkdir()
+    globals_ = PROBE["diagnostic_hooks"].__wrapped__.__globals__
+    staged = []
+    monkeypatch.setitem(
+        globals_,
+        "stage_weights",
+        lambda model: (
+            staged.append(model)
+            or SimpleNamespace(path=draft, weights_sha256="sha256:" + "b" * 64)
+        ),
+    )
+    commands = []
+
+    def enter(self):
+        self.runner(["docker", "run", "-d", "image"])
+        raise EngineError("stop after launch command")
+
+    monkeypatch.setattr(EngineContainer, "__enter__", enter)
+    monkeypatch.setattr(EngineContainer, "__exit__", lambda self, *args: None)
+    with PROBE["diagnostic_hooks"](
+        tmp_path, f, trace, capacity=True, timeout=1800, scorer_repetitions=3
+    ):
+        container = harness.EngineContainer(
+            spec=EngineSpec("image", [], {}, "/cache", "sglang"),
+            network=BenchNetwork(),
+            role="baseline",
+            gpu_count=8,
+            runner=lambda cmd, **kw: commands.append(cmd),
+        )
+        with pytest.raises(EngineError, match="stop after launch"):
+            container.__enter__()
+    assert [(m.hf_repo, m.hf_revision) for m in staged] == [
+        ("RadixArk/Kimi-K3-DSpark", "3c5bac301d9cf392706189d82ed947feca6c2f0f")
+    ]
+    assert commands == [
+        [
+            "docker",
+            "run",
+            "-v",
+            f"{draft}:/root/models/kimi-k3-dspark:ro",
+            "-d",
+            "image",
+        ]
+    ]
+    with pytest.raises(ValueError, match="draft model"):
+        with PROBE["diagnostic_hooks"](
+            tmp_path / "volume",
+            f,
+            trace,
+            capacity=True,
+            timeout=1800,
+            scorer_repetitions=3,
+            docker_model_volume=True,
+        ):
+            pass
+
+
+def test_hardware_check_matches_profile_gpu_count(tmp_path, monkeypatch):
+    globals_ = PROBE["verify_hardware"].__globals__
+    rows = "\n".join(
+        f"{i}, GPU-{i}, NVIDIA B300 SXM6 AC, 275040, 580" for i in range(8)
+    )
+    monkeypatch.setattr(
+        globals_["subprocess"], "run", lambda *a, **kw: SimpleNamespace(stdout=rows)
+    )
+    profile = PROBE["PROFILES"][("B300", "moonshotai/Kimi-K3")]
+    PROBE["verify_hardware"](tmp_path, profile)
+    with pytest.raises(ValueError, match="exactly 1 RTX PRO 6000"):
+        PROBE["verify_hardware"](
+            tmp_path, PROBE["PROFILES"][("RTXPRO6000", "Qwen/Qwen3.8-27B-FP8")]
+        )
