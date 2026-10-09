@@ -572,6 +572,10 @@ def main(argv=None):
             if state.get(key) is not None:
                 state[key] = str(state[key])
         save(root / "summary.json", state)
+        print(
+            f"Preflight status: {state['status']}; summary: {root / 'summary.json'}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

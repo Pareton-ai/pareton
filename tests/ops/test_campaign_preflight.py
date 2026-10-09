@@ -145,8 +145,12 @@ def run(tmp_path, *extra, name="out"):
     return code, json.loads((out / "summary.json").read_text())
 
 
-def test_all_checks_pass_on_one_baseline_start(tmp_path, harness):
+def test_all_checks_pass_on_one_baseline_start(tmp_path, harness, capsys):
     code, summary = run(tmp_path)
+    last = capsys.readouterr().out.strip().splitlines()[-1]
+    assert last == (
+        f"Preflight status: passed; summary: {(tmp_path / 'out/summary.json').resolve()}"
+    )
     assert code == 0, summary
     assert summary["status"] == "passed"
     assert harness.staged == [

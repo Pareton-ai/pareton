@@ -243,10 +243,22 @@ and any `/draft` mounted read-only. On that one start it runs:
 
 ```bash
 export PREFLIGHT_DIR=$(mktemp -d /var/tmp/pareton-preflight-XXXXXX)
-nohup python -u -m ops.campaign_preflight \
-  --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
-  --output-dir "$PREFLIGHT_DIR/run" > "$PREFLIGHT_DIR/preflight.log" 2>&1 < /dev/null &
-tail -f "$PREFLIGHT_DIR/preflight.log"
+export PREFLIGHT_LOG="$PREFLIGHT_DIR/preflight.log"
+nohup bash -c '
+  python -u -m ops.campaign_preflight \
+    --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
+    --output-dir "$PREFLIGHT_DIR/run"
+  code=$?
+  case $code in
+    0) meaning="every check passed" ;;
+    1) meaning="a check failed; see failures in the summary" ;;
+    *) meaning="the run could not complete; see error in the summary" ;;
+  esac
+  echo "Preflight exit code: $code ($meaning)"
+  echo "Summary JSON: $PREFLIGHT_DIR/run/summary.json"
+' > "$PREFLIGHT_LOG" 2>&1 < /dev/null &
+echo "Preflight PID: $!"
+echo "Preflight log: $PREFLIGHT_LOG"
 ```
 
 The host needs exactly the fixture's GPUs (eight B300 for Kimi K3), Docker, the
