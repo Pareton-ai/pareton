@@ -276,6 +276,12 @@ Also ask for the scorer's `bench.correctness.serve_args`, such as a lower
 verify that an honest baseline passes and that the harness extracts enough
 logprobs. Record actual observations separately.
 
+For a new campaign, run the
+[temperature-extremes logprob check](../ops/README.md#temperature-extremes-logprob-check)
+on the campaign GPU with the final fixture, and require exit `0` before opening.
+It grades the baseline's outputs at both ends of `temperature_range` against
+these thresholds.
+
 Build a full round request through `worker.round_job.build_round_request`, using
 the baseline engine as an unchanged candidate, or the native mutation probe after
 its dedicated GPU checks pass. This ensures the dry run carries
