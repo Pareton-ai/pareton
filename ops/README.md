@@ -183,6 +183,43 @@ private patch access through the linked privacy runbook. If seed completion is
 uncertain, check the log and database/API before any retry; a new job directory
 does not prevent duplicate campaigns.
 
+### Kimi K3 8×B300 long-form qualification
+
+The [Kimi K3 fixture](../fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json)
+reuses the PRO6000 workload contract (v5, 16 requests at C4, 8k/16k), but its
+source pool must be qualified on Kimi K3 itself. Token counts, tiers and natural
+output lengths depend on the model, so the PRO6000 pool and receipt do not
+carry over. Seeding refuses the fixture's rule until this step writes a
+qualified one.
+
+Use a dedicated host with one node of eight B300 GPUs, Docker, the NVIDIA
+Container Toolkit and room for about 1.6 TB of weights plus the draft. Don't
+use a static host that the reaper manages: the baseline runs under a
+`pareton-bench-` name. From a checkout of this branch, with `requirements.txt`
+installed (it now includes `tiktoken`) and Hugging Face access:
+
+```bash
+export KIMI_RUN_DIR=$(mktemp -d /var/tmp/pareton-kimi-k3-XXXXXX)
+nohup python -u -m ops.qualify_kimi_k3_b300 --output-dir "$KIMI_RUN_DIR/run" \
+  >> "$KIMI_RUN_DIR/qualify.log" 2>&1 < /dev/null &
+tail -f "$KIMI_RUN_DIR/qualify.log"
+```
+
+The runner refuses anything but eight B300 GPUs. It builds the round's bench
+request with the worker's own builder and starts the planned baseline: Kimi K3
+at `/model`, the DSPARK draft at `/draft`, both read-only, with the fixture's
+serving arguments and the port published on 127.0.0.1. It waits up to an hour
+for the baseline to load (`--health-timeout`). It then runs
+`bench.qualify_longform` with pool 32, two repetitions (temperatures 0.1 and
+1.01), concurrency 4 and a 600 s timeout, and removes the container. Exit 0
+prints the path of `run/qualification/sampling_rule.json`. Check
+`run/qualification/summary.json` for 16 rows in each tier, and keep
+`qualification.jsonl` with the run.
+
+Pass that rule to `ops/seed-sglang-kimi-k3-b300.sh` only after the
+[temperature check](https://github.com/Pareton-ai/pareton/pull/194) and a full
+shadow round with the qualified rule have passed.
+
 ### Correctness scorer memory
 
 Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
