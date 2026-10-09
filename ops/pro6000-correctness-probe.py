@@ -681,7 +681,10 @@ def diagnostic_hooks(
                 dtype=fields["bench"]["model"]["dtype"],
                 quantization=None,
                 max_model_len=fields["bench"]["model"]["max_model_len"],
-            )
+            ),
+            # The draft shares the target's tokenizer, as bench.main stages it.
+            # The Kimi K3 profile already needs #193, whose stage_weights takes this.
+            require_tokenizer=False,
         )
         draft_dir = staged.path.resolve()
         save(

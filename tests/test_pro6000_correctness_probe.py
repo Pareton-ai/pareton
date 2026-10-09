@@ -724,8 +724,8 @@ def test_kimi_k3_draft_is_staged_and_mounted_read_only(tmp_path, monkeypatch):
     monkeypatch.setitem(
         globals_,
         "stage_weights",
-        lambda model: (
-            staged.append(model)
+        lambda model, **kwargs: (
+            staged.append((model, kwargs))
             or SimpleNamespace(path=draft, weights_sha256="sha256:" + "b" * 64)
         ),
     )
@@ -750,8 +750,12 @@ def test_kimi_k3_draft_is_staged_and_mounted_read_only(tmp_path, monkeypatch):
         )
         with pytest.raises(EngineError, match="stop after launch"):
             container.__enter__()
-    assert [(m.hf_repo, m.hf_revision) for m in staged] == [
-        ("RadixArk/Kimi-K3-DSpark", "3c5bac301d9cf392706189d82ed947feca6c2f0f")
+    assert [(m.hf_repo, m.hf_revision, kw) for m, kw in staged] == [
+        (
+            "RadixArk/Kimi-K3-DSpark",
+            "3c5bac301d9cf392706189d82ed947feca6c2f0f",
+            {"require_tokenizer": False},
+        )
     ]
     assert commands == [
         [
