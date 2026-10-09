@@ -1,0 +1,8 @@
+{
+  "name": "weighted_tier_completion_speedup",
+  "failure_penalty": 0.1,
+  "tier_weights": {
+    "8k": 0.5,
+    "16k": 0.5
+  }
+}
