@@ -1,7 +1,7 @@
 ---
 name: campaign-launch
 description: "Build, verify and launch a pinned vLLM or SGLang campaign, including an open campaign with pinned emissions."
-version: 3.3.0
+version: 3.4.0
 category: ops
 metadata:
   hermes:
@@ -258,8 +258,23 @@ maintenance change; preserve the existing image store and other daemon settings.
 ## 3. Verify on the campaign GPU
 
 Correctness thresholds are pinned policy, not automatically measured constants.
-Use explicit values, then verify that an honest baseline passes and that the
-harness extracts enough logprobs. Record actual observations separately.
+Before writing the fixture or seed helper, ask the user for each value and do not
+copy an earlier campaign's thresholds without that confirmation. Ask about these
+values, offering the previous campaign's as the suggestion:
+
+| Field | Meaning | Previous campaigns |
+| --- | --- | --- |
+| `min_mean_logprob` | Lowest mean token logprob per graded engine | `-4` |
+| `min_token_logprob` | Lowest token logprob, applied at the quantile below | `-16` |
+| `min_token_quantile` | Which low position `min_token_logprob` applies to; `0` is the plain minimum | `0.001` |
+| `min_coverage_ratio` | Share of forced positions the scorer must return | `0.5` |
+| `max_mean_logprob_drop` | Largest mean drop allowed below the baseline | `2.5` |
+| `num_prompts` | Graded outputs per engine | the workload's prompt count |
+
+Also ask for the scorer's `bench.correctness.serve_args`, such as a lower
+`--mem-fraction-static`. Record the answers in the fixture and seed helper, then
+verify that an honest baseline passes and that the harness extracts enough
+logprobs. Record actual observations separately.
 
 Build a full round request through `worker.round_job.build_round_request`, using
 the baseline engine as an unchanged candidate, or the native mutation probe after
