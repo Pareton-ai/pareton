@@ -204,6 +204,32 @@ uses `--mem-fraction-static 0.4` and the campaign's TP and GPU count, and requir
 completed baseline and candidate correctness reports. To restore the baseline
 memory setting, remove the correctness memory override and update the manifest.
 
+### Temperature-extremes logprob check
+
+Run this on the campaign's GPU host, with the exact fixture, before opening a new
+campaign. The trusted baseline generates one sampled campaign prompt ten times at
+each end of the sampling rule's `temperature_range` (0.1 and 1.01 in the v5
+LongWriter rule), with natural EOS and seeds 0 to 9. The campaign's scorer then
+grades every output separately against the campaign's absolute bars: mean
+logprob, the token logprob at `min_token_quantile` (production applies
+`min_token_logprob` there), and coverage. `results.json` also records each
+output's raw minimum token logprob and whether it is below `min_token_logprob`.
+
+```bash
+export PARETON_BENCH_HEALTH_TIMEOUT_S=3600
+PYTHONPATH=. nohup python -u ops/temperature_logprob_check.py \
+  --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
+  --output-dir "$(mktemp -u /var/tmp/pareton-temperature-check-XXXXXX)" \
+  > temperature-check.log 2>&1 < /dev/null &
+```
+
+Exit `0` means all twenty outputs passed; `1` means at least one failed a bar
+(listed in `summary.json` as `failed_samples`); `2` or `3` means the check could
+not complete. A failure at 1.01 with a pass at 0.1 suggests the thresholds are
+too strict for the campaign's own sampling range: revisit them with the
+campaign owner before launch rather than narrowing the temperature range.
+`--request-index` selects another prompt from the same fixed-seed trace.
+
 ### Deployment lifecycle
 
 `pareton-deploy.timer` polls `origin/main` every 60 seconds. There is no
