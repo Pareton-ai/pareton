@@ -183,6 +183,42 @@ private patch access through the linked privacy runbook. If seed completion is
 uncertain, check the log and database/API before any retry; a new job directory
 does not prevent duplicate campaigns.
 
+### Shadow round
+
+After the preflight exits `0`, run one full round with its qualified rule. The
+round samples the workload from that rule and builds its request with the
+worker's builder, using the baseline image as the only candidate. It then runs
+the production harness, including baseline, drift baseline, candidate, scorer,
+SLA replays and scoring. It passes when the harness exits `0`, the report's
+verdict is `pass`, and the unchanged candidate is `scored`, not disqualified.
+
+```bash
+source /workspace/preflight-env.sh
+export SHADOW_DIR="$PREFLIGHT_DIR/shadow" SHADOW_LOG="$PREFLIGHT_DIR/shadow.log"
+nohup bash -c '
+  python -u -m ops.shadow_round \
+    --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
+    --qualified-rule "$PREFLIGHT_DIR/run/qualification/sampling_rule.json" \
+    --output-dir "$SHADOW_DIR"
+  code=$?
+  case $code in
+    0) meaning="shadow round passed" ;;
+    1) meaning="the round ran and failed; see failures in the summary" ;;
+    *) meaning="the round could not complete; see error in the summary" ;;
+  esac
+  echo "Shadow exit code: $code ($meaning)"
+  echo "Summary JSON: $SHADOW_DIR/summary.json"
+  echo "Bench report: $SHADOW_DIR/round/bench_report.json"
+' > "$SHADOW_LOG" 2>&1 < /dev/null &
+echo "Shadow PID: $!"
+echo "Shadow log: $SHADOW_LOG"
+```
+
+Review the result with
+`jq '{verdict, baseline_drift, entries, error}' "$SHADOW_DIR/round/bench_report.json"`.
+Check the baseline exclusions and tier timings as well. Keep the directory with
+the preflight evidence.
+
 ### Correctness scorer memory
 
 Pin scorer overrides in the campaign's `bench.correctness.serve_args`:
@@ -203,6 +239,85 @@ campaigns need a pinned manifest update. Verify that the scorer's Docker launch
 uses `--mem-fraction-static 0.4` and the campaign's TP and GPU count, and require
 completed baseline and candidate correctness reports. To restore the baseline
 memory setting, remove the correctness memory override and update the manifest.
+
+### Campaign preflight
+
+Run `ops/campaign_preflight.py` once on the campaign's GPU host, with the final
+fixture, before seeding a new long-form campaign. Seeding needs the qualified
+rule it writes, and the campaign may open only if it exits `0`. It is not
+specific to one campaign: give it any SGLang v4/v5 fixture.
+
+**Prerequisite:** the scorer's `bench.correctness.serve_args` must already be settled. For Kimi K3, that means both the natural and capacity runs of the [#189 scorer memory probe](https://github.com/Pareton-ai/pareton/pull/189) exit `0` at the fixture's `--mem-fraction-static` (0.80), or the fixture is updated to the setting that passed. The logprob stage below grades with that scorer configuration.
+
+It starts the trusted baseline once, exactly as a round would. The request comes
+from the worker's builder and the start from the harness's plan, with `/model`
+and any `/draft` mounted read-only. On that one start it runs:
+
+1. **Qualification.** `bench.qualify_longform` runs with pool `2 × n_prompts`,
+   two repetitions (both ends of `temperature_range`) and concurrency 4. It writes
+   `qualification/sampling_rule.json`, which the seed helper takes.
+   `--qualified-rule PATH` reuses a rule qualified earlier for the same pins,
+   for example after a later stage failed.
+2. **Highest-tier prompt.** The qualified rule samples a fixed-seed trace, and one
+   request from its highest input tier (16k for LongWriter) is used for every
+   later stage. The engine's prompt-token count must equal the trace's.
+3. **Temperature extremes.** That prompt is generated 10 times at each end of
+   `temperature_range` (0.1 and 1.01), seeds 0 to 9, with natural EOS. Requests
+   run in waves of the rule's `request_concurrency`.
+4. **Greedy repeatability.** One greedy reference runs alone, then a full
+   concurrent wave of the same greedy request. Each output must match the
+   reference's tokens position by position at the SLA quality floor (0.99).
+5. **SLA.** Every streamed request above counts toward p99 TTFT and p99
+   inter-chunk latency, checked against the campaign's `sla` (2000 ms and
+   50 ms). With speculative decoding a chunk can carry several tokens, so
+   `summary.json` also records p99 time per output token and whether per-token
+   timing was available. Rounds report the SLA as goodput but don't gate on it.
+   This check shows whether the baseline itself meets the published numbers.
+6. **Logprobs.** The campaign's own scorer grades each temperature-extreme output
+   separately against the absolute bars: mean logprob, the token logprob at
+   `min_token_quantile` (where production applies `min_token_logprob`), and
+   coverage. `results.json` also records each output's raw minimum token
+   logprob and whether it is below `min_token_logprob`.
+
+```bash
+export PREFLIGHT_DIR=$(mktemp -d /var/tmp/pareton-preflight-XXXXXX)
+export PREFLIGHT_LOG="$PREFLIGHT_DIR/preflight.log"
+nohup bash -c '
+  python -u -m ops.campaign_preflight \
+    --campaign-fields fixtures/campaigns/sglang_kimi_k3_b300/campaign-fields.json \
+    --output-dir "$PREFLIGHT_DIR/run"
+  code=$?
+  case $code in
+    0) meaning="every check passed" ;;
+    1) meaning="a check failed; see failures in the summary" ;;
+    *) meaning="the run could not complete; see error in the summary" ;;
+  esac
+  echo "Preflight exit code: $code ($meaning)"
+  echo "Summary JSON: $PREFLIGHT_DIR/run/summary.json"
+' > "$PREFLIGHT_LOG" 2>&1 < /dev/null &
+echo "Preflight PID: $!"
+echo "Preflight log: $PREFLIGHT_LOG"
+```
+
+The host needs exactly the fixture's GPUs (eight B300 for Kimi K3), Docker, the
+NVIDIA Container Toolkit, `requirements.txt` (which includes `tiktoken`) and
+Hugging Face access. Kimi K3 also needs room for about 1.6 TB of weights plus
+the draft. Don't use a static host that the reaper manages, because the
+baseline runs under a `pareton-bench-` name.
+
+Exit codes:
+
+- `0`: every check passed.
+- `1`: a check failed. `summary.json` lists each one under `failures`:
+  qualification, logprob samples, SLA or greedy match.
+- `2` or `3`: the run could not complete.
+
+A logprob failure at 1.01 with a pass at 0.1 suggests the thresholds are too
+strict for the campaign's own sampling range. Revisit them with the campaign
+owner rather than narrowing the range. `--request-index` selects another
+highest-tier prompt from the same trace. Keep the whole output directory with
+the campaign's launch evidence, then run the shadow round with the qualified
+rule before seeding.
 
 ### Deployment lifecycle
 
