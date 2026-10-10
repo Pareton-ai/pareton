@@ -62,6 +62,11 @@ LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
 # empty-patch build replaces the prebuilt AOT package with the pinned source build.
 FROM ghcr.io/pareton-ai/pareton-baseline@sha256:38c742f147cb8926200e429022b7979b5d359578e6d790c62def91cc2ab78a05 AS native
 RUN pip install 'scikit-build-core==0.11.6' 'cmake==3.31.10'
+# FlashInfer otherwise fetches trtllm-gen cubins from NVIDIA's artifactory at
+# first use, which fails in the offline evaluation container. Upstream installs
+# the matching cubin package from FlashInfer's index; PyPI stops at 0.6.13.
+RUN pip install --no-deps --index-url https://flashinfer.ai/whl 'flashinfer-cubin==0.7.0.post1' \
+    && python -c "import flashinfer, flashinfer_cubin; assert flashinfer.__version__ == flashinfer_cubin.__version__, (flashinfer.__version__, flashinfer_cubin.__version__)"
 COPY images/baseline-sglang/prepare-deps.py /opt/pareton/prepare-sglang-deps.py
 RUN python /opt/pareton/prepare-sglang-deps.py
 COPY images/baseline-sglang/install.sh /usr/local/bin/pareton-install-sglang
