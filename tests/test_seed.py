@@ -1130,3 +1130,120 @@ def test_seed_visibility_flags(monkeypatch):
         "reveal_delay_s": 0,
     }
     assert main(["--submission-fee-tao", "0", "--patch-reveal-delay-s", "60"]) == 1
+
+
+def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from bench.main import SGLANG_SCORER_CONTEXT_HEADROOM, plan_round_starts
+    from bench.validate import sha256_file, validate_bench_request_dict
+    from worker.round_job import build_round_request
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed,
+        "preflight_longform_campaign",
+        lambda *args: SimpleNamespace(row_indices=tuple(range(32))),
+    )
+    monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_kimi_k3_b300"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    engine_ref = fields["base_image_digest"]
+    argv = (
+        subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
+                "capture",
+                str(root / "ops/seed-sglang-kimi-k3-b300.sh"),
+                engine_ref,
+                str(fixture / "sampling_rule.json"),
+            ],
+            cwd=root,
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    assert main(argv[2:]) == 0
+    manifest = captured["manifest"]
+    expected_bench = fields["bench"]
+    expected_bench["baseline_engine_image_digest"] = engine_ref
+    assert manifest.bench == expected_bench
+    assert manifest.baseline_commit == fields["baseline_commit"]
+    assert manifest.gpu_skus == ["B300"]
+    assert manifest.status == "open"
+    assert manifest.submission_fee["amount_tao"] == "0.35"
+    for key in (
+        "sampling_rule",
+        "scoring_rule",
+        "emission_rule",
+        "engine",
+        "patch_visibility",
+    ):
+        assert getattr(manifest, key) == fields[key]
+    assert manifest.emission_rule["start_weight"] == 0.5
+    pro6000 = json.loads(
+        (
+            root / "fixtures/campaigns/sglang_qwen38_27b_pro6000/scoring_rule.json"
+        ).read_text()
+    )
+    assert manifest.scoring_rule == pro6000
+    trace = tmp_path / "trace.json"
+    trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))
+    request = build_round_request(
+        {
+            "gpu_sku": "B300",
+            "sampled_trace_sha256": sha256_file(trace),
+            "scoring_rule": manifest.scoring_rule,
+        },
+        manifest,
+        [
+            {"role": "baseline", "engine_image_ref": engine_ref},
+            {"role": "challenger", "engine_image_ref": engine_ref},
+        ],
+        task_id=str(uuid4()),
+        trace_path=str(trace),
+    )
+    parsed = validate_bench_request_dict(request)
+    assert request["hardware"]["gpu_count"] == 8
+    assert request["draft_model"] == fields["bench"]["draft_model"]
+    assert parsed.draft_model is not None
+    assert manifest.base_image_digest == fields["base_image_digest"] == engine_ref
+    for start in plan_round_starts(
+        parsed.engines, correctness_serve_args=parsed.correctness.serve_args
+    ):
+        args = start.spec.serve_args
+        # The worker's /model path must be the only model path argparse sees.
+        assert [args[i + 1] for i, a in enumerate(args) if a == "--model-path"] == [
+            "/model"
+        ]
+        fractions = [
+            args[i + 1] for i, a in enumerate(args) if a == "--mem-fraction-static"
+        ]
+        assert fractions[-1] == ("0.80" if start.kind == "scorer" else "0.88")
+        assert args[args.index("--speculative-draft-model-path") + 1] == "/draft"
+        context = 1048576 + (
+            SGLANG_SCORER_CONTEXT_HEADROOM if start.kind == "scorer" else 0
+        )
+        assert all(
+            args[i + 1] == str(context)
+            for i, a in enumerate(args)
+            if a == "--context-length"
+        )
+
+
+def test_draft_model_flags_must_be_paired(monkeypatch):
+    _patch_store(monkeypatch)
+    rc = main(
+        [
+            "--submission-fee-tao",
+            "0.1",
+            "--bench-draft-model-repo",
+            "RadixArk/Kimi-K3-DSpark",
+            "--allow-placeholders",
+        ]
+    )
+    assert rc != 0

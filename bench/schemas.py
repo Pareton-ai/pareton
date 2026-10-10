@@ -128,6 +128,18 @@ class ModelSpec:
 
 
 @dataclass
+class DraftModelSpec:
+    """Pinned speculative-decoding draft, staged like the model and mounted at /draft."""
+
+    hf_repo: str
+    hf_revision: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> DraftModelSpec:
+        return cls(hf_repo=str(d["hf_repo"]), hf_revision=str(d["hf_revision"]))
+
+
+@dataclass
 class HardwareSpec:
     gpu_count: int
     gpu_sku_expected: str
@@ -311,6 +323,7 @@ class BenchRequest:
     # skips the rest of the cohort once that leg fails. None keeps the old
     # behavior: every candidate is benched.
     leader_candidate_index: int | None = None
+    draft_model: DraftModelSpec | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
@@ -340,6 +353,11 @@ class BenchRequest:
             scoring_rule=dict(d.get("scoring_rule") or {}),
             hf_token_env=str(d.get("hf_token_env") or "HF_TOKEN"),
             leader_candidate_index=leader_index,
+            draft_model=(
+                DraftModelSpec.from_dict(d["draft_model"])
+                if d.get("draft_model") is not None
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:

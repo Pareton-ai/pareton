@@ -445,3 +445,85 @@ def test_validate_report_dict_with_real_weights_sha(
     from bench.validate import validate_report_dict
 
     validate_report_dict(report)
+
+
+def test_draft_staging_does_not_require_a_tokenizer(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    from bench.schemas import DraftModelSpec
+
+    def no_tokenizer(**kwargs: Any) -> str:
+        path = Path(kwargs["local_dir"])
+        _write_complete_snapshot(path)
+        (path / "tokenizer.json").unlink()
+        return str(path)
+
+    monkeypatch.setattr("bench.weights.snapshot_download", no_tokenizer)
+    draft = DraftModelSpec(hf_repo="org/draft", hf_revision="abcdef2")
+    staged = stage_weights(draft, cache_dir=cache_dir, require_tokenizer=False)
+    assert staged.path == cache_dir / "org--draft" / "abcdef2"
+    # A cache hit is revalidated with the same rule rather than deleted.
+    assert stage_weights(draft, cache_dir=cache_dir, require_tokenizer=False) == staged
+    with pytest.raises(WeightsError, match="tokenizer"):
+        stage_weights(draft, cache_dir=cache_dir / "strict")
+
+
+def test_engine_provider_mounts_draft_read_only(tmp_path: Path):
+    from bench.main import plan_round_starts
+    from bench.phases import BenchPhase
+    from tests.test_lifecycle import FakeDocker
+
+    raw = load_json(SAMPLE_REQUEST)
+    raw["draft_model"] = {"hf_repo": "org/draft", "hf_revision": "abcdef2"}
+    req = validate_bench_request_dict(raw)
+    assert req.draft_model is not None
+    assert req.draft_model.hf_repo == "org/draft"
+    weights = tmp_path / "staged"
+    draft = tmp_path / "draft"
+    weights.mkdir()
+    draft.mkdir()
+    fake = FakeDocker()
+    fake.image_digests[req.engines.baseline.image] = [
+        f"{req.engines.baseline.image}@sha256:" + ("a" * 64)
+    ]
+    provider = _EngineProvider(
+        req=req,
+        mock=False,
+        logs_dir=tmp_path / "logs",
+        weights_dir=weights,
+        docker_runner=fake,
+    )
+    provider.draft_dir = draft
+
+    import bench.lifecycle as life
+
+    original_wait = life.wait_until_healthy
+    life.wait_until_healthy = lambda *_a, **_k: None  # type: ignore[assignment]
+    try:
+        start = plan_round_starts(req.engines)[0]
+        with provider.start(start, phase=BenchPhase.SLA_BENCH):
+            pass
+    finally:
+        life.wait_until_healthy = original_wait  # type: ignore[assignment]
+
+    run = next(c for c, _ in fake.calls if c[:2] == ["docker", "run"])
+    assert f"{draft.resolve()}:/draft:ro" in run
+    assert f"{weights.resolve()}:/model:ro" in run
+
+
+@pytest.mark.parametrize(
+    "draft",
+    [
+        "org/draft",
+        {"hf_repo": "org/draft"},
+        {"hf_repo": "org/draft", "hf_revision": "main"},
+        {"hf_repo": "../draft", "hf_revision": "abcdef2"},
+    ],
+)
+def test_invalid_draft_model_is_rejected(draft):
+    from bench.validate import RequestValidationError
+
+    raw = load_json(SAMPLE_REQUEST)
+    raw["draft_model"] = draft
+    with pytest.raises(RequestValidationError, match="draft_model"):
+        validate_bench_request_dict(raw)

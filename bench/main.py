@@ -435,6 +435,7 @@ class _EngineProvider:
         # Test seam: a fake runner exercises the real docker argv without a daemon.
         self._docker_runner = docker_runner
         self.weights_dir = weights_dir
+        self.draft_dir: Path | None = None
         self._phase_sink = phase_sink
         self.baseline_digest = extract_image_digest(req.engines.baseline.image)
         self.candidate_digests = [
@@ -511,6 +512,7 @@ class _EngineProvider:
                 role=start.role,
                 gpu_count=_effective_gpu_count(self._req.hardware.gpu_count),
                 weights_dir=self.weights_dir,
+                draft_dir=self.draft_dir,
                 publish_port=False,
                 pull=_should_pull_image(start.spec.image),
                 logs_dir=self._logs_dir,
@@ -1156,6 +1158,24 @@ def run_bench(
                         "total_bytes": staged.total_bytes,
                     }
                 )
+                if req.draft_model is not None:
+                    draft = stage_weights(
+                        req.draft_model,
+                        token_env=req.hf_token_env,
+                        require_tokenizer=False,
+                    )
+                    provider.draft_dir = draft.path
+                    layout.append_log(
+                        {
+                            "event": "draft_weights_staged",
+                            "repo": req.draft_model.hf_repo,
+                            "revision": req.draft_model.hf_revision,
+                            "path": str(draft.path),
+                            "weights_sha256": draft.weights_sha256,
+                            "num_files": draft.num_files,
+                            "total_bytes": draft.total_bytes,
+                        }
+                    )
             baseline, drift, runs, correctness = run_round(
                 req=req,
                 provider=provider,

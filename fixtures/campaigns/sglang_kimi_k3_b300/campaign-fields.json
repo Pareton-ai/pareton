@@ -1,0 +1,159 @@
+{
+  "baseline_repo": "https://github.com/sgl-project/sglang.git",
+  "baseline_commit": "11972e520709a76766f91744a672e92727fdcb09",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:5ee5aae15cd05a5fb3a6b35da8350a208ebc261a8be74249dade0064336d36b0",
+  "gpu_skus": [
+    "B300"
+  ],
+  "sla": {
+    "p99_ttft_ms": 2000.0,
+    "p99_itl_ms": 50.0,
+    "quality_floor_spec": "greedy token-match >= 0.99 vs baseline"
+  },
+  "scoring_config_sha256": null,
+  "scoring_config_url": null,
+  "allowed_paths": [
+    "python/sglang/**",
+    "rust/**"
+  ],
+  "denied_paths": [
+    "tests/**",
+    "benchmarks/**",
+    ".github/**",
+    "docker/**",
+    "**/Dockerfile*",
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/requirements*.txt",
+    "test/**",
+    "benchmark/**",
+    "python/sglang/test/**",
+    "python/sglang/kernels/aot/tests/**",
+    "python/sglang/kernels/aot/python/sgl_kernel/test_utils.py",
+    "python/sglang/kernels/aot/python/sgl_kernel/testing/**",
+    "rust/**/tests/**",
+    "rust/**/benches/**"
+  ],
+  "status": "draft",
+  "priority_metric": "gpu_hours",
+  "success_threshold": ">=10% GPU-hour reduction at SLA",
+  "bench": {
+    "model": {
+      "hf_repo": "moonshotai/Kimi-K3",
+      "hf_revision": "f831ab66814297da540d832a5235f8e904f29d06",
+      "dtype": "bfloat16",
+      "quantization": null,
+      "max_model_len": 1048576
+    },
+    "draft_model": {
+      "hf_repo": "RadixArk/Kimi-K3-DSpark",
+      "hf_revision": "3c5bac301d9cf392706189d82ed947feca6c2f0f"
+    },
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:5ee5aae15cd05a5fb3a6b35da8350a208ebc261a8be74249dade0064336d36b0",
+    "gpu_count": 8,
+    "serve_args": [
+      "--served-model-name",
+      "Kimi-K3",
+      "--tp",
+      "8",
+      "--context-length",
+      "1048576",
+      "--mem-fraction-static",
+      "0.88",
+      "--max-running-requests",
+      "64",
+      "--enable-cache-report",
+      "--enable-metrics",
+      "--trust-remote-code",
+      "--tool-call-parser",
+      "kimi_k3",
+      "--dcp-size",
+      "8",
+      "--max-mamba-cache-size",
+      "320",
+      "--speculative-algorithm",
+      "DSPARK",
+      "--speculative-draft-model-path",
+      "/draft",
+      "--speculative-dspark-block-size",
+      "3",
+      "--enable-linear-replayssm-spec",
+      "--watchdog-timeout",
+      "3600",
+      "--reasoning-parser",
+      "kimi_k3",
+      "--cuda-graph-backend-prefill",
+      "breakable",
+      "--cuda-graph-max-bs-prefill",
+      "4608"
+    ],
+    "correctness": {
+      "thresholds": {
+        "min_mean_logprob": -4.0,
+        "min_token_logprob": -16.0,
+        "min_token_quantile": 0.001,
+        "min_coverage_ratio": 0.5,
+        "max_mean_logprob_drop": 2.5
+      },
+      "num_prompts": 16,
+      "serve_args": [
+        "--mem-fraction-static",
+        "0.80"
+      ]
+    }
+  },
+  "engine": {
+    "name": "sglang",
+    "install_cmd": "/usr/local/bin/pareton-install-sglang",
+    "entrypoint": [
+      "python3",
+      "-m",
+      "sglang.launch_server"
+    ],
+    "cache_dir": "/root/.cache/sglang"
+  },
+  "scoring_rule": {
+    "name": "weighted_tier_completion_speedup",
+    "failure_penalty": 0.1,
+    "tier_weights": {
+      "8k": 0.5,
+      "16k": 0.5
+    }
+  },
+  "emission_rule": {
+    "name": "linear_decay",
+    "start_weight": 0.5,
+    "floor_weight": 0.0,
+    "decay_blocks": 201600
+  },
+  "sampling_rule": {
+    "algo_version": 5,
+    "config": "default",
+    "dataset": "zai-org/LongWriter-6k",
+    "enable_thinking": false,
+    "max_tokens": 5120,
+    "n_prompts": 16,
+    "n_rows": 6000,
+    "temperature_range": [
+      0.1,
+      1.01
+    ],
+    "revision": "0db15c0624f19d63e2efe1021595af933cc5b6cc",
+    "seed_block_offset": 10,
+    "split": "train",
+    "type": "hf_rows",
+    "min_output_tokens": 3000,
+    "followup_prompt": "Write a new, original, self-contained long-form work. Use the previous response as an example of depth and detail, but choose a different topic from coding, fiction, non-fiction, science, history, astronomy, or internet culture. Surprise me. Produce the complete work, not an outline, summary, or discussion of what you would write. Aim for approximately 4,000-6,000 words.",
+    "request_concurrency": 4,
+    "request_timeout_s": 600,
+    "input_tiers": [
+      "8k",
+      "16k"
+    ],
+    "max_baseline_prompt_drops": 4
+  },
+  "patch_visibility": {
+    "mode": "private"
+  }
+}
