@@ -1,7 +1,7 @@
 {
   "baseline_repo": "https://github.com/sgl-project/sglang.git",
   "baseline_commit": "11972e520709a76766f91744a672e92727fdcb09",
-  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:53f6abe1774050fef2620b00afe1e86a08a2aae4e34e695c6c67c8b28c3b6cb8",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:5ee5aae15cd05a5fb3a6b35da8350a208ebc261a8be74249dade0064336d36b0",
   "gpu_skus": [
     "B300"
   ],
@@ -50,7 +50,7 @@
       "hf_repo": "RadixArk/Kimi-K3-DSpark",
       "hf_revision": "3c5bac301d9cf392706189d82ed947feca6c2f0f"
     },
-    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:53f6abe1774050fef2620b00afe1e86a08a2aae4e34e695c6c67c8b28c3b6cb8",
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:5ee5aae15cd05a5fb3a6b35da8350a208ebc261a8be74249dade0064336d36b0",
     "gpu_count": 8,
     "serve_args": [
       "--served-model-name",
