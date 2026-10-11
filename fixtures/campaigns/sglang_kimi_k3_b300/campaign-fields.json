@@ -82,11 +82,7 @@
       "--watchdog-timeout",
       "3600",
       "--reasoning-parser",
-      "kimi_k3",
-      "--cuda-graph-backend-prefill",
-      "breakable",
-      "--cuda-graph-max-bs-prefill",
-      "4608"
+      "kimi_k3"
     ],
     "correctness": {
       "thresholds": {

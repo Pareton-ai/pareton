@@ -58,8 +58,6 @@ python -m campaign.seed \
   --bench-serve-args=--enable-linear-replayssm-spec \
   --bench-serve-args=--watchdog-timeout --bench-serve-args=3600 \
   --bench-serve-args=--reasoning-parser --bench-serve-args=kimi_k3 \
-  --bench-serve-args=--cuda-graph-backend-prefill --bench-serve-args=breakable \
-  --bench-serve-args=--cuda-graph-max-bs-prefill --bench-serve-args=4608 \
   --bench-correctness-num-prompts 16 \
   --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.80 \
   --bench-correctness-min-mean-logprob=-4 \
