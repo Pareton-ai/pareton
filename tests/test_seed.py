@@ -1224,6 +1224,11 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
             args[i + 1] for i, a in enumerate(args) if a == "--mem-fraction-static"
         ]
         assert fractions[-1] == ("0.80" if start.kind == "scorer" else "0.88")
+        # The scorer's KV budget at 0.80 only fits a small mamba pool.
+        last = {a: args[i + 1] for i, a in enumerate(args[:-1])}
+        assert (last["--max-mamba-cache-size"], last["--max-running-requests"]) == (
+            ("16", "8") if start.kind == "scorer" else ("320", "64")
+        )
         assert args[args.index("--speculative-draft-model-path") + 1] == "/draft"
         context = 1048576 + (
             SGLANG_SCORER_CONTEXT_HEADROOM if start.kind == "scorer" else 0

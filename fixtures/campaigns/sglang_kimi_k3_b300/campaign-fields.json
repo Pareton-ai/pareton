@@ -95,7 +95,11 @@
       "num_prompts": 16,
       "serve_args": [
         "--mem-fraction-static",
-        "0.80"
+        "0.80",
+        "--max-mamba-cache-size",
+        "16",
+        "--max-running-requests",
+        "8"
       ]
     }
   },
