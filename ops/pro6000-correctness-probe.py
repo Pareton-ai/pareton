@@ -427,6 +427,28 @@ def validate_runtime(info, args):
             raise EngineError(f"runtime {key} does not confirm requested value {raw}")
 
 
+def baseline_dropped(dest, count):
+    """Prompts the harness left out of grading because the baseline's own
+    output (or its drift rerun) was degenerate. Both sides must drop the same
+    ones, and only for that reason; at least one prompt must still be scored."""
+    dropped = {}
+    for path in (dest / "baseline.jsonl", dest / "candidate_0.jsonl"):
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        if len(rows) != count:
+            raise EngineError("missing/truncated scorer positions or excluded prompts")
+        dropped[path.stem] = {
+            r["request_id"]: r.get("drop_reason") for r in rows if r.get("dropped")
+        }
+    if dropped["baseline"].keys() != dropped["candidate_0"].keys() or any(
+        not str(reason or "").startswith("baseline")
+        for reason in dropped["baseline"].values()
+    ):
+        raise EngineError("missing/truncated scorer positions or excluded prompts")
+    if len(dropped["baseline"]) >= count:
+        raise EngineError("every prompt was dropped for baseline degeneracy")
+    return dropped["baseline"]
+
+
 def require_reports(reports, count):
     if set(reports) != {BASELINE_INDEX, 0}:
         raise EngineError(
@@ -845,14 +867,21 @@ def diagnostic_hooks(
                 },
             )
             save(dest / "timing.json", {"elapsed_s": time.monotonic() - started})
-            require_reports(reports, count)
+            # The harness drops a prompt whose baseline output was degenerate
+            # from both sides; the rest must all be scored in full.
+            dropped = baseline_dropped(dest, count)
+            state["baseline_dropped"] = dropped
+            require_reports(reports, count - len(dropped))
             # Verify each continuation, not just aggregate coverage. Tokenized text
             # can differ from generation token counts; record any such mismatch.
             for path in (dest / "baseline.jsonl", dest / "candidate_0.jsonl"):
-                rows = [json.loads(line) for line in path.read_text().splitlines()]
-                if len(rows) != count or any(
-                    r.get("dropped")
-                    or r.get("span_positions", 0) < 1
+                rows = [
+                    r
+                    for r in map(json.loads, path.read_text().splitlines())
+                    if r["request_id"] not in dropped
+                ]
+                if any(
+                    r.get("span_positions", 0) < 1
                     or r.get("scored_positions") != r.get("span_positions")
                     for r in rows
                 ):

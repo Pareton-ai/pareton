@@ -299,6 +299,78 @@ def test_real_grade_hook_repeats_and_rejects_truncation(tmp_path, monkeypatch, s
     assert (tmp_path / "captured_outputs.json").exists()
 
 
+def _graded(dest, rows):
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in ("baseline", "candidate_0"):
+        (dest / f"{name}.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows)
+        )
+
+
+def test_baseline_degenerate_prompt_is_dropped_from_the_count(tmp_path):
+    scored = {"span_positions": 10, "scored_positions": 10}
+    dropped = {
+        "dropped": True,
+        "drop_reason": "baseline-drift: longest repeated span ratio 0.625",
+    }
+    _graded(
+        tmp_path,
+        [{"request_id": "probe-000", **scored}, {"request_id": "probe-001", **dropped}],
+    )
+    assert PROBE["baseline_dropped"](tmp_path, 2) == {
+        "probe-001": dropped["drop_reason"]
+    }
+    PROBE["require_reports"]({BASELINE_INDEX: report(), 0: report()}, 2 - 1)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # dropped for a reason other than the baseline's own output
+        [
+            {"request_id": "probe-000", "span_positions": 1, "scored_positions": 1},
+            {"request_id": "probe-001", "dropped": True, "drop_reason": "candidate"},
+        ],
+        # every prompt dropped
+        [
+            {"request_id": "probe-000", "dropped": True, "drop_reason": "baseline"},
+            {"request_id": "probe-001", "dropped": True, "drop_reason": "baseline"},
+        ],
+        # a prompt missing from the scorer's rows
+        [{"request_id": "probe-000", "span_positions": 1, "scored_positions": 1}],
+    ],
+)
+def test_other_exclusions_still_fail(tmp_path, rows):
+    _graded(tmp_path, rows)
+    with pytest.raises(EngineError):
+        PROBE["baseline_dropped"](tmp_path, 2)
+
+
+def test_dropped_prompts_must_match_on_both_sides(tmp_path):
+    _graded(
+        tmp_path,
+        [
+            {"request_id": "probe-000", "span_positions": 1, "scored_positions": 1},
+            {"request_id": "probe-001", "dropped": True, "drop_reason": "baseline"},
+        ],
+    )
+    (tmp_path / "candidate_0.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "request_id": f"probe-00{i}",
+                    "span_positions": 1,
+                    "scored_positions": 1,
+                }
+            )
+            + "\n"
+            for i in range(2)
+        )
+    )
+    with pytest.raises(EngineError):
+        PROBE["baseline_dropped"](tmp_path, 2)
+
+
 def test_prepare_only_never_touches_gpu_and_preserves_failure_evidence(
     tmp_path, monkeypatch, capsys
 ):
