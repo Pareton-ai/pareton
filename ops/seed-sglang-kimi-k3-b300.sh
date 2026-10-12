@@ -6,7 +6,7 @@
 # The harness mounts pinned weights at /model and adds --model-path itself; the
 # serving flags below must not repeat it. The pinned DSPARK draft is staged the
 # same way and mounted read-only at /draft.
-# Uses the v5 16-request 2k/4k/8k/16k workload (4 per tier) at C4; engine capacity remains 64.
+# Uses the v5 16-request 2k/4k/8k/16k workload (4 per tier) at C32; engine capacity remains 64.
 # Patches remain private with no timed public reveal.
 set -euo pipefail
 if [[ $# -ne 2 ]]; then
