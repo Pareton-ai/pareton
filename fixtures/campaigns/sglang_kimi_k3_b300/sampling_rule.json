@@ -19,6 +19,8 @@
   "request_concurrency": 4,
   "request_timeout_s": 600,
   "input_tiers": [
+    "2k",
+    "4k",
     "8k",
     "16k"
   ],

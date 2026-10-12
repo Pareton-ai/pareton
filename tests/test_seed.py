@@ -1185,12 +1185,10 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
     ):
         assert getattr(manifest, key) == fields[key]
     assert manifest.emission_rule["start_weight"] == 0.5
-    pro6000 = json.loads(
-        (
-            root / "fixtures/campaigns/sglang_qwen38_27b_pro6000/scoring_rule.json"
-        ).read_text()
+    qwen = json.loads(
+        (root / "fixtures/campaigns/sglang_qwen38_27b/scoring_rule.json").read_text()
     )
-    assert manifest.scoring_rule == pro6000
+    assert manifest.scoring_rule == qwen
     trace = tmp_path / "trace.json"
     trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))
     request = build_round_request(
