@@ -172,12 +172,12 @@ def test_all_checks_pass_on_one_baseline_start(tmp_path, harness, capsys):
     (qualified,) = harness.qualified
     assert qualified["container"] == "c1"
     assert (qualified["repetitions"], qualified["concurrency"]) == (2, 4)
-    # 10 at each extreme, one greedy reference, then a C32 greedy wave.
+    # 10 at each extreme, one greedy reference, then a C16 greedy wave.
     temps = [(s["temperature"], s["seed"]) for s in harness.streams]
     assert sorted(temps[:20]) == sorted((t, r) for t in (0.1, 1.01) for r in range(10))
-    assert temps[20:] == [(0.0, 0)] * 33
+    assert temps[20:] == [(0.0, 0)] * 17
     assert summary["tier"] == "16k" and summary["input_tokens"] == INPUT_TOKENS
-    assert summary["sla"]["requests"] == 53 and summary["sla"]["failures"] == []
+    assert summary["sla"]["requests"] == 37 and summary["sla"]["failures"] == []
     assert set(summary["greedy"]["matches"].values()) == {1.0}
     assert [kind for kind, _ in harness.starts] == ["scorer"]
     assert summary["by_temperature"]["1.01"]["passed"] == 10
@@ -207,7 +207,7 @@ def test_low_logprob_and_slow_ttft_fail_while_greedy_drift_is_reported(
     assert any(f.startswith("sla: p99 TTFT") for f in summary["failures"])
     # Greedy drift is reported but never fails the preflight on its own.
     assert not any(f.startswith("greedy:") for f in summary["failures"])
-    assert len(summary["greedy"]["below_floor"]) == 32
+    assert len(summary["greedy"]["below_floor"]) == 16
     results = json.loads((tmp_path / "out/results.json").read_text())
     failed = next(r for r in results if r["request_id"] == "t1.01-r3")
     assert "mean logprob" in failed["reason"] and "quantile" in failed["reason"]
