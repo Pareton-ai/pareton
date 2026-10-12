@@ -37,6 +37,7 @@ from bench import __version__
 from bench.concurrency import (
     WEIGHTED_RULE,
     request_groups,
+    tier_size,
     tier_completion_metrics,
     validate_tier_contract,
 )
@@ -571,6 +572,7 @@ def run_round(
     replay_kwargs = (
         {
             "input_tiers": workload.get("input_tiers"),
+            "tier_size": tier_size(workload),
             "request_concurrency": workload["request_concurrency"],
             "request_timeout_s": workload["request_timeout_s"],
         }
@@ -699,6 +701,7 @@ def run_round(
                         requests,
                         workload["request_concurrency"],
                         workload.get("input_tiers"),
+                        tier_size(workload),
                     )
                     prompts = [PromptCase(r.id, r.prompt) for r in requests]
                     trace = replace(trace, requests=requests)

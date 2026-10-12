@@ -65,12 +65,33 @@ def tier_weights(rule):
     return {tier: float(weights[tier]) for tier in TIERS if tier in weights}
 
 
-def request_groups(requests, concurrency, tiers=None):
+# Prompts per tier that the original 8-per-tier grouping assumed.
+DEFAULT_TIER_SIZE = 8
+
+
+def tier_size(workload):
+    """Prompts each tier contributes to a round, from the trace's length groups."""
+    counts = [g.get("count") for g in workload.get("length_groups") or ()]
+    if not counts:
+        return DEFAULT_TIER_SIZE
+    if any(type(c) is not int or c < 1 for c in counts):
+        raise ValueError("length_groups counts must be positive integers")
+    return max(counts)
+
+
+def request_groups(requests, concurrency, tiers=None, size=DEFAULT_TIER_SIZE):
+    """Group whole tiers so each group fills ``concurrency`` slots.
+
+    ``size`` is the trace's planned prompts per tier (not the count left after
+    baseline drops), so group membership stays frozen across a round.
+    """
     from bench.lifecycle import EngineError
 
     tiers = input_tiers(tiers)
     validate_concurrency(concurrency)
-    tiers_per_group = max(1, concurrency // 8)
+    if type(size) is not int or size < 1:
+        raise ValueError("tier size must be a positive integer")
+    tiers_per_group = max(1, concurrency // size)
     if any(r.input_length_group not in tiers for r in requests):
         raise EngineError("concurrency replay requires LongWriter input tiers")
     if any(not any(r.input_length_group == t for r in requests) for t in tiers):
