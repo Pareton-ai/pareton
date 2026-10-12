@@ -60,6 +60,8 @@ python -m campaign.seed \
   --bench-serve-args=--reasoning-parser --bench-serve-args=kimi_k3 \
   --bench-correctness-num-prompts 16 \
   --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.80 \
+  --bench-correctness-serve-args=--max-mamba-cache-size --bench-correctness-serve-args=16 \
+  --bench-correctness-serve-args=--max-running-requests --bench-correctness-serve-args=8 \
   --bench-correctness-min-mean-logprob=-4 \
   --bench-correctness-min-token-logprob=-16 \
   --bench-correctness-min-token-quantile=0.001 \
