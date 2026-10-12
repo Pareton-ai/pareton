@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from bench.concurrency import (
+    DEFAULT_TIER_SIZE,
     concurrency_observations,
     request_groups,
     tier_completion_metrics,
@@ -383,9 +384,10 @@ def _replay_concurrent(
     timeout_s,
     request_concurrency,
     input_tiers=None,
+    tier_size=DEFAULT_TIER_SIZE,
 ):
     """Bounded workers, fixed tier groups, and a deadline for the entire replay."""
-    groups = request_groups(requests, request_concurrency, input_tiers)
+    groups = request_groups(requests, request_concurrency, input_tiers, tier_size)
     t0 = time.monotonic()
     deadline = t0 + timeout_s * len(requests)
     rows, errs = [], []
@@ -582,6 +584,7 @@ def _run_engine(
     warmup_repetitions: int,
     request_concurrency: int | None = None,
     input_tiers: list[str] | None = None,
+    tier_size: int = DEFAULT_TIER_SIZE,
 ) -> tuple[list[dict], list[dict]]:
     """Warmup + N measured reps for one engine.
 
@@ -595,7 +598,11 @@ def _run_engine(
     replay_kwargs = (
         {}
         if request_concurrency is None
-        else {"request_concurrency": request_concurrency, "input_tiers": input_tiers}
+        else {
+            "request_concurrency": request_concurrency,
+            "input_tiers": input_tiers,
+            "tier_size": tier_size,
+        }
     )
     for warmup in range(warmup_repetitions):
         warm_rows, warm_wall, warm_errors = replay(
@@ -719,6 +726,7 @@ def run_sla_engine(
     engine_name: str = "vllm",
     request_concurrency: int | None = None,
     input_tiers: list[str] | None = None,
+    tier_size: int = DEFAULT_TIER_SIZE,
 ) -> EngineReplay:
     """Replay the trace against one healthy engine and persist its evidence.
 
@@ -745,7 +753,11 @@ def run_sla_engine(
         timeout_s=request_timeout_s,
         warmup_repetitions=2 if engine_name == "sglang" else 1,
         **(
-            {"request_concurrency": request_concurrency, "input_tiers": input_tiers}
+            {
+                "request_concurrency": request_concurrency,
+                "input_tiers": input_tiers,
+                "tier_size": tier_size,
+            }
             if request_concurrency is not None
             else {}
         ),
