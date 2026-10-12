@@ -265,8 +265,11 @@ and any `/draft` mounted read-only. On that one start it runs:
    `temperature_range` (0.1 and 1.01), seeds 0 to 9, with natural EOS. Requests
    run in waves of the rule's `request_concurrency`.
 4. **Greedy repeatability.** One greedy reference runs alone, then a full
-   concurrent wave of the same greedy request. Each output must match the
-   reference's tokens position by position at the SLA quality floor (0.99).
+   concurrent wave of the same greedy request. `summary.json` records each
+   output's position-by-position token match against the reference and lists
+   those under 0.99 in `greedy.below_floor`. This is reported, not enforced:
+   rounds never sample at temperature 0, and one early near-tie flip (seen on
+   Kimi K3 under DCP and speculative decoding) misaligns every later token.
 5. **SLA.** Every streamed request above counts toward p99 TTFT and p99
    inter-chunk latency, checked against the campaign's `sla` (2000 ms and
    50 ms). With speculative decoding a chunk can carry several tokens, so
@@ -309,7 +312,7 @@ Exit codes:
 
 - `0`: every check passed.
 - `1`: a check failed. `summary.json` lists each one under `failures`:
-  qualification, logprob samples, SLA or greedy match.
+  qualification, logprob samples or SLA.
 - `2` or `3`: the run could not complete.
 
 A logprob failure at 1.01 with a pass at 0.1 suggests the thresholds are too

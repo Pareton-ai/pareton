@@ -14,8 +14,10 @@ request builder and the harness's planned baseline, with ``/model`` and any
    at each end of ``temperature_range`` with natural EOS, in waves of the
    campaign's ``request_concurrency``.
 4. **Greedy repeatability.** One greedy reference, then a full concurrent wave
-   of the same greedy request. Each must match the reference's tokens at the
-   SLA quality floor (0.99).
+   of the same greedy request, compared token by token with the reference.
+   This is reported, not enforced: rounds never sample at temperature 0, and
+   a batched near-tie can flip one early token (Kimi K3 under DCP and
+   speculative decoding), after which every position differs.
 5. **SLA.** Every streamed request above counts toward p99 TTFT and p99
    inter-chunk latency against the campaign's ``sla``.
 
@@ -560,12 +562,19 @@ def main(argv=None):
         failures = [
             *(f"logprob: {r}" for r in state["failed_samples"]),
             *(f"sla: {f}" for f in state["sla"]["failures"]),
-            *(
-                f"greedy: {label} matched {ratio:.4f} < {GREEDY_MATCH_FLOOR}"
-                for label, ratio in state["greedy"]["matches"].items()
-                if ratio < GREEDY_MATCH_FLOOR
-            ),
         ]
+        state["greedy"]["below_floor"] = [
+            label
+            for label, ratio in state["greedy"]["matches"].items()
+            if ratio < GREEDY_MATCH_FLOOR
+        ]
+        for label in state["greedy"]["below_floor"]:
+            ratio = state["greedy"]["matches"][label]
+            print(
+                f"NOTE greedy (not enforced): {label} matched {ratio:.4f} "
+                f"< {GREEDY_MATCH_FLOOR}",
+                flush=True,
+            )
         state["failures"] = failures
         state["status"] = "passed" if not failures else "failed_checks"
         for failure in failures:

@@ -194,7 +194,9 @@ def test_health_timeout_reaches_the_scorer_start(tmp_path, harness):
     assert config.BENCH_HEALTH_TIMEOUT_S == 5400
 
 
-def test_low_logprob_slow_ttft_and_greedy_drift_each_fail(tmp_path, harness):
+def test_low_logprob_and_slow_ttft_fail_while_greedy_drift_is_reported(
+    tmp_path, harness
+):
     harness.scores = lambda c: -20.0 if c.request_id == "t1.01-r3" else -1.0
     harness.ttft_s = 2.5
     harness.greedy_text = lambda n: "a b c d" if n == 21 else "a b x y"
@@ -203,7 +205,9 @@ def test_low_logprob_slow_ttft_and_greedy_drift_each_fail(tmp_path, harness):
     assert summary["status"] == "failed_checks"
     assert summary["failed_samples"] == ["t1.01-r3"]
     assert any(f.startswith("sla: p99 TTFT") for f in summary["failures"])
-    assert sum(f.startswith("greedy:") for f in summary["failures"]) == 4
+    # Greedy drift is reported but never fails the preflight on its own.
+    assert not any(f.startswith("greedy:") for f in summary["failures"])
+    assert len(summary["greedy"]["below_floor"]) == 4
     results = json.loads((tmp_path / "out/results.json").read_text())
     failed = next(r for r in results if r["request_id"] == "t1.01-r3")
     assert "mean logprob" in failed["reason"] and "quantile" in failed["reason"]

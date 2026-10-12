@@ -281,7 +281,7 @@ For a new campaign, run the
 on the campaign GPU with the final fixture, and require exit `0` before opening.
 It qualifies the source pool. On a highest-tier prompt it then grades the
 baseline's outputs at both ends of `temperature_range` against these thresholds,
-checks greedy repeatability against the SLA quality floor, and measures p99
+reports greedy repeatability (informational), and measures p99
 TTFT and ITL against the SLA.
 
 Build a full round request through `worker.round_job.build_round_request`, using
