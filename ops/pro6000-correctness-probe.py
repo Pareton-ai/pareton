@@ -60,6 +60,7 @@ from worker.round_job import build_round_request
 
 MAX_INPUT = 16384
 MAX_OUTPUT = 5120
+MIN_CAPACITY_SPAN = int(MAX_OUTPUT * 0.85)
 SCALARS = {
     "--context-length": "context_length",
     "--mem-fraction-static": "mem_fraction_static",
@@ -888,7 +889,15 @@ def diagnostic_hooks(
                     raise EngineError(
                         "missing/truncated scorer positions or excluded prompts"
                     )
-                if capacity and any(r["span_positions"] != MAX_OUTPUT for r in rows):
+                # The scorer re-tokenizes the generated text, which can merge
+                # tokens (Kimi K3: 4620-5119 for 5120 generated). Generation
+                # itself is checked for exactly 5120 above; here only catch a
+                # continuation the scorer saw substantially cut short.
+                spans = [r["span_positions"] for r in rows]
+                state["capacity_min_span_positions"] = min(
+                    [*spans, state.get("capacity_min_span_positions", MAX_OUTPUT)]
+                )
+                if capacity and min(spans) < MIN_CAPACITY_SPAN:
                     raise EngineError(
                         "scorer did not consume a full 5120-token continuation"
                     )

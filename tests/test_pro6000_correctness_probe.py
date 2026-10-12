@@ -245,7 +245,7 @@ def test_incomplete_scoring_never_passes(bad):
         PROBE["require_reports"]({BASELINE_INDEX: report(), 0: report(**bad)}, 1)
 
 
-@pytest.mark.parametrize("span", [5120, 5119])
+@pytest.mark.parametrize("span", [5120, 4620, 4351])
 def test_real_grade_hook_repeats_and_rejects_truncation(tmp_path, monkeypatch, span):
     f = fields()
     trace = PROBE["longest_trace"](
@@ -278,7 +278,7 @@ def test_real_grade_hook_repeats_and_rejects_truncation(tmp_path, monkeypatch, s
     with PROBE["diagnostic_hooks"](
         tmp_path, f, trace, capacity=True, timeout=1800, scorer_repetitions=3
     ) as state:
-        if span != 5120:
+        if span < PROBE["MIN_CAPACITY_SPAN"]:
             with pytest.raises(EngineError, match="full 5120-token"):
                 harness.grade_all(
                     "local",
@@ -292,6 +292,7 @@ def test_real_grade_hook_repeats_and_rejects_truncation(tmp_path, monkeypatch, s
             )
             assert result[0].verdict == "pass"
             assert state["scorer_repetitions"] == 3
+            assert state["capacity_min_span_positions"] == span
             assert len(calls) == 3
             assert (tmp_path / "standard/candidate_0.jsonl").exists()
             assert all(call["cfg"] == "unchanged" for call in calls)
