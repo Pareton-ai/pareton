@@ -21,7 +21,7 @@ def run_check(monkeypatch, tmp_path, engine="sglang", **changes):
         "data": [{"max_model_len": TEST_CONTEXT}],
         **changes,
     }
-    monkeypatch.setattr("bench.workload_preflight.get_json", lambda *_: metadata)
+    monkeypatch.setattr("bench.workload_preflight.get_json", lambda *_, **__: metadata)
     tokenize = formatter().encode
     monkeypatch.setattr(
         "bench.workload_preflight.post_json",

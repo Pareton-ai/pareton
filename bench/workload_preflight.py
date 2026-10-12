@@ -31,7 +31,9 @@ def validate_engine_workload(
         raise EngineError("trace context contract does not match bench request")
     evidence = {"context": context, "tokenizer_verified": verify_tokenizer}
     if engine_name == "sglang":
-        info = get_json(base_url, "/server_info")
+        # SGLang answers /server_info from the scheduler loop, so under concurrent
+        # qualification it waits behind other requests' long prefills.
+        info = get_json(base_url, "/server_info", timeout=600)
         fields = (
             "context_length",
             "max_req_input_len",
