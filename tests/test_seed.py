@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -1132,6 +1133,37 @@ def test_seed_visibility_flags(monkeypatch):
     assert main(["--submission-fee-tao", "0", "--patch-reveal-delay-s", "60"]) == 1
 
 
+@pytest.mark.parametrize("timeout", [None, "1200", "3599.5", "soon"])
+def test_kimi_k3_launch_helper_requires_the_startup_timeout(timeout):
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_kimi_k3_b300"
+    engine_ref = json.loads((fixture / "campaign-fields.json").read_text())[
+        "base_image_digest"
+    ]
+    env = {k: v for k, v in os.environ.items() if k != "PARETON_BENCH_HEALTH_TIMEOUT_S"}
+    if timeout is not None:
+        env["PARETON_BENCH_HEALTH_TIMEOUT_S"] = timeout
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'python() { echo seeded; }; export -f python; bash "$1" "${@:2}"',
+            "capture",
+            str(root / "ops/seed-sglang-kimi-k3-b300.sh"),
+            engine_ref,
+            str(fixture / "sampling_rule.json"),
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "seeded" not in result.stdout
+    assert "needs at least 3600" in result.stderr
+
+
 def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
@@ -1162,6 +1194,7 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
                 str(fixture / "sampling_rule.json"),
             ],
             cwd=root,
+            env={**os.environ, "PARETON_BENCH_HEALTH_TIMEOUT_S": "3600"},
         )
         .decode()
         .rstrip("\0")

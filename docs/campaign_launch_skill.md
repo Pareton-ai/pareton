@@ -342,6 +342,9 @@ A 27B model can need a longer health timeout and memory headroom for the shared
 scorer. For SGLang, tune `--mem-fraction-static`; vLLM uses
 `--gpu-memory-utilization`. Set the required timeout in the running worker's
 configuration before opening, using the normal deployment process.
+The workers forward `PARETON_BENCH_HEALTH_TIMEOUT_S` to every GPU pod. Kimi K3
+on 8×B300 took over 20 minutes to become healthy, so it needs 3600, and its seed
+helper refuses to run with less.
 
 ## 4. Open a future Qwen v5 campaign
 

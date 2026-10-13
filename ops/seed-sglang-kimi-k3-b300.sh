@@ -24,6 +24,16 @@ if [[ ! "$engine_ref" =~ ^ghcr\.io/pareton-ai/(pareton-engine|pareton-baseline)@
   echo 'Pass the full published SGLang engine reference by digest' >&2
   exit 2
 fi
+# Kimi K3 engines took over 20 minutes to become healthy on 8xB300. The workers
+# forward this value to every GPU pod, so raise it in the validator's .env and
+# restart both workers before the campaign opens. Seed with that .env loaded.
+min_health_timeout_s=3600
+health_timeout_s=${PARETON_BENCH_HEALTH_TIMEOUT_S:-600}
+if ! awk -v v="$health_timeout_s" -v m="$min_health_timeout_s" 'BEGIN { exit !(v + 0 >= m) }'; then
+  echo "PARETON_BENCH_HEALTH_TIMEOUT_S is $health_timeout_s; Kimi K3 needs at least $min_health_timeout_s." >&2
+  echo 'Set it in /opt/pareton/.env, restart pareton-round-worker and pareton-worker, load the .env and rerun.' >&2
+  exit 2
+fi
 
 # Store the agreed 0.35 TAO initial fee with the open row, with no activation delay.
 # seed validates whole RAO and the locally trusted recipient before insertion.
