@@ -1133,7 +1133,7 @@ def test_seed_visibility_flags(monkeypatch):
     assert main(["--submission-fee-tao", "0", "--patch-reveal-delay-s", "60"]) == 1
 
 
-@pytest.mark.parametrize("timeout", [None, "1200", "3599.5", "soon"])
+@pytest.mark.parametrize("timeout", [None, "1200", "3599.5", "soon", "3600s", "inf"])
 def test_kimi_k3_launch_helper_requires_the_startup_timeout(timeout):
     root = Path(__file__).resolve().parents[1]
     fixture = root / "fixtures/campaigns/sglang_kimi_k3_b300"

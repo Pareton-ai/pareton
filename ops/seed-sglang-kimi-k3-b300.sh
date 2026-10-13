@@ -29,7 +29,8 @@ fi
 # restart both workers before the campaign opens. Seed with that .env loaded.
 min_health_timeout_s=3600
 health_timeout_s=${PARETON_BENCH_HEALTH_TIMEOUT_S:-600}
-if ! awk -v v="$health_timeout_s" -v m="$min_health_timeout_s" 'BEGIN { exit !(v + 0 >= m) }'; then
+if [[ ! "$health_timeout_s" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+  || ! awk -v v="$health_timeout_s" -v m="$min_health_timeout_s" 'BEGIN { exit !(v + 0 >= m) }'; then
   echo "PARETON_BENCH_HEALTH_TIMEOUT_S is $health_timeout_s; Kimi K3 needs at least $min_health_timeout_s." >&2
   echo 'Set it in /opt/pareton/.env, restart pareton-round-worker and pareton-worker, load the .env and rerun.' >&2
   exit 2
