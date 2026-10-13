@@ -431,6 +431,12 @@ def build_round_request(
         "hf_token_env": "HF_TOKEN",
         "leader_candidate_index": leader_candidate_index,
     }
+    draft = bench.get("draft_model")
+    if draft is not None:
+        req["draft_model"] = {
+            "hf_repo": str(draft["hf_repo"]),
+            "hf_revision": str(draft["hf_revision"]),
+        }
     try:
         validate_bench_request_dict(req)
     except RequestValidationError as exc:

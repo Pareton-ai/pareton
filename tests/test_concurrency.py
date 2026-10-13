@@ -14,6 +14,7 @@ from bench.concurrency import (
     WEIGHTED_RULE,
     request_groups,
     tier_completion_metrics,
+    tier_size,
 )
 from bench.http import StreamResult, post_completion_stream
 from bench.lifecycle import EngineError
@@ -263,6 +264,29 @@ def test_group_membership_frozen(c, sizes):
     assert len(filtered[0]) == sizes[0] - 1
     with pytest.raises(EngineError, match="nonempty"):
         request_groups([r for r in requests() if r.input_length_group != "2k"], c)
+
+
+@pytest.mark.parametrize(
+    "c,sizes", [(1, [4] * 4), (4, [4] * 4), (8, [8] * 2), (16, [16]), (32, [16])]
+)
+def test_groups_fill_concurrency_from_planned_tier_size(c, sizes):
+    # 16 prompts over four tiers: C16 replays every tier at once.
+    groups = request_groups(requests(4), c, size=4)
+    assert list(map(len, groups)) == sizes
+    # Baseline drops never regroup: the planned size, not the remainder, decides.
+    kept = [r for r in requests(4) if not r.id.endswith("-0")]
+    assert [len(g) for g in request_groups(kept, c, size=4)] == [
+        n - n // 4 for n in sizes
+    ]
+
+
+def test_tier_size_reads_length_groups():
+    assert tier_size({}) == 8
+    assert tier_size({"length_groups": [{"name": t, "count": 4} for t in TIERS]}) == 4
+    with pytest.raises(ValueError, match="positive"):
+        tier_size({"length_groups": [{"name": "2k", "count": 0}]})
+    with pytest.raises(ValueError, match="tier size"):
+        request_groups(requests(4), 16, size=0)
 
 
 def test_immediate_refill_and_full_protocol_occupancy(monkeypatch):

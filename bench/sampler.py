@@ -330,6 +330,20 @@ def build_prompt_formatter(
         raise SamplerError(
             "token-counted sampling requires a full tokenizer commit revision"
         )
+    if trajectory and config_loader is None and tokenizer_loader is None:
+        from bench.tiktoken_chat import (
+            build_tiktoken_chat_formatter,
+            tiktoken_chat_spec,
+        )
+
+        if tiktoken_chat_spec(repo, revision) is not None:
+            return build_tiktoken_chat_formatter(
+                repo=repo,
+                revision=revision,
+                enable_thinking=enable_thinking,
+                expected_template_sha256=expected_template_sha256,
+                token=_hf_token(),
+            )
     loader = config_loader or _call_load_tokenizer_config
     try:
         config = loader(

@@ -154,6 +154,23 @@ def _validate_bench_request_dict(d: dict[str, Any]) -> BenchRequest:
             f"model.hf_repo must be a HuggingFace org/name id, got {hf_repo!r}"
         )
 
+    draft = d.get("draft_model")
+    if draft is not None:
+        if not isinstance(draft, dict):
+            raise RequestValidationError("draft_model must be an object")
+        _require_keys(draft, ["hf_repo", "hf_revision"], ctx="draft_model")
+        if not _GIT_SHA_RE.match(str(draft["hf_revision"])):
+            raise RequestValidationError(
+                "draft_model.hf_revision must be a git commit sha, "
+                f"got {draft['hf_revision']!r}"
+            )
+        draft_repo = str(draft["hf_repo"])
+        if ".." in draft_repo or not _HF_REPO_RE.match(draft_repo):
+            raise RequestValidationError(
+                "draft_model.hf_repo must be a HuggingFace org/name id, "
+                f"got {draft_repo!r}"
+            )
+
     hardware = d["hardware"]
     if not isinstance(hardware, dict):
         raise RequestValidationError("hardware must be an object")

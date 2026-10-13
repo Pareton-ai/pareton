@@ -211,6 +211,7 @@ def build_seed_bench_spec(
     correctness_num_prompts: int | None = None,
     correctness_serve_args: list[str] | None = None,
     correctness_thresholds: dict | None = None,
+    draft_model: dict | None = None,
 ) -> dict:
     # Every campaign pins its own correctness thresholds. The values default
     # from config, but they are copied into the manifest here rather than read
@@ -221,7 +222,7 @@ def build_seed_bench_spec(
         correctness["num_prompts"] = int(correctness_num_prompts)
     if correctness_serve_args is not None:
         correctness["serve_args"] = list(correctness_serve_args)
-    return {
+    bench = {
         "model": {
             "hf_repo": model_repo,
             "hf_revision": model_revision,
@@ -234,6 +235,10 @@ def build_seed_bench_spec(
         "serve_args": list(serve_args) if serve_args else None,
         "correctness": correctness,
     }
+    # Added only when pinned, so campaigns without a draft keep their hashes.
+    if draft_model is not None:
+        bench["draft_model"] = dict(draft_model)
+    return bench
 
 
 def seed_synthetic_campaign(
@@ -253,6 +258,7 @@ def seed_synthetic_campaign(
     bench_correctness_num_prompts: int | None = None,
     bench_correctness_serve_args: list[str] | None = None,
     bench_correctness_thresholds: dict | None = None,
+    bench_draft_model: dict | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
     scoring_rule: dict | None = None,
@@ -346,6 +352,7 @@ def seed_synthetic_campaign(
             correctness_num_prompts=bench_correctness_num_prompts,
             correctness_serve_args=bench_correctness_serve_args,
             correctness_thresholds=bench_correctness_thresholds,
+            draft_model=bench_draft_model,
         )
     )
 
@@ -515,6 +522,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bench-dtype", default=DEFAULT_BENCH_DTYPE)
     p.add_argument(
         "--bench-max-model-len", type=int, default=DEFAULT_BENCH_MAX_MODEL_LEN
+    )
+    p.add_argument(
+        "--bench-draft-model-repo",
+        default=None,
+        help="Speculative draft model, staged and mounted read-only at /draft",
+    )
+    p.add_argument(
+        "--bench-draft-model-revision",
+        default=None,
+        help="Pinned commit of --bench-draft-model-repo",
     )
     p.add_argument(
         "--bench-quantization",
@@ -709,6 +726,20 @@ def main(argv: list[str] | None = None) -> int:
             "decay_blocks": args.emission_decay_blocks,
         }
         emission = {k: v for k, v in emission_overrides.items() if v is not None}
+        if (args.bench_draft_model_repo is None) != (
+            args.bench_draft_model_revision is None
+        ):
+            raise ValueError(
+                "--bench-draft-model-repo and --bench-draft-model-revision go together"
+            )
+        draft_model = (
+            {
+                "hf_repo": args.bench_draft_model_repo,
+                "hf_revision": args.bench_draft_model_revision,
+            }
+            if args.bench_draft_model_repo is not None
+            else None
+        )
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -725,6 +756,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_correctness_num_prompts=args.bench_correctness_num_prompts,
             bench_correctness_serve_args=args.bench_correctness_serve_args,
             bench_correctness_thresholds=correctness_thresholds,
+            bench_draft_model=draft_model,
             workload_pool=pool,
             sampling_rule=rule,
             scoring_rule=scoring,

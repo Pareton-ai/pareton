@@ -22,7 +22,7 @@ export PARETON_BUILD_LOG_DIR="${PARETON_BUILD_LOG_DIR:-$output_dir/logs}"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
 engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
 probe_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-probe"
-commit=4c3d47f1df9dee2d77794f6fc5ef11c64817e4fc
+commit=11972e520709a76766f91744a672e92727fdcb09
 repo=https://github.com/sgl-project/sglang.git
 
 python - "$build_tag" "$reuse_build_ref" "$commit" <<'PY'
