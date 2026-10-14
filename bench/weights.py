@@ -133,13 +133,22 @@ def validate_staged_tree(root: Path, *, require_tokenizer: bool = True) -> None:
 
 
 def _file_stats(root: Path) -> dict[str, list[int]]:
-    """Size and mtime of every staged file, keyed by its path under ``root``."""
+    """Size, mtime and inode of every staged file, keyed by its path under ``root``.
+
+    The inode catches a file replaced by copy or rename even when its mtime was
+    preserved. ctime is deliberately left out: bootstrap's ``chown -R`` over the
+    cache bumps it on every round, which would defeat the reuse.
+    """
     stats: dict[str, list[int]] = {}
     for path in _iter_staged_paths(root):
         if path.is_symlink() or not path.is_file():
             continue
         st = path.stat()
-        stats[path.relative_to(root).as_posix()] = [st.st_size, st.st_mtime_ns]
+        stats[path.relative_to(root).as_posix()] = [
+            st.st_size,
+            st.st_mtime_ns,
+            st.st_ino,
+        ]
     return stats
 
 
@@ -237,7 +246,7 @@ def _finalize(
 ) -> StagedWeights:
     validate_staged_tree(root, require_tokenizer=require_tokenizer)
     # Hashing a multi-TB checkpoint takes tens of minutes on the GPU host, so
-    # reuse the last hash while every file keeps the size and mtime it had then.
+    # reuse the last hash while every file keeps the size, mtime and inode it had.
     # Stats are read before hashing: a file changed mid-hash fails the next match.
     stats = _file_stats(root)
     recorded = _recorded_manifest(

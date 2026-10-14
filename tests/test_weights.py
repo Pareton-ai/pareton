@@ -564,6 +564,43 @@ def test_cache_hit_rehashes_a_changed_file(
     )
 
 
+def test_cache_hit_rehashes_a_replaced_file_with_preserved_mtime(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    import os
+
+    monkeypatch.setattr("bench.weights.snapshot_download", _fake_snapshot_download)
+    staged = stage_weights(_model(), cache_dir=cache_dir)
+    weights = staged.path / "model.safetensors"
+    st = weights.stat()
+    replacement = staged.path / "replacement.tmp"
+    replacement.write_bytes(b"CHANGED")  # same size as b"WEIGHTS"
+    os.utime(replacement, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(replacement, weights)
+    assert weights.stat().st_mtime_ns == st.st_mtime_ns
+
+    again = stage_weights(_model(), cache_dir=cache_dir)
+    assert again.weights_sha256 != staged.weights_sha256
+
+
+def test_cache_hit_survives_a_noop_chown(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    """Bootstrap re-chowns the cache every round; that alone must not rehash."""
+    import os
+
+    monkeypatch.setattr("bench.weights.snapshot_download", _fake_snapshot_download)
+    staged = stage_weights(_model(), cache_dir=cache_dir)
+    for path in staged.path.rglob("*"):
+        os.chown(path, os.getuid(), os.getgid())
+
+    def no_hashing(path: Path) -> str:
+        raise AssertionError(f"rehashed {path}")
+
+    monkeypatch.setattr("bench.weights.sha256_file", no_hashing)
+    assert stage_weights(_model(), cache_dir=cache_dir) == staged
+
+
 @pytest.mark.parametrize("damage", ["aggregate", "revision", "garbage"])
 def test_cache_hit_ignores_an_untrustworthy_record(
     monkeypatch: pytest.MonkeyPatch, cache_dir: Path, damage: str
