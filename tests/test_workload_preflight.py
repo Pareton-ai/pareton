@@ -21,7 +21,13 @@ def run_check(monkeypatch, tmp_path, engine="sglang", **changes):
         "data": [{"max_model_len": TEST_CONTEXT}],
         **changes,
     }
-    monkeypatch.setattr("bench.workload_preflight.get_json", lambda *_: metadata)
+
+    def get_json(_url, path, **kwargs):
+        reads.append((path, kwargs))
+        return metadata
+
+    reads = []
+    monkeypatch.setattr("bench.workload_preflight.get_json", get_json)
     tokenize = formatter().encode
     monkeypatch.setattr(
         "bench.workload_preflight.post_json",
@@ -35,6 +41,7 @@ def run_check(monkeypatch, tmp_path, engine="sglang", **changes):
         evidence_dir=tmp_path,
         verify_tokenizer=True,
     )
+    return reads
 
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
@@ -70,6 +77,11 @@ def test_a_baseline_that_would_shorten_the_workload_is_rejected(
 ):
     with pytest.raises(EngineError):
         run_check(monkeypatch, tmp_path, **changes)
+
+
+def test_sglang_server_info_waits_out_a_busy_scheduler(monkeypatch, tmp_path):
+    # The 60s default timed out on a Kimi K3 round engine and voided the round.
+    assert run_check(monkeypatch, tmp_path) == [("/server_info", {"timeout": 600})]
 
 
 def test_trusted_token_ids_must_match_not_just_the_token_count(monkeypatch, tmp_path):
