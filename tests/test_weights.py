@@ -527,3 +527,67 @@ def test_invalid_draft_model_is_rejected(draft):
     raw["draft_model"] = draft
     with pytest.raises(RequestValidationError, match="draft_model"):
         validate_bench_request_dict(raw)
+
+
+def test_cache_hit_reuses_the_recorded_hash(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    monkeypatch.setattr("bench.weights.snapshot_download", _fake_snapshot_download)
+    staged = stage_weights(_model(), cache_dir=cache_dir)
+
+    def no_hashing(path: Path) -> str:
+        raise AssertionError(f"rehashed {path}")
+
+    monkeypatch.setattr("bench.weights.sha256_file", no_hashing)
+    assert stage_weights(_model(), cache_dir=cache_dir) == staged
+    # The record sits beside the snapshot, so it never enters the manifest.
+    assert not any("weights-manifest" in e["path"] for e in staged.manifest["files"])
+
+
+def test_cache_hit_rehashes_a_changed_file(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path
+):
+    import os
+
+    monkeypatch.setattr("bench.weights.snapshot_download", _fake_snapshot_download)
+    staged = stage_weights(_model(), cache_dir=cache_dir)
+    weights = staged.path / "model.safetensors"
+    before = weights.stat().st_mtime_ns
+    weights.write_bytes(b"CHANGED")  # same size as b"WEIGHTS"
+    os.utime(weights, ns=(before + 10**9, before + 10**9))
+
+    again = stage_weights(_model(), cache_dir=cache_dir)
+    assert again.weights_sha256 != staged.weights_sha256
+    assert (
+        again.weights_sha256
+        == build_weights_manifest(staged.path, repo="org/model", revision="abcdef1")[1]
+    )
+
+
+@pytest.mark.parametrize("damage", ["aggregate", "revision", "garbage"])
+def test_cache_hit_ignores_an_untrustworthy_record(
+    monkeypatch: pytest.MonkeyPatch, cache_dir: Path, damage: str
+):
+    monkeypatch.setattr("bench.weights.snapshot_download", _fake_snapshot_download)
+    staged = stage_weights(_model(), cache_dir=cache_dir)
+    record_path = staged.path.parent / f"{staged.path.name}.weights-manifest.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    if damage == "aggregate":
+        record["aggregate"] = "sha256:" + "0" * 64
+    elif damage == "revision":
+        record["manifest"]["revision"] = "other"
+    if damage == "garbage":
+        record_path.write_text("{", encoding="utf-8")
+    else:
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    hashed: list[Path] = []
+    real = __import__("bench.weights", fromlist=["sha256_file"]).sha256_file
+
+    def counting(path: Path) -> str:
+        hashed.append(path)
+        return real(path)
+
+    monkeypatch.setattr("bench.weights.sha256_file", counting)
+    assert stage_weights(_model(), cache_dir=cache_dir) == staged
+    assert len(hashed) == 3

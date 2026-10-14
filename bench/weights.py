@@ -132,6 +132,22 @@ def validate_staged_tree(root: Path, *, require_tokenizer: bool = True) -> None:
     assert_complete(root, require_tokenizer=require_tokenizer)
 
 
+def _file_stats(root: Path) -> dict[str, list[int]]:
+    """Size and mtime of every staged file, keyed by its path under ``root``."""
+    stats: dict[str, list[int]] = {}
+    for path in _iter_staged_paths(root):
+        if path.is_symlink() or not path.is_file():
+            continue
+        st = path.stat()
+        stats[path.relative_to(root).as_posix()] = [st.st_size, st.st_mtime_ns]
+    return stats
+
+
+def _aggregate(manifest: dict[str, Any]) -> str:
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def build_weights_manifest(
     root: Path, *, repo: str, revision: str
 ) -> tuple[dict[str, Any], str, int, int]:
@@ -155,10 +171,46 @@ def build_weights_manifest(
         "revision": revision,
         "files": entries,
     }
-    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
-    aggregate = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     total_bytes = sum(int(e["size"]) for e in entries)
-    return manifest, aggregate, len(entries), total_bytes
+    return manifest, _aggregate(manifest), len(entries), total_bytes
+
+
+def _hash_record_path(root: Path) -> Path:
+    # Beside the snapshot, never inside it: the record must not enter its own
+    # manifest or the read-only /model mount.
+    return root.parent / f"{root.name}.weights-manifest.json"
+
+
+def _recorded_manifest(
+    root: Path, stats: dict[str, list[int]], *, repo: str, revision: str
+) -> tuple[dict[str, Any], str] | None:
+    """The manifest hashed last time, if no staged file changed since."""
+    try:
+        record = json.loads(_hash_record_path(root).read_text(encoding="utf-8"))
+        manifest, aggregate = record["manifest"], record["aggregate"]
+        if (
+            record["stats"] != stats
+            or manifest["repo"] != repo
+            or manifest["revision"] != revision
+            or aggregate != _aggregate(manifest)
+        ):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return manifest, aggregate
+
+
+def _write_hash_record(
+    root: Path, stats: dict[str, list[int]], manifest: dict[str, Any], aggregate: str
+) -> None:
+    path = _hash_record_path(root)
+    tmp = path.with_name(path.name + ".tmp")
+    record = {"stats": stats, "manifest": manifest, "aggregate": aggregate}
+    try:
+        tmp.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("could not record weights hash at %s: %s", path, exc)
 
 
 def _rm_tree(path: Path) -> None:
@@ -184,14 +236,28 @@ def _finalize(
     root: Path, model: ModelSpec | DraftModelSpec, *, require_tokenizer: bool = True
 ) -> StagedWeights:
     validate_staged_tree(root, require_tokenizer=require_tokenizer)
-    manifest, aggregate, n_files, total = build_weights_manifest(
-        root, repo=model.hf_repo, revision=model.hf_revision
+    # Hashing a multi-TB checkpoint takes tens of minutes on the GPU host, so
+    # reuse the last hash while every file keeps the size and mtime it had then.
+    # Stats are read before hashing: a file changed mid-hash fails the next match.
+    stats = _file_stats(root)
+    recorded = _recorded_manifest(
+        root, stats, repo=model.hf_repo, revision=model.hf_revision
     )
+    if recorded is not None:
+        manifest, aggregate = recorded
+        logger.info(
+            "reusing weights hash for %s (%d files unchanged)", root, len(stats)
+        )
+    else:
+        manifest, aggregate, _, _ = build_weights_manifest(
+            root, repo=model.hf_repo, revision=model.hf_revision
+        )
+        _write_hash_record(root, stats, manifest, aggregate)
     return StagedWeights(
         path=root,
         weights_sha256=aggregate,
-        num_files=n_files,
-        total_bytes=total,
+        num_files=len(manifest["files"]),
+        total_bytes=sum(int(e["size"]) for e in manifest["files"]),
         manifest=manifest,
     )
 
@@ -260,6 +326,7 @@ def stage_weights(
                 exc,
             )
             _rm_tree(final)
+            _hash_record_path(final).unlink(missing_ok=True)
 
     # Deterministic partial dir so a later bench on the same pod resumes.
     partial_root = cache_root / ".partial"
@@ -276,6 +343,8 @@ def stage_weights(
         raise
 
     final.parent.mkdir(parents=True, exist_ok=True)
+    # A fresh tree is always hashed: timestamps alone may not tell it apart.
+    _hash_record_path(final).unlink(missing_ok=True)
     if final.exists():
         _rm_tree(final)
     try:
