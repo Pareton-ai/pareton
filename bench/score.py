@@ -135,8 +135,9 @@ def baseline_drift_ceiling(rule: Mapping[str, Any], default: float) -> float:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
-        or not math.isfinite(value)
+        # Range first: math.isfinite overflows on an int too large for a float.
         or not 0 < value <= 1
+        or not math.isfinite(value)
     ):
         raise ValueError("scoring_rule.baseline_drift_ceiling must be in (0, 1]")
     return float(value)

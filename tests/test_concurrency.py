@@ -261,7 +261,9 @@ def test_drift_ceiling_is_pinned_only_when_the_rule_names_one():
     assert rule["baseline_drift_ceiling"] == 0.15
 
 
-@pytest.mark.parametrize("ceiling", [0, -0.1, 1.5, True, float("nan"), "0.15"])
+@pytest.mark.parametrize(
+    "ceiling", [0, -0.1, 1.5, True, float("nan"), float("inf"), 10**400, "0.15"]
+)
 def test_invalid_drift_ceiling(ceiling):
     with pytest.raises(ValueError, match="baseline_drift_ceiling"):
         validate_scoring_rule(
