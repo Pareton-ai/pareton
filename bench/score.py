@@ -236,6 +236,49 @@ def summarize_prompt_scores(
     }
 
 
+def extrapolate_short_completions(
+    rows: Sequence[Mapping[str, Any]],
+    reference_tokens: Mapping[str, int],
+    *,
+    tolerance: float = DEFAULT_SPEED_TOLERANCE,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Charge a short completion as if it had produced the baseline's tokens.
+
+    A request that stops below the tolerance gate leaves the tier early and
+    frees its batch slot for the rest. Without this, ending the slowest
+    request in each tier would buy weighted speed credit for the cost of the
+    flat failure penalty alone. Its completion offset is scaled from its own
+    admission by ``reference_tokens / completion_tokens``, so an honest answer
+    that comes out slightly short barely moves, while an early stop is charged
+    roughly a full-length decode at the speed it actually achieved.
+
+    Returns adjusted copies of the rows and the request ids that were scaled.
+    """
+    adjusted, scaled = [], set()
+    for row in rows:
+        rid = str(row["request_id"])
+        reference = reference_tokens.get(rid)
+        tokens = int(row.get("completion_tokens") or 0)
+        if (
+            reference is None
+            or row.get("error")
+            or tokens >= _min_aligned_tokens(int(reference), tolerance)
+        ):
+            adjusted.append(dict(row))
+            continue
+        origin = row.get("admission_offset_ms", row["group_start_offset_ms"])
+        elapsed = row["protocol_completion_offset_ms"] - origin
+        adjusted.append(
+            {
+                **row,
+                "protocol_completion_offset_ms": origin
+                + elapsed * int(reference) / max(tokens, 1),
+            }
+        )
+        scaled.add(rid)
+    return adjusted, scaled
+
+
 def _median_e2e_speedup(
     rule: Mapping[str, Any],
     baseline: Mapping[str, PromptTiming],
@@ -340,6 +383,7 @@ def _weighted_tier_completion_speedup(
             "candidate_completion_s": ct,
             "speedup": 1 - ct / bt,
             "scheduled_requests": len(ids),
+            "extrapolated_request_ids": list(c.get("extrapolated_request_ids", [])),
         }
     if seen != set(baseline) or set(candidate) - seen:
         raise ValueError("tier membership does not match eligible request timings")

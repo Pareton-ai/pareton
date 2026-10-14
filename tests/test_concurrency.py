@@ -846,3 +846,59 @@ def test_long_completion_uses_configured_absolute_deadline(
     else:
         with pytest.raises(EngineError, match="absolute deadline"):
             complete()
+
+
+def _tier_rows(ends_s, tokens, *, admission_s=None):
+    return [
+        {
+            "request_id": f"2k-{i}",
+            "rep": 1,
+            "input_length_group": "2k",
+            "group_start_offset_ms": 0.0,
+            "admission_offset_ms": 1000.0 * (admission_s or [0] * len(ends_s))[i],
+            "protocol_completion_offset_ms": 1000.0 * end,
+            "completion_tokens": tok,
+        }
+        for i, (end, tok) in enumerate(zip(ends_s, tokens))
+    ]
+
+
+def test_ending_the_tier_straggler_early_buys_no_tier_speed():
+    from bench.score import extrapolate_short_completions
+
+    reference = {"2k-0": 3000, "2k-1": 3500, "2k-2": 4000, "2k-3": 5000}
+    baseline = tier_completion_metrics(
+        _tier_rows([60, 70, 80, 100], list(reference.values())), 1, ["2k"]
+    )
+    # Same decode speed, but the slowest request is stopped after 10 tokens.
+    cheat = _tier_rows([60, 70, 80, 0.2], [3000, 3500, 4000, 10])
+    assert tier_completion_metrics(cheat, 1, ["2k"])["2k"]["completion_s"] == 80
+
+    adjusted, scaled = extrapolate_short_completions(cheat, reference)
+    charged = tier_completion_metrics(adjusted, 1, ["2k"])
+    assert scaled == {"2k-3"}
+    assert charged["2k"]["completion_s"] == pytest.approx(
+        baseline["2k"]["completion_s"]
+    )
+
+
+def test_honest_completions_within_tolerance_are_untouched():
+    from bench.score import extrapolate_short_completions
+
+    reference = {"2k-0": 5000, "2k-1": 5000}
+    # 4600 >= 90% of 5000 passes the gate; 4400 is a natural stop just under it.
+    rows = _tier_rows([92, 88], [4600, 4400])
+    adjusted, scaled = extrapolate_short_completions(rows, reference)
+    assert scaled == {"2k-1"}
+    assert adjusted[0] == rows[0]
+    assert adjusted[1]["protocol_completion_offset_ms"] == pytest.approx(100_000)
+    assert rows[1]["protocol_completion_offset_ms"] == 88_000
+
+
+def test_extrapolation_scales_from_the_request_admission():
+    from bench.score import extrapolate_short_completions
+
+    rows = _tier_rows([30], [1000], admission_s=[20])
+    adjusted, _ = extrapolate_short_completions(rows, {"2k-0": 4000})
+    # 10s of service for 1000 tokens -> 40s for 4000, starting at 20s.
+    assert adjusted[0]["protocol_completion_offset_ms"] == pytest.approx(60_000)
