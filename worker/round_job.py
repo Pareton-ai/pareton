@@ -24,6 +24,7 @@ from bench.sampler import (
     generate_trace,
     parse_sampling_rule,
 )
+from bench.score import baseline_drift_ceiling
 from bench.validate import (
     RequestValidationError,
     extract_image_digest,
@@ -925,7 +926,9 @@ def _process_round(
         rank_entries,
         epsilon=float(config.OVERTAKE_EPSILON),
         drift=drift_f,
-        drift_ceiling=float(config.BASELINE_DRIFT_CEILING),
+        drift_ceiling=baseline_drift_ceiling(
+            req.get("scoring_rule") or {}, config.BASELINE_DRIFT_CEILING
+        ),
         leader_score=incumbent_score,
     )
     if decision.void:
