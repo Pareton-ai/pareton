@@ -964,3 +964,48 @@ def test_process_round_voids_on_drift_when_the_harness_stops_early(
     alerted = "ALERT round_destroy_failed" in caplog.text
     assert alerted == (exit_code == EXIT_DESTROY_FAILED)
     assert voided == [("baseline_drift", "baseline drift 0.1800 exceeds ceiling 0.1")]
+
+
+def test_process_round_alerts_on_a_failed_teardown_without_a_report(
+    tmp_path, monkeypatch, caplog
+):
+    """A teardown failure with no report still raises the billing alert."""
+    from pathlib import Path
+
+    import worker.round_job as rj
+
+    campaign = _campaign()
+    voided: list[str] = []
+
+    monkeypatch.setattr(rj, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(rj, "list_round_entries", lambda _rid: _entries())
+    monkeypatch.setattr(rj, "remaining_round_budget_s", lambda *a, **k: 100.0)
+    monkeypatch.setattr(rj, "set_round_phase", lambda **k: True)
+    monkeypatch.setattr(rj, "touch_round_heartbeat", lambda **k: True)
+    monkeypatch.setattr(
+        rj, "void_round", lambda rid, reason, detail="": voided.append(reason)
+    )
+
+    def fake_materialize(_row, _campaign, dest_dir, **_k):
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        trace = dest / "trace.json"
+        _write_trace(trace)
+        return trace
+
+    def fake_build(_row, _campaign, _entries, *, task_id, trace_path):
+        return {"task_id": task_id}
+
+    monkeypatch.setattr(rj, "materialize_round_trace", fake_materialize)
+    monkeypatch.setattr(rj, "build_round_request", fake_build)
+
+    outcome = rj.process_round(
+        _round_row(),
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=lambda *_a, **_k: EXIT_DESTROY_FAILED,
+    )
+
+    assert outcome == "pod_failed"
+    assert "ALERT round_destroy_failed" in caplog.text
+    assert voided == ["pod_failed"]

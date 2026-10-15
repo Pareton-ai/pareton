@@ -869,6 +869,16 @@ def _process_round(
                 reason = VOID_ROUND_TIMEOUT if timed_out else VOID_POD_FAILED
                 raise RoundInfraError(reason, str(exc)) from exc
 
+    if exit_code == EXIT_DESTROY_FAILED:
+        # Raised before reading the report, so a teardown failure is flagged
+        # whether the round then settles, voids on drift, or voids unbound.
+        logger.error(
+            "ALERT round_destroy_failed round=%s campaign=%s "
+            "(pod/volume may still be billing)",
+            round_id,
+            campaign_id,
+        )
+
     report_path = output_dir / "bench_report.json"
     has_report = report_path.is_file()
     report: dict[str, Any] | None = None
@@ -891,14 +901,6 @@ def _process_round(
             trace_sha256=str(round_row["sampled_trace_sha256"]),
         )
         bound = True
-
-    if bound and exit_code == EXIT_DESTROY_FAILED:
-        logger.error(
-            "ALERT round_destroy_failed round=%s campaign=%s "
-            "(pod/volume may still be billing); using the bound report",
-            round_id,
-            campaign_id,
-        )
 
     if bound and report is not None and report.get("error_role") == "baseline_drift":
         # The harness stopped after its two baseline runs because they
