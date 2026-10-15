@@ -902,3 +902,23 @@ def test_extrapolation_scales_from_the_request_admission():
     adjusted, _ = extrapolate_short_completions(rows, {"2k-0": 4000})
     # 10s of service for 1000 tokens -> 40s for 4000, starting at 20s.
     assert adjusted[0]["protocol_completion_offset_ms"] == pytest.approx(60_000)
+
+
+def test_equal_throughput_completions_of_unequal_length_are_charged_one_sided():
+    from bench.score import extrapolate_short_completions
+
+    # Baseline: 100 tokens in 100 s. Every candidate below decodes at the
+    # same 1 token/s, so only the token count differs.
+    reference = {"2k-0": 100}
+    cases = {
+        80: 100_000,  # below the 90% gate: charged the baseline's length
+        95: 95_000,  # within the gate: measured time kept
+        120: 120_000,  # longer than the baseline: never scaled down
+    }
+    for tokens, expected_ms in cases.items():
+        rows = _tier_rows([tokens], [tokens])
+        adjusted, scaled = extrapolate_short_completions(rows, reference)
+        assert adjusted[0]["protocol_completion_offset_ms"] == pytest.approx(
+            expected_ms
+        )
+        assert scaled == ({"2k-0"} if tokens == 80 else set())

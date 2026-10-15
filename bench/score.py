@@ -252,6 +252,13 @@ def extrapolate_short_completions(
     that comes out slightly short barely moves, while an early stop is charged
     roughly a full-length decode at the speed it actually achieved.
 
+    The adjustment is deliberately one-sided. A candidate that writes more
+    than the baseline keeps its measured time and is not scaled down, and
+    neither are the baseline's own rows. Fewer tokens is the only direction
+    a patch can steer to buy time, so only that direction is charged. Scaling
+    the whole admission-to-completion interval also scales prefill, which
+    makes the charge slightly conservative for short stops.
+
     Returns adjusted copies of the rows and the request ids that were scaled.
     """
     adjusted, scaled = [], set()
