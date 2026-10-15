@@ -352,7 +352,10 @@ class BenchRequest:
                 ceiling_raw, (int, float)
             ):
                 raise ValueError("baseline_drift_ceiling must be a number")
-            ceiling = float(ceiling_raw)
+            try:
+                ceiling = float(ceiling_raw)
+            except OverflowError as exc:
+                raise ValueError("baseline_drift_ceiling is out of range") from exc
             if not math.isfinite(ceiling) or ceiling <= 0:
                 raise ValueError("baseline_drift_ceiling must be positive and finite")
         return cls(

@@ -892,6 +892,14 @@ def _process_round(
         )
         bound = True
 
+    if bound and exit_code == EXIT_DESTROY_FAILED:
+        logger.error(
+            "ALERT round_destroy_failed round=%s campaign=%s "
+            "(pod/volume may still be billing); using the bound report",
+            round_id,
+            campaign_id,
+        )
+
     if bound and report is not None and report.get("error_role") == "baseline_drift":
         # The harness stopped after its two baseline runs because they
         # disagreed by more than drift_ceiling(), before any candidate ran.
@@ -906,14 +914,6 @@ def _process_round(
     )
     if void_reason is not None:
         raise RoundInfraError(void_reason, f"exit_code={exit_code}")
-
-    if exit_code == EXIT_DESTROY_FAILED:
-        logger.error(
-            "ALERT round_destroy_failed round=%s campaign=%s "
-            "(pod/volume may still be billing); settling the bound report",
-            round_id,
-            campaign_id,
-        )
 
     assert report is not None
     results = entry_results_from_report(entries, report)

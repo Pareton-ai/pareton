@@ -128,7 +128,7 @@ def test_engine_error_report_carries_the_drift(tmp_path):
     assert report["error"] == "baseline drift 0.1800 exceeds ceiling 0.1"
 
 
-@pytest.mark.parametrize("bad", [True, "0.1", 0, -0.1, float("inf")])
+@pytest.mark.parametrize("bad", [True, "0.1", 0, -0.1, float("inf"), 10**400])
 def test_request_rejects_a_bad_drift_ceiling(bad):
     req, _ = workload()
     raw = json.loads(json.dumps(req.to_dict(), default=str))

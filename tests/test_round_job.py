@@ -872,10 +872,12 @@ def test_an_already_settled_round_is_not_voided_again(monkeypatch):
     assert seen == []
 
 
+@pytest.mark.parametrize("exit_code", [3, EXIT_DESTROY_FAILED])
 def test_process_round_voids_on_drift_when_the_harness_stops_early(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog, exit_code
 ):
-    """A harness drift stop voids as baseline_drift, not pod_failed."""
+    """A harness drift stop voids as baseline_drift, not pod_failed, and a
+    failed teardown still raises its billing alert."""
     import json as _json
     from pathlib import Path
 
@@ -946,7 +948,7 @@ def test_process_round_voids_on_drift_when_the_harness_stops_early(
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         (out / "bench_report.json").write_text(_json.dumps(report))
-        return 3
+        return exit_code
 
     monkeypatch.setattr(rj, "materialize_round_trace", fake_materialize)
     monkeypatch.setattr(rj, "build_round_request", fake_build)
@@ -959,4 +961,6 @@ def test_process_round_voids_on_drift_when_the_harness_stops_early(
     )
 
     assert outcome == "baseline_drift"
+    alerted = "ALERT round_destroy_failed" in caplog.text
+    assert alerted == (exit_code == EXIT_DESTROY_FAILED)
     assert voided == [("baseline_drift", "baseline drift 0.1800 exceeds ceiling 0.1")]
