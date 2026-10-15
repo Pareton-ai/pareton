@@ -20,13 +20,14 @@ from campaign.store import (
     insert_submission,
 )
 from db.connection import db_connection
-from round.create import create_due_rounds, try_create_round
+from round.create import create_due_rounds, dedupe_by_digest, try_create_round
 from round.rank import EVENT_OVERTAKEN, EVENT_SEATED, EVENT_VACATED, RankDecision
 from round.store import (
     VOID_POD_FAILED,
     campaigns_with_queue,
     claim_pending_round,
     complete_round,
+    create_round,
     disqualify_campaign_hotkey,
     get_leader,
     list_idle_seated_leaders,
@@ -817,6 +818,57 @@ def _history(campaign_id: UUID) -> list[tuple]:
                 (r[0], str(r[1]) if r[1] else None, str(r[2]) if r[2] else None)
                 for r in cur.fetchall()
             ]
+
+
+def _set_campaign_status(campaign_id: UUID, status: str) -> None:
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE campaigns SET status = %s WHERE id = %s",
+                (status, str(campaign_id)),
+            )
+
+
+def _create_round(campaign_id: UUID) -> dict | None:
+    """create_round without trace sampling, which needs the HF hub."""
+    return create_round(
+        campaign_id=campaign_id,
+        cohort_limit=5,
+        dedupe=dedupe_by_digest,
+        gpu_sku="H200",
+        baseline_image_ref="ghcr.io/pareton-ai/pareton-baseline@" + ENGINE_DIGEST,
+        seed_block=990,
+        seed_block_hash="0x" + "0" * 64,
+        seed_hex="0" * 64,
+        sampled_trace_sha256="sha256:" + "e" * 64,
+        sampling_receipt={},
+        scoring_rule={"name": "median_e2e_speedup"},
+    )
+
+
+def test_closed_campaign_gets_no_new_round():
+    campaign_id = _campaign()
+    sid = _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    _set_campaign_status(campaign_id, "closed")
+    assert str(campaign_id) not in {
+        str(q["campaign_id"]) for q in campaigns_with_queue()
+    }
+    # The watcher read the queue before the campaign closed.
+    assert _create_round(campaign_id) is None
+    assert _rounds(campaign_id) == []
+    assert _latest_state(sid)[0] == "bench_queued"
+
+
+def test_pending_round_of_a_closed_campaign_is_not_claimed():
+    campaign_id = _campaign()
+    _queued(campaign_id, image_ref=IMAGE_A, block=10, waited_s=40_000)
+    assert _create_round(campaign_id) is not None
+    _set_campaign_status(campaign_id, "closed")
+    assert claim_pending_round() is None
+    assert [r["status"] for r in _rounds(campaign_id)] == ["pending"]
+    _set_campaign_status(campaign_id, "open")
+    claimed = claim_pending_round()
+    assert claimed is not None and str(claimed["campaign_id"]) == str(campaign_id)
 
 
 def test_claim_sets_started_at_and_heartbeat_at():
