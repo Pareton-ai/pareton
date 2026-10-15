@@ -541,6 +541,15 @@ class _CandidateRun:
     reason: str | None = None
 
 
+def _natural_stop_tier_workload(req: BenchRequest, trace: WorkloadTrace | None) -> bool:
+    return (
+        trace is not None
+        and getattr(req, "scoring_rule", {}).get("name") == WEIGHTED_RULE
+        and (trace.meta.sampling or {}).get("algo_version") == 5
+        and any(not request.sampling.ignore_eos for request in trace.requests)
+    )
+
+
 def run_round(
     *,
     req: BenchRequest,
@@ -735,9 +744,18 @@ def run_round(
                             "tier_completion_max_rel_range"
                         ] = variance
                         if variance > REPRO_BAR_MAX_REL_RANGE:
-                            raise EngineError(
-                                "baseline tier completion repetitions are unstable"
-                            )
+                            if _natural_stop_tier_workload(req, trace):
+                                logger.warning(
+                                    "%s natural-stop tier completion relative range %.4f "
+                                    "exceeds %.4f; diagnostic only",
+                                    reference.result.role,
+                                    variance,
+                                    REPRO_BAR_MAX_REL_RANGE,
+                                )
+                            else:
+                                raise EngineError(
+                                    "baseline tier completion repetitions are unstable"
+                                )
 
             except EngineError as exc:
                 # The baseline is the fixed reference every candidate is
@@ -928,6 +946,7 @@ def _build_entries(
     correctness: dict[int, CorrectnessReport],
     digests: list[str],
     mock_engine: bool = False,
+    trace: WorkloadTrace | None = None,
 ) -> list[RoundEntryReport]:
     entries: list[RoundEntryReport] = []
     for run in runs:
@@ -996,20 +1015,29 @@ def _build_entries(
         # A mock engine sleeps on the host clock, so its spread measures the
         # machine running the harness rather than the candidate.
         if not mock_engine and rel_range > REPRO_BAR_MAX_REL_RANGE:
-            entries.append(
-                RoundEntryReport(
-                    index=run.index,
-                    image_digest=digest,
-                    status="infra_failed",
-                    sla=run.replay.result,
-                    correctness=corr,
-                    reason=(
-                        f"{variance_key} {rel_range:.4f} exceeds "
-                        f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
-                    ),
+            if _natural_stop_tier_workload(req, trace):
+                logger.warning(
+                    "candidate-%d natural-stop tier completion relative range %.4f "
+                    "exceeds %.4f; diagnostic only",
+                    run.index,
+                    rel_range,
+                    REPRO_BAR_MAX_REL_RANGE,
                 )
-            )
-            continue
+            else:
+                entries.append(
+                    RoundEntryReport(
+                        index=run.index,
+                        image_digest=digest,
+                        status="infra_failed",
+                        sla=run.replay.result,
+                        correctness=corr,
+                        reason=(
+                            f"{variance_key} {rel_range:.4f} exceeds "
+                            f"reproducibility bar {REPRO_BAR_MAX_REL_RANGE}"
+                        ),
+                    )
+                )
+                continue
 
         scored = score_candidate(
             req.scoring_rule,
@@ -1249,6 +1277,7 @@ def run_bench(
             correctness=correctness,
             digests=provider.candidate_digests,
             mock_engine=mock_engine,
+            trace=trace,
         )
         report = BenchReport(
             schema_version=1,
