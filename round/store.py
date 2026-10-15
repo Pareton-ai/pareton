@@ -71,7 +71,7 @@ class CampaignHotkeyWaiver:
 
 
 def campaigns_with_queue() -> list[dict[str, Any]]:
-    """Campaigns holding queued work and no live round.
+    """Open campaigns holding queued work and no live round.
 
     A submission is queued when its newest event is ``bench_queued``; that
     event's timestamp is the wait clock the starvation trigger reads. A
@@ -86,6 +86,7 @@ def campaigns_with_queue() -> list[dict[str, Any]]:
                        COUNT(*) AS queued,
                        MIN(latest.created_at) AS oldest_queued_at
                 FROM submissions s
+                JOIN campaigns c ON c.id = s.campaign_id AND c.status = 'open'
                 JOIN LATERAL (
                     SELECT e.state, e.created_at
                     FROM submission_events e
@@ -136,9 +137,13 @@ def create_round(
         with db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT 1 FROM campaigns WHERE id = %s FOR UPDATE",
+                    "SELECT status FROM campaigns WHERE id = %s FOR UPDATE",
                     (str(campaign_id),),
                 )
+                campaign_row = cur.fetchone()
+                # Closed after the queue was read: a round would only void.
+                if campaign_row is None or campaign_row["status"] != "open":
+                    return None
                 cur.execute(
                     """
                     SELECT 1 FROM rounds
@@ -358,7 +363,10 @@ def infra_failed_follow_up_states(had_prior: bool) -> tuple[str, ...]:
 
 
 def claim_pending_round() -> dict[str, Any] | None:
-    """Claim the oldest pending round. started_at and heartbeat_at are set here.
+    """Claim the oldest pending round of an open campaign.
+
+    started_at and heartbeat_at are set here. A closed campaign's pending round
+    stays pending: running it would only void and requeue its challengers.
 
     The PAR-79 reaper keys on COALESCE(heartbeat_at, started_at). A running
     round with both NULL is unreapable, so they land in the same statement as
@@ -375,11 +383,13 @@ def claim_pending_round() -> dict[str, Any] | None:
                     phase = NULL,
                     progress = NULL
                 WHERE id = (
-                    SELECT id FROM rounds
-                    WHERE status = 'pending'
-                      AND (retry_after IS NULL OR retry_after <= now())
-                    ORDER BY created_at
-                    FOR UPDATE SKIP LOCKED
+                    SELECT r.id FROM rounds r
+                    JOIN campaigns c ON c.id = r.campaign_id
+                    WHERE r.status = 'pending'
+                      AND c.status = 'open'
+                      AND (r.retry_after IS NULL OR r.retry_after <= now())
+                    ORDER BY r.created_at
+                    FOR UPDATE OF r SKIP LOCKED
                     LIMIT 1
                 )
                 RETURNING id, campaign_id, ordinal, gpu_sku,
