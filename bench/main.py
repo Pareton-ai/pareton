@@ -79,7 +79,7 @@ from bench.schemas import (
     RoundEntryReport,
     WorkloadTrace,
 )
-from bench.score import score_candidate
+from bench.score import extrapolate_short_completions, score_candidate
 from bench.sla_bench import (
     REPRO_BAR_MAX_REL_RANGE,
     EngineReplay,
@@ -813,6 +813,14 @@ def run_round(
                         index,
                     )
                 continue
+            if concurrent:
+                replay.result.tier_completion = _charged_tier_completion(
+                    replay,
+                    baseline=baseline,
+                    layout=layout,
+                    repetitions=req.sla_bench.repetitions,
+                    input_tiers=workload.get("input_tiers"),
+                )
             runs.append(_CandidateRun(index=index, status="scored", replay=replay))
             pending.append(
                 PendingCorrectness(
@@ -883,6 +891,33 @@ def run_round(
     if excluded_prompts:
         baseline = replace(baseline, excluded_prompts=excluded_prompts)
     return baseline, drift, runs, correctness
+
+
+def _charged_tier_completion(
+    replay: EngineReplay,
+    *,
+    baseline: EngineReplay | None,
+    layout: OutputLayout,
+    repetitions: int,
+    input_tiers: list[str] | None,
+) -> dict[str, Any]:
+    """Candidate tier durations with short completions charged at full length.
+
+    See ``bench.score.extrapolate_short_completions``. The reference is the
+    baseline's latency-median token count, the same one the scorer's
+    tolerance gate uses for ``candidate_failed``.
+    """
+    if baseline is None:
+        raise EngineError("candidate replay ran before the baseline reference")
+    rows = read_replay_rows(layout.sla_bench_dir / replay.result.role, repetitions)
+    adjusted, scaled = extrapolate_short_completions(
+        rows,
+        {rid: t.completion_tokens for rid, t in baseline.result.timings.items()},
+    )
+    tiers = tier_completion_metrics(adjusted, repetitions, input_tiers)
+    for tier in tiers.values():
+        tier["extrapolated_request_ids"] = sorted(scaled & set(tier["request_ids"]))
+    return tiers
 
 
 def _build_entries(
