@@ -142,6 +142,21 @@ def test_build_round_request_maps_candidates_in_entry_order(tmp_path):
     assert "perf_screen" not in req
 
 
+def test_build_round_request_carries_the_settlement_drift_ceiling(
+    tmp_path, monkeypatch
+):
+    """The harness must stop on the same ceiling settlement would void on."""
+    monkeypatch.setattr(config, "BASELINE_DRIFT_CEILING", 0.1)
+    trace = tmp_path / "trace.json"
+    raw = _write_trace(trace)
+    row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    req = build_round_request(
+        row, _campaign(), _entries(), task_id=str(uuid4()), trace_path=str(trace)
+    )
+    assert req["baseline_drift_ceiling"] == 0.1
+    assert req["baseline_drift_ceiling"] == round_job.drift_ceiling()
+
+
 def test_build_round_request_names_the_leader_candidate(tmp_path):
     """The harness short-circuits a doomed round on this index."""
     trace = tmp_path / "trace.json"
@@ -855,3 +870,93 @@ def test_an_already_settled_round_is_not_voided_again(monkeypatch):
 
     round_job._void({"id": "r1", "campaign_id": "c1", "ordinal": 7}, "pod_failed", "x")
     assert seen == []
+
+
+def test_process_round_voids_on_drift_when_the_harness_stops_early(
+    tmp_path, monkeypatch
+):
+    """A harness drift stop voids as baseline_drift, not pod_failed."""
+    import json as _json
+    from pathlib import Path
+
+    import worker.round_job as rj
+
+    campaign = _campaign()
+    captured: dict = {}
+    voided: list[tuple] = []
+
+    monkeypatch.setattr(rj, "get_campaign", lambda _cid: campaign)
+    monkeypatch.setattr(rj, "list_round_entries", lambda _rid: _entries())
+    monkeypatch.setattr(rj, "remaining_round_budget_s", lambda *a, **k: 100.0)
+    monkeypatch.setattr(rj, "set_round_phase", lambda **k: True)
+    monkeypatch.setattr(rj, "touch_round_heartbeat", lambda **k: True)
+    monkeypatch.setattr(
+        rj, "void_round", lambda rid, reason, detail="": voided.append((reason, detail))
+    )
+    monkeypatch.setattr(
+        rj, "complete_round", lambda **k: pytest.fail("a stopped round settled")
+    )
+
+    def fake_materialize(_row, _campaign, dest_dir, **_k):
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        trace = dest / "trace.json"
+        _write_trace(trace)
+        return trace
+
+    def fake_build(_row, _campaign, _entries, *, task_id, trace_path):
+        captured["task_id"] = task_id
+        return {
+            "task_id": task_id,
+            "engines": {
+                "baseline": {"image": BASELINE_REF},
+                "candidates": [{"image": CAND_A_REF}, {"image": CAND_B_REF}],
+            },
+        }
+
+    def fake_bench(request_path, output_dir, **_k):
+        request_bytes = Path(request_path).read_bytes()
+        report = {
+            "schema_version": 1,
+            "task_id": captured["task_id"],
+            "verdict": "error",
+            "started_at": "t0",
+            "finished_at": "t1",
+            "environment": {
+                "gpu": [],
+                "driver_version": "",
+                "cuda_version": "",
+                "docker_version": "",
+                "harness_version": "",
+                "hostname_hash": "",
+            },
+            "inputs_fingerprint": {
+                "baseline_image_digest": BASELINE_DIGEST,
+                "candidate_image_digest": [CAND_A, CAND_B],
+                "model_repo": "Qwen/Qwen2.5-7B-Instruct",
+                "model_revision": HF_REV,
+                "model_weights_sha256": "sha256:" + "0" * 64,
+                "trace_sha256": TRACE_SHA,
+                "request_sha256": sha256_bytes(request_bytes),
+            },
+            "error": "baseline drift 0.1800 exceeds ceiling 0.1",
+            "error_role": "baseline_drift",
+            "baseline_drift": 0.18,
+        }
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "bench_report.json").write_text(_json.dumps(report))
+        return 3
+
+    monkeypatch.setattr(rj, "materialize_round_trace", fake_materialize)
+    monkeypatch.setattr(rj, "build_round_request", fake_build)
+
+    outcome = rj.process_round(
+        _round_row(),
+        mock_bench=True,
+        work_root=tmp_path / "work",
+        run_bench_fn=fake_bench,
+    )
+
+    assert outcome == "baseline_drift"
+    assert voided == [("baseline_drift", "baseline drift 0.1800 exceeds ceiling 0.1")]

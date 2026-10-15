@@ -86,6 +86,22 @@ class EngineError(Exception):
         self.error_role = error_role
 
 
+class BaselineDriftError(EngineError):
+    """The two opening baseline runs disagree by more than the round's ceiling.
+
+    Raised before any candidate starts, so a round that settlement would void
+    on drift does not spend its candidate legs first.
+    """
+
+    def __init__(self, drift: float, ceiling: float) -> None:
+        super().__init__(
+            f"baseline drift {drift:.4f} exceeds ceiling {ceiling:g}",
+            error_role="baseline_drift",
+        )
+        self.drift = drift
+        self.ceiling = ceiling
+
+
 class EngineCrashedError(EngineError):
     """The engine process exited before becoming healthy.
 

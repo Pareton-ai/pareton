@@ -40,7 +40,12 @@ from gpu.errors import GpuError, NoCapacityError, ProvisionError
 from gpu.orchestrate import EXIT_DESTROY_FAILED, run_bench_on_pod
 from gpu.types import PodSpec
 from observability import events as obs
-from round.rank import VOID_LEADER_INFRA_FAILED, Entry, rank_round
+from round.rank import (
+    VOID_BASELINE_DRIFT,
+    VOID_LEADER_INFRA_FAILED,
+    Entry,
+    rank_round,
+)
 from round.store import (
     VOID_LEADER_IMAGE_MISSING,
     VOID_POD_FAILED,
@@ -273,6 +278,11 @@ def trace_request_count(trace_path: str | Path) -> int:
     return len(requests)
 
 
+def drift_ceiling() -> float:
+    """The baseline drift ceiling, shared by the harness request and settlement."""
+    return float(config.BASELINE_DRIFT_CEILING)
+
+
 def build_round_request(
     round_row: dict[str, Any],
     campaign: Any,
@@ -430,6 +440,7 @@ def build_round_request(
         "scoring_rule": dict(scoring_rule),
         "hf_token_env": "HF_TOKEN",
         "leader_candidate_index": leader_candidate_index,
+        "baseline_drift_ceiling": drift_ceiling(),
     }
     draft = bench.get("draft_model")
     if draft is not None:
@@ -881,6 +892,11 @@ def _process_round(
         )
         bound = True
 
+    if bound and report is not None and report.get("error_role") == "baseline_drift":
+        # The harness stopped after its two baseline runs because they
+        # disagreed by more than drift_ceiling(), before any candidate ran.
+        raise RoundInfraError(VOID_BASELINE_DRIFT, str(report.get("error") or ""))
+
     void_reason = classify_round_failure(
         provision_error=provision_error,
         timed_out=timed_out,
@@ -925,7 +941,7 @@ def _process_round(
         rank_entries,
         epsilon=float(config.OVERTAKE_EPSILON),
         drift=drift_f,
-        drift_ceiling=float(config.BASELINE_DRIFT_CEILING),
+        drift_ceiling=drift_ceiling(),
         leader_score=incumbent_score,
     )
     if decision.void:
