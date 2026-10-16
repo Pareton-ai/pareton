@@ -39,6 +39,7 @@ def test_fixture_is_the_c32_contract():
     assert rule == fixture
     assert (rule["n_prompts"], rule["request_concurrency"]) == (32, 32)
     assert rule["max_baseline_prompt_drops"] == 8
+    assert rule["request_timeout_s"] == 1200
     assert FIELDS["bench"]["correctness"]["num_prompts"] == 32
 
 

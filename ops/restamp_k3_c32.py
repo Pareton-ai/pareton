@@ -3,8 +3,9 @@
 Qualification is a per-row property: each pooled row produced enough clean output
 at both temperature endpoints. It does not depend on how many rows a round draws
 or how many run at once. This keeps the qualified pool and repetitions unchanged
-and only rewrites n_prompts, request_concurrency, max_baseline_prompt_drops and
-the correctness prompt count, then re-hashes the contract against the fixture.
+and only rewrites n_prompts, request_concurrency, max_baseline_prompt_drops,
+request_timeout_s (600 to 1200 s) and the correctness prompt count, then
+re-hashes the contract against the fixture.
 
 It first proves the source rule was qualified against exactly the current K3
 fixture apart from those fields. A pool of 32 rows (8 per tier) means every
@@ -37,6 +38,7 @@ SOURCE_PINS = {
     "n_prompts": 16,
     "request_concurrency": 16,
     "max_baseline_prompt_drops": 4,
+    "request_timeout_s": 600.0,
 }
 SOURCE_CORRECTNESS_PROMPTS = 16
 

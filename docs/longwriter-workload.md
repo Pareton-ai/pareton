@@ -34,7 +34,8 @@ Changing them invalidates the old receipt. The exact PRO6000 four-to-two tier
 reduction supports [verified evidence reuse](../ops/pro6000-qualification-reuse.md)
 when execution/generation pins are unchanged; other changes require fresh
 qualification. Both paths require a new shadow run.
-Kimi K3 runs 32 prompts (eight per tier) at C32 with up to eight drops. A rule
+Kimi K3 runs 32 prompts (eight per tier) at C32 with up to eight drops and a
+1200-second request timeout. A rule
 qualified for its earlier 16-prompt C16 contract keeps its pool and is re-hashed
 by `ops/restamp_k3_c32.py`, which refuses any other pin change. A 32-row pool means
 every round replays all 32 rows in a new order with new temperatures.
