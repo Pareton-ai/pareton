@@ -6,7 +6,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,7 @@ from bench.sampler import (
     generate_trace,
     parse_sampling_rule,
 )
+from bench.score import baseline_drift_ceiling
 from bench.validate import (
     RequestValidationError,
     extract_image_digest,
@@ -278,9 +279,12 @@ def trace_request_count(trace_path: str | Path) -> int:
     return len(requests)
 
 
-def drift_ceiling() -> float:
-    """The baseline drift ceiling, shared by the harness request and settlement."""
-    return float(config.BASELINE_DRIFT_CEILING)
+def drift_ceiling(scoring_rule: Mapping[str, Any]) -> float:
+    """The baseline drift ceiling, shared by the harness request and settlement.
+
+    The campaign's scoring rule can pin its own; otherwise the validator default.
+    """
+    return baseline_drift_ceiling(scoring_rule, config.BASELINE_DRIFT_CEILING)
 
 
 def build_round_request(
@@ -440,7 +444,7 @@ def build_round_request(
         "scoring_rule": dict(scoring_rule),
         "hf_token_env": "HF_TOKEN",
         "leader_candidate_index": leader_candidate_index,
-        "baseline_drift_ceiling": drift_ceiling(),
+        "baseline_drift_ceiling": drift_ceiling(scoring_rule),
     }
     draft = bench.get("draft_model")
     if draft is not None:
@@ -943,7 +947,7 @@ def _process_round(
         rank_entries,
         epsilon=float(config.OVERTAKE_EPSILON),
         drift=drift_f,
-        drift_ceiling=drift_ceiling(),
+        drift_ceiling=drift_ceiling(req.get("scoring_rule") or {}),
         leader_score=incumbent_score,
     )
     if decision.void:

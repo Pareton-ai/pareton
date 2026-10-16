@@ -142,19 +142,27 @@ def test_build_round_request_maps_candidates_in_entry_order(tmp_path):
     assert "perf_screen" not in req
 
 
+@pytest.mark.parametrize(
+    "scoring_rule,expected",
+    [
+        ({"name": "median_e2e_speedup"}, 0.1),
+        ({"name": "median_e2e_speedup", "baseline_drift_ceiling": 0.15}, 0.15),
+    ],
+)
 def test_build_round_request_carries_the_settlement_drift_ceiling(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, scoring_rule, expected
 ):
-    """The harness must stop on the same ceiling settlement would void on."""
+    """The harness must stop on the same ceiling settlement would void on,
+    including one the campaign pins in its scoring rule."""
     monkeypatch.setattr(config, "BASELINE_DRIFT_CEILING", 0.1)
     trace = tmp_path / "trace.json"
     raw = _write_trace(trace)
-    row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    row = _round_row(sampled_trace_sha256=sha256_bytes(raw), scoring_rule=scoring_rule)
     req = build_round_request(
         row, _campaign(), _entries(), task_id=str(uuid4()), trace_path=str(trace)
     )
-    assert req["baseline_drift_ceiling"] == 0.1
-    assert req["baseline_drift_ceiling"] == round_job.drift_ceiling()
+    assert req["baseline_drift_ceiling"] == expected
+    assert req["baseline_drift_ceiling"] == round_job.drift_ceiling(req["scoring_rule"])
 
 
 def test_build_round_request_names_the_leader_candidate(tmp_path):
@@ -661,14 +669,13 @@ def test_void_log_includes_infrastructure_detail(monkeypatch, caplog):
     assert "leader_infra_failed: docker pull failed: registry timeout" in caplog.text
 
 
-def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monkeypatch):
-    """A disqualified incumbent has no in-round score; the history row must
-    still carry the score it won with, from leaders.last_score."""
+def _process_round_with_report(tmp_path, monkeypatch, *, drift=0.0, scoring_rule=None):
+    """Run process_round on a mock report: one disqualified incumbent and one
+    challenger scoring 0.42, with the given baseline drift."""
     import json as _json
     from pathlib import Path
 
     import worker.round_job as rj
-    from round.rank import EVENT_OVERTAKEN
 
     campaign = _campaign()
     round_row = _round_row(incumbent_submission_id=str(uuid4()))
@@ -693,6 +700,7 @@ def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monke
         captured["task_id"] = task_id
         return {
             "task_id": task_id,
+            "scoring_rule": scoring_rule,
             "engines": {
                 "baseline": {"image": BASELINE_REF},
                 "candidates": [{"image": CAND_A_REF}, {"image": CAND_B_REF}],
@@ -729,7 +737,7 @@ def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monke
                 {"index": 0, "status": "disqualified", "reason": "wrong_outputs"},
                 {"index": 1, "status": "scored", "score": 0.42},
             ],
-            "baseline_drift": 0.0,
+            "baseline_drift": drift,
         }
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -751,10 +759,64 @@ def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monke
         run_bench_fn=fake_bench,
     )
 
+    return outcome, captured.get("decision")
+
+
+def test_process_round_reports_stored_leader_score_as_prev_score(tmp_path, monkeypatch):
+    """A disqualified incumbent has no in-round score; the history row must
+    still carry the score it won with, from leaders.last_score."""
+    from round.rank import EVENT_OVERTAKEN
+
+    outcome, decision = _process_round_with_report(tmp_path, monkeypatch)
+
     assert outcome == "ok"
-    decision = captured["decision"]
     assert decision.event == EVENT_OVERTAKEN
     assert decision.prev_score == 0.20
+
+
+@pytest.mark.parametrize(
+    "scoring_rule,voided",
+    [
+        (None, True),
+        ({"name": "weighted_tier_completion_speedup"}, True),
+        (
+            {
+                "name": "weighted_tier_completion_speedup",
+                "baseline_drift_ceiling": 0.15,
+            },
+            False,
+        ),
+        (
+            {
+                "name": "weighted_tier_completion_speedup",
+                "baseline_drift_ceiling": 0.05,
+            },
+            True,
+        ),
+    ],
+)
+def test_process_round_gates_drift_on_the_campaign_ceiling(
+    tmp_path, monkeypatch, scoring_rule, voided
+):
+    """The round's scoring rule may pin its own repeatability ceiling; without
+    one, the validator default (0.05) voids a 9% drift."""
+    monkeypatch.setattr(config, "BASELINE_DRIFT_CEILING", 0.05)
+    voids: list[str] = []
+    monkeypatch.setattr(
+        round_job, "_void", lambda _row, reason, _d="": voids.append(reason)
+    )
+
+    outcome, decision = _process_round_with_report(
+        tmp_path, monkeypatch, drift=0.093, scoring_rule=scoring_rule
+    )
+
+    if voided:
+        assert outcome == "baseline_drift"
+        assert voids == ["baseline_drift"]
+    else:
+        assert outcome == "ok"
+        assert voids == []
+        assert not decision.void
 
 
 def test_remaining_budget_voids_when_the_clock_has_run_out():

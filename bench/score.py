@@ -122,6 +122,27 @@ def failure_penalty(rule: Mapping[str, Any]) -> float:
     return float(value)
 
 
+def baseline_drift_ceiling(rule: Mapping[str, Any], default: float) -> float:
+    """The campaign's repeatability gate for its two opening baseline runs.
+
+    Absent means the validator-wide default. A campaign whose engine is noisier
+    than that default pins its own ceiling in the scoring rule, so the gate is
+    part of manifest_hash like the rest of the ranking contract.
+    """
+    if "baseline_drift_ceiling" not in rule:
+        return float(default)
+    value = rule["baseline_drift_ceiling"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        # Range first: math.isfinite overflows on an int too large for a float.
+        or not 0 < value <= 1
+        or not math.isfinite(value)
+    ):
+        raise ValueError("scoring_rule.baseline_drift_ceiling must be in (0, 1]")
+    return float(value)
+
+
 def _min_aligned_tokens(baseline_tokens: int, tolerance: float) -> int:
     if baseline_tokens < 2:
         return baseline_tokens
