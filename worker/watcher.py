@@ -89,7 +89,7 @@ def scan_cycle(subtensor, drain: threading.Event):
     except Exception:
         logger.exception("round reaping failed; will retry next cycle")
 
-    if subtensor is not None:
+    if subtensor is not None and config.ROUND_CREATION_ENABLED:
         try:
             create_due_rounds(subtensor)
         except Exception:
@@ -102,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
     _configure_logging(args.verbose)
+    if not config.ROUND_CREATION_ENABLED:
+        logger.warning(
+            "PARETON_ROUND_CREATION_ENABLED=false: scanning and reaping only; "
+            "no new rounds will be created"
+        )
 
     # Read-only deployment-probe poller (stage-2 spec 7.2): a daemon thread
     # so a re-verify against the running watcher never restarts it.

@@ -275,6 +275,11 @@ CHAIN_FINALITY_DEPTH: int = int(os.environ.get("PARETON_CHAIN_FINALITY_DEPTH", "
 # oldest queued submission has waited ROUND_MAX_WAIT_S;
 ROUND_SIZE: int = int(os.environ.get("PARETON_ROUND_SIZE", "5"))
 ROUND_MAX_WAIT_S: int = int(os.environ.get("PARETON_ROUND_MAX_WAIT_S", "21600"))
+# Pause switch for round creation. Off keeps the watcher scanning the chain
+# and reaping stale rounds, so submissions still queue without being seated.
+ROUND_CREATION_ENABLED: bool = os.environ.get(
+    "PARETON_ROUND_CREATION_ENABLED", "true"
+).strip().lower() in ("1", "true", "yes", "on")
 ROUND_STALE_S: int = int(os.environ.get("PARETON_ROUND_STALE_S", "1800"))
 ROUND_MAX_DURATION_S: int = int(os.environ.get("PARETON_ROUND_MAX_DURATION_S", "21600"))
 OVERTAKE_EPSILON: float = float(os.environ.get("PARETON_OVERTAKE_EPSILON", "0.01"))

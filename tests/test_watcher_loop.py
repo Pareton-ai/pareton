@@ -150,3 +150,24 @@ def test_drained_cycle_does_not_scan(monkeypatch):
     drain.set()
     client = object()
     assert scan_cycle(client, drain) is client
+
+
+def test_paused_round_creation_still_scans_and_reaps(monkeypatch):
+    client = object()
+    scanned, reaped = [], []
+    monkeypatch.setattr("worker.watcher.config.ROUND_CREATION_ENABLED", False)
+    monkeypatch.setattr(
+        "worker.watcher.scan_chain",
+        lambda *_a, **_k: scanned.append(1) or (["sid"], ["hk"]),
+    )
+    monkeypatch.setattr(
+        "worker.watcher.reap_stale_rounds", lambda _stale_s: reaped.append(1) or []
+    )
+    monkeypatch.setattr(
+        "worker.watcher.create_due_rounds",
+        lambda _subtensor: (_ for _ in ()).throw(AssertionError("created a round")),
+    )
+
+    assert scan_cycle(client, threading.Event()) is client
+    assert scanned == [1]
+    assert reaped == [1]
