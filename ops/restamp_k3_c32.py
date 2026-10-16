@@ -9,7 +9,6 @@ the correctness prompt count, then re-hashes the contract against the fixture.
 It first proves the source rule was qualified against exactly the current K3
 fixture apart from those fields. A pool of 32 rows (8 per tier) means every
 round replays all of them in a seed-dependent order with new temperatures.
-Run a C32 shadow round before using the output.
 
   PYTHONPATH=. python ops/restamp_k3_c32.py OLD_RULE.json NEW_RULE.json
 
@@ -178,7 +177,7 @@ def main(argv=None):
         f"Restamped {len(new['eligible_row_indices'])} qualified rows for "
         f"{new['n_prompts']} prompts at C{new['request_concurrency']}; "
         f"contract {new['qualification']['contract_sha256']}. "
-        "No GPU requests made. Run a C32 shadow round before seeding.",
+        "No GPU requests made.",
         flush=True,
     )
 
