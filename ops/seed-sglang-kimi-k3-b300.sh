@@ -6,7 +6,9 @@
 # The harness mounts pinned weights at /model and adds --model-path itself; the
 # serving flags below must not repeat it. The pinned DSPARK draft is staged the
 # same way and mounted read-only at /draft.
-# Uses the v5 16-request 2k/4k/8k/16k workload (4 per tier) at C16, one group of 16; engine capacity remains 64.
+# Uses the v5 32-request 2k/4k/8k/16k workload (8 per tier) at C32, one group of 32; engine capacity remains 64.
+# A rule qualified for the earlier 16-prompt C16 contract can be restamped without
+# new GPU work: PYTHONPATH=. python ops/restamp_k3_c32.py OLD_RULE NEW_RULE.
 # Patches remain private with no timed public reveal.
 set -euo pipefail
 if [[ $# -ne 2 ]]; then
@@ -69,7 +71,7 @@ python -m campaign.seed \
   --bench-serve-args=--enable-linear-replayssm-spec \
   --bench-serve-args=--watchdog-timeout --bench-serve-args=3600 \
   --bench-serve-args=--reasoning-parser --bench-serve-args=kimi_k3 \
-  --bench-correctness-num-prompts 16 \
+  --bench-correctness-num-prompts 32 \
   --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.80 \
   --bench-correctness-serve-args=--max-mamba-cache-size --bench-correctness-serve-args=16 \
   --bench-correctness-serve-args=--max-running-requests --bench-correctness-serve-args=8 \
