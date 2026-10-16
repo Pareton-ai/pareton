@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,9 +119,18 @@ def campaign_row(**changes):
     }
 
 
+def fake_preflight(rule, bench, engine):
+    require_qualification(rule, bench, engine)
+    return SimpleNamespace(row_indices=tuple(rule["eligible_row_indices"]))
+
+
+def short_tier_preflight(rule, bench, engine):
+    raise SamplerError("insufficient distinct long-form prompts; missing by input tier")
+
+
 def test_campaign_row_is_restamped_and_rehashed():
     cur = FakeCursor(campaign_row())
-    old, row = helper.restamp_campaign_row(cur, "cid", FIELDS)
+    old, row = helper.restamp_campaign_row(cur, "cid", FIELDS, fake_preflight)
     assert "FOR UPDATE" in cur.queries[0]
     assert old["manifest_hash"] == "sha256:old" and row["manifest_hash"] is None
     assert row["bench"] == FIELDS["bench"]
@@ -140,4 +150,13 @@ def test_campaign_row_is_restamped_and_rehashed():
 )
 def test_campaign_row_refuses_unsafe_states(row, active):
     with pytest.raises(SamplerError):
-        helper.restamp_campaign_row(FakeCursor(row, active), "cid", FIELDS)
+        helper.restamp_campaign_row(
+            FakeCursor(row, active), "cid", FIELDS, fake_preflight
+        )
+
+
+def test_campaign_row_refuses_a_pool_that_cannot_fill_every_tier():
+    with pytest.raises(SamplerError, match="preflight failed"):
+        helper.restamp_campaign_row(
+            FakeCursor(campaign_row()), "cid", FIELDS, short_tier_preflight
+        )

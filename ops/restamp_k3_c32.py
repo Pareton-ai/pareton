@@ -17,6 +17,9 @@ round replays all of them in a seed-dependent order with new temperatures.
 submissions, leader and fees carry over. It restamps the campaign's stored rule,
 raises its correctness prompt count and recomputes manifest_hash in one
 transaction, and refuses while the campaign has a pending or running round.
+It first samples a C32 trace from the new rule (Hugging Face access needed), so a
+pool that cannot fill every tier is refused. Stop pareton-watcher, which creates
+rounds, before running it.
 Without ``--yes`` it prints the change and writes nothing.
 
   PYTHONPATH=. python ops/restamp_k3_c32.py --apply-to CAMPAIGN_ID [--yes]
@@ -86,8 +89,13 @@ def restamp(old_rule, fields):
     return new
 
 
-def restamp_campaign_row(cur, campaign_id, fields):
-    """Lock an open K3 campaign row and return (row, updated row) for C32."""
+def restamp_campaign_row(cur, campaign_id, fields, preflight=None):
+    """Lock an open K3 campaign row and return (row, updated row) for C32.
+
+    ``preflight`` samples a C32 trace from the restamped rule, so a pool that
+    cannot fill eight rows in every tier is refused before anything is written.
+    """
+    from bench.longform import preflight_longform_campaign
     from campaign.store import _parse_json_obj
 
     cur.execute("SELECT * FROM campaigns WHERE id = %s FOR UPDATE", (campaign_id,))
@@ -102,7 +110,7 @@ def restamp_campaign_row(cur, campaign_id, fields):
     )
     require(
         cur.fetchone()["n"] == 0,
-        "a round is pending or running; stop pareton-round-worker and let it settle",
+        "a round is pending or running; stop pareton-watcher and let it settle",
     )
     source_bench = copy.deepcopy(fields["bench"])
     source_bench["correctness"]["num_prompts"] = SOURCE_CORRECTNESS_PROMPTS
@@ -112,6 +120,18 @@ def restamp_campaign_row(cur, campaign_id, fields):
         "campaign bench or engine differs from the C16 K3 fixture",
     )
     new = restamp(_parse_json_obj(row["sampling_rule"]), fields)
+    try:
+        trace = (preflight or preflight_longform_campaign)(
+            new, fields["bench"], fields["engine"]
+        )
+    except SamplerError as exc:
+        raise SamplerError(
+            f"restamp refused: C32 trace preflight failed: {exc}"
+        ) from exc
+    require(
+        len(trace.row_indices) == new["n_prompts"],
+        "C32 trace preflight did not sample every prompt",
+    )
     # A None hash makes the manifest recompute it, as set_campaign_scoring_rule does.
     return row, {
         **row,
