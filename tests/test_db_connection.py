@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 from psycopg2 import OperationalError
 from psycopg2.pool import PoolError
@@ -45,12 +48,38 @@ class ExhaustedPool:
         raise PoolError("connection pool exhausted")
 
 
+class BoundedPool:
+    """Mimics psycopg2's pool: PoolError as soon as `size` conns are out."""
+
+    def __init__(self, size: int):
+        self.size = size
+        self.out = 0
+        self.peak = 0
+        self.lock = threading.Lock()
+        self.puts = 0
+
+    def getconn(self) -> FakeConn:
+        with self.lock:
+            if self.out >= self.size:
+                raise PoolError("connection pool exhausted")
+            self.out += 1
+            self.peak = max(self.peak, self.out)
+        return FakeConn()
+
+    def putconn(self, conn: FakeConn, key=None, close: bool = False) -> None:
+        with self.lock:
+            self.out -= 1
+            self.puts += 1
+
+
 @pytest.fixture
-def conn_mod():
+def conn_mod(monkeypatch):
     import db.connection as conn_mod
 
     prev = conn_mod._pool
     conn_mod._pool = None
+    monkeypatch.setattr(conn_mod, "_slots", threading.BoundedSemaphore(4))
+    monkeypatch.setattr(conn_mod, "_POOL_WAIT_S", 2.0)
     yield conn_mod
     conn_mod._pool = prev
 
@@ -159,3 +188,55 @@ def test_failed_pool_init_does_not_poison(conn_mod, monkeypatch):
             pass
 
     assert conn_mod._pool is None
+
+
+def test_burst_above_pool_size_waits_instead_of_503(conn_mod):
+    """More concurrent requests than connections: they queue, none fail."""
+    pool = BoundedPool(size=4)
+    conn_mod._pool = pool
+    errors: list[BaseException] = []
+
+    def handle_request() -> None:
+        try:
+            with conn_mod.db_connection(readonly=True):
+                time.sleep(0.05)
+        except BaseException as exc:  # noqa: BLE001 - collected for the assert
+            errors.append(exc)
+
+    threads = [threading.Thread(target=handle_request) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert pool.peak <= 4
+    assert pool.puts == 20
+    assert pool.out == 0
+
+
+def test_saturated_pool_is_unavailable_after_wait(conn_mod):
+    conn_mod._pool = BoundedPool(size=4)
+    conn_mod._POOL_WAIT_S = 0.05
+    for _ in range(4):
+        assert conn_mod._slots.acquire(blocking=False)
+
+    started = time.monotonic()
+    with pytest.raises(DatabaseUnavailable, match="database connection failed"):
+        with conn_mod.db_connection(readonly=True):
+            pass
+    assert time.monotonic() - started >= 0.05
+
+
+def test_failed_checkout_frees_its_slot(conn_mod):
+    """A getconn error must not leak a slot, or the pool shrinks for good."""
+    conn_mod._pool = ExhaustedPool()
+    for _ in range(10):
+        with pytest.raises(DatabaseUnavailable):
+            with conn_mod.db_connection():
+                pass
+
+    conn = FakeConn()
+    conn_mod._pool = FakePool(conn)
+    with conn_mod.db_connection() as yielded:
+        assert yielded is conn
