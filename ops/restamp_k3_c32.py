@@ -9,9 +9,17 @@ the correctness prompt count, then re-hashes the contract against the fixture.
 It first proves the source rule was qualified against exactly the current K3
 fixture apart from those fields. A pool of 32 rows (8 per tier) means every
 round replays all of them in a seed-dependent order with new temperatures.
-Run a C32 shadow round before seeding a campaign from the output.
+Run a C32 shadow round before using the output.
 
   PYTHONPATH=. python ops/restamp_k3_c32.py OLD_RULE.json NEW_RULE.json
+
+``--apply-to CAMPAIGN_ID`` instead switches the open K3 campaign in place, so its
+submissions, leader and fees carry over. It restamps the campaign's stored rule,
+raises its correctness prompt count and recomputes manifest_hash in one
+transaction, and refuses while the campaign has a pending or running round.
+Without ``--yes`` it prints the change and writes nothing.
+
+  PYTHONPATH=. python ops/restamp_k3_c32.py --apply-to CAMPAIGN_ID [--yes]
 """
 
 from __future__ import annotations
@@ -77,13 +85,94 @@ def restamp(old_rule, fields):
     return new
 
 
+def restamp_campaign_row(cur, campaign_id, fields):
+    """Lock an open K3 campaign row and return (row, updated row) for C32."""
+    from campaign.store import _parse_json_obj
+
+    cur.execute("SELECT * FROM campaigns WHERE id = %s FOR UPDATE", (campaign_id,))
+    row = cur.fetchone()
+    require(row is not None, f"campaign {campaign_id} not found")
+    row = dict(row)
+    require(row["status"] == "open", f"campaign is {row['status']!r}, not open")
+    cur.execute(
+        "SELECT COUNT(*) AS n FROM rounds "
+        "WHERE campaign_id = %s AND status IN ('pending', 'running')",
+        (campaign_id,),
+    )
+    require(
+        cur.fetchone()["n"] == 0,
+        "a round is pending or running; stop pareton-round-worker and let it settle",
+    )
+    source_bench = copy.deepcopy(fields["bench"])
+    source_bench["correctness"]["num_prompts"] = SOURCE_CORRECTNESS_PROMPTS
+    require(
+        _parse_json_obj(row["bench"]) == source_bench
+        and _parse_json_obj(row["engine"]) == fields["engine"],
+        "campaign bench or engine differs from the C16 K3 fixture",
+    )
+    new = restamp(_parse_json_obj(row["sampling_rule"]), fields)
+    # A None hash makes the manifest recompute it, as set_campaign_scoring_rule does.
+    return row, {
+        **row,
+        "sampling_rule": new,
+        "bench": fields["bench"],
+        "manifest_hash": None,
+    }
+
+
+def apply_to_campaign(campaign_id, fields, *, write):
+    from psycopg2.extras import Json, RealDictCursor
+
+    from campaign.store import _row_to_manifest
+    from db.connection import db_connection
+
+    with db_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        old, row = restamp_campaign_row(cur, str(campaign_id), fields)
+        manifest_hash = _row_to_manifest(row).manifest_hash
+        print(f"manifest_hash {old['manifest_hash']} -> {manifest_hash}")
+        if not write:
+            conn.rollback()
+            return row["sampling_rule"]
+        cur.execute(
+            "UPDATE campaigns SET sampling_rule = %s, bench = %s, "
+            "manifest_hash = %s WHERE id = %s AND status = 'open'",
+            (
+                Json(row["sampling_rule"]),
+                Json(row["bench"]),
+                manifest_hash,
+                str(campaign_id),
+            ),
+        )
+        require(cur.rowcount == 1, "campaign row was not updated")
+    return row["sampling_rule"]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=Path)
-    parser.add_argument("output", type=Path)
+    parser.add_argument("source", type=Path, nargs="?")
+    parser.add_argument("output", type=Path, nargs="?")
+    parser.add_argument("--apply-to", metavar="CAMPAIGN_ID")
+    parser.add_argument("--yes", action="store_true")
     args = parser.parse_args(argv)
+    fields = json.loads(FIELDS.read_text())
+    if args.apply_to:
+        require(args.source is None, "--apply-to takes no rule files")
+        new = apply_to_campaign(args.apply_to, fields, write=args.yes)
+        print(
+            f"{'Updated' if args.yes else 'Dry run, nothing written to'} campaign "
+            f"{args.apply_to}: {new['n_prompts']} prompts at "
+            f"C{new['request_concurrency']}, "
+            f"{len(new['eligible_row_indices'])} qualified rows, contract "
+            f"{new['qualification']['contract_sha256']}.",
+            flush=True,
+        )
+        return
+    require(
+        args.source is not None and args.output is not None,
+        "pass OLD_RULE NEW_RULE, or --apply-to CAMPAIGN_ID",
+    )
     require(not args.output.exists(), "output file already exists")
-    new = restamp(json.loads(args.source.read_text()), json.loads(FIELDS.read_text()))
+    new = restamp(json.loads(args.source.read_text()), fields)
     args.output.write_text(json.dumps(new, indent=2) + "\n")
     print(
         f"Restamped {len(new['eligible_row_indices'])} qualified rows for "
