@@ -251,6 +251,26 @@ def test_invalid_failure_penalty(coefficient):
         validate_scoring_rule({"name": WEIGHTED_RULE, "failure_penalty": coefficient})
 
 
+def test_drift_ceiling_is_pinned_only_when_the_rule_names_one():
+    assert "baseline_drift_ceiling" not in validate_scoring_rule(
+        {"name": WEIGHTED_RULE}
+    )
+    rule = validate_scoring_rule(
+        {"name": WEIGHTED_RULE, "baseline_drift_ceiling": 0.15}
+    )
+    assert rule["baseline_drift_ceiling"] == 0.15
+
+
+@pytest.mark.parametrize(
+    "ceiling", [0, -0.1, 1.5, True, float("nan"), float("inf"), 10**400, "0.15"]
+)
+def test_invalid_drift_ceiling(ceiling):
+    with pytest.raises(ValueError, match="baseline_drift_ceiling"):
+        validate_scoring_rule(
+            {"name": WEIGHTED_RULE, "baseline_drift_ceiling": ceiling}
+        )
+
+
 @pytest.mark.parametrize(
     "c,sizes", [(1, [8] * 4), (4, [8] * 4), (8, [8] * 4), (16, [16] * 2), (32, [32])]
 )

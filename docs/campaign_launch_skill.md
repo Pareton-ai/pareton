@@ -437,6 +437,14 @@ failed ID once and exclude trusted baseline removals from the denominator. Hard
 runtime/correctness failures remain unscored. Use worst-tier baseline drift and
 repeatability gates rather than allowing tier changes to cancel out.
 
+A round is voided when that worst-tier drift exceeds
+`PARETON_BASELINE_DRIFT_CEILING` (default 0.05). The shadow round does not
+apply this gate, so compare its `baseline_drift` with the ceiling yourself. If
+the engine is noisier than that, pin `baseline_drift_ceiling` in the
+campaign's `scoring_rule`. It sits outside the qualification contract, so a
+qualified sampling rule stays valid. Kimi K3 on 8×B300 measured 9.3%, with
+up to 22% spread between repetitions within a single run, and pins 0.15.
+
 Qualify a fresh source pool for this exact new contract, then GPU-validate its
 full round before seeding. Existing v1-v4 pools and CPU-only or historical GPU
 reports do not qualify v5. See [LongWriter qualification](longwriter-workload.md).

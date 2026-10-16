@@ -121,7 +121,8 @@
       "4k": 0.25,
       "8k": 0.25,
       "16k": 0.25
-    }
+    },
+    "baseline_drift_ceiling": 0.15
   },
   "emission_rule": {
     "name": "linear_decay",

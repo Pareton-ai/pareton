@@ -1221,7 +1221,9 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
     qwen = json.loads(
         (root / "fixtures/campaigns/sglang_qwen38_27b/scoring_rule.json").read_text()
     )
-    assert manifest.scoring_rule == qwen
+    # Same ranking as Qwen, with a looser repeatability gate for Kimi's output
+    # length noise.
+    assert manifest.scoring_rule == {**qwen, "baseline_drift_ceiling": 0.15}
     trace = tmp_path / "trace.json"
     trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))
     request = build_round_request(
