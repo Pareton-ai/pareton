@@ -479,8 +479,10 @@ class WeightsModel(BaseModel):
     breakdown: list[WeightBreakdownModel]
 
 
+# async on purpose: sync endpoints share FastAPI's worker threads, which can
+# all be queued on the DB pool during a burst. Health must not wait behind them.
 @app.get("/health")
-def health():
+async def health():
     return {"ok": True, "service": "pareton", "stage": 0}
 
 
