@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -22,7 +23,11 @@ _POOL_MAX = int(os.environ.get("PARETON_DB_POOL_MAX", "10"))
 # psycopg2's pool raises PoolError the moment all `_POOL_MAX` connections are
 # out; it never waits. FastAPI runs sync endpoints on ~40 threads, so a burst
 # of dashboard traffic turned into 503s. Callers now queue for a free slot.
-_POOL_WAIT_S = float(os.environ.get("PARETON_DB_POOL_WAIT_S", "5"))
+# The wait is per checkout and an endpoint may check out up to three times in
+# sequence, so 3 s keeps a request under the frontend's 10 s API timeout.
+_POOL_WAIT_S = float(os.environ.get("PARETON_DB_POOL_WAIT_S", "3"))
+# A burst times out many waiters at once; log one line per window, not each.
+_WAIT_LOG_EVERY_S = 10.0
 _KEEPALIVES = {
     "keepalives": 1,
     "keepalives_idle": 30,
@@ -33,6 +38,25 @@ _KEEPALIVES = {
 _pool: Any = None
 _pool_lock = threading.Lock()
 _slots = threading.BoundedSemaphore(_POOL_MAX)
+_wait_log_lock = threading.Lock()
+_wait_log_at = 0.0
+_wait_timeouts = 0
+
+
+def _log_wait_timeout() -> None:
+    """Count a timed-out wait; warn at most once per `_WAIT_LOG_EVERY_S`."""
+    global _wait_log_at, _wait_timeouts
+    with _wait_log_lock:
+        _wait_timeouts += 1
+        now = time.monotonic()
+        if now - _wait_log_at < _WAIT_LOG_EVERY_S:
+            return
+        count, _wait_timeouts, _wait_log_at = _wait_timeouts, 0, now
+    logger.warning(
+        "db pool: %d request(s) found no free connection within %.1fs",
+        count,
+        _POOL_WAIT_S,
+    )
 
 
 def require_database_url() -> str:
@@ -67,7 +91,7 @@ def _checkout() -> Any:
 
     pool = _get_pool()
     if not _slots.acquire(timeout=_POOL_WAIT_S):
-        logger.warning("db pool: no free connection after %.1fs", _POOL_WAIT_S)
+        _log_wait_timeout()
         raise DatabaseUnavailable("database connection failed")
     try:
         return pool.getconn()

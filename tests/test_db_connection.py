@@ -215,9 +215,9 @@ def test_burst_above_pool_size_waits_instead_of_503(conn_mod):
     assert pool.out == 0
 
 
-def test_saturated_pool_is_unavailable_after_wait(conn_mod):
+def test_saturated_pool_is_unavailable_after_wait(conn_mod, monkeypatch):
     conn_mod._pool = BoundedPool(size=4)
-    conn_mod._POOL_WAIT_S = 0.05
+    monkeypatch.setattr(conn_mod, "_POOL_WAIT_S", 0.05)
     for _ in range(4):
         assert conn_mod._slots.acquire(blocking=False)
 
@@ -240,3 +240,23 @@ def test_failed_checkout_frees_its_slot(conn_mod):
     conn_mod._pool = FakePool(conn)
     with conn_mod.db_connection() as yielded:
         assert yielded is conn
+
+
+def test_wait_timeouts_log_once_per_window(conn_mod, monkeypatch, caplog):
+    """A burst of timed-out waiters writes one summary line, not one each."""
+    conn_mod._pool = BoundedPool(size=4)
+    monkeypatch.setattr(conn_mod, "_POOL_WAIT_S", 0.01)
+    monkeypatch.setattr(conn_mod, "_wait_log_at", 0.0)
+    monkeypatch.setattr(conn_mod, "_wait_timeouts", 0)
+    for _ in range(4):
+        assert conn_mod._slots.acquire(blocking=False)
+
+    with caplog.at_level("WARNING", logger="db.connection"):
+        for _ in range(5):
+            with pytest.raises(DatabaseUnavailable):
+                with conn_mod.db_connection(readonly=True):
+                    pass
+
+    warnings = [r for r in caplog.records if "no free connection" in r.message]
+    assert len(warnings) == 1
+    assert conn_mod._wait_timeouts == 4
