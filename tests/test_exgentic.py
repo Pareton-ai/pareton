@@ -12,7 +12,12 @@ import pytest
 
 from bench.concurrency import WEIGHTED_RULE, request_groups, validate_tier_contract
 from bench.exgentic import DATASET, REVISION, TIERS, flatten_dataset, normalize_snapshot
-from bench.longform import require_qualification, sampling_context_for_campaign
+from bench.longform import (
+    candidate_for_row,
+    digest,
+    require_qualification,
+    sampling_context_for_campaign,
+)
 from bench.qualify_exgentic import main, prepare
 from bench.qualify_longform import qualify
 from bench.sampler import (
@@ -228,9 +233,14 @@ def test_exact_tiers_and_receipt_replay_through_worker(tmp_path):
         65536,
         131072,
     ]
-    assert all(
-        "search" in r.prompt and "Write a new" not in r.prompt for r in trace.requests
-    )
+    for request in trace.requests:
+        rendered = json.loads(request.prompt)
+        assert rendered["messages"][-1] == {
+            "role": "user",
+            "content": f["sampling_rule"]["followup_prompt"],
+        }
+        assert rendered["tools"][0]["function"]["name"] == "search"
+    assert value.receipt["followup_prompt"] == f["sampling_rule"]["followup_prompt"]
     assert all(0.1 <= r.sampling.temperature <= 1.01 for r in trace.requests)
     assert len({r.sampling.temperature for r in trace.requests}) == 4
     assert all("snapshot_sha256" in r for r in value.receipt["requests"])
@@ -295,8 +305,11 @@ def test_weights_and_legacy_guard():
     assert result.score == pytest.approx(0.28 * 0.5 - 0.28)
     with pytest.raises(SamplerError, match="input_tiers"):
         parse_sampling_rule({**f["sampling_rule"], "algo_version": 5})
-    with pytest.raises(SamplerError, match="followup_prompt"):
-        parse_sampling_rule({**f["sampling_rule"], "followup_prompt": "Write an essay"})
+    missing_followup = {
+        k: v for k, v in f["sampling_rule"].items() if k != "followup_prompt"
+    }
+    with pytest.raises(SamplerError, match="explicit followup_prompt"):
+        parse_sampling_rule(missing_followup)
     with pytest.raises(SamplerError, match="pinned v2"):
         parse_sampling_rule({**f["sampling_rule"], "revision": "b" * 40})
 
@@ -313,6 +326,11 @@ def test_cpu_preparation_writes_audit_and_replay(tmp_path):
     ] == dict.fromkeys(TIERS, 2)
     assert (output / "workload_trace.json").exists()
     assert (output / "hf-000.snapshot.json").exists()
+    audit = json.loads((output / "audit.json").read_text())
+    assert audit["followup_prompt_sha256"] == digest(
+        f["sampling_rule"]["followup_prompt"]
+    )
+    assert "follow-up" in audit["input_length_basis"]
 
 
 def test_baseline_qualification_temperature_extremes_and_stale_contract(
@@ -367,8 +385,12 @@ def test_baseline_qualification_temperature_extremes_and_stale_contract(
         assert [temp for p, _, temp in calls if p == prompt] == [0.1, 1.01]
     require_qualification(qualified, f["bench"], f["engine"])
     assert len(qualified["eligible_row_indices"]) == 8
-    with pytest.raises(SamplerError, match="baseline qualification"):
-        require_qualification({**qualified, "max_tokens": 33}, f["bench"], f["engine"])
+    for changed in (
+        {**qualified, "max_tokens": 5119},
+        {**qualified, "followup_prompt": "A different long-form task"},
+    ):
+        with pytest.raises(SamplerError, match="baseline qualification"):
+            require_qualification(changed, f["bench"], f["engine"])
 
 
 def test_cli_rejects_unprepared_template_before_qualification(tmp_path):
@@ -551,8 +573,8 @@ def test_qualification_defaults_to_32_in_flight_across_all_four_tiers(
     assert json.loads((tmp_path / "summary.json").read_text())["concurrency"] == 32
 
 
-def test_cli_inherits_campaign_concurrency(tmp_path, monkeypatch):
-    f = fields()
+def test_cli_inherits_campaign_concurrency_and_scans_full_split(tmp_path, monkeypatch):
+    f = fields(308)
     source = tmp_path / "fields.json"
     source.write_text(json.dumps(f))
     output = tmp_path / "qualified"
@@ -582,6 +604,7 @@ def test_cli_inherits_campaign_concurrency(tmp_path, monkeypatch):
         == 0
     )
     assert captured["concurrency"] == 32
+    assert captured["max_rows"] == 308
     assert captured["fields"]["sampling_rule"]["temperature_range"] == [0.1, 1.01]
 
 
@@ -660,3 +683,71 @@ def test_mixed_tier_qualification_refills_rejections_or_fails_closed(
         for line in (tmp_path / "qualification.jsonl").read_text().splitlines()
     ]
     assert sum(row.get("rejection") == "short_output" for row in records) == 1
+
+
+@pytest.mark.parametrize("prompt", [None, "", "   ", []])
+def test_followup_must_be_nonempty_text(prompt):
+    with pytest.raises(SamplerError, match="followup_prompt"):
+        parse_sampling_rule({**fields()["sampling_rule"], "followup_prompt": prompt})
+
+
+def test_followup_tokens_determine_tier_and_capacity_without_mutating_snapshot():
+    f = fields()
+    rule = parse_sampling_rule(
+        {**f["sampling_rule"], "followup_prompt": "one two three four"}
+    )
+    fmt = formatter()
+    original_encode = fmt.encode
+
+    def encode(prompt):
+        value = json.loads(prompt)
+        assert value["messages"][-1] == {
+            "role": "user",
+            "content": rule["followup_prompt"],
+        }
+        return original_encode(prompt) + [9] * len(
+            value["messages"][-1]["content"].split()
+        )
+
+    fmt = PromptFormatter(fmt.render, fmt.receipt, encode)
+    row = snapshots()[0]
+    original_row = copy.deepcopy(row)
+    context = sampling_context_for_campaign(f["bench"], f["engine"])
+    # Source alone is exactly 16k; appending the task pushes it outside the band.
+    assert candidate_for_row(0, row, fmt, rule, context) is None
+    assert row == original_row
+    row["snapshot_json"] = row["snapshot_json"].replace("n=16384", "n=16380")
+    candidate = candidate_for_row(0, row, fmt, rule, context)
+    assert candidate["input_tokens"] == 16384
+    assert candidate["input_length_group"] == "16k"
+    rendered = json.loads(candidate["prompt"])
+    source = json.loads(row["snapshot_json"])
+    assert rendered["messages"][:-1] == source["messages"]
+    assert rendered["tools"] == source["tools"]
+    assert (
+        candidate_for_row(0, row, fmt, rule, {**context, "max_input_tokens": 16383})
+        is None
+    )
+
+
+def test_changed_followup_cannot_replay_old_receipt():
+    f = fields()
+    original = sample(f)
+    f["sampling_rule"]["followup_prompt"] = "Write a detailed mathematical exposition."
+    with pytest.raises(SamplerError, match="receipt does not reproduce"):
+        sample(f, sampling_receipt=original.receipt)
+
+
+def test_sampler_reaches_eligible_sessions_beyond_benchmark_grouped_prefix():
+    rows = snapshots(308)
+    for i in range(300):
+        snapshot = json.loads(rows[i]["snapshot_json"])
+        snapshot["benchmark"] = "appworld"
+        snapshot["messages"][0]["content"] = f"n=100;id={i}"
+        rows[i]["snapshot_json"] = json.dumps(snapshot)
+    result = sample(fields(308), rows)
+    assert len(result.row_indices) == 4
+    assert all(index >= 300 for index in result.row_indices)
+    assert (
+        sample(fields(308), rows, sampling_receipt=result.receipt).body == result.body
+    )

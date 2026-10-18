@@ -9,7 +9,7 @@ from pathlib import Path
 
 from bench.exgentic import DATASET, REVISION, TIERS, snapshot_from_row
 from bench.lifecycle import EngineError
-from bench.longform import candidate_for_row, sampling_context_for_campaign
+from bench.longform import candidate_for_row, digest, sampling_context_for_campaign
 from bench.qualify_longform import qualify
 from bench.sampler import (
     PromptRenderError,
@@ -79,6 +79,8 @@ def prepare(fields, output_dir, *, dataset=None, formatter=None):
         "revision": REVISION,
         "normalized_snapshots": len(dataset),
         "formatter": formatter.receipt,
+        "followup_prompt_sha256": digest(rule["followup_prompt"]),
+        "input_length_basis": "complete rendered snapshot plus follow-up and tool definitions",
         "render_failures": render_failures,
         "eligible_snapshots_by_tier": counts,
         "distinct_sessions_by_tier": {

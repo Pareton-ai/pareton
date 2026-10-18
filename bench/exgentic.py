@@ -217,7 +217,13 @@ def candidate_for_snapshot(row_index, row, formatter, rule, context):
     from bench.trajectory import token_ids_sha256
 
     snapshot = snapshot_from_row(row)
-    prompt = formatter.render(snapshot["messages"], tools=snapshot["tools"] or None)
+    # Preserve the source snapshot; append the pinned task only for rendering.
+    # Tier selection and capacity checks include its tokens and chat framing.
+    messages = [
+        *snapshot["messages"],
+        {"role": "user", "content": rule["followup_prompt"]},
+    ]
+    prompt = formatter.render(messages, tools=snapshot["tools"] or None)
     ids = formatter.encode(prompt)
     group = input_group(len(ids), rule["input_tiers"])
     if (

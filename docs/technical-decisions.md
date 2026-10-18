@@ -95,8 +95,9 @@ snapshots. Sampler v6 normalizes successful chat calls, preserves system/tool
 inputs, renders with the campaign tokenizer, and selects eight distinct prompts
 per 16k/32k/64k/128k tier. Each tier uses 90-100% of its named token count.
 Allow at most one snapshot from a source session per tier in a round and in the
-qualified pool. Never pad, truncate, append a writing instruction, execute tools,
-or feed candidate output into another request. Reject unsupported modalities.
+qualified pool. Append the campaign-pinned long-form follow-up before rendering
+and measuring input tiers. Never pad, truncate, execute tools or feed candidate
+output into another request. Reject unsupported modalities.
 
 Use tier weights 0.28/0.16/0.28/0.28. Keep the pinned Kimi serving configuration,
 C32 schedule, warmed-cache measurement, likelihood gates, and baseline-relative
@@ -127,3 +128,25 @@ Keep legacy qualification scheduling unchanged. Insufficient outputs at either
 temperature extreme block launch; the dataset change does not relax that gate.
 GPU scorer, SLA and full-round validation remain required before opening the
 new campaign. No production settings or historical evidence change here.
+
+
+## 2026-10-18: Append a broad long-form task to Exgentic snapshots
+
+The user's whole-corpus review found many long inputs but short natural agent
+outputs. Append one explicit, campaign-pinned user follow-up that invites a
+complete software implementation, mathematical exposition, technical tutorial,
+analysis or narrative. Keep source history and tool definitions as context,
+without replaying the source answer or executing tools. Ask for substantial,
+self-contained output without placeholders or repetitive padding. This is a
+long-context generation workload, not a replay of the original agent task.
+
+Count the full rendered history, tool definitions and follow-up with Kimi K3's
+pinned tokenizer before assigning the existing 90-100% input bands. Source-model
+counts in wider power-of-two bands are inventory evidence, not proof of these
+target-token quotas. Preparation and qualification scan the whole normalized
+split by default; selection uses deterministic hash ordering across that split,
+not a benchmark-grouped prefix. Retain one source session per tier and C32.
+The prompt is part of the sampling receipt and qualification contract. Missing
+follow-ups fail parsing; changed follow-ups invalidate prior qualification.
+Re-run the full CPU audit and baseline qualification before launch. Preserve
+temperature, output-length, correctness and scoring policy.

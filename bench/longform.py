@@ -164,8 +164,8 @@ def parse_longform_fields(rule, parsed):
             raise SamplerError(
                 "Exgentic v6 requires the pinned v2 dataset, default config and train split"
             )
-        if "followup_prompt" in rule:
-            raise SamplerError("Exgentic snapshots cannot append a followup_prompt")
+        if "followup_prompt" not in rule:
+            raise SamplerError("Exgentic v6 requires an explicit followup_prompt")
     prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip():
         raise SamplerError("followup_prompt must be nonempty text")
@@ -174,9 +174,7 @@ def parse_longform_fields(rule, parsed):
         raise SamplerError("min_output_tokens must be a positive integer")
     if minimum > parsed["max_tokens"]:
         raise SamplerError("min_output_tokens exceeds max_tokens")
-    result = {"min_output_tokens": minimum}
-    if not exgentic:
-        result["followup_prompt"] = prompt
+    result = {"min_output_tokens": minimum, "followup_prompt": prompt}
     # Do not add a default field to old rules: their receipts and qualification
     # hashes must continue to reproduce exactly.
     result.update(generation_fields(rule))
