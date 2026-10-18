@@ -1,0 +1,662 @@
+"""Snapshot import, target-token tiers, qualification and worker replay for v6."""
+
+import copy
+import json
+import re
+import threading
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from bench.concurrency import WEIGHTED_RULE, request_groups, validate_tier_contract
+from bench.exgentic import DATASET, REVISION, TIERS, flatten_dataset, normalize_snapshot
+from bench.longform import require_qualification, sampling_context_for_campaign
+from bench.qualify_exgentic import main, prepare
+from bench.qualify_longform import qualify
+from bench.sampler import (
+    PromptFormatter,
+    SamplerError,
+    generate_trace,
+    parse_sampling_rule,
+)
+from bench.score import PromptTiming, score_candidate
+from bench.validate import validate_workload_trace_dict
+from worker.round_job import materialize_round_trace
+
+pytestmark = pytest.mark.unit
+FIXTURE = Path(__file__).parents[1] / "fixtures/campaigns/sglang_kimi_k3_b300_exgentic"
+
+
+def fields(n=8):
+    value = json.loads((FIXTURE / "campaign-fields.json").read_text())
+    value["sampling_rule"].update(
+        n_rows=n, n_prompts=4, max_tokens=32, min_output_tokens=1
+    )
+    return value
+
+
+def formatter():
+    def render(messages, *, tools=None):
+        return json.dumps({"messages": messages, "tools": tools})
+
+    def encode(prompt):
+        n, identifier = map(int, re.search(r"n=(\d+);id=(\d+)", prompt).groups())
+        return [identifier + 1] + [0] * (n - 1)
+
+    return PromptFormatter(
+        render,
+        {
+            "chat_template": {"enable_thinking": False},
+            "tokenizer": {"sha256": "sha256:" + "a" * 64},
+        },
+        encode,
+    )
+
+
+def snapshots(n=8):
+    return [
+        {
+            "snapshot_json": json.dumps(
+                {
+                    "session_id": f"session-{i}",
+                    "source_row": i,
+                    "span_index": 2,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"n={(16384, 32768, 65536, 131072)[i % 4]};id={i}",
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {"name": "search", "parameters": {}},
+                        }
+                    ],
+                }
+            )
+        }
+        for i in range(n)
+    ]
+
+
+def sample(f=None, rows=None, **kwargs):
+    f = f or fields()
+    rows = rows or snapshots()
+    return generate_trace(
+        rule=f["sampling_rule"],
+        seed_hex="a" * 64,
+        row_fetcher=rows.__getitem__,
+        prompt_formatter=formatter(),
+        sampling_context=sampling_context_for_campaign(f["bench"], f["engine"]),
+        **kwargs,
+    )
+
+
+def source_row():
+    return {
+        "session_id": "source-session",
+        "benchmark": "swebench",
+        "spans": [
+            {
+                "type": "llm_call",
+                "status": {"code": 0},
+                "attributes": {
+                    "gen_ai.operation.name": "chat",
+                    "gen_ai.usage.input_tokens": 99999,
+                    "gen_ai.usage.output_tokens": 4,
+                    "gen_ai.request.model": "source-model",
+                    "gen_ai.system_instructions": "System instructions",
+                    "gen_ai.input.messages": json.dumps(
+                        [
+                            {
+                                "role": "developer",
+                                "parts": [
+                                    {
+                                        "type": "text",
+                                        "content": "Developer instructions",
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "user",
+                                "parts": [
+                                    {"type": "text", "content": "Inspect repository"}
+                                ],
+                            },
+                            {
+                                "role": "assistant",
+                                "parts": [
+                                    {"type": "thinking", "thinking": "Plan"},
+                                    {
+                                        "type": "tool_call",
+                                        "id": "call-1",
+                                        "name": "read",
+                                        "arguments": {"path": "file.py"},
+                                    },
+                                ],
+                            },
+                            {
+                                "role": "tool",
+                                "parts": [
+                                    {
+                                        "type": "tool_call_response",
+                                        "id": "call-1",
+                                        "result": "Contents",
+                                    }
+                                ],
+                            },
+                        ]
+                    ),
+                    "gen_ai.tool.definitions": json.dumps(
+                        [{"type": "function", "name": "read", "parameters": {}}]
+                    ),
+                    "gen_ai.output.messages": "DO NOT REPLAY THE SOURCE ANSWER",
+                },
+            }
+        ],
+    }
+
+
+def test_import_preserves_system_tools_and_history_without_source_answer():
+    snapshot = normalize_snapshot(source_row(), 7, 0)
+    assert [m["role"] for m in snapshot["messages"]] == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert snapshot["messages"][3]["reasoning_content"] == "Plan"
+    assert json.loads(
+        snapshot["messages"][3]["tool_calls"][0]["function"]["arguments"]
+    ) == {"path": "file.py"}
+    assert snapshot["messages"][4] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": "Contents",
+    }
+    assert snapshot["tools"][0]["function"]["name"] == "read"
+    assert "DO NOT REPLAY" not in json.dumps(snapshot)
+    assert (snapshot["source_row"], snapshot["span_index"]) == (7, 0)
+
+
+@pytest.mark.parametrize("change", ["failed", "zero", "image", "error"])
+def test_import_rejects_failed_zero_token_and_unsupported_requests(change):
+    row = source_row()
+    span = row["spans"][0]
+    if change == "failed":
+        span["status"]["code"] = 2
+    elif change == "zero":
+        span["attributes"]["gen_ai.usage.output_tokens"] = 0
+    elif change == "error":
+        span["attributes"]["error.type"] = "rate_limit"
+    else:
+        span["attributes"]["gen_ai.input.messages"] = json.dumps(
+            [{"role": "user", "parts": [{"type": "image", "url": "ignored"}]}]
+        )
+    assert normalize_snapshot(row, 0, 0) is None
+
+
+def test_arrow_flattening_preserves_session_span_order():
+    from datasets import Dataset
+
+    first, second = source_row(), source_row()
+    first["spans"].append(copy.deepcopy(first["spans"][0]))
+    second["session_id"] = "second"
+    dataset = flatten_dataset(Dataset.from_list([first, second]))
+    values = [json.loads(row["snapshot_json"]) for row in dataset]
+    assert [(row["source_row"], row["span_index"]) for row in values] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+    ]
+
+
+def test_exact_tiers_and_receipt_replay_through_worker(tmp_path):
+    f = fields()
+    value = sample(f)
+    trace = validate_workload_trace_dict(json.loads(value.body))
+    assert Counter(r.input_length_group for r in trace.requests) == dict.fromkeys(
+        TIERS, 1
+    )
+    assert sorted(r.input_tokens for r in trace.requests) == [
+        16384,
+        32768,
+        65536,
+        131072,
+    ]
+    assert all(
+        "search" in r.prompt and "Write a new" not in r.prompt for r in trace.requests
+    )
+    assert all(0.1 <= r.sampling.temperature <= 1.01 for r in trace.requests)
+    assert len({r.sampling.temperature for r in trace.requests}) == 4
+    assert all("snapshot_sha256" in r for r in value.receipt["requests"])
+    assert sample(f, sampling_receipt=value.receipt).body == value.body
+    path = materialize_round_trace(
+        {"sampled_trace_sha256": value.sha256, "sampling_receipt": value.receipt},
+        SimpleNamespace(bench=f["bench"], engine=f["engine"]),
+        tmp_path / "worker",
+        row_fetcher=snapshots().__getitem__,
+        prompt_formatter=formatter(),
+    )
+    assert path.read_bytes() == value.body
+    assert len(request_groups(trace.requests, 32, TIERS, size=1)) == 1
+    changed = copy.deepcopy(value.receipt)
+    changed["requests"][0]["snapshot_sha256"] = "sha256:" + "b" * 64
+    with pytest.raises(SamplerError, match="receipt does not reproduce"):
+        sample(f, sampling_receipt=changed)
+
+
+def test_missing_tier_fails_without_truncation_or_fallback():
+    rows = snapshots()
+    for i in (3, 7):
+        rows[i]["snapshot_json"] = rows[i]["snapshot_json"].replace(
+            "n=131072", "n=131073"
+        )
+    with pytest.raises(SamplerError, match="128k.*no shorter fallback"):
+        sample(rows=rows)
+
+
+def test_one_snapshot_per_session_per_tier():
+    rows = snapshots(8)
+    for index in (0, 4):
+        row = json.loads(rows[index]["snapshot_json"])
+        row["session_id"] = "same"
+        rows[index]["snapshot_json"] = json.dumps(row)
+    f = fields()
+    f["sampling_rule"]["n_prompts"] = 8
+    with pytest.raises(SamplerError, match="16k"):
+        sample(f, rows)
+
+
+def test_weights_and_legacy_guard():
+    f = fields()
+    validate_tier_contract(f["sampling_rule"], f["scoring_rule"])
+    assert f["scoring_rule"]["tier_weights"] == dict(
+        zip(TIERS, [0.28, 0.16, 0.28, 0.28], strict=True)
+    )
+    baseline = {t: PromptTiming(1, [], 8, "stop") for t in TIERS}
+    bt = {t: {"request_ids": [t], "completion_s": 10} for t in TIERS}
+    ct = {
+        t: {"request_ids": [t], "completion_s": v}
+        for t, v in zip(TIERS, [5, 10, 20, 10], strict=True)
+    }
+    result = score_candidate(
+        f["scoring_rule"],
+        baseline=baseline,
+        candidate=baseline,
+        baseline_tiers=bt,
+        candidate_tiers=ct,
+    )
+    assert result.rule == WEIGHTED_RULE
+    assert result.score == pytest.approx(0.28 * 0.5 - 0.28)
+    with pytest.raises(SamplerError, match="input_tiers"):
+        parse_sampling_rule({**f["sampling_rule"], "algo_version": 5})
+    with pytest.raises(SamplerError, match="followup_prompt"):
+        parse_sampling_rule({**f["sampling_rule"], "followup_prompt": "Write an essay"})
+    with pytest.raises(SamplerError, match="pinned v2"):
+        parse_sampling_rule({**f["sampling_rule"], "revision": "b" * 40})
+
+
+def test_cpu_preparation_writes_audit_and_replay(tmp_path):
+    f = fields()
+    f["sampling_rule"]["n_rows"] = 0
+    output = tmp_path / "prepared"
+    prepared = prepare(f, output, dataset=snapshots(), formatter=formatter())
+    assert prepared["sampling_rule"]["n_rows"] == 8
+    assert "qualification" not in prepared["sampling_rule"]
+    assert json.loads((output / "audit.json").read_text())[
+        "distinct_sessions_by_tier"
+    ] == dict.fromkeys(TIERS, 2)
+    assert (output / "workload_trace.json").exists()
+    assert (output / "hf-000.snapshot.json").exists()
+
+
+def test_baseline_qualification_temperature_extremes_and_stale_contract(
+    tmp_path, monkeypatch
+):
+    f = fields()
+    f["sampling_rule"].update(max_tokens=5120, min_output_tokens=1500)
+    fmt = formatter()
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image",
+        lambda **kw: {
+            "engine_ref": f["bench"]["baseline_engine_image_digest"],
+            "container_id": "baseline",
+        },
+    )
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
+    )
+    calls = []
+
+    def post(url, path, body, **kwargs):
+        assert path == "/v1/completions" and body["ignore_eos"] is False
+        assert "min_tokens" not in body
+        assert body["temperature"] in (0.1, 1.01)
+        n = len(fmt.encode(body["prompt"]))
+        calls.append((body["prompt"], n, body["temperature"]))
+        return {
+            "choices": [
+                {
+                    "text": '{"tool": "search", "query": "result"}',
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": n, "completion_tokens": 1500},
+        }
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    qualified = qualify(
+        fields=f,
+        base_url="http://127.0.0.1:8000",
+        container="baseline",
+        engine_ref=f["bench"]["baseline_engine_image_digest"],
+        output_dir=tmp_path / "qualified",
+        pool_size=8,
+        max_rows=8,
+        row_fetcher=snapshots().__getitem__,
+        formatter=fmt,
+    )
+    assert len(calls) == 16
+    assert {n for _, n, _ in calls} == {16384, 32768, 65536, 131072}
+    for prompt, _, _ in calls:
+        assert [temp for p, _, temp in calls if p == prompt] == [0.1, 1.01]
+    require_qualification(qualified, f["bench"], f["engine"])
+    assert len(qualified["eligible_row_indices"]) == 8
+    with pytest.raises(SamplerError, match="baseline qualification"):
+        require_qualification({**qualified, "max_tokens": 33}, f["bench"], f["engine"])
+
+
+def test_cli_rejects_unprepared_template_before_qualification(tmp_path):
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "--output-dir",
+                str(tmp_path / "q"),
+                "--base-url",
+                "http://127.0.0.1:8000",
+                "--container",
+                "baseline",
+                "--engine-ref",
+                "repo@sha256:" + "a" * 64,
+            ]
+        )
+    assert error.value.code == 1
+    assert not (tmp_path / "q" / "sampling_rule.json").exists()
+
+
+def test_fixture_is_unqualified_and_preserves_serving_pins():
+    original = json.loads(
+        (FIXTURE.parent / "sglang_kimi_k3_b300/campaign-fields.json").read_text()
+    )
+    new = json.loads((FIXTURE / "campaign-fields.json").read_text())
+    # Only the dataset, tier selection and weighting are new campaign policy.
+    assert {
+        k: v for k, v in new.items() if k not in ("sampling_rule", "scoring_rule")
+    } == {
+        k: v for k, v in original.items() if k not in ("sampling_rule", "scoring_rule")
+    }
+    sampling_changes = {
+        "algo_version",
+        "dataset",
+        "revision",
+        "n_rows",
+        "input_tiers",
+        "followup_prompt",
+    }
+    assert {
+        k: v for k, v in new["sampling_rule"].items() if k not in sampling_changes
+    } == {
+        k: v for k, v in original["sampling_rule"].items() if k not in sampling_changes
+    }
+    assert {k: v for k, v in new["scoring_rule"].items() if k != "tier_weights"} == {
+        k: v for k, v in original["scoring_rule"].items() if k != "tier_weights"
+    }
+    assert new["sampling_rule"]["temperature_range"] == [0.1, 1.01]
+    assert "temperature" not in new["sampling_rule"]
+    assert new["sampling_rule"]["min_output_tokens"] == 1500
+    assert new["sampling_rule"]["request_concurrency"] == 32
+    assert new["sampling_rule"]["n_prompts"] == 32
+    assert (
+        json.loads((FIXTURE / "sampling_rule.json").read_text()) == new["sampling_rule"]
+    )
+    assert (
+        json.loads((FIXTURE / "scoring_rule.json").read_text()) == new["scoring_rule"]
+    )
+    assert new["sampling_rule"]["dataset"] == DATASET
+    assert new["sampling_rule"]["revision"] == REVISION
+    assert new["sampling_rule"]["n_rows"] == 0
+    with pytest.raises(SamplerError):
+        parse_sampling_rule(new["sampling_rule"])
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_v6_cannot_seed_without_fresh_qualification(monkeypatch, stale):
+    from test_seed import _patch_store
+
+    from campaign.seed import seed_synthetic_campaign
+
+    captured = _patch_store(monkeypatch)
+    f = fields(64)
+    if stale:
+        f["sampling_rule"]["eligible_row_indices"] = list(range(8))
+        f["sampling_rule"]["qualification"] = {
+            "contract_sha256": "sha256:" + "a" * 64,
+            "repetitions": 2,
+        }
+    with pytest.raises(SamplerError, match="baseline qualification"):
+        seed_synthetic_campaign(
+            submission_fee_tao="0.35",
+            allow_placeholders=True,
+            status="draft",
+            sampling_rule=f["sampling_rule"],
+            scoring_rule=f["scoring_rule"],
+            bench_max_model_len=1048576,
+        )
+    assert captured["inserts"] == 0 and captured["profile_data"] is None
+
+
+def test_qualification_pool_needs_distinct_sessions_before_gpu_calls(
+    tmp_path, monkeypatch
+):
+    f = fields()
+    rows = snapshots()
+    for index in (0, 4):
+        snapshot = json.loads(rows[index]["snapshot_json"])
+        snapshot["session_id"] = "one-session"
+        rows[index]["snapshot_json"] = json.dumps(snapshot)
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image",
+        lambda **kw: {
+            "engine_ref": f["bench"]["baseline_engine_image_digest"],
+            "container_id": "baseline",
+        },
+    )
+    monkeypatch.setattr(
+        "bench.qualify_longform.post_json",
+        lambda *a, **kw: pytest.fail("GPU called before input coverage check"),
+    )
+    with pytest.raises(SamplerError, match="distinct sessions"):
+        qualify(
+            fields=f,
+            base_url="http://127.0.0.1:8000",
+            container="baseline",
+            engine_ref=f["bench"]["baseline_engine_image_digest"],
+            output_dir=tmp_path / "failed",
+            pool_size=8,
+            max_rows=8,
+            row_fetcher=rows.__getitem__,
+            formatter=formatter(),
+        )
+    assert (tmp_path / "failed/qualification.jsonl").exists()
+    assert not (tmp_path / "failed/sampling_rule.json").exists()
+
+
+def test_qualification_defaults_to_32_in_flight_across_all_four_tiers(
+    tmp_path, monkeypatch
+):
+    f = fields(64)
+    f["sampling_rule"]["n_prompts"] = 32
+    fmt = formatter()
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image",
+        lambda **kw: {
+            "engine_ref": f["bench"]["baseline_engine_image_digest"],
+            "container_id": "baseline",
+        },
+    )
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
+    )
+    barrier = threading.Barrier(32, timeout=20)
+    lock = threading.Lock()
+    calls = []
+
+    def post(url, path, body, **kwargs):
+        n = len(fmt.encode(body["prompt"]))
+        with lock:
+            calls.append((n, body["temperature"]))
+        # A single-tier batch or C4 default cannot complete this barrier.
+        barrier.wait()
+        return {
+            "choices": [{"text": "A valid response", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": n, "completion_tokens": 8},
+        }
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    qualified = qualify(
+        fields=f,
+        base_url="http://127.0.0.1:8000",
+        container="baseline",
+        engine_ref=f["bench"]["baseline_engine_image_digest"],
+        output_dir=tmp_path,
+        max_rows=64,
+        row_fetcher=snapshots(64).__getitem__,
+        formatter=fmt,
+    )
+    assert len(calls) == 128
+    for offset in range(0, 128, 32):
+        assert Counter(n for n, _ in calls[offset : offset + 32]) == dict.fromkeys(
+            (16384, 32768, 65536, 131072),
+            8,
+        )
+        assert {temp for _, temp in calls[offset : offset + 32]} == {
+            0.1 if offset % 64 == 0 else 1.01
+        }
+    assert len(qualified["eligible_row_indices"]) == 64
+    assert json.loads((tmp_path / "summary.json").read_text())["concurrency"] == 32
+
+
+def test_cli_inherits_campaign_concurrency(tmp_path, monkeypatch):
+    f = fields()
+    source = tmp_path / "fields.json"
+    source.write_text(json.dumps(f))
+    output = tmp_path / "qualified"
+    captured = {}
+
+    def fake_qualify(**kwargs):
+        captured.update(kwargs)
+        kwargs["output_dir"].mkdir()
+        return kwargs["fields"]["sampling_rule"]
+
+    monkeypatch.setattr("bench.qualify_exgentic.qualify", fake_qualify)
+    assert (
+        main(
+            [
+                "--campaign-fields",
+                str(source),
+                "--output-dir",
+                str(output),
+                "--base-url",
+                "http://127.0.0.1:8000",
+                "--container",
+                "baseline",
+                "--engine-ref",
+                f["bench"]["baseline_engine_image_digest"],
+            ]
+        )
+        == 0
+    )
+    assert captured["concurrency"] == 32
+    assert captured["fields"]["sampling_rule"]["temperature_range"] == [0.1, 1.01]
+
+
+def test_exgentic_preserves_kimi_output_floor():
+    from bench.qualify_longform import evaluate_response
+
+    rule = fields()["sampling_rule"]
+    rule.update(max_tokens=5120)
+    rule.pop("min_output_tokens")
+    rule = parse_sampling_rule(rule)
+    assert rule["min_output_tokens"] == 1500
+    for count, rejection in ((1499, "short_output"), (1500, None)):
+        response = {
+            "choices": [{"text": "A valid response", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 16384, "completion_tokens": count},
+        }
+        assert evaluate_response(response, rule, 16384)["rejection"] == rejection
+
+
+@pytest.mark.parametrize("n_rows", [64, 68])
+def test_mixed_tier_qualification_refills_rejections_or_fails_closed(
+    tmp_path, monkeypatch, n_rows
+):
+    f = fields(n_rows)
+    f["sampling_rule"].update(n_prompts=32, max_tokens=5120, min_output_tokens=1500)
+    fmt = formatter()
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image",
+        lambda **kw: {
+            "engine_ref": f["bench"]["baseline_engine_image_digest"],
+            "container_id": "baseline",
+        },
+    )
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
+    )
+    lock = threading.Lock()
+    rejected = False
+
+    def post(url, path, body, **kwargs):
+        nonlocal rejected
+        n = len(fmt.encode(body["prompt"]))
+        count = 1500
+        with lock:
+            if n == 16384 and not rejected:
+                rejected = True
+                count = 1499
+        return {
+            "choices": [{"text": "A valid response", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": n, "completion_tokens": count},
+        }
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    kwargs = dict(
+        fields=f,
+        base_url="http://127.0.0.1:8000",
+        container="baseline",
+        engine_ref=f["bench"]["baseline_engine_image_digest"],
+        output_dir=tmp_path,
+        max_rows=n_rows,
+        row_fetcher=snapshots(n_rows).__getitem__,
+        formatter=fmt,
+    )
+    if n_rows == 64:
+        with pytest.raises(SamplerError, match="16k cannot fill 16 slots"):
+            qualify(**kwargs)
+        assert not (tmp_path / "sampling_rule.json").exists()
+    else:
+        result = qualify(**kwargs)
+        assert len(result["eligible_row_indices"]) == 64
+        assert json.loads((tmp_path / "summary.json").read_text())[
+            "qualified_rows_by_input_tier"
+        ] == dict.fromkeys(TIERS, 16)
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "qualification.jsonl").read_text().splitlines()
+    ]
+    assert sum(row.get("rejection") == "short_output" for row in records) == 1

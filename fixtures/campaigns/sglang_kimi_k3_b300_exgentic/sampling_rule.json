@@ -1,0 +1,27 @@
+{
+  "algo_version": 6,
+  "config": "default",
+  "dataset": "Exgentic/agent-llm-traces-v2",
+  "enable_thinking": false,
+  "max_tokens": 5120,
+  "n_prompts": 32,
+  "n_rows": 0,
+  "revision": "4b8ad4ab198438e5a170f9171c19c6a2cf7c1814",
+  "seed_block_offset": 10,
+  "split": "train",
+  "type": "hf_rows",
+  "min_output_tokens": 1500,
+  "request_concurrency": 32,
+  "request_timeout_s": 1200,
+  "input_tiers": [
+    "16k",
+    "32k",
+    "64k",
+    "128k"
+  ],
+  "max_baseline_prompt_drops": 8,
+  "temperature_range": [
+    0.1,
+    1.01
+  ]
+}

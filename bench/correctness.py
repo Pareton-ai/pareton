@@ -771,7 +771,7 @@ def baseline_prompt_drops(
     max_drops = sampling.get("max_baseline_prompt_drops", MAX_BASELINE_PROMPT_DROPS)
     minimum = (
         sampling.get("min_output_tokens")
-        if sampling.get("algo_version") in (4, 5)
+        if sampling.get("algo_version") in (4, 5, 6)
         else None
     )
     for request in trace.requests:

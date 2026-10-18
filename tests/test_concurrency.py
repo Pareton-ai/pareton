@@ -234,7 +234,7 @@ def test_weights_and_longer_durations_are_monotonic():
     "weights",
     [
         [0.25] * 4,
-        {"32k": 1},
+        {"256k": 1},
         dict.fromkeys(TIERS, 0.3),
         dict.fromkeys(TIERS, float("nan")),
         dict(zip(TIERS, [True, 0, 0, 0])),
@@ -693,7 +693,9 @@ def test_reference_drift_cannot_cancel_between_tiers():
 
 
 @pytest.mark.parametrize("batched", [False, True])
-@pytest.mark.parametrize("selected_tiers", [None, ["8k", "16k"]])
+@pytest.mark.parametrize(
+    "selected_tiers", [None, ["8k", "16k"], ["16k", "32k", "64k", "128k"]]
+)
 def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
     monkeypatch, tmp_path, batched, selected_tiers
 ):
@@ -734,15 +736,19 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
     raw["scoring_rule"] = {"name": WEIGHTED_RULE, "failure_penalty": 0.1}
     raw["sla_bench"]["repetitions"] = 1
     if selected_tiers:
-        raw["scoring_rule"]["tier_weights"] = dict.fromkeys(selected_tiers, 0.5)
+        raw["scoring_rule"]["tier_weights"] = dict.fromkeys(
+            selected_tiers, 1 / len(selected_tiers)
+        )
     req = BenchRequest.from_dict(raw)
     trace = WorkloadTrace(
         1,
         TraceMeta(
             "v5",
             sampling={
-                "algo_version": 5,
-                "request_concurrency": 4,
+                "algo_version": 6 if selected_tiers and "128k" in selected_tiers else 5,
+                "request_concurrency": 32
+                if selected_tiers and "128k" in selected_tiers
+                else 4,
                 "request_timeout_s": 480,
                 "min_output_tokens": 2,
                 **(
@@ -753,9 +759,17 @@ def test_full_v5_round_scores_natural_outputs_and_verifies_baseline(
             },
         ),
         [
-            replace(r, max_tokens=8)
+            replace(
+                r,
+                max_tokens=8,
+                input_length_group=selected_tiers[TIERS.index(r.input_length_group)],
+            )
+            if selected_tiers and "128k" in selected_tiers
+            else replace(r, max_tokens=8)
             for r in requests()
-            if r.input_length_group in (selected_tiers or TIERS)
+            if not selected_tiers
+            or "128k" in selected_tiers
+            or r.input_length_group in selected_tiers
         ],
     )
     starts = []

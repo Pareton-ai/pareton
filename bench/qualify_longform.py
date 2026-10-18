@@ -31,7 +31,7 @@ from bench.longform import (
     sampling_context_for_campaign,
 )
 from bench.sampler import (
-    LONGFORM_ALGO_VERSIONS,
+    TIERED_ALGO_VERSIONS,
     PromptRenderError,
     SamplerError,
     build_prompt_formatter,
@@ -203,16 +203,22 @@ def qualify(
     pool_size=None,
     max_rows=6000,
     repetitions=2,
-    concurrency=4,
+    concurrency=None,
     timeout=600,
     row_fetcher=None,
     formatter=None,
 ):
+    if concurrency is None:
+        concurrency = (
+            fields["sampling_rule"].get("request_concurrency", 32)
+            if fields["sampling_rule"].get("algo_version") == 6
+            else 4
+        )
     if type(concurrency) is not int or concurrency < 1:
         raise SamplerError("concurrency must be a positive integer")
     rule = parse_sampling_rule(fields["sampling_rule"])
-    if rule["algo_version"] not in LONGFORM_ALGO_VERSIONS:
-        raise SamplerError("qualification requires algo_version 4 or 5")
+    if rule["algo_version"] not in TIERED_ALGO_VERSIONS:
+        raise SamplerError("qualification requires algo_version 4, 5 or 6")
     if pool_size is None:
         pool_size = 2 * rule["n_prompts"]
     if repetitions < 2 or pool_size < rule["n_prompts"] or max_rows < pool_size:
@@ -244,7 +250,7 @@ def qualify(
     rule_path = output_dir / "sampling_rule.json"
     if evidence_path.exists() or rule_path.exists():
         raise SamplerError("use a fresh qualification output directory")
-    qualified, seen = [], set()
+    qualified, seen, qualified_sessions = [], set(), set()
     seed = hashlib.sha256(b"pareton-longform-qualification-v1").hexdigest()
     with evidence_path.open("x", encoding="utf-8") as evidence:
         evidence.write(
@@ -273,6 +279,10 @@ def qualify(
                 candidate = None
             if candidate is not None and candidate["input_ids_sha256"] not in seen:
                 seen.add(candidate["input_ids_sha256"])
+                # Agent snapshots can contain hundreds of thousands of tokens.
+                # Keep only metadata while indexing, then re-render accepted work.
+                if rule["algo_version"] == 6:
+                    candidate = {k: v for k, v in candidate.items() if k != "prompt"}
                 candidates[candidate["input_length_group"]].append(candidate)
             if scanned % 500 == 0:
                 logger.info("Indexed %s/%s source rows", scanned, len(indices))
@@ -280,11 +290,47 @@ def qualify(
             "Eligible inputs by tier: %s",
             {g: len(rows) for g, rows in candidates.items()},
         )
+        if rule["algo_version"] == 6:
+            session_counts = {
+                group: len({candidate["session_id"] for candidate in rows})
+                for group, rows in candidates.items()
+            }
+            evidence.write(
+                json.dumps(
+                    {
+                        "type": "input_audit",
+                        "distinct_sessions_by_tier": session_counts,
+                        "required_per_tier": quotas,
+                    }
+                )
+                + "\n"
+            )
+            evidence.flush()
+            missing = {
+                group: count
+                for group, count in session_counts.items()
+                if count < quotas[group]
+            }
+            if missing:
+                raise SamplerError(
+                    f"input tiers cannot fill qualified pool from distinct sessions: {missing}; "
+                    "evidence saved, no launch rule written"
+                )
         evidence_lock = threading.Lock()
 
         def qualify_candidate(candidate):
             row_index = candidate["row_index"]
             group = candidate["input_length_group"]
+            if rule["algo_version"] == 6:
+                rendered = candidate_for_row(
+                    row_index, fetcher(row_index), formatter, rule, context
+                )
+                if (
+                    rendered is None
+                    or {k: v for k, v in rendered.items() if k != "prompt"} != candidate
+                ):
+                    raise SamplerError("Exgentic snapshot changed during qualification")
+                candidate = rendered
             # Preflight one already-rendered candidate, using the same request
             # builder as rounds. Round-wide tier quotas apply to the saved pool,
             # not this internal single-request capacity/tokenization check.
@@ -343,6 +389,19 @@ def qualify(
                                 "input_ids_sha256": candidate["input_ids_sha256"],
                                 "input_tokens": candidate["input_tokens"],
                                 "input_length_group": group,
+                                **(
+                                    {
+                                        k: candidate[k]
+                                        for k in (
+                                            "session_id",
+                                            "source_row",
+                                            "span_index",
+                                            "snapshot_sha256",
+                                        )
+                                    }
+                                    if rule["algo_version"] == 6
+                                    else {}
+                                ),
                                 **result,
                             },
                             ensure_ascii=False,
@@ -364,42 +423,87 @@ def qualify(
                     break
             return accepted
 
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            # Finish the scarce longest tier before spending GPU time on others.
-            for group in reversed(quotas):
-                pool = candidates[group]
-                offset = 0
-                while qualified_counts[group] < quotas[group]:
-                    remaining = len(pool) - offset
-                    if qualified_counts[group] + remaining < quotas[group]:
-                        raise SamplerError(
-                            f"input tiers: {group} cannot fill {quotas[group]} slots "
-                            f"({qualified_counts[group]} qualified, {remaining} untried); "
-                            "evidence saved, no launch rule written"
-                        )
-                    size = min(concurrency, quotas[group] - qualified_counts[group])
-                    batch = pool[offset : offset + size]
-                    offset += len(batch)
-                    logger.info(
-                        "Qualifying tier=%s batch=%s accepted=%s/%s",
-                        group,
-                        len(batch),
-                        qualified_counts[group],
-                        quotas[group],
-                    )
-                    # Consume results in source order, independent of completion timing.
-                    for candidate, accepted in zip(
-                        batch, executor.map(qualify_candidate, batch), strict=True
-                    ):
-                        if accepted:
-                            qualified.append(candidate["row_index"])
-                            qualified_counts[group] += 1
-                            logger.info(
-                                "Qualified row %s (%s/%s)",
-                                candidate["row_index"],
-                                len(qualified),
-                                pool_size,
+        def batches():
+            # v6 fills mixed-tier batches, eight per tier at C32, instead of
+            # capping concurrency at a single tier's pool quota (normally 16).
+            # Preserve scarce-tier-first qualification for legacy workloads.
+            schedules = (
+                [tuple(quotas)]
+                if rule["algo_version"] == 6
+                else [(group,) for group in reversed(quotas)]
+            )
+            offsets = dict.fromkeys(quotas, 0)
+            for schedule in schedules:
+                while any(qualified_counts[g] < quotas[g] for g in schedule):
+                    for group in schedule:
+                        remaining = len(candidates[group]) - offsets[group]
+                        if qualified_counts[group] + remaining < quotas[group]:
+                            raise SamplerError(
+                                f"input tiers: {group} cannot fill {quotas[group]} slots "
+                                f"({qualified_counts[group]} qualified, {remaining} untried); "
+                                "evidence saved, no launch rule written"
                             )
+                    batch = []
+                    batch_counts = dict.fromkeys(quotas, 0)
+                    batch_sessions = set()
+                    while len(batch) < concurrency:
+                        added = False
+                        for group in schedule:
+                            if (
+                                qualified_counts[group] + batch_counts[group]
+                                >= quotas[group]
+                            ):
+                                continue
+                            pool = candidates[group]
+                            while offsets[group] < len(pool):
+                                candidate = pool[offsets[group]]
+                                offsets[group] += 1
+                                session_key = (candidate.get("session_id"), group)
+                                if rule["algo_version"] == 6 and (
+                                    session_key in qualified_sessions
+                                    or session_key in batch_sessions
+                                ):
+                                    continue
+                                batch.append(candidate)
+                                batch_counts[group] += 1
+                                batch_sessions.add(session_key)
+                                added = True
+                                break
+                            else:
+                                raise SamplerError(
+                                    f"input tiers: {group} cannot fill {quotas[group]} slots "
+                                    f"({qualified_counts[group]} qualified, candidates exhausted); "
+                                    "evidence saved, no launch rule written"
+                                )
+                            if len(batch) == concurrency:
+                                break
+                        if not added:
+                            break
+                    logger.info(
+                        "Qualifying batch=%s tiers=%s accepted=%s",
+                        len(batch),
+                        batch_counts,
+                        qualified_counts,
+                    )
+                    yield batch
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            for batch in batches():
+                # Consume results in source order, independent of completion timing.
+                for candidate, accepted in zip(
+                    batch, executor.map(qualify_candidate, batch), strict=True
+                ):
+                    if accepted:
+                        group = candidate["input_length_group"]
+                        qualified_sessions.add((candidate.get("session_id"), group))
+                        qualified.append(candidate["row_index"])
+                        qualified_counts[group] += 1
+                        logger.info(
+                            "Qualified row %s (%s/%s)",
+                            candidate["row_index"],
+                            len(qualified),
+                            pool_size,
+                        )
     if (
         verify_baseline_image(
             engine_ref=engine_ref, base_url=base_url, container=identity["container_id"]

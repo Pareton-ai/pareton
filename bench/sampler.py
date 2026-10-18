@@ -19,12 +19,14 @@ _SHA256_HEX_RE = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 _HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 
 ALGO_VERSION = 2
-SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3, 4, 5})
+SUPPORTED_ALGO_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
 CHAT_TEMPLATE_ALGO_VERSION = 2
 TRAJECTORY_ALGO_VERSION = 3
 LONGFORM_ALGO_VERSION = 4
 CONCURRENCY_ALGO_VERSION = 5
 LONGFORM_ALGO_VERSIONS = frozenset({4, 5})
+TIERED_ALGO_VERSIONS = frozenset({4, 5, 6})
+CONCURRENT_ALGO_VERSIONS = frozenset({5, 6})
 LONGFORM_RULE_FIELDS = frozenset(
     {
         "input_tiers",
@@ -44,7 +46,7 @@ DEFAULT_SEED_BLOCK_OFFSET = 1
 CHAT_TEMPLATE_ENABLE_THINKING = False
 
 # process-local cache: one Arrow split per pinned (dataset, revision, config, split)
-_HF_SPLIT_CACHE: dict[tuple[str, str, str, str], Any] = {}
+_HF_SPLIT_CACHE: dict[tuple[str, ...], Any] = {}
 
 
 class SamplerError(ValueError):
@@ -70,7 +72,7 @@ class SampledTrace:
 class PromptFormatter:
     """Deterministic conversion from a dataset user message to model input."""
 
-    render: Callable[[str | list[dict[str, str]]], str]
+    render: Callable[..., str]
     receipt: dict[str, Any]
     encode: Callable[[str], list[int]] | None = None
 
@@ -121,12 +123,12 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         "request_concurrency",
         "request_timeout_s",
     }
-    if algo_version != CONCURRENCY_ALGO_VERSION and {
+    if algo_version not in CONCURRENT_ALGO_VERSIONS and {
         "request_concurrency",
         "request_timeout_s",
     }.intersection(rule):
         raise SamplerError(
-            "request_concurrency and request_timeout_s require algo_version 5"
+            "request_concurrency and request_timeout_s require algo_version 5 or 6"
         )
     if algo_version < TRAJECTORY_ALGO_VERSION and new_fields.intersection(rule):
         raise SamplerError(
@@ -153,14 +155,10 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             - {"ignore_eos", "enable_thinking", "request_interval_ms"}
             - (
                 {"request_concurrency", "request_timeout_s"}
-                if algo_version == 5
+                if algo_version in CONCURRENT_ALGO_VERSIONS
                 else set()
             )
-            - (
-                LONGFORM_RULE_FIELDS
-                if algo_version in LONGFORM_ALGO_VERSIONS
-                else set()
-            )
+            - (LONGFORM_RULE_FIELDS if algo_version in TIERED_ALGO_VERSIONS else set())
         )
         if unknown:
             raise SamplerError(
@@ -181,7 +179,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             raise SamplerError(
                 f"algo_version {algo_version} requires a full dataset commit revision"
             )
-        if algo_version == CONCURRENCY_ALGO_VERSION:
+        if algo_version in CONCURRENT_ALGO_VERSIONS:
             from bench.concurrency import validate_concurrency, validate_request_timeout
 
             if "request_interval_ms" in rule:
@@ -204,7 +202,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(thinking, bool):
             raise SamplerError("enable_thinking must be a boolean")
         parsed.update(enable_thinking=thinking)
-    if algo_version in LONGFORM_ALGO_VERSIONS:
+    if algo_version in TIERED_ALGO_VERSIONS:
         from bench.longform import parse_longform_fields
 
         parsed.update(parse_longform_fields(rule, parsed))
@@ -213,7 +211,7 @@ def parse_sampling_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
 
 def sampling_context_for_rule(rule, bench, engine=None):
     """Resolve capacity without imposing SWE history tiers on writing prompts."""
-    if rule["algo_version"] in LONGFORM_ALGO_VERSIONS:
+    if rule["algo_version"] in TIERED_ALGO_VERSIONS:
         from bench.longform import sampling_context_for_campaign
     else:
         from bench.trajectory import sampling_context_for_campaign
@@ -343,6 +341,7 @@ def build_prompt_formatter(
                 enable_thinking=enable_thinking,
                 expected_template_sha256=expected_template_sha256,
                 token=_hf_token(),
+                windowed_encoding=parsed["algo_version"] == 6,
             )
     loader = config_loader or _call_load_tokenizer_config
     try:
@@ -409,7 +408,7 @@ def build_prompt_formatter(
             }
         }
 
-    def render(prompt: str | list[dict[str, str]]) -> str:
+    def render(prompt: str | list[dict[str, str]], *, tools=None) -> str:
         try:
             special_tokens = {
                 key: _special_token_value(value)
@@ -420,7 +419,7 @@ def build_prompt_formatter(
                 messages=[{"role": "user", "content": prompt}]
                 if isinstance(prompt, str)
                 else prompt,
-                tools=None,
+                tools=tools,
                 documents=None,
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
@@ -588,6 +587,7 @@ def _cached_hf_split(rule: dict[str, Any]) -> Any:
         str(rule["revision"]),
         str(rule["config"]),
         str(rule["split"]),
+        *(("exgentic-v6",) if rule.get("algo_version") == 6 else ()),
     )
     cached = _HF_SPLIT_CACHE.get(key)
     if cached is not None:
@@ -608,6 +608,10 @@ def _cached_hf_split(rule: dict[str, Any]) -> Any:
         )
     except Exception as exc:
         raise SamplerError(f"hf load_dataset failed: {exc}") from exc
+    if rule.get("algo_version") == 6:
+        from bench.exgentic import flatten_dataset
+
+        ds = flatten_dataset(ds)
     _HF_SPLIT_CACHE[key] = ds
     return ds
 
@@ -615,6 +619,10 @@ def _cached_hf_split(rule: dict[str, Any]) -> Any:
 def fetch_hf_row(rule: dict[str, Any], index: int) -> dict[str, Any]:
     """Return one row from the pinned HF split. Downloads parquet once per process."""
     ds = _cached_hf_split(rule)
+    if rule.get("algo_version") == 6 and len(ds) != rule["n_rows"]:
+        raise SamplerError(
+            "Exgentic snapshot count changed; rerun preparation and qualification"
+        )
     idx = int(index)
     try:
         row = ds[idx]
@@ -641,7 +649,7 @@ def generate_trace(
 ) -> SampledTrace:
     """Build a trace from hash-selected rows. row_fetcher is injected in tests."""
     parsed = parse_sampling_rule(rule)
-    if parsed["algo_version"] in LONGFORM_ALGO_VERSIONS:
+    if parsed["algo_version"] in TIERED_ALGO_VERSIONS:
         from bench.longform import generate_longform_trace
 
         return generate_longform_trace(

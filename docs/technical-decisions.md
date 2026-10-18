@@ -86,3 +86,44 @@ services keep credentialed S3 access for fetch and build.
 Old append-only `submission_events` rows are untouched: nothing rewrites past
 `committed` details. Objects already copied to public storage under the former
 reveal policy are outside this code change.
+
+
+## 2026-10-18: Exgentic v6 workload for a new Kimi K3 campaign
+
+Use the pinned Exgentic agent-llm-traces-v2 corpus as independent request
+snapshots. Sampler v6 normalizes successful chat calls, preserves system/tool
+inputs, renders with the campaign tokenizer, and selects eight distinct prompts
+per 16k/32k/64k/128k tier. Each tier uses 90-100% of its named token count.
+Allow at most one snapshot from a source session per tier in a round and in the
+qualified pool. Never pad, truncate, append a writing instruction, execute tools,
+or feed candidate output into another request. Reject unsupported modalities.
+
+Use tier weights 0.28/0.16/0.28/0.28. Keep the pinned Kimi serving configuration,
+C32 schedule, warmed-cache measurement, likelihood gates, and baseline-relative
+completion accounting. Preserve Kimi's `[0.1, 1.01]` temperature range,
+natural EOS, 5120-token ceiling and 1500-token output floor. The raw completion
+endpoint retains generated tool-call syntax as
+text for scoring. Qualification does not establish tool execution correctness.
+
+Prepare the exact normalized snapshot count and CPU coverage before running
+the baseline qualification command. Fail without a launch rule if any tier's
+qualified pool is short. Require a new qualification contract and new campaign;
+preserve historical LongWriter rule/receipt behavior. No old qualification can
+be restamped into this workload. Manually select and review the last ten old
+campaign submissions after qualification; never transfer scores or rewrite
+their old audit events. Rollout commands live in the accompanying pull request.
+
+Linear tools were unavailable. This implements the user's explicit request.
+
+
+## 2026-10-18: Preserve Kimi policy when replacing the input corpus
+
+Review against PR #193 and the subsequent C32 change in PR #203 found that the
+initial Exgentic commit incorrectly selected greedy generation, a one-token
+floor and a C4 qualification default. Restore the existing generation policy
+and default qualification to the campaign's request concurrency. Qualify v6 in
+mixed-tier batches so the 16-per-tier pool quota does not cap C32 at C16.
+Keep legacy qualification scheduling unchanged. Insufficient outputs at either
+temperature extreme block launch; the dataset change does not relax that gate.
+GPU scorer, SLA and full-round validation remain required before opening the
+new campaign. No production settings or historical evidence change here.

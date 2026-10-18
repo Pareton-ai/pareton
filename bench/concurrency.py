@@ -6,6 +6,7 @@ import math
 import statistics
 
 TIERS = ("2k", "4k", "8k", "16k")
+ALL_TIERS = TIERS + ("32k", "64k", "128k")
 CONCURRENCIES = (1, 2, 4, 8, 16, 32)
 WEIGHTED_RULE = "weighted_tier_completion_speedup"
 
@@ -34,25 +35,34 @@ def input_tiers(value=None):
     if (
         not isinstance(value, (list, tuple))
         or not value
-        or any(not isinstance(t, str) or t not in TIERS for t in value)
-        or tuple(value) != tuple(t for t in TIERS if t in value)
+        or any(not isinstance(t, str) or t not in ALL_TIERS for t in value)
+        or tuple(value) != tuple(t for t in ALL_TIERS if t in value)
     ):
         raise ValueError(
-            "input_tiers must be a nonempty ordered subset of 2k, 4k, 8k, 16k"
+            "input_tiers must be a nonempty ordered subset of 2k, 4k, 8k, 16k, 32k, 64k, 128k"
         )
     return tuple(value)
 
 
 def validate_tier_contract(sampling, scoring):
-    if set(input_tiers(sampling.get("input_tiers"))) != set(tier_weights(scoring)):
+    selected = input_tiers(sampling.get("input_tiers"))
+    if sampling.get("algo_version") == 5 and set(selected) - set(TIERS):
+        raise ValueError("extended input_tiers require algo_version 6")
+    if sampling.get("algo_version") == 6 and selected != ("16k", "32k", "64k", "128k"):
+        raise ValueError("Exgentic v6 requires 16k, 32k, 64k, 128k input_tiers")
+    if set(selected) != set(tier_weights(scoring)):
         raise ValueError("tier_weights must match sampling input_tiers")
 
 
 def tier_weights(rule):
     weights = rule.get("tier_weights", dict.fromkeys(TIERS, 0.25))
-    if not isinstance(weights, dict) or not weights or not set(weights) <= set(TIERS):
+    if (
+        not isinstance(weights, dict)
+        or not weights
+        or not set(weights) <= set(ALL_TIERS)
+    ):
         raise ValueError(
-            "tier_weights must name a nonempty subset of 2k, 4k, 8k and 16k"
+            "tier_weights must name a nonempty subset of 2k, 4k, 8k, 16k, 32k, 64k and 128k"
         )
     if any(
         isinstance(w, bool)
@@ -62,7 +72,7 @@ def tier_weights(rule):
         for w in weights.values()
     ) or not math.isclose(sum(weights.values()), 1.0, rel_tol=0, abs_tol=1e-9):
         raise ValueError("tier_weights must be finite, nonnegative and sum to one")
-    return {tier: float(weights[tier]) for tier in TIERS if tier in weights}
+    return {tier: float(weights[tier]) for tier in ALL_TIERS if tier in weights}
 
 
 # Prompts per tier that the original 8-per-tier grouping assumed.
@@ -93,7 +103,7 @@ def request_groups(requests, concurrency, tiers=None, size=DEFAULT_TIER_SIZE):
         raise ValueError("tier size must be a positive integer")
     tiers_per_group = max(1, concurrency // size)
     if any(r.input_length_group not in tiers for r in requests):
-        raise EngineError("concurrency replay requires LongWriter input tiers")
+        raise EngineError("concurrency replay requires configured input tiers")
     if any(not any(r.input_length_group == t for r in requests) for t in tiers):
         raise EngineError(
             "concurrency replay requires a nonempty eligible set in every tier"

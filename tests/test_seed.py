@@ -1164,7 +1164,10 @@ def test_kimi_k3_launch_helper_requires_the_startup_timeout(timeout):
     assert "needs at least 3600" in result.stderr
 
 
-def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_path):
+@pytest.mark.parametrize("exgentic", [False, True])
+def test_kimi_k3_launch_helper_matches_fixture_through_worker(
+    monkeypatch, tmp_path, exgentic
+):
     from types import SimpleNamespace
 
     from bench.main import SGLANG_SCORER_CONTEXT_HEADROOM, plan_round_starts
@@ -1179,19 +1182,44 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
     )
     monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
     root = Path(__file__).resolve().parents[1]
-    fixture = root / "fixtures/campaigns/sglang_kimi_k3_b300"
+    suffix = "_exgentic" if exgentic else ""
+    fixture = root / f"fixtures/campaigns/sglang_kimi_k3_b300{suffix}"
     fields = json.loads((fixture / "campaign-fields.json").read_text())
+    rule_path = fixture / "sampling_rule.json"
+    if exgentic:
+        from bench.longform import qualification_contract
+        from bench.sampler import parse_sampling_rule
+
+        fields["sampling_rule"]["n_rows"] = 64
+        fields["sampling_rule"]["eligible_row_indices"] = list(range(64))
+        rule = parse_sampling_rule(fields["sampling_rule"])
+        rule["qualification"] = {
+            "contract_sha256": qualification_contract(
+                rule, fields["bench"], fields["engine"]
+            ),
+            "repetitions": 2,
+        }
+        fields["sampling_rule"] = rule
+        rule_path = tmp_path / "qualified.json"
+        rule_path.write_text(json.dumps(rule))
     engine_ref = fields["base_image_digest"]
     argv = (
         subprocess.check_output(
             [
                 "bash",
                 "-c",
-                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
+                'python() { if [[ "$1" == "-" ]]; then return 0; fi; printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
-                str(root / "ops/seed-sglang-kimi-k3-b300.sh"),
+                str(
+                    root
+                    / (
+                        "ops/seed-sglang-kimi-k3-b300-exgentic.sh"
+                        if exgentic
+                        else "ops/seed-sglang-kimi-k3-b300.sh"
+                    )
+                ),
                 engine_ref,
-                str(fixture / "sampling_rule.json"),
+                str(rule_path),
             ],
             cwd=root,
             env={**os.environ, "PARETON_BENCH_HEALTH_TIMEOUT_S": "3600"},
@@ -1223,6 +1251,8 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(monkeypatch, tmp_p
     )
     # Same ranking as Qwen, with a looser repeatability gate for Kimi's output
     # length noise.
+    if exgentic:
+        qwen["tier_weights"] = {"16k": 0.28, "32k": 0.16, "64k": 0.28, "128k": 0.28}
     assert manifest.scoring_rule == {**qwen, "baseline_drift_ceiling": 0.15}
     trace = tmp_path / "trace.json"
     trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))

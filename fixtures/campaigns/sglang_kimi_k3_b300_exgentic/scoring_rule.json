@@ -1,0 +1,11 @@
+{
+  "name": "weighted_tier_completion_speedup",
+  "failure_penalty": 0.1,
+  "tier_weights": {
+    "16k": 0.28,
+    "32k": 0.16,
+    "64k": 0.28,
+    "128k": 0.28
+  },
+  "baseline_drift_ceiling": 0.15
+}
