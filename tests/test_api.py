@@ -1640,3 +1640,12 @@ def test_entry_report_sampling_and_prompt_checks_are_additive(monkeypatch, clien
     assert body["sla"]["sampling"] == sampling
     assert body["correctness"]["prompt_checks"] == checks
     assert body["prompts"] == row["report"]["score_report"]["prompts"]
+
+
+def test_health_does_not_use_the_worker_threadpool():
+    """Sync routes queue behind DB pool waits; health has to answer anyway."""
+    import inspect
+
+    from api import server
+
+    assert inspect.iscoroutinefunction(server.health)
