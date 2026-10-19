@@ -455,26 +455,40 @@ def qualify(
                             ):
                                 continue
                             pool = candidates[group]
-                            while offsets[group] < len(pool):
-                                candidate = pool[offsets[group]]
-                                offsets[group] += 1
-                                session = candidate.get("session_id")
-                                if rule["algo_version"] == 6 and (
-                                    session in qualified_sessions
-                                    or session in batch_sessions
-                                ):
+                            start = offsets[group]
+                            if rule["algo_version"] == 6:
+                                # A qualified session is spent for the round; one
+                                # still in this batch is only deferred, since its
+                                # batched prompt may yet be rejected.
+                                pool[start:] = [
+                                    c
+                                    for c in pool[start:]
+                                    if c.get("session_id") not in qualified_sessions
+                                ]
+                            pick = next(
+                                (
+                                    i
+                                    for i in range(start, len(pool))
+                                    if pool[i].get("session_id") not in batch_sessions
+                                    or rule["algo_version"] != 6
+                                ),
+                                None,
+                            )
+                            if pick is None:
+                                if start < len(pool):
                                     continue
-                                batch.append(candidate)
-                                batch_counts[group] += 1
-                                batch_sessions.add(session)
-                                added = True
-                                break
-                            else:
                                 raise SamplerError(
                                     f"input tiers: {group} cannot fill {quotas[group]} slots "
                                     f"({qualified_counts[group]} qualified, candidates exhausted); "
                                     "evidence saved, no launch rule written"
                                 )
+                            candidate = pool.pop(pick)
+                            pool.insert(start, candidate)
+                            offsets[group] += 1
+                            batch.append(candidate)
+                            batch_counts[group] += 1
+                            batch_sessions.add(candidate.get("session_id"))
+                            added = True
                             if len(batch) == concurrency:
                                 break
                         if not added:

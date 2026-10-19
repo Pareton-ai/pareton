@@ -32,7 +32,7 @@ from campaign.store import (
 from db.connection import db_connection
 from gate.integrity import check_integrity, patch_fingerprint_bytes
 from gate.types import SubmissionState
-from storage.s3 import copy_private_patch, fetch_patch_bytes
+from storage.s3 import copy_private_patch, fetch_patch_bytes, private_patch_key
 
 # A patch is only valid against the tree and path policy it was written for.
 MATCHING_FIELDS = ("baseline_repo", "baseline_commit", "allowed_paths", "denied_paths")
@@ -128,6 +128,10 @@ def build_plan(
                 )
                 if cur.fetchone() is not None:
                     item["skip"] = "already in target campaign"
+                    continue
+                # Only private objects can be copied under the new campaign.
+                if private_patch_key(row["retrieval_url"]) is None:
+                    item["skip"] = "not a private patch locator"
                     continue
                 result = check_integrity(
                     retrieval_url=row["retrieval_url"],

@@ -15,7 +15,7 @@ from campaign.store import insert_campaign, insert_profile, insert_submission
 from db.connection import db_connection
 from e2e_db import cleanup_e2e_rows, require_e2e_database_url
 from gate.integrity import hash_patch_bytes, patch_fingerprint_bytes
-from storage.s3 import _s3_retrieval_url, object_key_for
+from storage.s3 import _s3_retrieval_url, object_key_for, public_retrieval_url
 
 
 @pytest.fixture(autouse=True)
@@ -136,3 +136,21 @@ def test_carries_latest_patches_in_commit_order_once():
         p["skip"]
         for p in carryover.build_plan(old, new, 4, fetcher=objects.__getitem__)
     ] == ["already in target campaign"] * 3 + ["duplicate already in target campaign"]
+
+
+def test_skips_a_public_patch_it_cannot_copy():
+    profile_id = insert_profile("e2e", {"fixture": True})
+    old, new = _campaign(profile_id, "closed"), _campaign(profile_id, "open")
+    data = _patch(7)
+    key = object_key_for(old, "hk", str(uuid4()))
+    url = public_retrieval_url(key.replace("/private/", "/", 1))
+    insert_submission(
+        campaign_id=old,
+        patch_hash=hash_patch_bytes(data),
+        hotkey="hk",
+        baseline_commit="a" * 40,
+        retrieval_url=url,
+        commit_block=100,
+    )
+    [item] = carryover.build_plan(old, new, 1, fetcher={url: data}.__getitem__)
+    assert item["skip"] == "not a private patch locator"

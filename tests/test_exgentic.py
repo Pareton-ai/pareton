@@ -769,3 +769,54 @@ def test_sampler_reaches_eligible_sessions_beyond_benchmark_grouped_prefix():
     assert (
         sample(fields(308), rows, sampling_receipt=result.receipt).body == result.body
     )
+
+
+def test_session_in_flight_is_deferred_not_dropped(tmp_path, monkeypatch):
+    # Rows 60 (16k) and 21 (32k) share a session and are each tier's first
+    # candidate, so they meet in the first batch. 32k has exactly its quota.
+    # Row 60 is rejected, so row 21 must still qualify in a later batch.
+    f = fields(68)
+    f["sampling_rule"].update(n_prompts=32, max_tokens=5120, min_output_tokens=1500)
+    fmt = formatter()
+    rows = snapshots(68)
+    for index, update in ((60, {}), (21, {}), (65, {"size": SIZES[2]})):
+        snapshot = json.loads(rows[index]["snapshot_json"])
+        if not update:
+            snapshot["session_id"] = "shared"
+        else:
+            snapshot["messages"][0]["content"] = f"n={update['size']};id={index}"
+        rows[index]["snapshot_json"] = json.dumps(snapshot)
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image",
+        lambda **kw: {
+            "engine_ref": f["bench"]["baseline_engine_image_digest"],
+            "container_id": "baseline",
+        },
+    )
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
+    )
+
+    def post(url, path, body, **kwargs):
+        tokens = fmt.encode(body["prompt"])
+        return {
+            "choices": [{"text": "A valid response", "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": len(tokens),
+                "completion_tokens": 1499 if tokens[0] == 61 else 1500,
+            },
+        }
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    result = qualify(
+        fields=f,
+        base_url="http://127.0.0.1:8000",
+        container="baseline",
+        engine_ref=f["bench"]["baseline_engine_image_digest"],
+        output_dir=tmp_path,
+        max_rows=68,
+        row_fetcher=rows.__getitem__,
+        formatter=fmt,
+    )
+    assert 60 not in result["eligible_row_indices"]
+    assert 21 in result["eligible_row_indices"]
