@@ -11,7 +11,12 @@ pytestmark = pytest.mark.e2e
 from campaign import carryover
 from campaign.manifest import build_manifest
 from campaign.models import SLA
-from campaign.store import insert_campaign, insert_profile, insert_submission
+from campaign.store import (
+    append_event,
+    insert_campaign,
+    insert_profile,
+    insert_submission,
+)
 from db.connection import db_connection
 from e2e_db import cleanup_e2e_rows, require_e2e_database_url
 from gate.integrity import hash_patch_bytes, patch_fingerprint_bytes
@@ -154,3 +159,46 @@ def test_skips_a_public_patch_it_cannot_copy():
     )
     [item] = carryover.build_plan(old, new, 1, fetcher={url: data}.__getitem__)
     assert item["skip"] == "not a private patch locator"
+
+
+def test_rechecks_the_source_before_copying():
+    profile_id = insert_profile("e2e", {"fixture": True})
+    old, new = _campaign(profile_id, "closed"), _campaign(profile_id, "open")
+    objects, ids = {}, []
+    for i in range(2):
+        data = _patch(10 + i)
+        url = _s3_retrieval_url(object_key_for(old, f"hk{i}", str(uuid4())))
+        objects[url] = data
+        ids.append(
+            insert_submission(
+                campaign_id=old,
+                patch_hash=hash_patch_bytes(data),
+                hotkey=f"hk{i}",
+                baseline_commit="a" * 40,
+                retrieval_url=url,
+                commit_block=100 + i,
+            )
+        )
+    plan = carryover.build_plan(old, new, 2, fetcher=objects.__getitem__)
+    assert [p["skip"] for p in plan] == [None, None]
+    # Both change after the reviewed plan was built.
+    append_event(ids[0], "rejected")
+    append_event(
+        ids[1],
+        "disqualified",
+        detail={"source": "manual", "scope": "campaign", "action": "disqualified"},
+    )
+    copied = []
+
+    def copier(url, **kwargs):
+        copied.append(url)
+        return url
+
+    results = carryover.apply_plan(
+        plan, old, new, copier=copier, operator="ops", reason="r", evidence_ref="PR"
+    )
+    assert [r["outcome"] for r in results] == [
+        "skipped: source state rejected",
+        "skipped: hotkey disqualified in source campaign",
+    ]
+    assert copied == []

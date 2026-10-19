@@ -59,6 +59,7 @@ def _plan():
 def calls(monkeypatch):
     seen = {"copies": [], "inserts": []}
     monkeypatch.setattr(carryover, "build_plan", lambda *a, **k: _plan())
+    monkeypatch.setattr(carryover, "_recheck", lambda *a: None)
 
     def copy(url, **kwargs):
         seen["copies"].append((url, kwargs))
