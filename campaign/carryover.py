@@ -67,6 +67,34 @@ def _campaigns(cur, source_id: str, target_id: str) -> None:
             raise ValueError(f"campaigns differ in {key}")
 
 
+def _ineligible(cur, source_id: str, target_id: str, hotkey: str, state) -> str | None:
+    if state in SKIPPED_SOURCE_STATES:
+        return f"source state {state}"
+    for label, cid in (("source", source_id), ("target", target_id)):
+        if _campaign_hotkey_is_disqualified(cur, cid, hotkey):
+            return f"hotkey disqualified in {label} campaign"
+    return None
+
+
+def _latest_state(cur, submission_id: str):
+    cur.execute(
+        """
+        SELECT state FROM submission_events WHERE submission_id = %s
+        ORDER BY created_at DESC, id DESC LIMIT 1
+        """,
+        (submission_id,),
+    )
+    row = cur.fetchone()
+    return row["state"] if row else None
+
+
+def _recheck(source_id: str, target_id: str, item: dict[str, Any]) -> str | None:
+    with db_connection(readonly=True) as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            state = _latest_state(cur, item["source_submission_id"])
+            return _ineligible(cur, source_id, target_id, item["hotkey"], state)
+
+
 def build_plan(
     source_id: str,
     target_id: str,
@@ -113,13 +141,9 @@ def build_plan(
                     "skip": None,
                 }
                 plan.append(item)
-                if row["source_state"] in SKIPPED_SOURCE_STATES:
-                    item["skip"] = f"source state {row['source_state']}"
-                    continue
-                for label, cid in (("source", source_id), ("target", target_id)):
-                    if _campaign_hotkey_is_disqualified(cur, cid, row["hotkey"]):
-                        item["skip"] = f"hotkey disqualified in {label} campaign"
-                        break
+                item["skip"] = _ineligible(
+                    cur, source_id, target_id, row["hotkey"], row["source_state"]
+                )
                 if item["skip"]:
                     continue
                 cur.execute(
@@ -181,6 +205,14 @@ def apply_plan(
         if item["skip"]:
             continue
         source = item["source_submission_id"]
+        # The source can still be rejected or its hotkey disqualified after the
+        # plan was built, so check again just before copying.
+        skip = _recheck(source_id, target_id, item)
+        if skip:
+            results.append(
+                {"source_submission_id": source, "outcome": f"skipped: {skip}"}
+            )
+            continue
         url = copier(
             item["retrieval_url"],
             campaign_id=target_id,
