@@ -109,7 +109,9 @@ prefix, so a round and a qualified pool take at most one call per session. The
 CPU audit reports distinct sessions per tier and how much of a preview round a
 prefix cache must hold. A tier short of its quota fails without a launch rule.
 
-`campaign.carryover` enters the latest N submissions of a closed campaign into
-its replacement: the patch is copied under the new campaign, the source commit
+`campaign.carryover` takes the latest N submissions of a closed campaign and
+enters the eligible ones into its replacement (patches that never ran, excluded
+hotkeys, non-private URLs and duplicates are skipped). Each patch is copied
+under the new campaign, the source commit
 block keeps on-chain order for cohorts and ties, and no payment, image or score
 moves. A dry run prints the plan and its hash; `--apply` requires that hash.
