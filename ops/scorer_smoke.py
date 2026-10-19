@@ -54,6 +54,7 @@ from bench.http import get_json
 from bench.lifecycle import EngineError
 from bench.longform import (
     candidate_for_row,
+    digest,
     length_groups,
     sampling_context_for_campaign,
 )
@@ -100,6 +101,17 @@ def check_gpus(sku, count, runner=subprocess.run):
     if len(matching) < count or len(matching) != len(names):
         raise EngineError(f"need {count} {sku} GPUs and no others, found {names}")
     return names
+
+
+def inputs_digest(fields):
+    """What the sequences depend on, so a scorer-args change keeps them valid."""
+    return digest(
+        {
+            "sampling_rule": fields["sampling_rule"],
+            "model": fields["bench"]["model"],
+            "engine": fields["engine"],
+        }
+    )
 
 
 def top_tier(rule):
@@ -357,18 +369,18 @@ def main(argv=None):
         fields = json.loads(args.campaign_fields.read_text())
         if fields["engine"]["name"] != "sglang":
             raise ValueError("the smoke scores through SGLang's native endpoints")
-        state["campaign_fields_sha256"] = sha256_file(args.campaign_fields)
+        state["inputs_sha256"] = inputs_digest(fields)
         state["scorer_serve_args"] = fields["bench"]["correctness"]["serve_args"]
         if args.prepared:
             prepared = json.loads((args.prepared / "sequences.json").read_text())
-            if prepared["campaign_fields_sha256"] != state["campaign_fields_sha256"]:
-                raise ValueError("prepared sequences belong to other campaign fields")
+            if prepared["inputs_sha256"] != state["inputs_sha256"]:
+                raise ValueError("prepared sequences belong to another workload")
         else:
             rule = parse_sampling_rule(fields["sampling_rule"])
             count = args.count or top_tier(rule)["count"]
             tier, sequences = select_sequences(fields, count)
             prepared = {
-                "campaign_fields_sha256": state["campaign_fields_sha256"],
+                "inputs_sha256": state["inputs_sha256"],
                 "tier": tier,
                 "sequences": sequences,
             }

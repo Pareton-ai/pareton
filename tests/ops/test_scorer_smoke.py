@@ -97,7 +97,7 @@ def gpu(monkeypatch, tmp_path):
     (prepared / "sequences.json").write_text(
         json.dumps(
             {
-                "campaign_fields_sha256": smoke.sha256_file(path),
+                "inputs_sha256": smoke.inputs_digest(fields),
                 "tier": "128k",
                 "sequences": sequences,
             }
@@ -158,8 +158,8 @@ def gpu(monkeypatch, tmp_path):
     return h
 
 
-def run(h, tmp_path, *extra):
-    out = tmp_path / "out"
+def run(h, tmp_path, *extra, name="out"):
+    out = tmp_path / name
     code = smoke.main(
         [
             "--campaign-fields",
@@ -217,10 +217,13 @@ def test_prepare_only_needs_no_gpu(gpu, tmp_path):
     assert not gpu.gpus_checked and not gpu.starts
 
 
-def test_prepared_sequences_must_match_the_campaign_fields(gpu, tmp_path):
+def test_prepared_sequences_survive_a_scorer_args_change(gpu, tmp_path):
     fields = json.loads(gpu.path.read_text())
-    fields["bench"]["correctness"]["serve_args"][-1] = "8"
+    fields["bench"]["correctness"]["serve_args"][1] = "0.84"
+    gpu.path.write_text(json.dumps(fields))
+    assert run(gpu, tmp_path, name="changed")[0] == 0
+    fields["sampling_rule"]["max_tokens"] = 4096
     gpu.path.write_text(json.dumps(fields))
     code, summary = run(gpu, tmp_path)
     assert code == 2
-    assert "other campaign fields" in summary["error"]
+    assert "another workload" in summary["error"]
