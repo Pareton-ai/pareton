@@ -148,15 +148,15 @@ Re-run the full CPU audit and baseline qualification before launch. Preserve
 temperature, output-length, correctness and scoring policy.
 
 
-## 2026-10-19: Size the Kimi Exgentic tiers to the DCP KV pool
+## 2026-10-19: Kimi Exgentic tiers, session isolation and carryover
 
 The workload exists to punish engines that drop `--dcp-size 8` and so hold
-about a sixth of the KV cache. At C32 with eight prompts per tier, 16k-128k
-tiers put about 1.9M prompt tokens in flight, which is more than the DCP-8
-baseline holds (estimated at 1.5M tokens from a C64 run at 39% KV use), so the
-baseline would queue too. Use 8k/16k/32k/64k with equal weights: about 1.05M
-tokens, inside the baseline pool and about four times a no-DCP pool. Sampler v6
-accepts any ordered tier set, so the fixture alone carries this choice.
+about a sixth of the KV cache. Use 16k/32k/64k/128k with equal weights, eight
+prompts each at C32. That is about 1.9M prompt tokens in flight, which may
+exceed the DCP-8 baseline pool too (estimated at 1.5M tokens from a C64 run at
+39% KV use), so the B300 qualification log and shadow round must confirm the
+baseline completes within the timeout and drift ceiling. Sampler v6 accepts any
+ordered tier set, so smaller tiers are a fixture change.
 
 One session's later calls extend its earlier prompts, so two calls of a session
 in different tiers would share a cached prefix. Keep one call per session per

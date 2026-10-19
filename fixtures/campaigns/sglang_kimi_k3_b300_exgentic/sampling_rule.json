@@ -14,10 +14,10 @@
   "request_concurrency": 32,
   "request_timeout_s": 1200,
   "input_tiers": [
-    "8k",
     "16k",
     "32k",
-    "64k"
+    "64k",
+    "128k"
   ],
   "max_baseline_prompt_drops": 8,
   "temperature_range": [
