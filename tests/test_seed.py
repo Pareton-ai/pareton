@@ -1283,10 +1283,12 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(
             args[i + 1] for i, a in enumerate(args) if a == "--mem-fraction-static"
         ]
         assert fractions[-1] == ("0.80" if start.kind == "scorer" else "0.88")
-        # The scorer's KV budget at 0.80 only fits a small mamba pool.
+        # The scorer's KV budget at 0.80 only fits a small mamba pool, and it
+        # grades one request at a time on the long-context campaign.
         last = {a: args[i + 1] for i, a in enumerate(args[:-1])}
+        scorer_running = "1" if exgentic else "8"
         assert (last["--max-mamba-cache-size"], last["--max-running-requests"]) == (
-            ("16", "8") if start.kind == "scorer" else ("320", "64")
+            ("16", scorer_running) if start.kind == "scorer" else ("320", "64")
         )
         assert args[args.index("--speculative-draft-model-path") + 1] == "/draft"
         context = 1048576 + (

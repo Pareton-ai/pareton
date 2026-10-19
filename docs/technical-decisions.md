@@ -103,6 +103,9 @@ That is about 1.9M prompt tokens in flight, possibly beyond the DCP-8
 baseline's own pool (estimated 1.5M from a C64 run at 39% KV use). B300
 qualification and a shadow round must show the baseline completes within the
 timeout and drift ceiling; otherwise smaller tiers are a fixture change.
+The scorer keeps the 0.80 memory fraction but one running request, since it
+grades sequentially; a 128k input is rejected, not truncated, if it exceeds
+the scorer's KV pool, so a scorer-only smoke checks that before qualification.
 
 A session's later calls extend its earlier prompts and would share a cached
 prefix, so a round and a qualified pool take at most one call per session. The

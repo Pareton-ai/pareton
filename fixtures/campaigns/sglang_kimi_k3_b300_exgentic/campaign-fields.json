@@ -99,7 +99,7 @@
         "--max-mamba-cache-size",
         "16",
         "--max-running-requests",
-        "8"
+        "1"
       ]
     }
   },

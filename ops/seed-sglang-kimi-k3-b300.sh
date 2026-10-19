@@ -21,6 +21,11 @@ fi
 engine_ref=$1
 sampling_rule=$2
 scoring_rule=${3:-fixtures/campaigns/sglang_kimi_k3_b300/scoring_rule.json}
+# The scorer grades one request at a time. Its running-request cap is part of
+# the qualification contract, so take it from the fixture beside the scoring rule.
+scorer_running=$(python3 -c 'import json, sys
+args = json.load(open(sys.argv[1]))["bench"]["correctness"]["serve_args"]
+print(args[args.index("--max-running-requests") + 1])' "$(dirname "$scoring_rule")/campaign-fields.json")
 if [[ ! -f "$sampling_rule" || ! -r "$sampling_rule" ]]; then
   echo "Qualified sampling rule must be a readable file: $sampling_rule" >&2
   exit 2
@@ -77,7 +82,7 @@ python -m campaign.seed \
   --bench-correctness-num-prompts 32 \
   --bench-correctness-serve-args=--mem-fraction-static --bench-correctness-serve-args=0.80 \
   --bench-correctness-serve-args=--max-mamba-cache-size --bench-correctness-serve-args=16 \
-  --bench-correctness-serve-args=--max-running-requests --bench-correctness-serve-args=8 \
+  --bench-correctness-serve-args=--max-running-requests --bench-correctness-serve-args="$scorer_running" \
   --bench-correctness-min-mean-logprob=-4 \
   --bench-correctness-min-token-logprob=-16 \
   --bench-correctness-min-token-quantile=0.001 \

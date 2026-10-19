@@ -415,11 +415,15 @@ def test_baseline_qualification_temperature_extremes_and_stale_contract(
             require_qualification(changed, f["bench"], f["engine"])
 
 
-def test_fixture_changes_only_the_workload():
+def test_fixture_changes_only_the_workload_and_scorer_batch():
     original = json.loads(
         (FIXTURE.parent / "sglang_kimi_k3_b300/campaign-fields.json").read_text()
     )
     new = json.loads((FIXTURE / "campaign-fields.json").read_text())
+    # Grading is sequential, so the scorer keeps one request slot.
+    scorer = new["bench"]["correctness"]["serve_args"]
+    assert scorer[-2:] == ["--max-running-requests", "1"]
+    scorer[-1] = "8"
     workload = {
         "algo_version",
         "dataset",
