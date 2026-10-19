@@ -6,7 +6,7 @@
 # The harness mounts pinned weights at /model and adds --model-path itself; the
 # serving flags below must not repeat it. The pinned DSPARK draft is staged the
 # same way and mounted read-only at /draft.
-# Uses qualified Exgentic v6 snapshots: 16k/32k/64k/128k, eight per tier at C32.
+# Uses qualified Exgentic v6 snapshots: 8k/16k/32k/64k, eight per tier at C32.
 # Patches remain private with no timed public reveal.
 set -euo pipefail
 if [[ $# -ne 2 ]]; then

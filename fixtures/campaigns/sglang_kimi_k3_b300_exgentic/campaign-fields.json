@@ -117,10 +117,10 @@
     "name": "weighted_tier_completion_speedup",
     "failure_penalty": 0.1,
     "tier_weights": {
-      "16k": 0.28,
-      "32k": 0.16,
-      "64k": 0.28,
-      "128k": 0.28
+      "8k": 0.25,
+      "16k": 0.25,
+      "32k": 0.25,
+      "64k": 0.25
     },
     "baseline_drift_ceiling": 0.15
   },
@@ -146,10 +146,10 @@
     "request_concurrency": 32,
     "request_timeout_s": 1200,
     "input_tiers": [
+      "8k",
       "16k",
       "32k",
-      "64k",
-      "128k"
+      "64k"
     ],
     "max_baseline_prompt_drops": 8,
     "temperature_range": [

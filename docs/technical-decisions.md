@@ -93,13 +93,13 @@ reveal policy are outside this code change.
 Use the pinned Exgentic agent-llm-traces-v2 corpus as independent request
 snapshots. Sampler v6 normalizes successful chat calls, preserves system/tool
 inputs, renders with the campaign tokenizer, and selects eight distinct prompts
-per 16k/32k/64k/128k tier. Each tier uses 90-100% of its named token count.
-Allow at most one snapshot from a source session per tier in a round and in the
+per tier. Each tier uses 90-100% of its named token count.
+Allow at most one snapshot from a source session in a round and in the
 qualified pool. Append the campaign-pinned long-form follow-up before rendering
 and measuring input tiers. Never pad, truncate, execute tools or feed candidate
 output into another request. Reject unsupported modalities.
 
-Use tier weights 0.28/0.16/0.28/0.28. Keep the pinned Kimi serving configuration,
+Keep the pinned Kimi serving configuration,
 C32 schedule, warmed-cache measurement, likelihood gates, and baseline-relative
 completion accounting. Preserve Kimi's `[0.1, 1.01]` temperature range,
 natural EOS, 5120-token ceiling and 1500-token output floor. The raw completion
@@ -110,11 +110,7 @@ Prepare the exact normalized snapshot count and CPU coverage before running
 the baseline qualification command. Fail without a launch rule if any tier's
 qualified pool is short. Require a new qualification contract and new campaign;
 preserve historical LongWriter rule/receipt behavior. No old qualification can
-be restamped into this workload. Manually select and review the last ten old
-campaign submissions after qualification; never transfer scores or rewrite
-their old audit events. Rollout commands live in the accompanying pull request.
-
-Linear tools were unavailable. This implements the user's explicit request.
+be restamped into this workload.
 
 
 ## 2026-10-18: Preserve Kimi policy when replacing the input corpus
@@ -145,8 +141,32 @@ pinned tokenizer before assigning the existing 90-100% input bands. Source-model
 counts in wider power-of-two bands are inventory evidence, not proof of these
 target-token quotas. Preparation and qualification scan the whole normalized
 split by default; selection uses deterministic hash ordering across that split,
-not a benchmark-grouped prefix. Retain one source session per tier and C32.
+not a benchmark-grouped prefix. Retain one source session per round and C32.
 The prompt is part of the sampling receipt and qualification contract. Missing
 follow-ups fail parsing; changed follow-ups invalidate prior qualification.
 Re-run the full CPU audit and baseline qualification before launch. Preserve
 temperature, output-length, correctness and scoring policy.
+
+
+## 2026-10-19: Size the Kimi Exgentic tiers to the DCP KV pool
+
+The workload exists to punish engines that drop `--dcp-size 8` and so hold
+about a sixth of the KV cache. At C32 with eight prompts per tier, 16k-128k
+tiers put about 1.9M prompt tokens in flight, which is more than the DCP-8
+baseline holds (estimated at 1.5M tokens from a C64 run at 39% KV use), so the
+baseline would queue too. Use 8k/16k/32k/64k with equal weights: about 1.05M
+tokens, inside the baseline pool and about four times a no-DCP pool. Sampler v6
+accepts any ordered tier set, so the fixture alone carries this choice.
+
+One session's later calls extend its earlier prompts, so two calls of a session
+in different tiers would share a cached prefix. Keep one call per session per
+round and per qualified pool. Different sessions of one harness can still share
+system and tool prefixes, so the CPU audit reports how many prompt tokens of a
+preview round a prefix cache must hold.
+
+`campaign.carryover` enters the latest N submissions of a closed campaign into
+its replacement. It copies each patch under the new campaign's prefix, keeps
+the source commit block so on-chain order still decides cohorts and ties, and
+reuses no payment reference, image or score. Patches that never ran, duplicate
+an earlier carried patch, or belong to an excluded hotkey are skipped. A dry run
+prints the plan and its hash; `--apply` requires that hash.

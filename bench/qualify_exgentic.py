@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 
-from bench.exgentic import DATASET, REVISION, TIERS, snapshot_from_row
+from bench.exgentic import DATASET, REVISION, prompt_kv_tokens, snapshot_from_row
 from bench.lifecycle import EngineError
 from bench.longform import candidate_for_row, digest, sampling_context_for_campaign
 from bench.qualify_longform import qualify
@@ -52,8 +52,9 @@ def prepare(fields, output_dir, *, dataset=None, formatter=None):
         rule, model_repo=model["hf_repo"], model_revision=model["hf_revision"]
     )
     context = sampling_context_for_campaign(fields["bench"], fields["engine"])
-    counts = dict.fromkeys(TIERS, 0)
-    sessions = {tier: set() for tier in TIERS}
+    tiers = rule["input_tiers"]
+    counts = dict.fromkeys(tiers, 0)
+    sessions = {tier: set() for tier in tiers}
     hashes = set()
     render_failures = 0
     for index in range(len(dataset)):
@@ -88,6 +89,7 @@ def prepare(fields, output_dir, *, dataset=None, formatter=None):
         },
         "scope": "CPU input coverage only; no GPU qualification",
     }
+    # Written before the preview so a sampler failure still leaves the counts.
     (root / "audit.json").write_text(json.dumps(audit, indent=2) + "\n")
     (root / "campaign-fields.json").write_text(json.dumps(fields, indent=2) + "\n")
     # Preview the actual round sampler and prove receipt reconstruction.
@@ -101,6 +103,9 @@ def prepare(fields, output_dir, *, dataset=None, formatter=None):
     sample = generate_trace(**kwargs)
     if generate_trace(**kwargs, sampling_receipt=sample.receipt).body != sample.body:
         raise SamplerError("Exgentic CPU receipt replay changed trace bytes")
+    prompts = [r["prompt"] for r in json.loads(sample.body)["requests"]]
+    audit["preview_round_kv"] = prompt_kv_tokens(formatter.encode(p) for p in prompts)
+    (root / "audit.json").write_text(json.dumps(audit, indent=2) + "\n")
     (root / "workload_trace.json").write_bytes(sample.body)
     (root / "sampling_receipt.json").write_text(
         json.dumps(sample.receipt, indent=2) + "\n"

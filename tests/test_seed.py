@@ -1252,7 +1252,9 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(
     # Same ranking as Qwen, with a looser repeatability gate for Kimi's output
     # length noise.
     if exgentic:
-        qwen["tier_weights"] = {"16k": 0.28, "32k": 0.16, "64k": 0.28, "128k": 0.28}
+        qwen["tier_weights"] = dict.fromkeys(
+            fields["sampling_rule"]["input_tiers"], 0.25
+        )
     assert manifest.scoring_rule == {**qwen, "baseline_drift_ceiling": 0.15}
     trace = tmp_path / "trace.json"
     trace.write_text(json.dumps({"requests": [{"prompt": "hi"}] * 16}))

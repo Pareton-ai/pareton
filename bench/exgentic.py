@@ -14,7 +14,6 @@ from bench.sampler import SamplerError
 
 DATASET = "Exgentic/agent-llm-traces-v2"
 REVISION = "4b8ad4ab198438e5a170f9171c19c6a2cf7c1814"
-TIERS = ("16k", "32k", "64k", "128k")
 logger = logging.getLogger(__name__)
 
 
@@ -210,6 +209,27 @@ def snapshot_from_row(row):
     if not isinstance(snapshot, dict) or not snapshot.get("session_id"):
         raise SamplerError("invalid normalized Exgentic snapshot identity")
     return snapshot
+
+
+def prompt_kv_tokens(token_lists):
+    """Prompt tokens in total, and how many a shared prefix cache must hold.
+
+    Snapshots from one harness can share long system and tool prefixes, which
+    an engine stores once. Summing each sorted prompt's length past its common
+    prefix with the previous one counts the nodes of their token trie.
+    """
+    total = unique = 0
+    previous = ()
+    for ids in sorted(map(tuple, token_lists)):
+        common = 0
+        for a, b in zip(previous, ids):
+            if a != b:
+                break
+            common += 1
+        total += len(ids)
+        unique += len(ids) - common
+        previous = ids
+    return {"prompt_tokens": total, "unique_prefix_tokens": unique}
 
 
 def candidate_for_snapshot(row_index, row, formatter, rule, context):

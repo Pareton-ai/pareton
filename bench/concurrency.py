@@ -48,8 +48,8 @@ def validate_tier_contract(sampling, scoring):
     selected = input_tiers(sampling.get("input_tiers"))
     if sampling.get("algo_version") == 5 and set(selected) - set(TIERS):
         raise ValueError("extended input_tiers require algo_version 6")
-    if sampling.get("algo_version") == 6 and selected != ("16k", "32k", "64k", "128k"):
-        raise ValueError("Exgentic v6 requires 16k, 32k, 64k, 128k input_tiers")
+    if sampling.get("algo_version") == 6 and "input_tiers" not in sampling:
+        raise ValueError("Exgentic v6 requires explicit input_tiers")
     if set(selected) != set(tier_weights(scoring)):
         raise ValueError("tier_weights must match sampling input_tiers")
 

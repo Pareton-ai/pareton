@@ -458,15 +458,15 @@ def qualify(
                             while offsets[group] < len(pool):
                                 candidate = pool[offsets[group]]
                                 offsets[group] += 1
-                                session_key = (candidate.get("session_id"), group)
+                                session = candidate.get("session_id")
                                 if rule["algo_version"] == 6 and (
-                                    session_key in qualified_sessions
-                                    or session_key in batch_sessions
+                                    session in qualified_sessions
+                                    or session in batch_sessions
                                 ):
                                     continue
                                 batch.append(candidate)
                                 batch_counts[group] += 1
-                                batch_sessions.add(session_key)
+                                batch_sessions.add(session)
                                 added = True
                                 break
                             else:
@@ -495,7 +495,7 @@ def qualify(
                 ):
                     if accepted:
                         group = candidate["input_length_group"]
-                        qualified_sessions.add((candidate.get("session_id"), group))
+                        qualified_sessions.add(candidate.get("session_id"))
                         qualified.append(candidate["row_index"])
                         qualified_counts[group] += 1
                         logger.info(

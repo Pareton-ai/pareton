@@ -11,7 +11,13 @@ from types import SimpleNamespace
 import pytest
 
 from bench.concurrency import WEIGHTED_RULE, request_groups, validate_tier_contract
-from bench.exgentic import DATASET, REVISION, TIERS, flatten_dataset, normalize_snapshot
+from bench.exgentic import (
+    DATASET,
+    REVISION,
+    flatten_dataset,
+    normalize_snapshot,
+    prompt_kv_tokens,
+)
 from bench.longform import (
     candidate_for_row,
     digest,
@@ -32,6 +38,8 @@ from worker.round_job import materialize_round_trace
 
 pytestmark = pytest.mark.unit
 FIXTURE = Path(__file__).parents[1] / "fixtures/campaigns/sglang_kimi_k3_b300_exgentic"
+TIERS = tuple(json.loads((FIXTURE / "sampling_rule.json").read_text())["input_tiers"])
+SIZES = tuple(int(tier[:-1]) * 1024 for tier in TIERS)
 
 
 def fields(n=8):
@@ -71,7 +79,7 @@ def snapshots(n=8):
                     "messages": [
                         {
                             "role": "user",
-                            "content": f"n={(16384, 32768, 65536, 131072)[i % 4]};id={i}",
+                            "content": f"n={SIZES[i % 4]};id={i}",
                         }
                     ],
                     "tools": [
@@ -227,12 +235,7 @@ def test_exact_tiers_and_receipt_replay_through_worker(tmp_path):
     assert Counter(r.input_length_group for r in trace.requests) == dict.fromkeys(
         TIERS, 1
     )
-    assert sorted(r.input_tokens for r in trace.requests) == [
-        16384,
-        32768,
-        65536,
-        131072,
-    ]
+    assert sorted(r.input_tokens for r in trace.requests) == list(SIZES)
     for request in trace.requests:
         rendered = json.loads(request.prompt)
         assert rendered["messages"][-1] == {
@@ -264,21 +267,23 @@ def test_missing_tier_fails_without_truncation_or_fallback():
     rows = snapshots()
     for i in (3, 7):
         rows[i]["snapshot_json"] = rows[i]["snapshot_json"].replace(
-            "n=131072", "n=131073"
+            f"n={SIZES[-1]}", f"n={SIZES[-1] + 1}"
         )
-    with pytest.raises(SamplerError, match="128k.*no shorter fallback"):
+    with pytest.raises(SamplerError, match=f"{TIERS[-1]}.*no shorter fallback"):
         sample(rows=rows)
 
 
-def test_one_snapshot_per_session_per_tier():
+@pytest.mark.parametrize("indices", [(0, 4), (0, 1)])
+def test_one_snapshot_per_session_per_round(indices):
+    # (0, 1) puts one session in two tiers, where they would share a prefix.
     rows = snapshots(8)
-    for index in (0, 4):
+    for index in indices:
         row = json.loads(rows[index]["snapshot_json"])
         row["session_id"] = "same"
         rows[index]["snapshot_json"] = json.dumps(row)
     f = fields()
     f["sampling_rule"]["n_prompts"] = 8
-    with pytest.raises(SamplerError, match="16k"):
+    with pytest.raises(SamplerError, match="insufficient distinct"):
         sample(f, rows)
 
 
@@ -286,7 +291,7 @@ def test_weights_and_legacy_guard():
     f = fields()
     validate_tier_contract(f["sampling_rule"], f["scoring_rule"])
     assert f["scoring_rule"]["tier_weights"] == dict(
-        zip(TIERS, [0.28, 0.16, 0.28, 0.28], strict=True)
+        zip(TIERS, [0.25] * 4, strict=True)
     )
     baseline = {t: PromptTiming(1, [], 8, "stop") for t in TIERS}
     bt = {t: {"request_ids": [t], "completion_s": 10} for t in TIERS}
@@ -302,7 +307,7 @@ def test_weights_and_legacy_guard():
         candidate_tiers=ct,
     )
     assert result.rule == WEIGHTED_RULE
-    assert result.score == pytest.approx(0.28 * 0.5 - 0.28)
+    assert result.score == pytest.approx(0.25 * 0.5 - 0.25)
     with pytest.raises(SamplerError, match="input_tiers"):
         parse_sampling_rule({**f["sampling_rule"], "algo_version": 5})
     missing_followup = {
@@ -331,6 +336,16 @@ def test_cpu_preparation_writes_audit_and_replay(tmp_path):
         f["sampling_rule"]["followup_prompt"]
     )
     assert "follow-up" in audit["input_length_basis"]
+    # The test encoder gives every prompt a distinct first token.
+    kv = audit["preview_round_kv"]
+    assert kv["unique_prefix_tokens"] == kv["prompt_tokens"] == sum(SIZES)
+
+
+def test_prompt_kv_tokens_counts_a_shared_prefix_once():
+    assert prompt_kv_tokens([[1, 2, 3, 4], [1, 2, 9], [7], [1, 2, 3, 4]]) == {
+        "prompt_tokens": 12,
+        "unique_prefix_tokens": 6,
+    }
 
 
 def test_baseline_qualification_temperature_extremes_and_stale_contract(
@@ -380,7 +395,7 @@ def test_baseline_qualification_temperature_extremes_and_stale_contract(
         formatter=fmt,
     )
     assert len(calls) == 16
-    assert {n for _, n, _ in calls} == {16384, 32768, 65536, 131072}
+    assert {n for _, n, _ in calls} == set(SIZES)
     for prompt, _, _ in calls:
         assert [temp for p, _, temp in calls if p == prompt] == [0.1, 1.01]
     require_qualification(qualified, f["bench"], f["engine"])
@@ -563,8 +578,7 @@ def test_qualification_defaults_to_32_in_flight_across_all_four_tiers(
     assert len(calls) == 128
     for offset in range(0, 128, 32):
         assert Counter(n for n, _ in calls[offset : offset + 32]) == dict.fromkeys(
-            (16384, 32768, 65536, 131072),
-            8,
+            SIZES, 8
         )
         assert {temp for _, temp in calls[offset : offset + 32]} == {
             0.1 if offset % 64 == 0 else 1.01
@@ -713,19 +727,23 @@ def test_followup_tokens_determine_tier_and_capacity_without_mutating_snapshot()
     row = snapshots()[0]
     original_row = copy.deepcopy(row)
     context = sampling_context_for_campaign(f["bench"], f["engine"])
-    # Source alone is exactly 16k; appending the task pushes it outside the band.
+    # Source alone fills the tier; appending the task pushes it outside the band.
     assert candidate_for_row(0, row, fmt, rule, context) is None
     assert row == original_row
-    row["snapshot_json"] = row["snapshot_json"].replace("n=16384", "n=16380")
+    row["snapshot_json"] = row["snapshot_json"].replace(
+        f"n={SIZES[0]}", f"n={SIZES[0] - 4}"
+    )
     candidate = candidate_for_row(0, row, fmt, rule, context)
-    assert candidate["input_tokens"] == 16384
-    assert candidate["input_length_group"] == "16k"
+    assert candidate["input_tokens"] == SIZES[0]
+    assert candidate["input_length_group"] == TIERS[0]
     rendered = json.loads(candidate["prompt"])
     source = json.loads(row["snapshot_json"])
     assert rendered["messages"][:-1] == source["messages"]
     assert rendered["tools"] == source["tools"]
     assert (
-        candidate_for_row(0, row, fmt, rule, {**context, "max_input_tokens": 16383})
+        candidate_for_row(
+            0, row, fmt, rule, {**context, "max_input_tokens": SIZES[0] - 1}
+        )
         is None
     )
 

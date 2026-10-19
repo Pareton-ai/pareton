@@ -130,13 +130,8 @@ def tier_policy_fields(rule):
         TIERS
     ):
         raise SamplerError("extended input_tiers require algo_version 6")
-    if rule.get("algo_version") == 6 and fields.get("input_tiers") != [
-        "16k",
-        "32k",
-        "64k",
-        "128k",
-    ]:
-        raise SamplerError("Exgentic v6 requires 16k, 32k, 64k, 128k input tiers")
+    if rule.get("algo_version") == 6 and "input_tiers" not in fields:
+        raise SamplerError("Exgentic v6 requires explicit input_tiers")
     return fields
 
 
@@ -387,16 +382,18 @@ def generate_longform_trace(
                 raise SamplerError("long-form receipt selected an ineligible row")
             continue
         group = candidate["input_length_group"]
-        session_key = (candidate.get("session_id"), group)
-        if rule["algo_version"] == 6 and session_key in seen_sessions:
+        # Later calls of one session extend its earlier prompts, so two of them
+        # in one round would share a cached prefix across tiers.
+        session = candidate.get("session_id")
+        if rule["algo_version"] == 6 and session in seen_sessions:
             if receipt is not None:
-                raise SamplerError("Exgentic receipt repeats a session within one tier")
+                raise SamplerError("Exgentic receipt repeats a source session")
             continue
         if remaining[group] == 0:
             if receipt is not None:
                 raise SamplerError("long-form receipt exceeds its input tier quota")
             continue
-        seen_sessions.add(session_key)
+        seen_sessions.add(session)
         remaining[group] -= 1
         selected.append(candidate)
         seen_prompts.add(candidate["input_ids_sha256"])
