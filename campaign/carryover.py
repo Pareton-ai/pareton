@@ -236,21 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = build_plan(args.from_campaign, args.to_campaign, args.last)
         digest = plan_sha256(plan)
         for item in plan:
-            print(
-                json.dumps(
-                    {
-                        k: item[k]
-                        for k in (
-                            "source_submission_id",
-                            "hotkey",
-                            "patch_hash",
-                            "commit_block",
-                            "source_state",
-                            "skip",
-                        )
-                    }
-                )
-            )
+            print(json.dumps(item))
         carried = sum(not item["skip"] for item in plan)
         print(f"plan: {carried} to carry, {len(plan) - carried} skipped")
         print(f"plan_sha256: {digest}")

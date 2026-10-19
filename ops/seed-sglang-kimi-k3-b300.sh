@@ -7,17 +7,20 @@
 # serving flags below must not repeat it. The pinned DSPARK draft is staged the
 # same way and mounted read-only at /draft.
 # Uses the v5 32-request 2k/4k/8k/16k workload (8 per tier) at C32, one group of 32; engine capacity remains 64.
+# For the Exgentic v6 16k-128k campaign, pass its qualified rule and
+# fixtures/campaigns/sglang_kimi_k3_b300_exgentic/scoring_rule.json.
 # A rule qualified for the earlier 16-prompt C16 contract can be restamped without
 # new GPU work: PYTHONPATH=. python ops/restamp_k3_c32.py OLD_RULE NEW_RULE.
 # Patches remain private with no timed public reveal.
 set -euo pipefail
-if [[ $# -ne 2 ]]; then
-  echo 'Usage: seed-sglang-kimi-k3-b300.sh ENGINE_DIGEST_REF QUALIFIED_SAMPLING_RULE_JSON' >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo 'Usage: seed-sglang-kimi-k3-b300.sh ENGINE_DIGEST_REF QUALIFIED_SAMPLING_RULE_JSON [SCORING_RULE_JSON]' >&2
   echo 'Creates a new campaign. For an existing campaign use python -m campaign.set_fee.' >&2
   exit 2
 fi
 engine_ref=$1
 sampling_rule=$2
+scoring_rule=${3:-fixtures/campaigns/sglang_kimi_k3_b300/scoring_rule.json}
 if [[ ! -f "$sampling_rule" || ! -r "$sampling_rule" ]]; then
   echo "Qualified sampling rule must be a readable file: $sampling_rule" >&2
   exit 2
@@ -81,6 +84,6 @@ python -m campaign.seed \
   --bench-correctness-min-coverage-ratio=0.5 \
   --bench-correctness-max-mean-logprob-drop=2.5 \
   --sampling-rule-json "$sampling_rule" \
-  --scoring-rule-json fixtures/campaigns/sglang_kimi_k3_b300/scoring_rule.json \
+  --scoring-rule-json "$scoring_rule" \
   --status open --emission-start-weight 0.50 --emission-floor-weight 0 \
   --emission-decay-blocks 201600 --force

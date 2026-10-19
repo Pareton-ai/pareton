@@ -201,22 +201,22 @@ def qualify(
     engine_ref,
     output_dir,
     pool_size=None,
-    max_rows=6000,
+    max_rows=None,
     repetitions=2,
     concurrency=None,
     timeout=600,
     row_fetcher=None,
     formatter=None,
 ):
+    rule = parse_sampling_rule(fields["sampling_rule"])
+    # v6 scans the whole prepared split at the campaign's own concurrency.
+    v6 = rule["algo_version"] == 6
+    if max_rows is None:
+        max_rows = rule["n_rows"] if v6 else 6000
     if concurrency is None:
-        concurrency = (
-            fields["sampling_rule"].get("request_concurrency", 32)
-            if fields["sampling_rule"].get("algo_version") == 6
-            else 4
-        )
+        concurrency = rule["request_concurrency"] if v6 else 4
     if type(concurrency) is not int or concurrency < 1:
         raise SamplerError("concurrency must be a positive integer")
-    rule = parse_sampling_rule(fields["sampling_rule"])
     if rule["algo_version"] not in TIERED_ALGO_VERSIONS:
         raise SamplerError("qualification requires algo_version 4, 5 or 6")
     if pool_size is None:
@@ -281,7 +281,7 @@ def qualify(
                 seen.add(candidate["input_ids_sha256"])
                 # Agent snapshots can contain hundreds of thousands of tokens.
                 # Keep only metadata while indexing, then re-render accepted work.
-                if rule["algo_version"] == 6:
+                if v6:
                     candidate = {k: v for k, v in candidate.items() if k != "prompt"}
                 candidates[candidate["input_length_group"]].append(candidate)
             if scanned % 500 == 0:
@@ -290,26 +290,11 @@ def qualify(
             "Eligible inputs by tier: %s",
             {g: len(rows) for g, rows in candidates.items()},
         )
-        if rule["algo_version"] == 6:
-            session_counts = {
-                group: len({candidate["session_id"] for candidate in rows})
-                for group, rows in candidates.items()
-            }
-            evidence.write(
-                json.dumps(
-                    {
-                        "type": "input_audit",
-                        "distinct_sessions_by_tier": session_counts,
-                        "required_per_tier": quotas,
-                    }
-                )
-                + "\n"
-            )
-            evidence.flush()
+        if v6:
             missing = {
                 group: count
-                for group, count in session_counts.items()
-                if count < quotas[group]
+                for group, rows in candidates.items()
+                if (count := len({c["session_id"] for c in rows})) < quotas[group]
             }
             if missing:
                 raise SamplerError(
@@ -321,7 +306,7 @@ def qualify(
         def qualify_candidate(candidate):
             row_index = candidate["row_index"]
             group = candidate["input_length_group"]
-            if rule["algo_version"] == 6:
+            if v6:
                 rendered = candidate_for_row(
                     row_index, fetcher(row_index), formatter, rule, context
                 )
@@ -399,7 +384,7 @@ def qualify(
                                             "snapshot_sha256",
                                         )
                                     }
-                                    if rule["algo_version"] == 6
+                                    if v6
                                     else {}
                                 ),
                                 **result,
@@ -428,9 +413,7 @@ def qualify(
             # capping concurrency at a single tier's pool quota (normally 16).
             # Preserve scarce-tier-first qualification for legacy workloads.
             schedules = (
-                [tuple(quotas)]
-                if rule["algo_version"] == 6
-                else [(group,) for group in reversed(quotas)]
+                [tuple(quotas)] if v6 else [(group,) for group in reversed(quotas)]
             )
             offsets = dict.fromkeys(quotas, 0)
             for schedule in schedules:
@@ -456,7 +439,7 @@ def qualify(
                                 continue
                             pool = candidates[group]
                             start = offsets[group]
-                            if rule["algo_version"] == 6:
+                            if v6:
                                 # A qualified session is spent for the round; one
                                 # still in this batch is only deferred, since its
                                 # batched prompt may yet be rejected.
@@ -470,7 +453,7 @@ def qualify(
                                     i
                                     for i in range(start, len(pool))
                                     if pool[i].get("session_id") not in batch_sessions
-                                    or rule["algo_version"] != 6
+                                    or not v6
                                 ),
                                 None,
                             )
@@ -581,13 +564,15 @@ def main(argv=None):
         type=int,
         help="Default: twice n_prompts, split equally across selected input tiers",
     )
-    parser.add_argument("--max-rows", type=int, default=6000)
+    parser.add_argument(
+        "--max-rows", type=int, help="Default: all rows for v6, otherwise 6000"
+    )
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=4,
-        help="Maximum simultaneous candidate requests (default: 4)",
+        help="Maximum simultaneous candidate requests (default: the v6 campaign's "
+        "request_concurrency, otherwise 4)",
     )
     parser.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args(argv)

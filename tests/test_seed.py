@@ -1208,18 +1208,12 @@ def test_kimi_k3_launch_helper_matches_fixture_through_worker(
             [
                 "bash",
                 "-c",
-                'python() { if [[ "$1" == "-" ]]; then return 0; fi; printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
                 "capture",
-                str(
-                    root
-                    / (
-                        "ops/seed-sglang-kimi-k3-b300-exgentic.sh"
-                        if exgentic
-                        else "ops/seed-sglang-kimi-k3-b300.sh"
-                    )
-                ),
+                str(root / "ops/seed-sglang-kimi-k3-b300.sh"),
                 engine_ref,
                 str(rule_path),
+                *([str(fixture / "scoring_rule.json")] if exgentic else []),
             ],
             cwd=root,
             env={**os.environ, "PARETON_BENCH_HEALTH_TIMEOUT_S": "3600"},

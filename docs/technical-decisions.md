@@ -88,85 +88,28 @@ Old append-only `submission_events` rows are untouched: nothing rewrites past
 reveal policy are outside this code change.
 
 
-## 2026-10-18: Exgentic v6 workload for a new Kimi K3 campaign
 
-Use the pinned Exgentic agent-llm-traces-v2 corpus as independent request
-snapshots. Sampler v6 normalizes successful chat calls, preserves system/tool
-inputs, renders with the campaign tokenizer, and selects eight distinct prompts
-per tier. Each tier uses 90-100% of its named token count.
-Allow at most one snapshot from a source session in a round and in the
-qualified pool. Append the campaign-pinned long-form follow-up before rendering
-and measuring input tiers. Never pad, truncate, execute tools or feed candidate
-output into another request. Reject unsupported modalities.
+## 2026-10-19: Long-context Exgentic workload for a new Kimi K3 campaign
 
-Keep the pinned Kimi serving configuration,
-C32 schedule, warmed-cache measurement, likelihood gates, and baseline-relative
-completion accounting. Preserve Kimi's `[0.1, 1.01]` temperature range,
-natural EOS, 5120-token ceiling and 1500-token output floor. The raw completion
-endpoint retains generated tool-call syntax as
-text for scoring. Qualification does not establish tool execution correctness.
+The LongWriter workload (2k-16k) fits an engine that drops `--dcp-size 8` and
+keeps about a sixth of the KV cache, so such engines never queue. Sampler v6
+uses pinned Exgentic agent-llm-traces-v2 calls as request snapshots (system
+prompt, history and tool definitions; never the source answer, never tool
+execution), appends a pinned long-form follow-up, and places the Kimi-rendered
+prompt in a 90-100% band of 16k/32k/64k/128k, eight per tier at C32 with equal
+weights. No padding or truncation. All other Kimi policy is unchanged.
 
-Prepare the exact normalized snapshot count and CPU coverage before running
-the baseline qualification command. Fail without a launch rule if any tier's
-qualified pool is short. Require a new qualification contract and new campaign;
-preserve historical LongWriter rule/receipt behavior. No old qualification can
-be restamped into this workload.
+That is about 1.9M prompt tokens in flight, possibly beyond the DCP-8
+baseline's own pool (estimated 1.5M from a C64 run at 39% KV use). B300
+qualification and a shadow round must show the baseline completes within the
+timeout and drift ceiling; otherwise smaller tiers are a fixture change.
 
-
-## 2026-10-18: Preserve Kimi policy when replacing the input corpus
-
-Review against PR #193 and the subsequent C32 change in PR #203 found that the
-initial Exgentic commit incorrectly selected greedy generation, a one-token
-floor and a C4 qualification default. Restore the existing generation policy
-and default qualification to the campaign's request concurrency. Qualify v6 in
-mixed-tier batches so the 16-per-tier pool quota does not cap C32 at C16.
-Keep legacy qualification scheduling unchanged. Insufficient outputs at either
-temperature extreme block launch; the dataset change does not relax that gate.
-GPU scorer, SLA and full-round validation remain required before opening the
-new campaign. No production settings or historical evidence change here.
-
-
-## 2026-10-18: Append a broad long-form task to Exgentic snapshots
-
-The user's whole-corpus review found many long inputs but short natural agent
-outputs. Append one explicit, campaign-pinned user follow-up that invites a
-complete software implementation, mathematical exposition, technical tutorial,
-analysis or narrative. Keep source history and tool definitions as context,
-without replaying the source answer or executing tools. Ask for substantial,
-self-contained output without placeholders or repetitive padding. This is a
-long-context generation workload, not a replay of the original agent task.
-
-Count the full rendered history, tool definitions and follow-up with Kimi K3's
-pinned tokenizer before assigning the existing 90-100% input bands. Source-model
-counts in wider power-of-two bands are inventory evidence, not proof of these
-target-token quotas. Preparation and qualification scan the whole normalized
-split by default; selection uses deterministic hash ordering across that split,
-not a benchmark-grouped prefix. Retain one source session per round and C32.
-The prompt is part of the sampling receipt and qualification contract. Missing
-follow-ups fail parsing; changed follow-ups invalidate prior qualification.
-Re-run the full CPU audit and baseline qualification before launch. Preserve
-temperature, output-length, correctness and scoring policy.
-
-
-## 2026-10-19: Kimi Exgentic tiers, session isolation and carryover
-
-The workload exists to punish engines that drop `--dcp-size 8` and so hold
-about a sixth of the KV cache. Use 16k/32k/64k/128k with equal weights, eight
-prompts each at C32. That is about 1.9M prompt tokens in flight, which may
-exceed the DCP-8 baseline pool too (estimated at 1.5M tokens from a C64 run at
-39% KV use), so the B300 qualification log and shadow round must confirm the
-baseline completes within the timeout and drift ceiling. Sampler v6 accepts any
-ordered tier set, so smaller tiers are a fixture change.
-
-One session's later calls extend its earlier prompts, so two calls of a session
-in different tiers would share a cached prefix. Keep one call per session per
-round and per qualified pool. Different sessions of one harness can still share
-system and tool prefixes, so the CPU audit reports how many prompt tokens of a
-preview round a prefix cache must hold.
+A session's later calls extend its earlier prompts and would share a cached
+prefix, so a round and a qualified pool take at most one call per session. The
+CPU audit reports distinct sessions per tier and how much of a preview round a
+prefix cache must hold. A tier short of its quota fails without a launch rule.
 
 `campaign.carryover` enters the latest N submissions of a closed campaign into
-its replacement. It copies each patch under the new campaign's prefix, keeps
-the source commit block so on-chain order still decides cohorts and ties, and
-reuses no payment reference, image or score. Patches that never ran, duplicate
-an earlier carried patch, or belong to an excluded hotkey are skipped. A dry run
-prints the plan and its hash; `--apply` requires that hash.
+its replacement: the patch is copied under the new campaign, the source commit
+block keeps on-chain order for cohorts and ties, and no payment, image or score
+moves. A dry run prints the plan and its hash; `--apply` requires that hash.

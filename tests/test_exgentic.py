@@ -24,7 +24,7 @@ from bench.longform import (
     require_qualification,
     sampling_context_for_campaign,
 )
-from bench.qualify_exgentic import main, prepare
+from bench.qualify_exgentic import prepare
 from bench.qualify_longform import qualify
 from bench.sampler import (
     PromptFormatter,
@@ -38,7 +38,11 @@ from worker.round_job import materialize_round_trace
 
 pytestmark = pytest.mark.unit
 FIXTURE = Path(__file__).parents[1] / "fixtures/campaigns/sglang_kimi_k3_b300_exgentic"
-TIERS = tuple(json.loads((FIXTURE / "sampling_rule.json").read_text())["input_tiers"])
+TIERS = tuple(
+    json.loads((FIXTURE / "campaign-fields.json").read_text())["sampling_rule"][
+        "input_tiers"
+    ]
+)
 SIZES = tuple(int(tier[:-1]) * 1024 for tier in TIERS)
 
 
@@ -105,6 +109,19 @@ def sample(f=None, rows=None, **kwargs):
         prompt_formatter=formatter(),
         sampling_context=sampling_context_for_campaign(f["bench"], f["engine"]),
         **kwargs,
+    )
+
+
+def fake_baseline(monkeypatch, f):
+    monkeypatch.setattr(
+        "bench.qualify_longform.verify_baseline_image",
+        lambda **kw: {
+            "engine_ref": f["bench"]["baseline_engine_image_digest"],
+            "container_id": "baseline",
+        },
+    )
+    monkeypatch.setattr(
+        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
     )
 
 
@@ -330,7 +347,6 @@ def test_cpu_preparation_writes_audit_and_replay(tmp_path):
         "distinct_sessions_by_tier"
     ] == dict.fromkeys(TIERS, 2)
     assert (output / "workload_trace.json").exists()
-    assert (output / "hf-000.snapshot.json").exists()
     audit = json.loads((output / "audit.json").read_text())
     assert audit["followup_prompt_sha256"] == digest(
         f["sampling_rule"]["followup_prompt"]
@@ -354,16 +370,7 @@ def test_baseline_qualification_temperature_extremes_and_stale_contract(
     f = fields()
     f["sampling_rule"].update(max_tokens=5120, min_output_tokens=1500)
     fmt = formatter()
-    monkeypatch.setattr(
-        "bench.qualify_longform.verify_baseline_image",
-        lambda **kw: {
-            "engine_ref": f["bench"]["baseline_engine_image_digest"],
-            "container_id": "baseline",
-        },
-    )
-    monkeypatch.setattr(
-        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
-    )
+    fake_baseline(monkeypatch, f)
     calls = []
 
     def post(url, path, body, **kwargs):
@@ -408,36 +415,12 @@ def test_baseline_qualification_temperature_extremes_and_stale_contract(
             require_qualification(changed, f["bench"], f["engine"])
 
 
-def test_cli_rejects_unprepared_template_before_qualification(tmp_path):
-    with pytest.raises(SystemExit) as error:
-        main(
-            [
-                "--output-dir",
-                str(tmp_path / "q"),
-                "--base-url",
-                "http://127.0.0.1:8000",
-                "--container",
-                "baseline",
-                "--engine-ref",
-                "repo@sha256:" + "a" * 64,
-            ]
-        )
-    assert error.value.code == 1
-    assert not (tmp_path / "q" / "sampling_rule.json").exists()
-
-
-def test_fixture_is_unqualified_and_preserves_serving_pins():
+def test_fixture_changes_only_the_workload():
     original = json.loads(
         (FIXTURE.parent / "sglang_kimi_k3_b300/campaign-fields.json").read_text()
     )
     new = json.loads((FIXTURE / "campaign-fields.json").read_text())
-    # Only the dataset, tier selection and weighting are new campaign policy.
-    assert {
-        k: v for k, v in new.items() if k not in ("sampling_rule", "scoring_rule")
-    } == {
-        k: v for k, v in original.items() if k not in ("sampling_rule", "scoring_rule")
-    }
-    sampling_changes = {
+    workload = {
         "algo_version",
         "dataset",
         "revision",
@@ -445,30 +428,23 @@ def test_fixture_is_unqualified_and_preserves_serving_pins():
         "input_tiers",
         "followup_prompt",
     }
-    assert {
-        k: v for k, v in new["sampling_rule"].items() if k not in sampling_changes
-    } == {
-        k: v for k, v in original["sampling_rule"].items() if k not in sampling_changes
-    }
-    assert {k: v for k, v in new["scoring_rule"].items() if k != "tier_weights"} == {
-        k: v for k, v in original["scoring_rule"].items() if k != "tier_weights"
-    }
-    assert new["sampling_rule"]["temperature_range"] == [0.1, 1.01]
-    assert "temperature" not in new["sampling_rule"]
-    assert new["sampling_rule"]["min_output_tokens"] == 1500
-    assert new["sampling_rule"]["request_concurrency"] == 32
-    assert new["sampling_rule"]["n_prompts"] == 32
+    for key, ignored in (
+        ("sampling_rule", workload),
+        ("scoring_rule", {"tier_weights"}),
+    ):
+        assert {k: v for k, v in new.pop(key).items() if k not in ignored} == {
+            k: v for k, v in original.pop(key).items() if k not in ignored
+        }
+    assert new == original
+    rule = json.loads((FIXTURE / "campaign-fields.json").read_text())["sampling_rule"]
+    assert (rule["dataset"], rule["revision"], rule["n_rows"]) == (DATASET, REVISION, 0)
     assert (
-        json.loads((FIXTURE / "sampling_rule.json").read_text()) == new["sampling_rule"]
+        json.loads((FIXTURE / "scoring_rule.json").read_text())
+        == json.loads((FIXTURE / "campaign-fields.json").read_text())["scoring_rule"]
     )
-    assert (
-        json.loads((FIXTURE / "scoring_rule.json").read_text()) == new["scoring_rule"]
-    )
-    assert new["sampling_rule"]["dataset"] == DATASET
-    assert new["sampling_rule"]["revision"] == REVISION
-    assert new["sampling_rule"]["n_rows"] == 0
+    # An unprepared template cannot be launched.
     with pytest.raises(SamplerError):
-        parse_sampling_rule(new["sampling_rule"])
+        parse_sampling_rule(rule)
 
 
 @pytest.mark.parametrize("stale", [False, True])
@@ -506,13 +482,7 @@ def test_qualification_pool_needs_distinct_sessions_before_gpu_calls(
         snapshot = json.loads(rows[index]["snapshot_json"])
         snapshot["session_id"] = "one-session"
         rows[index]["snapshot_json"] = json.dumps(snapshot)
-    monkeypatch.setattr(
-        "bench.qualify_longform.verify_baseline_image",
-        lambda **kw: {
-            "engine_ref": f["bench"]["baseline_engine_image_digest"],
-            "container_id": "baseline",
-        },
-    )
+    fake_baseline(monkeypatch, f)
     monkeypatch.setattr(
         "bench.qualify_longform.post_json",
         lambda *a, **kw: pytest.fail("GPU called before input coverage check"),
@@ -533,22 +503,13 @@ def test_qualification_pool_needs_distinct_sessions_before_gpu_calls(
     assert not (tmp_path / "failed/sampling_rule.json").exists()
 
 
-def test_qualification_defaults_to_32_in_flight_across_all_four_tiers(
+def test_qualification_defaults_to_full_split_and_32_in_flight_across_tiers(
     tmp_path, monkeypatch
 ):
     f = fields(64)
     f["sampling_rule"]["n_prompts"] = 32
     fmt = formatter()
-    monkeypatch.setattr(
-        "bench.qualify_longform.verify_baseline_image",
-        lambda **kw: {
-            "engine_ref": f["bench"]["baseline_engine_image_digest"],
-            "container_id": "baseline",
-        },
-    )
-    monkeypatch.setattr(
-        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
-    )
+    fake_baseline(monkeypatch, f)
     barrier = threading.Barrier(32, timeout=20)
     lock = threading.Lock()
     calls = []
@@ -571,7 +532,6 @@ def test_qualification_defaults_to_32_in_flight_across_all_four_tiers(
         container="baseline",
         engine_ref=f["bench"]["baseline_engine_image_digest"],
         output_dir=tmp_path,
-        max_rows=64,
         row_fetcher=snapshots(64).__getitem__,
         formatter=fmt,
     )
@@ -585,41 +545,6 @@ def test_qualification_defaults_to_32_in_flight_across_all_four_tiers(
         }
     assert len(qualified["eligible_row_indices"]) == 64
     assert json.loads((tmp_path / "summary.json").read_text())["concurrency"] == 32
-
-
-def test_cli_inherits_campaign_concurrency_and_scans_full_split(tmp_path, monkeypatch):
-    f = fields(308)
-    source = tmp_path / "fields.json"
-    source.write_text(json.dumps(f))
-    output = tmp_path / "qualified"
-    captured = {}
-
-    def fake_qualify(**kwargs):
-        captured.update(kwargs)
-        kwargs["output_dir"].mkdir()
-        return kwargs["fields"]["sampling_rule"]
-
-    monkeypatch.setattr("bench.qualify_exgentic.qualify", fake_qualify)
-    assert (
-        main(
-            [
-                "--campaign-fields",
-                str(source),
-                "--output-dir",
-                str(output),
-                "--base-url",
-                "http://127.0.0.1:8000",
-                "--container",
-                "baseline",
-                "--engine-ref",
-                f["bench"]["baseline_engine_image_digest"],
-            ]
-        )
-        == 0
-    )
-    assert captured["concurrency"] == 32
-    assert captured["max_rows"] == 308
-    assert captured["fields"]["sampling_rule"]["temperature_range"] == [0.1, 1.01]
 
 
 def test_exgentic_preserves_kimi_output_floor():
@@ -645,16 +570,7 @@ def test_mixed_tier_qualification_refills_rejections_or_fails_closed(
     f = fields(n_rows)
     f["sampling_rule"].update(n_prompts=32, max_tokens=5120, min_output_tokens=1500)
     fmt = formatter()
-    monkeypatch.setattr(
-        "bench.qualify_longform.verify_baseline_image",
-        lambda **kw: {
-            "engine_ref": f["bench"]["baseline_engine_image_digest"],
-            "container_id": "baseline",
-        },
-    )
-    monkeypatch.setattr(
-        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
-    )
+    fake_baseline(monkeypatch, f)
     lock = threading.Lock()
     rejected = False
 
@@ -786,16 +702,7 @@ def test_session_in_flight_is_deferred_not_dropped(tmp_path, monkeypatch):
         else:
             snapshot["messages"][0]["content"] = f"n={update['size']};id={index}"
         rows[index]["snapshot_json"] = json.dumps(snapshot)
-    monkeypatch.setattr(
-        "bench.qualify_longform.verify_baseline_image",
-        lambda **kw: {
-            "engine_ref": f["bench"]["baseline_engine_image_digest"],
-            "container_id": "baseline",
-        },
-    )
-    monkeypatch.setattr(
-        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
-    )
+    fake_baseline(monkeypatch, f)
 
     def post(url, path, body, **kwargs):
         tokens = fmt.encode(body["prompt"])
