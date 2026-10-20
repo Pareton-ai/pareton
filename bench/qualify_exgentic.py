@@ -12,9 +12,13 @@ import logging
 from pathlib import Path
 
 from bench.exgentic import DATASET, REVISION, prompt_kv_tokens
-from bench.longform import candidate_for_row, digest, sampling_context_for_campaign
+from bench.longform import (
+    RENDER_FAILED,
+    digest,
+    sampling_context_for_campaign,
+    scan_candidates,
+)
 from bench.sampler import (
-    PromptRenderError,
     SamplerError,
     _cached_hf_split,
     build_prompt_formatter,
@@ -59,16 +63,15 @@ def prepare(fields, output_dir, *, dataset=None, formatter=None):
     sessions = {tier: set() for tier in tiers}
     hashes = set()
     render_failures = 0
-    for index in range(len(dataset)):
-        if index and index % 100 == 0:
+    scan = scan_candidates(
+        range(len(dataset)), dataset.__getitem__, formatter, rule, context
+    )
+    for index, candidate in scan:
+        if index and index % 5000 == 0:
             logger.info(
                 "Indexed %s/%s snapshots; eligible=%s", index, len(dataset), counts
             )
-        try:
-            candidate = candidate_for_row(
-                index, dataset[index], formatter, rule, context
-            )
-        except PromptRenderError:
+        if candidate == RENDER_FAILED:
             render_failures += 1
             continue
         if candidate is None or candidate["input_ids_sha256"] in hashes:

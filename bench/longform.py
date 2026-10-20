@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import multiprocessing
+import os
 import re
-from typing import Any
+from typing import Any, Callable, Iterable, Iterator
 
 from bench.concurrency import TIERS, input_tiers
 from bench.sampler import PromptRenderError, SampledTrace, SamplerError, encode_trace
@@ -301,6 +303,66 @@ def candidate_for_row(row_index, row, formatter, rule, context):
         + hashlib.sha256(history_answer.encode()).hexdigest(),
         "input_length_group": group,
     }
+
+
+RENDER_FAILED = "render_failed"
+# Set in the parent just before forking, so workers inherit the loaded split
+# and tokenizer instead of pickling them.
+_SCAN = None
+
+
+def _scan_row(row_index):
+    fetcher, formatter, rule, context = _SCAN
+    try:
+        candidate = candidate_for_row(
+            row_index, fetcher(row_index), formatter, rule, context
+        )
+    except PromptRenderError:
+        return row_index, RENDER_FAILED
+    # v6 snapshots can hold hundreds of thousands of tokens; callers re-render
+    # the few they keep.
+    if candidate is not None and rule["algo_version"] == 6:
+        candidate = {k: v for k, v in candidate.items() if k != "prompt"}
+    return row_index, candidate
+
+
+def scan_candidates(
+    indices: Iterable[int],
+    fetcher: Callable[[int], Any],
+    formatter: Any,
+    rule: dict[str, Any],
+    context: dict[str, Any],
+    *,
+    workers: int | None = None,
+) -> Iterator[tuple[int, Any]]:
+    """Yield ``(row_index, candidate)`` in input order, rendering rows in parallel.
+
+    A candidate is None for an ineligible row and RENDER_FAILED for one that
+    cannot be rendered. Rendering a full Exgentic split one row at a time took
+    hours, so this forks one worker per CPU.
+    """
+    global _SCAN
+    indices = list(indices)
+    workers = workers or os.cpu_count() or 1
+    if (
+        workers < 2
+        or len(indices) < 2
+        or "fork" not in multiprocessing.get_all_start_methods()
+    ):
+        _SCAN = (fetcher, formatter, rule, context)
+        try:
+            yield from map(_scan_row, indices)
+        finally:
+            _SCAN = None
+        return
+    # Load the split once here so forked workers share it.
+    fetcher(indices[0])
+    _SCAN = (fetcher, formatter, rule, context)
+    try:
+        with multiprocessing.get_context("fork").Pool(workers) as pool:
+            yield from pool.imap(_scan_row, indices, chunksize=16)
+    finally:
+        _SCAN = None
 
 
 def request_for_candidate(candidate, rule, index, *, generation_seed=""):
