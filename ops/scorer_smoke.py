@@ -57,11 +57,11 @@ from bench.longform import (
     digest,
     length_groups,
     sampling_context_for_campaign,
+    scan_candidates,
 )
 from bench.main import _EngineProvider, plan_round_starts
 from bench.phases import BenchPhase
 from bench.sampler import (
-    PromptRenderError,
     build_prompt_formatter,
     fetch_hf_row,
     parse_sampling_rule,
@@ -147,16 +147,11 @@ def select_sequences(fields, count, *, formatter=None, row_fetcher=None):
     context = sampling_context_for_campaign(fields["bench"], fields["engine"])
     tier = top_tier(rule)
     best = {}
-    for index in range(rule["n_rows"]):
-        if index and index % 500 == 0:
+    scan = scan_candidates(range(rule["n_rows"]), row_fetcher, formatter, rule, context)
+    for index, item in scan:
+        if index and index % 5000 == 0:
             print(f"Scanned {index}/{rule['n_rows']} rows", flush=True)
-        try:
-            item = candidate_for_row(
-                index, row_fetcher(index), formatter, rule, context
-            )
-        except PromptRenderError:
-            continue
-        if item is None or item["input_length_group"] != tier["name"]:
+        if not isinstance(item, dict) or item["input_length_group"] != tier["name"]:
             continue
         key = item.get("session_id") or item["input_ids_sha256"]
         if key not in best or item["input_tokens"] > best[key]["input_tokens"]:
@@ -166,6 +161,13 @@ def select_sequences(fields, count, *, formatter=None, row_fetcher=None):
         raise CheckFailed(
             f"only {len(chosen)} distinct {tier['name']} prompts, need {count}"
         )
+    # The scan keeps metadata only; render the chosen few in full.
+    chosen = [
+        candidate_for_row(
+            item["row_index"], row_fetcher(item["row_index"]), formatter, rule, context
+        )
+        for item in chosen[:count]
+    ]
     output = continuation(formatter, rule["followup_prompt"], rule["max_tokens"])
     return tier["name"], [
         {

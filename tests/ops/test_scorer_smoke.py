@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import config
+from bench import longform
 from bench.lifecycle import EngineError
 from bench.sampler import PromptFormatter
 
@@ -63,7 +64,9 @@ def test_selection_keeps_the_longest_top_tier_prompt_per_session(monkeypatch, tm
         None,
         candidate(5, "d", 118000),
     ] + [None] * 58
-    monkeypatch.setattr(smoke, "candidate_for_row", lambda i, *a: rows[i])
+    # The parallel scan renders through bench.longform; the chosen few re-render here.
+    for module in (longform, smoke):
+        monkeypatch.setattr(module, "candidate_for_row", lambda i, *a: rows[i])
     tier, sequences = smoke.select_sequences(
         fields, 2, formatter=WORDS, row_fetcher=lambda i: {}
     )
