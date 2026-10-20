@@ -21,6 +21,7 @@ from bench.correctness import degeneracy_reason
 from bench.http import post_json
 from bench.lifecycle import EngineError
 from bench.longform import (
+    RENDER_FAILED,
     candidate_for_row,
     digest,
     generation_fields,
@@ -29,10 +30,10 @@ from bench.longform import (
     qualification_contract,
     request_for_candidate,
     sampling_context_for_campaign,
+    scan_candidates,
 )
 from bench.sampler import (
     TIERED_ALGO_VERSIONS,
-    PromptRenderError,
     SamplerError,
     build_prompt_formatter,
     fetch_hf_row,
@@ -271,18 +272,13 @@ def qualify(
         candidates = {group: [] for group in quotas}
         indices = ordered_rows(rule, seed)[:max_rows]
         logger.info("Indexing %s source rows before GPU qualification", len(indices))
-        for scanned, row_index in enumerate(indices, 1):
-            row = fetcher(row_index)
-            try:
-                candidate = candidate_for_row(row_index, row, formatter, rule, context)
-            except PromptRenderError:
+        # v6 candidates arrive without their prompt; accepted work is re-rendered.
+        scan = scan_candidates(indices, fetcher, formatter, rule, context)
+        for scanned, (row_index, candidate) in enumerate(scan, 1):
+            if candidate == RENDER_FAILED:
                 candidate = None
             if candidate is not None and candidate["input_ids_sha256"] not in seen:
                 seen.add(candidate["input_ids_sha256"])
-                # Agent snapshots can contain hundreds of thousands of tokens.
-                # Keep only metadata while indexing, then re-render accepted work.
-                if v6:
-                    candidate = {k: v for k, v in candidate.items() if k != "prompt"}
                 candidates[candidate["input_length_group"]].append(candidate)
             if scanned % 500 == 0:
                 logger.info("Indexed %s/%s source rows", scanned, len(indices))

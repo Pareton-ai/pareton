@@ -19,15 +19,18 @@ from bench.exgentic import (
     prompt_kv_tokens,
 )
 from bench.longform import (
+    RENDER_FAILED,
     candidate_for_row,
     digest,
     require_qualification,
     sampling_context_for_campaign,
+    scan_candidates,
 )
 from bench.qualify_exgentic import prepare
 from bench.qualify_longform import qualify
 from bench.sampler import (
     PromptFormatter,
+    PromptRenderError,
     SamplerError,
     generate_trace,
     parse_sampling_rule,
@@ -731,3 +734,30 @@ def test_session_in_flight_is_deferred_not_dropped(tmp_path, monkeypatch):
     )
     assert 60 not in result["eligible_row_indices"]
     assert 21 in result["eligible_row_indices"]
+
+
+def test_parallel_scan_matches_one_row_at_a_time():
+    f = fields(n=40)
+    rule = parse_sampling_rule(f["sampling_rule"])
+    context = sampling_context_for_campaign(f["bench"], f["engine"])
+    rows = snapshots(40)
+    base = formatter()
+
+    def render(messages, *, tools=None):
+        # One unrenderable row keeps its place in the output.
+        if "id=5" in json.dumps(messages):
+            raise PromptRenderError("unrenderable")
+        return base.render(messages, tools=tools)
+
+    fmt = PromptFormatter(render, base.receipt, base.encode)
+    serial = list(
+        scan_candidates(range(40), rows.__getitem__, fmt, rule, context, workers=1)
+    )
+    parallel = list(
+        scan_candidates(range(40), rows.__getitem__, fmt, rule, context, workers=3)
+    )
+    assert parallel == serial
+    assert [i for i, _ in parallel] == list(range(40))
+    assert serial[5][1] == RENDER_FAILED
+    assert serial[0][1]["input_tokens"] == SIZES[0]
+    assert all("prompt" not in c for _, c in serial if isinstance(c, dict))
