@@ -119,6 +119,12 @@ fi
 . .venv/bin/activate
 export PYTHONPATH=$REPO PARETON_BENCH_HF_CACHE_DIR=$HF_CACHE PARETON_BENCH_HEALTH_TIMEOUT_S=3600
 log "Commit $(git rev-parse HEAD) on $(git rev-parse --abbrev-ref HEAD)"
+# The engine image is private on GHCR; pull it now so a missing docker login
+# fails here rather than after the CPU audit.
+image=$(jq -r .bench.baseline_engine_image_digest \
+  fixtures/campaigns/sglang_kimi_k3_b300_exgentic/campaign-fields.json)
+docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image" \
+  || finish 2 "cannot pull $image; run docker login ghcr.io with a read:packages token"
 
 # ---- 1. CPU audit --------------------------------------------------------------
 step "1/4 CPU audit of the dataset"
