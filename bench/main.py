@@ -59,6 +59,7 @@ from bench.env import (
     warn_gpu_sku_mismatch,
 )
 from bench.lifecycle import (
+    BaselineDriftError,
     BenchNetwork,
     EngineContainer,
     EngineCrashedError,
@@ -359,6 +360,8 @@ def _write_engine_error_report(
     }
     if role:
         report["error_role"] = role
+    if isinstance(exc, BaselineDriftError):
+        report["baseline_drift"] = exc.drift
     validate_report_dict(report)
     layout.write_report(report)
     layout.append_log(
@@ -786,6 +789,17 @@ def run_round(
                     )
             else:
                 drift = replay
+                ceiling = req.baseline_drift_ceiling
+                if ceiling is not None and baseline is not None:
+                    # The same comparison settlement makes, run before the
+                    # candidates so a round it would void ends here.
+                    gap = baseline_drift(
+                        req,
+                        replace(baseline, excluded_prompts=excluded_prompts),
+                        drift,
+                    )
+                    if abs(gap) > ceiling:
+                        raise BaselineDriftError(gap, ceiling)
 
         elif start.kind == "candidate":
             index = start.candidate_index

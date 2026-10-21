@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -324,6 +325,10 @@ class BenchRequest:
     # behavior: every candidate is benched.
     leader_candidate_index: int | None = None
     draft_model: DraftModelSpec | None = None
+    # The settlement drift ceiling for this round. When set, the harness stops
+    # after the second baseline run if the runs disagree by more than this.
+    # None keeps the old behavior: drift is only reported.
+    baseline_drift_ceiling: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
@@ -340,6 +345,19 @@ class BenchRequest:
                     f"leader_candidate_index {leader_index} out of range for "
                     f"{len(engines.candidates)} candidate(s)"
                 )
+        ceiling_raw = d.get("baseline_drift_ceiling")
+        ceiling: float | None = None
+        if ceiling_raw is not None:
+            if isinstance(ceiling_raw, bool) or not isinstance(
+                ceiling_raw, (int, float)
+            ):
+                raise ValueError("baseline_drift_ceiling must be a number")
+            try:
+                ceiling = float(ceiling_raw)
+            except OverflowError as exc:
+                raise ValueError("baseline_drift_ceiling is out of range") from exc
+            if not math.isfinite(ceiling) or ceiling <= 0:
+                raise ValueError("baseline_drift_ceiling must be positive and finite")
         return cls(
             schema_version=int(d["schema_version"]),
             task_id=str(d["task_id"]),
@@ -358,6 +376,7 @@ class BenchRequest:
                 if d.get("draft_model") is not None
                 else None
             ),
+            baseline_drift_ceiling=ceiling,
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -6,7 +6,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,7 +41,12 @@ from gpu.errors import GpuError, NoCapacityError, ProvisionError
 from gpu.orchestrate import EXIT_DESTROY_FAILED, run_bench_on_pod
 from gpu.types import PodSpec
 from observability import events as obs
-from round.rank import VOID_LEADER_INFRA_FAILED, Entry, rank_round
+from round.rank import (
+    VOID_BASELINE_DRIFT,
+    VOID_LEADER_INFRA_FAILED,
+    Entry,
+    rank_round,
+)
 from round.store import (
     VOID_LEADER_IMAGE_MISSING,
     VOID_POD_FAILED,
@@ -274,6 +279,14 @@ def trace_request_count(trace_path: str | Path) -> int:
     return len(requests)
 
 
+def drift_ceiling(scoring_rule: Mapping[str, Any]) -> float:
+    """The baseline drift ceiling, shared by the harness request and settlement.
+
+    The campaign's scoring rule can pin its own; otherwise the validator default.
+    """
+    return baseline_drift_ceiling(scoring_rule, config.BASELINE_DRIFT_CEILING)
+
+
 def build_round_request(
     round_row: dict[str, Any],
     campaign: Any,
@@ -431,6 +444,7 @@ def build_round_request(
         "scoring_rule": dict(scoring_rule),
         "hf_token_env": "HF_TOKEN",
         "leader_candidate_index": leader_candidate_index,
+        "baseline_drift_ceiling": drift_ceiling(scoring_rule),
     }
     draft = bench.get("draft_model")
     if draft is not None:
@@ -859,6 +873,16 @@ def _process_round(
                 reason = VOID_ROUND_TIMEOUT if timed_out else VOID_POD_FAILED
                 raise RoundInfraError(reason, str(exc)) from exc
 
+    if exit_code == EXIT_DESTROY_FAILED:
+        # Raised before reading the report, so a teardown failure is flagged
+        # whether the round then settles, voids on drift, or voids unbound.
+        logger.error(
+            "ALERT round_destroy_failed round=%s campaign=%s "
+            "(pod/volume may still be billing)",
+            round_id,
+            campaign_id,
+        )
+
     report_path = output_dir / "bench_report.json"
     has_report = report_path.is_file()
     report: dict[str, Any] | None = None
@@ -882,6 +906,11 @@ def _process_round(
         )
         bound = True
 
+    if bound and report is not None and report.get("error_role") == "baseline_drift":
+        # The harness stopped after its two baseline runs because they
+        # disagreed by more than drift_ceiling(), before any candidate ran.
+        raise RoundInfraError(VOID_BASELINE_DRIFT, str(report.get("error") or ""))
+
     void_reason = classify_round_failure(
         provision_error=provision_error,
         timed_out=timed_out,
@@ -891,14 +920,6 @@ def _process_round(
     )
     if void_reason is not None:
         raise RoundInfraError(void_reason, f"exit_code={exit_code}")
-
-    if exit_code == EXIT_DESTROY_FAILED:
-        logger.error(
-            "ALERT round_destroy_failed round=%s campaign=%s "
-            "(pod/volume may still be billing); settling the bound report",
-            round_id,
-            campaign_id,
-        )
 
     assert report is not None
     results = entry_results_from_report(entries, report)
@@ -926,9 +947,7 @@ def _process_round(
         rank_entries,
         epsilon=float(config.OVERTAKE_EPSILON),
         drift=drift_f,
-        drift_ceiling=baseline_drift_ceiling(
-            req.get("scoring_rule") or {}, config.BASELINE_DRIFT_CEILING
-        ),
+        drift_ceiling=drift_ceiling(req.get("scoring_rule") or {}),
         leader_score=incumbent_score,
     )
     if decision.void:
