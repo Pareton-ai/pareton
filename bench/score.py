@@ -268,17 +268,19 @@ def extrapolate_short_completions(
     A request that stops below the tolerance gate leaves the tier early and
     frees its batch slot for the rest. Without this, ending the slowest
     request in each tier would buy weighted speed credit for the cost of the
-    flat failure penalty alone. Its completion offset is scaled from its own
-    admission by ``reference_tokens / completion_tokens``, so an honest answer
-    that comes out slightly short barely moves, while an early stop is charged
-    roughly a full-length decode at the speed it actually achieved.
+    flat failure penalty alone. Its decode time, from its first token to its
+    completion, is scaled by ``reference_tokens / completion_tokens``, so an
+    honest answer that comes out slightly short barely moves, while an early
+    stop is charged roughly a full-length decode at the speed it actually
+    achieved. Prefill and queueing are kept as measured: they do not grow with
+    the output, and scaling them charged honest natural-EOS answers several
+    points of tier time on long prompts. Rows without a first-token time are
+    scaled from their admission.
 
     The adjustment is deliberately one-sided. A candidate that writes more
     than the baseline keeps its measured time and is not scaled down, and
     neither are the baseline's own rows. Fewer tokens is the only direction
-    a patch can steer to buy time, so only that direction is charged. Scaling
-    the whole admission-to-completion interval also scales prefill, which
-    makes the charge slightly conservative for short stops.
+    a patch can steer to buy time, so only that direction is charged.
 
     Returns adjusted copies of the rows and the request ids that were scaled.
     """
@@ -295,6 +297,10 @@ def extrapolate_short_completions(
             adjusted.append(dict(row))
             continue
         origin = row.get("admission_offset_ms", row["group_start_offset_ms"])
+        ttft_ms = row.get("ttft_ms")
+        if isinstance(ttft_ms, (int, float)) and not isinstance(ttft_ms, bool):
+            first_token = row.get("dispatch_offset_ms", origin) + ttft_ms
+            origin = min(max(origin, first_token), row["protocol_completion_offset_ms"])
         elapsed = row["protocol_completion_offset_ms"] - origin
         adjusted.append(
             {
