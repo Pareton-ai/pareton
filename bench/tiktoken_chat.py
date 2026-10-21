@@ -33,7 +33,7 @@ TIKTOKEN_CHAT_MODELS: dict[tuple[str, str], dict[str, str]] = {
 
 # The model tokenizer encodes longer inputs in windows; plain whole-string
 # encoding is identical only below these limits, so refuse anything larger.
-_MAX_ENCODE_CHARS = 400_000
+MAX_ENCODE_CHARS = 400_000
 _MAX_RUN_CHARS = 25_000
 _LONG_RUN_RE = re.compile(rf"\s{{{_MAX_RUN_CHARS + 1},}}|\S{{{_MAX_RUN_CHARS + 1},}}")
 # Stdlib only: anything else means the pinned encoder changed shape.
@@ -169,6 +169,7 @@ def build_tiktoken_chat_formatter(
     expected_template_sha256: str | None,
     token: Any,
     file_loader: Callable[..., bytes] | None = None,
+    windowed_encoding: bool = False,
 ) -> PromptFormatter:
     import tiktoken
 
@@ -231,14 +232,14 @@ def build_tiktoken_chat_formatter(
     # Match the model tokenizer's apply_chat_template default.
     kwargs = {"thinking_effort": "max"} if enable_thinking else {}
 
-    def render(prompt: str | list[dict[str, str]]) -> str:
+    def render(prompt: str | list[dict[str, str]], *, tools=None) -> str:
         messages = (
             [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
         )
         try:
             segments = build_segments(
                 messages,
-                None,
+                tools,
                 add_generation_prompt=True,
                 thinking=enable_thinking,
                 **kwargs,
@@ -257,7 +258,13 @@ def build_tiktoken_chat_formatter(
 
     def encode(prompt: str) -> list[int]:
         # The engine's tokenizer parses special-token text and adds no BOS.
-        if len(prompt) > _MAX_ENCODE_CHARS or _LONG_RUN_RE.search(prompt):
+        if windowed_encoding:
+            return [
+                token
+                for piece in encoding_windows(prompt)
+                for token in encoding.encode(piece, allowed_special="all")
+            ]
+        if len(prompt) > MAX_ENCODE_CHARS or _LONG_RUN_RE.search(prompt):
             raise PromptRenderError(
                 "prompt exceeds the pinned tokenizer's single-window limits"
             )
@@ -280,9 +287,26 @@ def build_tiktoken_chat_formatter(
                 "model_revision": revision,
                 "sha256": _sha256(files[spec["vocab"]]),
                 "library": "tiktoken",
+                **({"windowing": "kimi-400000-25000-v1"} if windowed_encoding else {}),
                 "library_version": tiktoken.__version__,
                 "add_special_tokens": True,
             },
         },
         encode=encode,
     )
+
+
+def encoding_windows(text: str):
+    """Match the pinned Kimi tokenizer's character windows and run boundaries."""
+    for offset in range(0, len(text), MAX_ENCODE_CHARS):
+        window = text[offset : offset + MAX_ENCODE_CHARS]
+        start, run = 0, 0
+        whitespace = window[0].isspace()
+        for index, char in enumerate(window):
+            current = char.isspace()
+            run = run + 1 if current == whitespace else 1
+            whitespace = current
+            if run > _MAX_RUN_CHARS:
+                yield window[start:index]
+                start, run = index, 1
+        yield window[start:]

@@ -112,13 +112,13 @@ def freeze_manifest_fields(
     if workload_pool is not None:
         out["workload_pool"] = _canon(list(workload_pool))
     if sampling_rule is not None:
-        if (sampling_rule.get("algo_version") == 5) != (
+        if (sampling_rule.get("algo_version") in (5, 6)) != (
             out["scoring_rule"]["name"] == "weighted_tier_completion_speedup"
         ):
             raise ValueError(
-                "version 5 requires weighted_tier_completion_speedup and vice versa"
+                "versions 5 and 6 require weighted_tier_completion_speedup and vice versa"
             )
-        if sampling_rule.get("algo_version") == 5:
+        if sampling_rule.get("algo_version") in (5, 6):
             validate_tier_contract(sampling_rule, out["scoring_rule"])
         out["sampling_rule"] = _canon(dict(sampling_rule))
     elif workload_trace_sha256 and workload_trace_url:

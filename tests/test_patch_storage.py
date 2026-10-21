@@ -322,3 +322,59 @@ def test_publication_rejects_untrusted_url_and_wrong_public_checksum(monkeypatch
         s3.publish_patch("https://evil.example/patch", "sha256:" + "a" * 64)
     with pytest.raises(ValueError, match="public patch checksum"):
         s3.publish_patch(PRIVATE_URL, "sha256:" + "a" * 64)
+
+
+def test_copy_private_patch_to_another_campaign_once(monkeypatch):
+    from botocore.exceptions import ClientError
+
+    target_campaign = "33333333-3333-4333-8333-333333333333"
+    upload_id = "44444444-4444-4444-8444-444444444444"
+    patch_hash = "sha256:" + "a" * 64
+    objects = {
+        s3.private_patch_key(PRIVATE_URL): {
+            "ChecksumSHA256": s3._checksum(patch_hash),
+            "ETag": '"etag"',
+        }
+    }
+    calls = []
+
+    def head(**kwargs):
+        if kwargs["Key"] not in objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return objects[kwargs["Key"]]
+
+    def copy(**kwargs):
+        calls.append(kwargs)
+        objects[kwargs["Key"]] = objects[kwargs["CopySource"]["Key"]]
+
+    monkeypatch.setattr(
+        s3, "_client", lambda **_: SimpleNamespace(head_object=head, copy_object=copy)
+    )
+    kwargs = dict(
+        campaign_id=target_campaign,
+        hotkey="hk1",
+        upload_id=upload_id,
+        patch_hash=patch_hash,
+    )
+    url = s3.copy_private_patch(PRIVATE_URL, **kwargs)
+    assert s3.copy_private_patch(PRIVATE_URL, **kwargs) == url
+    assert len(calls) == 1
+    assert calls[0]["CopySourceIfMatch"] == '"etag"'
+    key = s3.private_patch_key(url)
+    assert key == s3.object_key_for(target_campaign, "hk1", upload_id)
+    assert key.split("/")[-4] == target_campaign
+    with pytest.raises(ValueError, match="different patch"):
+        s3.copy_private_patch(
+            PRIVATE_URL, **{**kwargs, "patch_hash": "sha256:" + "b" * 64}
+        )
+    with pytest.raises(ValueError, match="checksum"):
+        s3.copy_private_patch(
+            PRIVATE_URL,
+            **{
+                **kwargs,
+                "upload_id": "55555555-5555-4555-8555-555555555555",
+                "patch_hash": "sha256:" + "b" * 64,
+            },
+        )
+    with pytest.raises(ValueError, match="private patch locator"):
+        s3.copy_private_patch("https://evil.example/patch.diff", **kwargs)

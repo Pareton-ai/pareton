@@ -275,8 +275,12 @@ def insert_submission(
     payment_block: int | None = None,
     payment_tx: int | None = None,
     patch_fingerprint: str | None = None,
+    event_detail: dict[str, Any] | None = None,
 ) -> UUID | None:
-    """Insert submission. Returns id, or None if (campaign_id, patch_hash) exists."""
+    """Insert submission. Returns id, or None if (campaign_id, patch_hash) exists.
+
+    ``event_detail`` adds audit fields to the ``committed`` event.
+    """
     patch_hash = patch_hash.strip().lower()
     with db_connection() as conn:
         with conn.cursor() as cur:
@@ -347,6 +351,7 @@ def insert_submission(
             if payment_block is not None:
                 detail["payment_block"] = payment_block
                 detail["payment_tx"] = payment_tx
+            detail.update(event_detail or {})
             cur.execute(
                 """
                 INSERT INTO submission_events (submission_id, state, detail)

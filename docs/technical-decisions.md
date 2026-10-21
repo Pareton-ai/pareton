@@ -86,3 +86,35 @@ services keep credentialed S3 access for fetch and build.
 Old append-only `submission_events` rows are untouched: nothing rewrites past
 `committed` details. Objects already copied to public storage under the former
 reveal policy are outside this code change.
+
+
+
+## 2026-10-19: Long-context Exgentic workload for a new Kimi K3 campaign
+
+The LongWriter workload (2k-16k) fits an engine that drops `--dcp-size 8` and
+keeps about a sixth of the KV cache, so such engines never queue. Sampler v6
+uses pinned Exgentic agent-llm-traces-v2 calls as request snapshots (system
+prompt, history and tool definitions; never the source answer, never tool
+execution), appends a pinned long-form follow-up, and places the Kimi-rendered
+prompt in a 90-100% band of 16k/32k/64k/128k, eight per tier at C32 with equal
+weights. No padding or truncation. All other Kimi policy is unchanged.
+
+That is about 1.9M prompt tokens in flight, possibly beyond the DCP-8
+baseline's own pool (estimated 1.5M from a C64 run at 39% KV use). B300
+qualification and a shadow round must show the baseline completes within the
+timeout and drift ceiling; otherwise smaller tiers are a fixture change.
+The scorer keeps the 0.80 memory fraction but one running request, since it
+grades sequentially; a 128k input is rejected, not truncated, if it exceeds
+the scorer's KV pool, so a scorer-only smoke checks that before qualification.
+
+A session's later calls extend its earlier prompts and would share a cached
+prefix, so a round and a qualified pool take at most one call per session. The
+CPU audit reports distinct sessions per tier and how much of a preview round a
+prefix cache must hold. A tier short of its quota fails without a launch rule.
+
+`campaign.carryover` takes the latest N submissions of a closed campaign and
+enters the eligible ones into its replacement (patches that never ran, excluded
+hotkeys, non-private URLs and duplicates are skipped). Each patch is copied
+under the new campaign, the source commit
+block keeps on-chain order for cohorts and ties, and no payment, image or score
+moves. A dry run prints the plan and its hash; `--apply` requires that hash.

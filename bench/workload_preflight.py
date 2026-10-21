@@ -11,6 +11,19 @@ from bench.schemas import WorkloadTrace
 from bench.trajectory import token_ids_sha256
 
 
+def generation_window(model_repo: str, model_revision: str, algo_version) -> int | None:
+    """Characters per window when the engine encodes a prompt for generation.
+
+    Mirrors bench.sampler: v6 workloads on a pinned tiktoken chat model (Kimi)
+    are encoded in fixed windows from the start of the prompt.
+    """
+    from bench.tiktoken_chat import MAX_ENCODE_CHARS, tiktoken_chat_spec
+
+    if algo_version == 6 and tiktoken_chat_spec(model_repo, model_revision):
+        return MAX_ENCODE_CHARS
+    return None
+
+
 def validate_engine_workload(
     base_url: str,
     trace: WorkloadTrace,
@@ -19,6 +32,7 @@ def validate_engine_workload(
     max_model_len: int,
     evidence_dir: Path,
     verify_tokenizer: bool,
+    tokenize_window: int | None = None,
 ) -> None:
     sampling = trace.meta.sampling
     if sampling is None:
@@ -89,13 +103,29 @@ def validate_engine_workload(
             )
         evidence["engine_limits"] = {"max_model_len": max_model_len}
     if verify_tokenizer:
+        # Kimi's tokenizer windows the whole prompt when SGLang encodes it for
+        # generation, but /tokenize passes add_special_tokens, which windows
+        # each piece between special tokens from that piece's start instead.
+        # Sending each generation window on its own reproduces the generation ids.
+        window = tokenize_window
         for request in trace.requests:
-            response = post_json(
-                base_url,
-                "/tokenize",
-                {"prompt": request.prompt, "add_special_tokens": True},
+            prompt = request.prompt
+            pieces = (
+                [prompt[i : i + window] for i in range(0, len(prompt), window)]
+                if window
+                else [prompt]
             )
-            ids = response.get("tokens")
+            ids = []
+            for piece in pieces:
+                tokens = post_json(
+                    base_url,
+                    "/tokenize",
+                    {"prompt": piece, "add_special_tokens": True},
+                ).get("tokens")
+                if not isinstance(tokens, list):
+                    ids = None
+                    break
+                ids.extend(tokens)
             if (
                 not isinstance(ids, list)
                 or any(type(i) is not int or i < 0 for i in ids)

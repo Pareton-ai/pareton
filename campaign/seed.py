@@ -18,7 +18,7 @@ import config
 from bench.concurrency import validate_tier_contract
 from bench.longform import preflight_longform_campaign, require_qualification
 from bench.sampler import (
-    LONGFORM_ALGO_VERSIONS,
+    TIERED_ALGO_VERSIONS,
     TRAJECTORY_ALGO_VERSION,
     parse_sampling_rule,
 )
@@ -375,14 +375,14 @@ def seed_synthetic_campaign(
 
     pool = list(workload_pool) if workload_pool is not None else None
     scoring = validate_scoring_rule(scoring_rule)
-    if (rule["algo_version"] == 5) != (
+    if (rule["algo_version"] in (5, 6)) != (
         scoring["name"] == "weighted_tier_completion_speedup"
     ):
         raise ValueError(
-            "version 5 requires weighted_tier_completion_speedup and vice versa"
+            "versions 5 and 6 require weighted_tier_completion_speedup and vice versa"
         )
 
-    if rule["algo_version"] == 5:
+    if rule["algo_version"] in (5, 6):
         validate_tier_contract(rule, scoring)
 
     if rule["algo_version"] == TRAJECTORY_ALGO_VERSION:
@@ -393,7 +393,7 @@ def seed_synthetic_campaign(
                 "Verified trajectory coverage: "
                 + json.dumps(preview.receipt["length_groups"])
             )
-    elif rule["algo_version"] in LONGFORM_ALGO_VERSIONS:
+    elif rule["algo_version"] in TIERED_ALGO_VERSIONS:
         from bench.longform import sampling_context_for_campaign as longform_context
 
         longform_context(bench, engine_profile)

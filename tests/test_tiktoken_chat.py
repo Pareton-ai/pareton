@@ -186,3 +186,32 @@ def test_staged_weights_accept_tiktoken_vocabulary(tmp_path):
         assert_complete(tmp_path)
     (tmp_path / "tiktoken.model").write_bytes(VOCAB)
     assert_complete(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "text", ["a" * 25001, " " * 25001, "abc " * 100001, "a" * 399999 + "<|open|>"]
+)
+def test_v6_windowed_encoding_preserves_all_bytes(text):
+    fmt = build_tiktoken_chat_formatter(
+        repo=REPO,
+        revision=REVISION,
+        enable_thinking=False,
+        expected_template_sha256=None,
+        token=None,
+        file_loader=files(),
+        windowed_encoding=True,
+    )
+    pieces = list(tiktoken_chat.encoding_windows(text))
+    assert "".join(pieces) == text
+    # Short-window calls use the unchanged encoding path as an independent check.
+    short = formatter()
+    expected = [token for piece in pieces for token in short.encode(piece)]
+    assert fmt.encode(text) == expected
+    assert fmt.receipt["tokenizer"]["windowing"] == "kimi-400000-25000-v1"
+
+
+def test_tool_definitions_reach_pinned_chat_encoder():
+    code = CHAT_CODE.replace("out = []", "out = [EncodeSegment(str(tools), False)]")
+    fmt = formatter(**{"encoding_k3.py": code.encode()})
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+    assert "read_file" in fmt.render("hi", tools=tools)

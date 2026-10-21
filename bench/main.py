@@ -545,7 +545,7 @@ def _natural_stop_tier_workload(req: BenchRequest, trace: WorkloadTrace | None) 
     return (
         trace is not None
         and getattr(req, "scoring_rule", {}).get("name") == WEIGHTED_RULE
-        and (trace.meta.sampling or {}).get("algo_version") == 5
+        and (trace.meta.sampling or {}).get("algo_version") in (5, 6)
         and any(not request.sampling.ignore_eos for request in trace.requests)
     )
 
@@ -566,12 +566,12 @@ def run_round(
     """Execute the whole round against one pod. Returns the raw material."""
     requests = list(trace.requests)
     workload = trace.meta.sampling or {}
-    concurrent = workload.get("algo_version") == 5
+    concurrent = workload.get("algo_version") in (5, 6)
     if concurrent:
         prompts = [PromptCase(r.id, r.prompt) for r in requests]
     if concurrent != (req.scoring_rule["name"] == WEIGHTED_RULE):
         raise RequestValidationError(
-            "version 5 workloads require weighted_tier_completion_speedup and vice versa"
+            "versions 5 and 6 workloads require weighted_tier_completion_speedup and vice versa"
         )
     if concurrent:
         try:
@@ -618,7 +618,10 @@ def run_round(
         layout.write_entry_statuses(entry_statuses)
 
     def preflight(url: str, start: EngineStart) -> None:
-        from bench.workload_preflight import validate_engine_workload
+        from bench.workload_preflight import (
+            generation_window,
+            validate_engine_workload,
+        )
 
         validate_engine_workload(
             url,
@@ -627,6 +630,11 @@ def run_round(
             max_model_len=req.model.max_model_len,
             evidence_dir=layout.sla_bench_dir / start.role,
             verify_tokenizer=start.kind == "baseline",
+            tokenize_window=generation_window(
+                req.model.hf_repo,
+                req.model.hf_revision,
+                (trace.meta.sampling or {}).get("algo_version"),
+            ),
         )
 
     for start in plan:

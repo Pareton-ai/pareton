@@ -327,6 +327,55 @@ def publish_patch(url: str, patch_hash: str) -> str:
     return public_url
 
 
+def copy_private_patch(
+    url: str, *, campaign_id: str, hotkey: str, upload_id: str, patch_hash: str
+) -> str:
+    """Copy a private patch under another campaign's prefix; return its locator.
+
+    Integrity checks bind a patch URL to its campaign, so a patch entered into a
+    second campaign needs its own object. Repeating a copy is a no-op.
+    """
+    key = private_patch_key(url)
+    if key is None:
+        raise ValueError("patch URL is not a private patch locator")
+    target = object_key_for(campaign_id, hotkey, upload_id)
+    from botocore.exceptions import ClientError
+
+    client = _client(bounded=True)
+    checksum = _checksum(patch_hash)
+    try:
+        existing = client.head_object(
+            Bucket=config.S3_BUCKET, Key=target, ChecksumMode="ENABLED"
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] not in (
+            "403",
+            "404",
+            "NoSuchKey",
+            "AccessDenied",
+        ):
+            raise
+    else:
+        if existing.get("ChecksumSHA256") != checksum:
+            raise ValueError("copy target already holds a different patch")
+        return _s3_retrieval_url(target)
+    source = client.head_object(
+        Bucket=config.S3_BUCKET, Key=key, ChecksumMode="ENABLED"
+    )
+    if source.get("ChecksumSHA256") != checksum:
+        raise ValueError("private patch checksum does not match commitment")
+    client.copy_object(
+        Bucket=config.S3_BUCKET,
+        Key=target,
+        CopySource={"Bucket": config.S3_BUCKET, "Key": key},
+        CopySourceIfMatch=source["ETag"],
+        MetadataDirective="REPLACE",
+        ChecksumAlgorithm="SHA256",
+        ContentType="text/plain",
+    )
+    return _s3_retrieval_url(target)
+
+
 def evidence_object_key(submission_id: str, task_id: str) -> str:
     prefix = config.S3_PREFIX.strip("/")
     return f"{prefix}/evidence/{submission_id}/{task_id}.tar.gz"
