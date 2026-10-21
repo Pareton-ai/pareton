@@ -76,7 +76,10 @@ DEFAULT_HEALTH_TIMEOUT_S = float(os.environ.get("PARETON_BENCH_HEALTH_TIMEOUT_S"
 ROUND_SCORER_TIMEOUT_S = 300.0
 # The scorer re-tokenizes prompt + continuation, which can merge a few tokens.
 MIN_SPAN_RATIO = 0.85
-FATAL_LOG = re.compile(r"out of memory|CUDA error", re.IGNORECASE)
+# Real failures print "CUDA error: ..." or "... out of memory". SGLang's
+# context-length warning ends "... or CUDA errors." on every scorer start.
+FATAL_LOG = re.compile(r"out of memory|CUDA error:", re.IGNORECASE)
+WARNING_LOG = re.compile(r"\bWarning:")
 
 
 class CheckFailed(Exception):
@@ -328,7 +331,7 @@ def fatal_log_lines(logs_dir):
         f"{path.name}: {line.strip()}"
         for path in sorted(Path(logs_dir).glob("**/*.log"))
         for line in path.read_text(errors="replace").splitlines()
-        if FATAL_LOG.search(line)
+        if FATAL_LOG.search(line) and not WARNING_LOG.search(line)
     ]
 
 

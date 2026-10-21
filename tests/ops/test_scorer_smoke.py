@@ -230,3 +230,17 @@ def test_prepared_sequences_survive_a_scorer_args_change(gpu, tmp_path):
     code, summary = run(gpu, tmp_path)
     assert code == 2
     assert "another workload" in summary["error"]
+
+
+def test_engine_log_check_ignores_the_context_length_warning(tmp_path):
+    (tmp_path / "scorer.log").write_text(
+        "[TP0] Warning: User-specified context_length (1048583) is greater than the "
+        "derived context_length (1048576). This may lead to incorrect model outputs "
+        "or CUDA errors.\n"
+        "RuntimeError: CUDA error: an illegal memory access was encountered\n"
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n"
+    )
+    assert [line.split(": ", 1)[1] for line in smoke.fatal_log_lines(tmp_path)] == [
+        "RuntimeError: CUDA error: an illegal memory access was encountered",
+        "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
+    ]
