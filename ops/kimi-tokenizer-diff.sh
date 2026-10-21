@@ -59,12 +59,19 @@ for row in json.load(open("/out/ours.json")):
     prompt, ours = row["prompt"], row["ours"]
     kw = tok.encode(prompt, add_special_tokens=True)
     plain = tok.encode(prompt)
+    # What the trusted check now sends: one /tokenize call per 400k-char window.
+    windowed = [
+        t
+        for i in range(0, len(prompt), 400_000)
+        for t in tok.encode(prompt[i : i + 400_000], add_special_tokens=True)
+    ]
     i = first_diff(kw, ours)
     info = {
         "id": row["id"], "chars": len(prompt), "ours": len(ours),
         "engine_add_special": len(kw), "engine_plain": len(plain),
         "add_special_matches_ours": kw == ours, "plain_matches_ours": plain == ours,
-        "plain_matches_add_special": plain == kw, "first_diff": i,
+        "plain_matches_add_special": plain == kw,
+        "windowed_check_matches_ours": windowed == ours, "first_diff": i,
     }
     if i is not None:
         offset = len(tok.decode(kw[:i]))
