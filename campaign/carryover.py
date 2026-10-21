@@ -4,6 +4,7 @@ Usage:
     PARETON_DATABASE_URL=... python -m campaign.carryover \
       --from-campaign OLD --to-campaign NEW --last 10 \
       --operator NAME --reason TEXT --evidence-ref URL
+    # Or name the submissions: --submission-id ID [--submission-id ID ...]
     # Review the plan, then repeat with --apply --plan-sha256 HASH.
 
 Without --apply nothing is written. Each carried patch is copied under the new
@@ -98,14 +99,26 @@ def _recheck(source_id: str, target_id: str, item: dict[str, Any]) -> str | None
 def build_plan(
     source_id: str,
     target_id: str,
-    last: int,
+    last: int | None = None,
     *,
+    submission_ids: list[str] | None = None,
     fetcher: Callable[[str], bytes] = fetch_patch_bytes,
 ) -> list[dict[str, Any]]:
-    """The latest ``last`` source submissions, oldest first, each kept or skipped."""
+    """The latest ``last`` source submissions, or the named ``submission_ids``,
+    oldest first, each kept or skipped."""
     source_id, target_id = str(UUID(source_id)), str(UUID(target_id))
-    if type(last) is not int or last < 1:
+    if (last is None) == (submission_ids is None):
+        raise ValueError("give either --last or --submission-id")
+    if submission_ids is not None:
+        ids = sorted({str(UUID(i)) for i in submission_ids})
+        if not ids:
+            raise ValueError("--submission-id needs at least one id")
+        selector, params = "s.id = ANY(%s::uuid[])", ids
+        limit = len(ids)
+    elif type(last) is not int or last < 1:
         raise ValueError("--last must be a positive integer")
+    else:
+        selector, params, limit = "true", None, last
     with db_connection(readonly=True) as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             _campaigns(cur, source_id, target_id)
@@ -120,13 +133,17 @@ def build_plan(
                     ORDER BY e.created_at DESC, e.id DESC
                     LIMIT 1
                 ) latest ON true
-                WHERE s.campaign_id = %s
+                WHERE s.campaign_id = %s AND {selector}
                 ORDER BY s.created_at DESC, s.id DESC
                 LIMIT %s
-                """,
-                (source_id, last),
+                """.format(selector=selector),
+                (source_id, *([params] if params else []), limit),
             )
             rows = list(reversed(cur.fetchall()))
+            if submission_ids is not None and len(rows) != limit:
+                found = {str(r["id"]) for r in rows}
+                missing = [i for i in params if i not in found]
+                raise ValueError(f"not in the source campaign: {', '.join(missing)}")
             plan, fingerprints = [], {}
             for row in rows:
                 item = {
@@ -253,7 +270,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--from-campaign", required=True)
     parser.add_argument("--to-campaign", required=True)
-    parser.add_argument("--last", type=int, required=True)
+    select = parser.add_mutually_exclusive_group(required=True)
+    select.add_argument("--last", type=int)
+    select.add_argument(
+        "--submission-id",
+        action="append",
+        dest="submission_ids",
+        help="A source submission to carry; repeat for each one",
+    )
     parser.add_argument("--operator", required=True)
     parser.add_argument("--reason", required=True)
     parser.add_argument("--evidence-ref", required=True)
@@ -265,7 +289,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply and not args.plan_sha256:
         parser.error("--apply requires --plan-sha256 from a reviewed dry run")
     try:
-        plan = build_plan(args.from_campaign, args.to_campaign, args.last)
+        plan = build_plan(
+            args.from_campaign,
+            args.to_campaign,
+            args.last,
+            submission_ids=args.submission_ids,
+        )
         digest = plan_sha256(plan)
         for item in plan:
             print(json.dumps(item))

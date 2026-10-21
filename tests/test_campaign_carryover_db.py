@@ -202,3 +202,32 @@ def test_rechecks_the_source_before_copying():
         "skipped: hotkey disqualified in source campaign",
     ]
     assert copied == []
+
+
+def test_carries_only_the_named_submissions():
+    profile_id = insert_profile("e2e", {"fixture": True})
+    old, new = _campaign(profile_id, "closed"), _campaign(profile_id, "open")
+    objects, ids = {}, []
+    for i in range(4):
+        data = _patch(20 + i)
+        url = _s3_retrieval_url(object_key_for(old, f"hk{i}", str(uuid4())))
+        objects[url] = data
+        ids.append(
+            insert_submission(
+                campaign_id=old,
+                patch_hash=hash_patch_bytes(data),
+                hotkey=f"hk{i}",
+                baseline_commit="a" * 40,
+                retrieval_url=url,
+                commit_block=100 + i,
+            )
+        )
+    plan = carryover.build_plan(
+        old, new, submission_ids=[ids[2], ids[0]], fetcher=objects.__getitem__
+    )
+    # Oldest first, whatever order the ids were given in.
+    assert [p["hotkey"] for p in plan] == ["hk0", "hk2"]
+    with pytest.raises(ValueError, match="not in the source campaign"):
+        carryover.build_plan(
+            old, new, submission_ids=[ids[1], str(uuid4())], fetcher=objects.__getitem__
+        )

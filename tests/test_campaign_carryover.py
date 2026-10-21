@@ -119,3 +119,32 @@ def test_apply_copies_and_enters_only_kept_rows(calls):
 def test_rejects_nonpositive_last():
     with pytest.raises(ValueError, match="positive"):
         carryover.build_plan(OLD, NEW, 0)
+
+
+def test_needs_exactly_one_selection():
+    with pytest.raises(ValueError, match="either --last or --submission-id"):
+        carryover.build_plan(OLD, NEW)
+    with pytest.raises(ValueError, match="either --last or --submission-id"):
+        carryover.build_plan(OLD, NEW, 2, submission_ids=[OLD])
+    with pytest.raises(SystemExit):
+        carryover.main([a for a in ARGS if a not in ("--last", "2")])
+
+
+def test_cli_passes_named_submissions(monkeypatch, capsys):
+    seen = {}
+
+    def plan(source, target, last, *, submission_ids):
+        seen.update(last=last, ids=submission_ids)
+        return _plan()
+
+    monkeypatch.setattr(carryover, "build_plan", plan)
+    args = [a for a in ARGS if a not in ("--last", "2")]
+    ids = [
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+    ]
+    assert (
+        carryover.main([*args, "--submission-id", ids[0], "--submission-id", ids[1]])
+        == 0
+    )
+    assert seen == {"last": None, "ids": ids}
