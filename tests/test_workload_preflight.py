@@ -118,9 +118,6 @@ def test_kimi_prompts_are_tokenized_one_generation_window_at_a_time(
     # A toy tokenizer with Kimi's two paths: generation windows the whole prompt
     # from its start; /tokenize windows each piece between special tokens.
     window = 10
-    monkeypatch.setitem(
-        workload_preflight.TOKENIZE_WINDOWS, "kimi-400000-25000-v1", window
-    )
 
     def words(text):
         # "<S>" is a special token; other words are ordinary tokens.
@@ -150,7 +147,6 @@ def test_kimi_prompts_are_tokenized_one_generation_window_at_a_time(
         meta=SimpleNamespace(
             sampling={
                 "context": {"max_model_len": TEST_CONTEXT, "engine_name": "vllm"},
-                "tokenizer": {"windowing": "kimi-400000-25000-v1"},
             }
         ),
         requests=[
@@ -177,4 +173,22 @@ def test_kimi_prompts_are_tokenized_one_generation_window_at_a_time(
         max_model_len=TEST_CONTEXT,
         evidence_dir=tmp_path,
         verify_tokenizer=True,
+        tokenize_window=window,
     )
+    # Sent whole, the same prompt fails the check.
+    with pytest.raises(EngineError, match="tokenization differs"):
+        validate_engine_workload(
+            "http://engine",
+            trace,
+            engine_name="vllm",
+            max_model_len=TEST_CONTEXT,
+            evidence_dir=tmp_path,
+            verify_tokenizer=True,
+        )
+
+
+def test_only_v6_kimi_workloads_tokenize_in_generation_windows():
+    kimi = ("moonshotai/Kimi-K3", "f831ab66814297da540d832a5235f8e904f29d06")
+    assert workload_preflight.generation_window(*kimi, 6) == 400_000
+    assert workload_preflight.generation_window(*kimi, 5) is None
+    assert workload_preflight.generation_window("Qwen/Qwen3-8B", "a" * 40, 6) is None

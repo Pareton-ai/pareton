@@ -33,7 +33,7 @@ TIKTOKEN_CHAT_MODELS: dict[tuple[str, str], dict[str, str]] = {
 
 # The model tokenizer encodes longer inputs in windows; plain whole-string
 # encoding is identical only below these limits, so refuse anything larger.
-_MAX_ENCODE_CHARS = 400_000
+MAX_ENCODE_CHARS = 400_000
 _MAX_RUN_CHARS = 25_000
 _LONG_RUN_RE = re.compile(rf"\s{{{_MAX_RUN_CHARS + 1},}}|\S{{{_MAX_RUN_CHARS + 1},}}")
 # Stdlib only: anything else means the pinned encoder changed shape.
@@ -264,7 +264,7 @@ def build_tiktoken_chat_formatter(
                 for piece in encoding_windows(prompt)
                 for token in encoding.encode(piece, allowed_special="all")
             ]
-        if len(prompt) > _MAX_ENCODE_CHARS or _LONG_RUN_RE.search(prompt):
+        if len(prompt) > MAX_ENCODE_CHARS or _LONG_RUN_RE.search(prompt):
             raise PromptRenderError(
                 "prompt exceeds the pinned tokenizer's single-window limits"
             )
@@ -298,8 +298,8 @@ def build_tiktoken_chat_formatter(
 
 def encoding_windows(text: str):
     """Match the pinned Kimi tokenizer's character windows and run boundaries."""
-    for offset in range(0, len(text), _MAX_ENCODE_CHARS):
-        window = text[offset : offset + _MAX_ENCODE_CHARS]
+    for offset in range(0, len(text), MAX_ENCODE_CHARS):
+        window = text[offset : offset + MAX_ENCODE_CHARS]
         start, run = 0, 0
         whitespace = window[0].isspace()
         for index, char in enumerate(window):
