@@ -40,7 +40,7 @@ from bench.sampler import (
     parse_sampling_rule,
 )
 from bench.schemas import WorkloadTrace
-from bench.workload_preflight import validate_engine_workload
+from bench.workload_preflight import generation_window, validate_engine_workload
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +333,9 @@ def qualify(
                 max_model_len=model["max_model_len"],
                 evidence_dir=output_dir / "preflight" / str(row_index),
                 verify_tokenizer=True,
+                tokenize_window=generation_window(
+                    model["hf_repo"], model["hf_revision"], rule["algo_version"]
+                ),
             )
             accepted = True
             for rep in range(repetitions):
