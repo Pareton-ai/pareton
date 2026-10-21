@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import threading
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -19,6 +20,14 @@ DATABASE_URL: str = os.environ.get("PARETON_DATABASE_URL", "")
 # once; min=1 made each extra checkout pay a Neon TLS handshake.
 _POOL_MIN = int(os.environ.get("PARETON_DB_POOL_MIN", "4"))
 _POOL_MAX = int(os.environ.get("PARETON_DB_POOL_MAX", "10"))
+# psycopg2's pool raises PoolError the moment all `_POOL_MAX` connections are
+# out; it never waits. FastAPI runs sync endpoints on ~40 threads, so a burst
+# of dashboard traffic turned into 503s. Callers now queue for a free slot.
+# The wait is per checkout and an endpoint may check out up to three times in
+# sequence, so 3 s keeps a request under the frontend's 10 s API timeout.
+_POOL_WAIT_S = float(os.environ.get("PARETON_DB_POOL_WAIT_S", "3"))
+# A burst times out many waiters at once; log one line per window, not each.
+_WAIT_LOG_EVERY_S = 10.0
 _KEEPALIVES = {
     "keepalives": 1,
     "keepalives_idle": 30,
@@ -28,6 +37,26 @@ _KEEPALIVES = {
 
 _pool: Any = None
 _pool_lock = threading.Lock()
+_slots = threading.BoundedSemaphore(_POOL_MAX)
+_wait_log_lock = threading.Lock()
+_wait_log_at = 0.0
+_wait_timeouts = 0
+
+
+def _log_wait_timeout() -> None:
+    """Count a timed-out wait; warn at most once per `_WAIT_LOG_EVERY_S`."""
+    global _wait_log_at, _wait_timeouts
+    with _wait_log_lock:
+        _wait_timeouts += 1
+        now = time.monotonic()
+        if now - _wait_log_at < _WAIT_LOG_EVERY_S:
+            return
+        count, _wait_timeouts, _wait_log_at = _wait_timeouts, 0, now
+    logger.warning(
+        "db pool: %d request(s) found no free connection within %.1fs",
+        count,
+        _POOL_WAIT_S,
+    )
 
 
 def require_database_url() -> str:
@@ -61,15 +90,27 @@ def _checkout() -> Any:
     from psycopg2.pool import PoolError
 
     pool = _get_pool()
+    if not _slots.acquire(timeout=_POOL_WAIT_S):
+        _log_wait_timeout()
+        raise DatabaseUnavailable("database connection failed")
     try:
         return pool.getconn()
     except PoolError as exc:
+        _slots.release()
         raise DatabaseUnavailable("database connection failed") from exc
     except Exception as exc:
+        _slots.release()
         raise DatabaseUnavailable("database connection failed") from exc
 
 
 def _putconn(conn: Any, *, close: bool) -> None:
+    try:
+        _return_conn(conn, close=close)
+    finally:
+        _slots.release()
+
+
+def _return_conn(conn: Any, *, close: bool) -> None:
     pool = _pool
     if pool is None:
         if not conn.closed:
