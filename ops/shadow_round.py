@@ -33,6 +33,7 @@ from bench.sampler import (
     generate_trace,
     sampling_context_for_rule,
 )
+from bench.score import summarize_prompt_scores
 from bench.validate import sha256_file
 from campaign.models import SLA
 from worker.round_job import build_round_request
@@ -165,10 +166,26 @@ def main(argv=None):
         state["baseline_tier_completion_s"] = {
             tier: value.get("completion_s") for tier, value in tiers.items()
         }
+        rule_name = fields["scoring_rule"].get("name")
         state["entries"] = [
-            {k: e.get(k) for k in ("index", "status", "score", "reason")}
+            {
+                **{k: e.get(k) for k in ("index", "status", "score", "reason")},
+                # Baseline against itself: prompts where the second run answered
+                # under 90% of the first run's tokens and earned nothing.
+                "prompt_counts": summarize_prompt_scores(
+                    (e.get("score_report") or {}).get("prompts") or [],
+                    rule=rule_name,
+                ),
+            }
             for e in report.get("entries") or []
         ]
+        for entry in state["entries"]:
+            counts = entry["prompt_counts"]
+            print(
+                f"Candidate {entry['index']}: {counts['zeroed']}/{counts['total']} "
+                f"prompts earned nothing ({counts['zeroed_by_reason']})",
+                flush=True,
+            )
         if code not in (0, 1) and not report:
             raise EngineError(f"harness exited {code} without a report")
         failures = ([f"harness exit {code}"] if code else []) + review(

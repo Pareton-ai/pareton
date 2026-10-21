@@ -57,7 +57,19 @@ def harness(monkeypatch):
     calls = {
         "report": {
             "verdict": "pass",
-            "entries": [{"index": 0, "status": "scored", "score": 0.01}],
+            "entries": [
+                {
+                    "index": 0,
+                    "status": "scored",
+                    "score": 0.01,
+                    "score_report": {
+                        "prompts": [
+                            {"request_id": "ex-0", "candidate_failed": False},
+                            {"request_id": "ex-1", "candidate_failed": True},
+                        ]
+                    },
+                }
+            ],
         },
         "code": 0,
     }
@@ -108,6 +120,9 @@ def test_unchanged_candidate_scored_passes(tmp_path, harness, capsys):
         == (request["engines"]["candidates"][0]["image"])
     )
     assert summary["entries"][0]["status"] == "scored"
+    # The prompts the baseline lost against itself are reported, not hidden.
+    assert summary["entries"][0]["prompt_counts"]["zeroed"] == 1
+    assert summary["entries"][0]["prompt_counts"]["total"] == 2
     last = capsys.readouterr().out.strip().splitlines()[-1]
     assert last.startswith("Shadow status: passed; summary: ")
 
