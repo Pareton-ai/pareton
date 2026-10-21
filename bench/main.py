@@ -618,7 +618,10 @@ def run_round(
         layout.write_entry_statuses(entry_statuses)
 
     def preflight(url: str, start: EngineStart) -> None:
-        from bench.workload_preflight import validate_engine_workload
+        from bench.workload_preflight import (
+            generation_window,
+            validate_engine_workload,
+        )
 
         validate_engine_workload(
             url,
@@ -627,6 +630,11 @@ def run_round(
             max_model_len=req.model.max_model_len,
             evidence_dir=layout.sla_bench_dir / start.role,
             verify_tokenizer=start.kind == "baseline",
+            tokenize_window=generation_window(
+                req.model.hf_repo,
+                req.model.hf_revision,
+                (trace.meta.sampling or {}).get("algo_version"),
+            ),
         )
 
     for start in plan:

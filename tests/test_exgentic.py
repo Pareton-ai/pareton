@@ -123,9 +123,12 @@ def fake_baseline(monkeypatch, f):
             "container_id": "baseline",
         },
     )
+    checks = []
     monkeypatch.setattr(
-        "bench.qualify_longform.validate_engine_workload", lambda *a, **kw: None
+        "bench.qualify_longform.validate_engine_workload",
+        lambda *a, **kw: checks.append(kw),
     )
+    return checks
 
 
 def source_row():
@@ -516,7 +519,7 @@ def test_qualification_defaults_to_full_split_and_32_in_flight_across_tiers(
     f = fields(64)
     f["sampling_rule"]["n_prompts"] = 32
     fmt = formatter()
-    fake_baseline(monkeypatch, f)
+    checks = fake_baseline(monkeypatch, f)
     barrier = threading.Barrier(32, timeout=20)
     lock = threading.Lock()
     calls = []
@@ -552,6 +555,8 @@ def test_qualification_defaults_to_full_split_and_32_in_flight_across_tiers(
         }
     assert len(qualified["eligible_row_indices"]) == 64
     assert json.loads((tmp_path / "summary.json").read_text())["concurrency"] == 32
+    # Kimi's /tokenize check must send prompts in its 400k-character windows.
+    assert {c["tokenize_window"] for c in checks} == {400_000}
 
 
 def test_exgentic_preserves_kimi_output_floor():
