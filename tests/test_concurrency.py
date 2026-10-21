@@ -924,6 +924,17 @@ def test_extrapolation_scales_from_the_request_admission():
     assert adjusted[0]["protocol_completion_offset_ms"] == pytest.approx(60_000)
 
 
+def test_extrapolation_scales_decode_but_not_prefill():
+    from bench.score import extrapolate_short_completions
+
+    rows = _tier_rows([50], [1000], admission_s=[0])
+    rows[0].update(dispatch_offset_ms=0.0, ttft_ms=30_000.0)
+    adjusted, scaled = extrapolate_short_completions(rows, {"2k-0": 4000})
+    # 30s of prefill stays 30s; 20s of decode for 1000 tokens -> 80s for 4000.
+    assert scaled == {"2k-0"}
+    assert adjusted[0]["protocol_completion_offset_ms"] == pytest.approx(110_000)
+
+
 def test_equal_throughput_completions_of_unequal_length_are_charged_one_sided():
     from bench.score import extrapolate_short_completions
 
