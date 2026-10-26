@@ -312,6 +312,21 @@ def test_reject_mode_changes_blocks_mode_edits(patch, path, mode):
     assert res.evidence == {"path": path, "mode": mode}
 
 
+def test_reject_mode_changes_blocks_copies():
+    # A copy takes its source's mode (an executable copies as executable), and
+    # without the baseline the gate can't tell which, so copies are refused.
+    copy = b"""diff --git a/vllm/run.sh b/vllm/run2.py
+similarity index 100%
+copy from vllm/run.sh
+copy to vllm/run2.py
+"""
+    kwargs = {"allowed_paths": ALLOW, "denied_paths": DENY}
+    assert check_surface(patch_bytes=copy, **kwargs).ok
+    res = check_surface(patch_bytes=copy, reject_mode_changes=True, **kwargs)
+    assert res.reason == "mode_change_forbidden"
+    assert res.evidence == {"path": "vllm/run2.py", "mode": "copy"}
+
+
 def test_reject_mode_changes_allows_plain_edits_and_new_files():
     for patch in (_ok_diff(), _NEW_REGULAR):
         res = check_surface(

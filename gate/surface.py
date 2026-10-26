@@ -33,7 +33,8 @@ class DiffFileChange:
     is_new: bool = False
     is_deleted: bool = False
     is_copy: bool = False
-    # Set by an ``old mode``/``new mode`` pair, or a new file not created 100644.
+    # Set by an ``old mode``/``new mode`` pair, a new file not created 100644,
+    # or a copy (it takes the source's mode, which the diff alone can't show).
     mode_change: str | None = None
 
 
@@ -170,6 +171,8 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
             j += 1
         final_path = rename_to or (new_p if new_p != "/dev/null" else old_p)
         old_path = rename_from or (old_p if old_p != "/dev/null" else None)
+        if is_copy and mode_change is None:
+            mode_change = "copy"
         changes.append(
             DiffFileChange(
                 path=final_path,
