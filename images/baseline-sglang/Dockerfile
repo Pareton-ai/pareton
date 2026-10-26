@@ -60,7 +60,7 @@ LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
 
 # Reuse the verified dependency/Rust bootstrap by digest. The subsequent trusted
 # empty-patch build replaces the prebuilt AOT package with the pinned source build.
-FROM ghcr.io/pareton-ai/pareton-baseline@sha256:8119dfe64ec0d342a988ff3f3627b0a81e7000aef2b792c2a5ddf11dbb3f1f72 AS native
+FROM ghcr.io/pareton-ai/pareton-baseline@sha256:5d5e86746ab8d8874822b711ee6a834e9339bf7f4d58ce82fadc1bdd9a53e19b AS native
 RUN pip install 'scikit-build-core==0.11.6' 'cmake==3.31.10'
 # FlashInfer otherwise fetches trtllm-gen cubins from NVIDIA's artifactory at
 # first use, which fails in the offline evaluation container. Upstream installs
