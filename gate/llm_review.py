@@ -5,11 +5,12 @@ quoted data, and the model must answer with a small JSON verdict
 that is validated here. The gate only ever passes or rejects: it never edits
 the patch, because the on-chain patch_hash binds the exact bytes that build.
 
-If the provider is down (connection error, timeout, 429, 5xx, or an auth or
-credit error on the operator's key), the gate is skipped and the submission
-continues to the build: an outage should not cost miners their fee. Every
-failure the patch itself could cause (a 400/413/422 on the request, malformed
-or off-schema output, an oversized patch) rejects. A valid verdict is cached per (patch_hash, policy, model, prompt), so
+If the provider looks down (connection error, timeout, 429, 5xx, or an auth
+or credit error on the operator's key), the result is a retryable reject: the
+pipeline defers the job and retries it later, and rejects once the attempts
+run out. It never skips the review, because a patch can provoke some of these
+failures itself (a huge diff, or text that makes the model think until the
+timeout). Every other failure rejects at once. A valid verdict is cached per (patch_hash, policy, model, prompt), so
 a retry of the same patch gets the same answer instead of a fresh sample.
 
 This is a deterrent, not a proof: obfuscated dtype selection is easy to miss.
@@ -366,7 +367,11 @@ def check_llm_review(
     client: ChatClient | None = None,
     cache_dir: Path | None = None,
 ) -> GateResult:
-    """Pass or reject the patch; skip on a provider outage. Never modifies it."""
+    """Pass or reject the patch. Never modifies it and never skips the review.
+
+    A provider outage is a reject with ``retryable=True``; the caller decides
+    whether to defer the job or let the reject stand.
+    """
     spec = validate_llm_review(spec)
     cache_dir = cache_dir or config.LLM_REVIEW_CACHE_DIR
     key = _cache_key(patch_hash, spec)
@@ -396,17 +401,12 @@ def check_llm_review(
             verdict = parse_verdict(content, _diff_hunks(review_text))
         except LLMReviewError as exc:
             if exc.reason == "llm_review_unavailable":
-                # Not cached, so a later submission of this patch is reviewed.
+                # Not cached: the retry gets a fresh call.
                 logger.warning(
-                    "llm review skipped for %s, provider unavailable: %s",
-                    patch_hash,
-                    exc,
+                    "llm review unavailable for %s (retryable): %s", patch_hash, exc
                 )
-                return GateResult.success(
-                    SubmissionState.SURFACE_OK,
-                    skipped=True,
-                    detail=exc.detail,
-                    **evidence,
+                return GateResult.reject(
+                    exc.reason, retryable=True, detail=exc.detail, **evidence
                 )
             logger.warning("llm review failed closed for %s: %s", patch_hash, exc)
             return GateResult.reject(exc.reason, detail=exc.detail, **evidence)
@@ -433,7 +433,6 @@ def check_llm_review(
         )
     return GateResult.success(
         SubmissionState.SURFACE_OK,
-        skipped=False,
         llm_reason=verdict["reason"],
         cached=cached,
         **evidence,

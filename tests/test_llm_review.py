@@ -218,11 +218,12 @@ def test_fails_closed_and_does_not_cache_failures(tmp_path, response):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_provider_outage_skips_gate_and_does_not_cache(tmp_path):
+def test_provider_outage_is_a_retryable_reject_and_not_cached(tmp_path):
     down = llm_review.LLMReviewError("llm_review_unavailable", "HTTP 503")
     res = _check(tmp_path, FakeClient(down))
-    assert res.ok
-    assert res.evidence["skipped"] is True
+    assert not res.ok
+    assert res.reason == "llm_review_unavailable"
+    assert res.evidence["retryable"] is True
     assert res.evidence["detail"] == "HTTP 503"
     assert list(tmp_path.iterdir()) == []
     # Once the provider is back, the same patch is actually reviewed.
@@ -231,8 +232,9 @@ def test_provider_outage_skips_gate_and_does_not_cache(tmp_path):
     assert len(client.calls) == 1
 
 
-def test_reviewed_pass_is_not_marked_skipped(tmp_path):
-    assert _check(tmp_path, FakeClient(_verdict("pass"))).evidence["skipped"] is False
+def test_other_failures_are_not_retryable(tmp_path):
+    res = _check(tmp_path, FakeClient("not json"))
+    assert not res.evidence.get("retryable")
 
 
 def test_unconfigured_endpoint_fails_closed(tmp_path, monkeypatch):

@@ -16,7 +16,7 @@ PATCH = b"diff --git a/x.py b/x.py\n"
 
 @pytest.fixture
 def run(monkeypatch):
-    def _run(bench, review_result=None):
+    def _run(bench, review_result=None, job=(None, None)):
         calls = {"review": [], "build": 0, "events": []}
         campaign = SimpleNamespace(
             campaign_id="c1",
@@ -69,6 +69,8 @@ def run(monkeypatch):
                 "patch_hash": "ab" * 32,
                 "retrieval_url": "https://x",
                 "baseline_commit": "abc",
+                "job_id": job[0],
+                "job_attempt": job[1],
             },
             registered_hotkeys=["hk"],
             mock_build=True,
@@ -108,11 +110,78 @@ def test_review_pass_continues_to_build(run):
     assert calls["build"] == 1
 
 
-def test_review_skipped_on_outage_continues_to_build(run):
-    spec = {"policy": "dtype_precision_v1", "model": "kimi-k3"}
-    skipped = GateResult.success(
-        SubmissionState.SURFACE_OK, skipped=True, detail="HTTP 503"
+UNAVAILABLE = GateResult.reject(
+    "llm_review_unavailable", retryable=True, detail="ReadTimeout"
+)
+SPEC = {"policy": "dtype_precision_v1", "model": "kimi-k3"}
+
+
+def test_outage_defers_job_with_backoff_and_never_builds(run, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_ATTEMPTS", 6)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_BASE_S", 300.0)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_S", 3600.0)
+    deferred = []
+    monkeypatch.setattr(pipeline, "defer_job", lambda **kw: deferred.append(kw) or True)
+    res, calls = run({"llm_review": SPEC}, UNAVAILABLE, job=(7, 2))
+    assert res.reason == "llm_review_deferred"
+    assert calls["build"] == 0
+    assert deferred == [
+        {
+            "job_id": 7,
+            "attempt": 2,
+            "delay_s": 600.0,
+            "last_error": "llm_review_unavailable: ReadTimeout",
+        }
+    ]
+    # No terminal event: the submission is not rejected while deferred.
+    assert all(state != SubmissionState.REJECTED for state, _ in calls["events"])
+
+
+def test_backoff_is_capped(run, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_ATTEMPTS", 20)
+    deferred = []
+    monkeypatch.setattr(pipeline, "defer_job", lambda **kw: deferred.append(kw) or True)
+    run({"llm_review": SPEC}, UNAVAILABLE, job=(7, 10))
+    assert deferred[0]["delay_s"] == config.LLM_REVIEW_RETRY_MAX_S
+
+
+def test_outage_rejects_once_attempts_run_out(run, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(
+        pipeline, "defer_job", lambda **kw: pytest.fail("must not defer")
     )
-    res, calls = run({"llm_review": spec}, skipped)
+    res, calls = run({"llm_review": SPEC}, UNAVAILABLE, job=(7, 3))
+    assert res.reason == "llm_review_unavailable"
+    assert calls["build"] == 0
+    assert calls["events"][-1][0] == SubmissionState.REJECTED
+
+
+def test_obfuscation_gate_runs_before_llm_review(run, monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "check_obfuscation",
+        lambda **_: GateResult.reject("obfuscation_detected", rules=["dynamic_code"]),
+    )
+    res, calls = run(
+        {"patch_limits": {"reject_obfuscation": True}, "llm_review": SPEC},
+        GateResult.success(SubmissionState.SURFACE_OK),
+    )
+    assert res.reason == "obfuscation_detected"
+    assert calls["review"] == []
+    assert calls["build"] == 0
+
+
+def test_obfuscation_gate_off_by_default(run, monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "check_obfuscation",
+        lambda **_: pytest.fail("must not run when the flag is unset"),
+    )
+    _res, calls = run({})
     assert calls["build"] == 1
-    assert res.reason == "stop_after_gates"

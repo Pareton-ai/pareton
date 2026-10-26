@@ -138,8 +138,8 @@ def review(args: argparse.Namespace) -> int:
             )
 
     _step(5, "Verdict validation")
-    if result.evidence.get("skipped"):
-        _ok(False, "provider unavailable, gate skipped")
+    if result.evidence.get("retryable"):
+        _ok(False, "provider unavailable; the worker would defer and retry")
     elif result.ok or result.reason == "llm_review_rejected":
         ok &= _ok(True, "verdict passed schema and hunk checks")
     else:
@@ -153,10 +153,10 @@ def review(args: argparse.Namespace) -> int:
         client=_no_call,
         cache_dir=cache_dir,
     )
-    if result.evidence.get("skipped") or not (
+    if result.evidence.get("retryable") or not (
         result.ok or result.reason == "llm_review_rejected"
     ):
-        _ok(True, "nothing cached for a skip or failure (expected)")
+        _ok(True, "nothing cached for an outage or failure (expected)")
     else:
         ok &= _ok(
             again.evidence.get("cached") is True and again.ok == result.ok,
@@ -165,7 +165,11 @@ def review(args: argparse.Namespace) -> int:
 
     _step(7, "Gate result")
     outcome = (
-        "SKIP" if result.evidence.get("skipped") else "PASS" if result.ok else "REJECT"
+        "DEFER"
+        if result.evidence.get("retryable")
+        else "PASS"
+        if result.ok
+        else "REJECT"
     )
     print(f"  OUTCOME: {outcome}")
     print(

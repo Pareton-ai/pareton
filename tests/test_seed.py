@@ -1330,6 +1330,7 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
                 "400",
                 "--reject-renames",
                 "--reject-mode-changes",
+                "--reject-obfuscation",
             ]
         )
         == 0
@@ -1339,6 +1340,7 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
         "max_added_line_chars": 400,
         "reject_renames": True,
         "reject_mode_changes": True,
+        "reject_obfuscation": True,
     }
 
 
@@ -1350,6 +1352,7 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
         {"max_patch_bytes": True},
         {"reject_renames": "yes"},
         {"reject_mode_changes": 1},
+        {"reject_obfuscation": "true"},
         {"max_line": 400},
     ],
 )

@@ -458,6 +458,38 @@ def set_job_status(
             )
 
 
+def defer_job(
+    *,
+    job_id: int,
+    attempt: int,
+    delay_s: float,
+    last_error: str,
+) -> bool:
+    """Return a running gates job to 'pending', not claimable for delay_s.
+
+    Matches (job_id, attempt, status=running) so a superseded attempt cannot
+    requeue. The next claim reruns the gates from the start.
+    """
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE submission_jobs
+                SET status = 'pending',
+                    retry_after = now() + make_interval(secs => %s),
+                    last_error = %s,
+                    phase = NULL,
+                    phase_started_at = NULL,
+                    heartbeat_at = NULL,
+                    progress = NULL,
+                    updated_at = now()
+                WHERE id = %s AND attempts = %s AND status = 'running'
+                """,
+                (float(delay_s), last_error, job_id, attempt),
+            )
+            return cur.rowcount > 0
+
+
 def set_job_phase(
     *,
     job_id: int,
@@ -607,6 +639,7 @@ def claim_next_job() -> dict[str, Any] | None:
                 SELECT j.id AS job_id, j.submission_id
                 FROM submission_jobs j
                 WHERE j.status = 'pending'
+                  AND (j.retry_after IS NULL OR j.retry_after <= now())
                 ORDER BY j.created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1

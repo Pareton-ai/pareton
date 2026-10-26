@@ -489,3 +489,26 @@ def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Pa
             "role": "baseline",
             "plan_version": 2,
         }
+
+
+def test_claim_skips_jobs_deferred_into_the_future(monkeypatch):
+    from campaign import store
+
+    sqls, _args = _patch_db(monkeypatch)
+    store.claim_next_job()
+    select = next(s for s in sqls if "FOR UPDATE SKIP LOCKED" in s)
+    assert "(j.retry_after IS NULL OR j.retry_after <= now())" in select
+
+
+def test_defer_job_requeues_only_the_running_attempt(monkeypatch):
+    from campaign import store
+
+    sqls, args = _patch_db(monkeypatch)
+    assert store.defer_job(job_id=7, attempt=2, delay_s=600, last_error="x") is True
+    sql = sqls[-1]
+    assert "SET status = 'pending'" in sql
+    assert "retry_after = now() + make_interval(secs => %s)" in sql
+    assert "WHERE id = %s AND attempts = %s AND status = 'running'" in sql
+    assert args[-1] == (600.0, "x", 7, 2)
+    _patch_db(monkeypatch, rowcount=0)
+    assert store.defer_job(job_id=7, attempt=1, delay_s=1, last_error="x") is False

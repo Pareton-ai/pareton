@@ -1,4 +1,4 @@
-"""Run gates a–e (plus the optional d2 LLM review) for one claimed submission job."""
+"""Run gates a–e (plus the optional d1/d2 reviews) for one claimed submission job."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
 from campaign.store import (
     append_event,
     complete_gates_job,
+    defer_job,
     get_campaign,
     set_engine_image,
     set_job_status,
@@ -22,6 +23,7 @@ from gate.base_apply import check_base_apply, check_base_apply_local
 from gate.identity import check_identity
 from gate.integrity import check_integrity
 from gate.llm_review import check_llm_review
+from gate.obfuscation import check_obfuscation
 from gate.surface import check_surface
 from gate.types import GateResult, SubmissionState
 from observability import events as obs
@@ -188,8 +190,24 @@ def process_submission(
         detail={"files": surface_res.evidence.get("files")},
     )
 
+    # d1. Obfuscation scan (optional, deterministic)
+    if patch_limits.get("reject_obfuscation"):
+        obf_res = check_obfuscation(patch_bytes=patch_bytes)
+        if not obf_res.ok:
+            obs.gate_failed(
+                submission_id=submission_id,
+                gate="obfuscation",
+                error=obf_res.reason or "",
+                patch_sha256=patch_hash,
+            )
+            _fail(submission_id, obf_res, job_id=job_id)
+            return obf_res
+        obs.gate_passed(
+            submission_id=submission_id, gate="obfuscation", patch_sha256=patch_hash
+        )
+
     # d2. LLM review (optional, reject-only; never rewrites the patch). A
-    # provider outage skips it rather than rejecting.
+    # provider outage defers the job; it never skips the review.
     llm_review = (campaign.bench or {}).get("llm_review")
     if llm_review:
         review_res = check_llm_review(
@@ -197,6 +215,10 @@ def process_submission(
             patch_hash=patch_hash,
             spec=llm_review,
         )
+        if not review_res.ok and review_res.evidence.get("retryable"):
+            deferred = _defer_llm_review(submission_id, row, review_res)
+            if deferred is not None:
+                return deferred
         if not review_res.ok:
             obs.gate_failed(
                 submission_id=submission_id,
@@ -206,16 +228,9 @@ def process_submission(
             )
             _fail(submission_id, review_res, job_id=job_id)
             return review_res
-        if review_res.evidence.get("skipped"):
-            logger.warning(
-                "submission %s: llm review skipped (%s); continuing to build",
-                submission_id,
-                review_res.evidence.get("detail"),
-            )
-        else:
-            obs.gate_passed(
-                submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
-            )
+        obs.gate_passed(
+            submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
+        )
 
     # e. Hermetic build
     append_event(submission_id, SubmissionState.BUILDING, detail={})
@@ -317,6 +332,45 @@ def process_submission(
     if enqueue_round:
         logger.info("queued submission %s for the next round", submission_id)
     return build_res
+
+
+def _defer_llm_review(
+    submission_id: str, row: dict[str, Any], result: GateResult
+) -> GateResult | None:
+    """Requeue the job after a provider outage. None means attempts ran out.
+
+    The submission gets no event: it stays at surface_ok until the retry.
+    """
+    job_id = row.get("job_id")
+    attempt = int(row.get("job_attempt") or 1)
+    if job_id is None or attempt >= config.LLM_REVIEW_MAX_ATTEMPTS:
+        return None
+    delay_s = min(
+        config.LLM_REVIEW_RETRY_BASE_S * 2 ** (attempt - 1),
+        config.LLM_REVIEW_RETRY_MAX_S,
+    )
+    if not defer_job(
+        job_id=int(job_id),
+        attempt=attempt,
+        delay_s=delay_s,
+        last_error=f"{result.reason}: {result.evidence.get('detail', '')}",
+    ):
+        # Superseded attempt; whoever holds the job now settles it.
+        logger.warning("submission %s: deferral did not land", submission_id)
+    logger.warning(
+        "submission %s: llm review unavailable (%s); retry %d/%d in %.0fs",
+        submission_id,
+        result.evidence.get("detail"),
+        attempt + 1,
+        config.LLM_REVIEW_MAX_ATTEMPTS,
+        delay_s,
+    )
+    return GateResult(
+        ok=False,
+        state=SubmissionState.SURFACE_OK,
+        reason="llm_review_deferred",
+        evidence={**result.evidence, "retry_in_s": delay_s, "attempt": attempt},
+    )
 
 
 def _fail(
