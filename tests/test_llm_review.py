@@ -268,7 +268,7 @@ def _resp(status=200, body=None):
 def endpoint(monkeypatch):
     monkeypatch.setattr(config, "LLM_REVIEW_BASE_URL", "https://llm.test/v1/")
     monkeypatch.setattr(config, "LLM_REVIEW_API_KEY", "sk-test")
-    monkeypatch.setattr(config, "LLM_REVIEW_JSON_MODE", False)
+    monkeypatch.setattr(config, "LLM_REVIEW_RESPONSE_FORMAT", "off")
 
 
 def test_client_posts_tool_free_chat_completion(endpoint, monkeypatch):
@@ -327,3 +327,35 @@ def test_client_errors_fail_closed(endpoint, monkeypatch, post, reason):
     with pytest.raises(llm_review.LLMReviewError) as exc:
         llm_review.openai_chat_client("kimi-k3")([])
     assert exc.value.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_type"),
+    [("json_object", "json_object"), ("json_schema", "json_schema")],
+)
+def test_client_sends_requested_response_format(
+    endpoint, monkeypatch, mode, expected_type
+):
+    monkeypatch.setattr(config, "LLM_REVIEW_RESPONSE_FORMAT", mode)
+    seen = {}
+
+    def post(url, headers, json, timeout):
+        seen["body"] = json
+        return _resp(
+            body={"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}
+        )
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    llm_review.openai_chat_client("kimi-k3")([])
+    fmt = seen["body"]["response_format"]
+    assert fmt["type"] == expected_type
+    if mode == "json_schema":
+        assert fmt["json_schema"]["schema"] == llm_review.VERDICT_JSON_SCHEMA
+        assert fmt["json_schema"]["strict"] is True
+
+
+def test_unknown_response_format_fails_closed(endpoint, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_RESPONSE_FORMAT", "grammar")
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_unconfigured"

@@ -56,8 +56,13 @@ Failures and skips are not cached.
 
 Engy serves an OpenAI-compatible API at `https://api.engy.ai/v1` with
 `Authorization: Bearer` auth, and Kimi K3 as `kimi-k3` with a 1M-token
-context ([docs](https://engy.ai/docs)). Its docs don't say whether
-`response_format` is honoured, so JSON mode stays off by default.
+context ([docs](https://engy.ai/docs)). Its docs don't mention
+`response_format`, structured outputs or grammar-constrained decoding, and its
+request schema accepts unknown fields, so an unsupported `response_format`
+may be silently ignored. Probe it with `scripts/llm_review_manual.py
+--probe-response-format` before turning it on. Even with constrained
+decoding, the gate still validates the verdict: a schema can't check that a
+cited hunk exists in the diff.
 
 ## Enabling it for a campaign
 
@@ -79,5 +84,5 @@ The model id is pinned in the manifest. The endpoint and key live in `.env`:
 | `PARETON_LLM_REVIEW_TIMEOUT_S` | 300 | |
 | `PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS` | 16384 | leaves room if the model thinks before answering |
 | `PARETON_LLM_REVIEW_MAX_INPUT_CHARS` | 1000000 | larger patches are rejected, not truncated |
-| `PARETON_LLM_REVIEW_JSON_MODE` | false | sends `response_format: {"type": "json_object"}` |
+| `PARETON_LLM_REVIEW_RESPONSE_FORMAT` | off | `json_object`, or `json_schema` to send the strict verdict schema |
 | `PARETON_LLM_REVIEW_CACHE_DIR` | `$PARETON_WORK_DIR/llm-review` | |

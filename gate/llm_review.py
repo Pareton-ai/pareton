@@ -217,6 +217,47 @@ def parse_verdict(content: str, hunks: dict[str, set[str]]) -> dict[str, Any]:
 # -- Client and cache ---------------------------------------------------------
 
 
+VERDICT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdict", "reason", "offending_hunks"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "reject"]},
+        "reason": {"type": "string"},
+        "offending_hunks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["file", "hunk", "why"],
+                "properties": {
+                    "file": {"type": "string"},
+                    "hunk": {"type": "string"},
+                    "why": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+def _response_format(mode: str) -> dict[str, Any] | None:
+    if mode in ("", "off"):
+        return None
+    if mode == "json_object":
+        return {"type": "json_object"}
+    if mode == "json_schema":
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "llm_review_verdict",
+                "strict": True,
+                "schema": VERDICT_JSON_SCHEMA,
+            },
+        }
+    raise LLMReviewError("llm_review_unconfigured", f"unknown response format {mode!r}")
+
+
 def openai_chat_client(model: str) -> ChatClient:
     """A tool-free call to an OpenAI-style ``/chat/completions`` endpoint."""
     base_url = config.LLM_REVIEW_BASE_URL.rstrip("/")
@@ -234,8 +275,9 @@ def openai_chat_client(model: str) -> ChatClient:
             "temperature": 0,
             "max_tokens": config.LLM_REVIEW_MAX_OUTPUT_TOKENS,
         }
-        if config.LLM_REVIEW_JSON_MODE:
-            body["response_format"] = {"type": "json_object"}
+        response_format = _response_format(config.LLM_REVIEW_RESPONSE_FORMAT)
+        if response_format is not None:
+            body["response_format"] = response_format
         try:
             resp = requests.post(
                 f"{base_url}/chat/completions",

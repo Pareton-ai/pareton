@@ -377,16 +377,17 @@ LLM_REVIEW_TIMEOUT_S: float = float(
 LLM_REVIEW_MAX_OUTPUT_TOKENS: int = int(
     os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "16384")
 )
-# Patches whose comment-stripped diff is longer than this are rejected rather
-# than truncated, since a truncated review would miss the tail.
+# Patches longer than this are rejected rather than truncated, since a
+# truncated review would miss the tail.
 LLM_REVIEW_MAX_INPUT_CHARS: int = int(
     os.environ.get("PARETON_LLM_REVIEW_MAX_INPUT_CHARS", "1000000")
 )
-# Sends response_format={"type": "json_object"}. Off until the provider is
-# confirmed to support it; the verdict is validated either way.
-LLM_REVIEW_JSON_MODE: bool = os.environ.get(
-    "PARETON_LLM_REVIEW_JSON_MODE", ""
-).strip().lower() in ("1", "true", "yes")
+# response_format to request: off, json_object, or json_schema (the strict
+# verdict schema). Off until the provider is confirmed to honour it; the
+# verdict is validated either way.
+LLM_REVIEW_RESPONSE_FORMAT: str = (
+    os.environ.get("PARETON_LLM_REVIEW_RESPONSE_FORMAT", "off").strip().lower()
+)
 LLM_REVIEW_CACHE_DIR: Path = Path(
     os.environ.get("PARETON_LLM_REVIEW_CACHE_DIR", str(WORK_DIR / "llm-review"))
 )
