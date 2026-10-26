@@ -1329,6 +1329,7 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
                 "--max-added-line-chars",
                 "400",
                 "--reject-renames",
+                "--reject-mode-changes",
             ]
         )
         == 0
@@ -1337,6 +1338,7 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
         "max_patch_bytes": 737280,
         "max_added_line_chars": 400,
         "reject_renames": True,
+        "reject_mode_changes": True,
     }
 
 
@@ -1347,6 +1349,7 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
         {"max_added_line_chars": 0},
         {"max_patch_bytes": True},
         {"reject_renames": "yes"},
+        {"reject_mode_changes": 1},
         {"max_line": 400},
     ],
 )
@@ -1365,6 +1368,10 @@ def test_seed_api_omits_patch_limits_that_set_nothing(monkeypatch):
     seed_synthetic_campaign(
         submission_fee_tao="0.15",
         allow_placeholders=True,
-        bench_patch_limits={"max_patch_bytes": None, "reject_renames": False},
+        bench_patch_limits={
+            "max_patch_bytes": None,
+            "reject_renames": False,
+            "reject_mode_changes": False,
+        },
     )
     assert "patch_limits" not in captured["manifest"].bench

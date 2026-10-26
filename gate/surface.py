@@ -17,6 +17,7 @@ _COPY_FROM_RE = re.compile(r"^copy from (.+)$")
 _COPY_TO_RE = re.compile(r"^copy to (.+)$")
 _NEW_FILE_RE = re.compile(r"^new file mode (\d+)$")
 _DELETED_FILE_RE = re.compile(r"^deleted file mode (\d+)$")
+_NEW_MODE_RE = re.compile(r"^new mode (\d+)$")
 _SIMILARITY_RE = re.compile(r"^similarity index ")
 _INDEX_RE = re.compile(r"^index ")
 _BINARY_RE = re.compile(r"^GIT binary patch$|^Binary files .* differ$")
@@ -32,6 +33,9 @@ class DiffFileChange:
     is_new: bool = False
     is_deleted: bool = False
     is_copy: bool = False
+    # Set by an ``old mode``/``new mode`` pair, a new file not created 100644,
+    # or a copy (it takes the source's mode, which the diff alone can't show).
+    mode_change: str | None = None
 
 
 def _normalize_path(path: str) -> str:
@@ -127,6 +131,7 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
         rename_from: str | None = None
         rename_to: str | None = None
         is_copy = False
+        mode_change: str | None = None
         j = i + 1
         while j < len(lines) and not lines[j].startswith("diff --git "):
             l2 = lines[j]
@@ -138,6 +143,8 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
                 mode = nm.group(1)
                 if mode.startswith("12"):  # symlink modes 120000
                     is_symlink = True
+                elif mode != "100644":
+                    mode_change = mode
             dm = _DELETED_FILE_RE.match(l2)
             if dm:
                 is_deleted = True
@@ -158,9 +165,14 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
                 rename_from = _normalize_path(cfm.group(1))
             if l2.startswith("new mode ") and "120000" in l2:
                 is_symlink = True
+            nmm = _NEW_MODE_RE.match(l2)
+            if nmm:
+                mode_change = nmm.group(1)
             j += 1
         final_path = rename_to or (new_p if new_p != "/dev/null" else old_p)
         old_path = rename_from or (old_p if old_p != "/dev/null" else None)
+        if is_copy and mode_change is None:
+            mode_change = "copy"
         changes.append(
             DiffFileChange(
                 path=final_path,
@@ -170,6 +182,7 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
                 is_new=is_new,
                 is_deleted=is_deleted,
                 is_copy=is_copy,
+                mode_change=mode_change,
             )
         )
         i = j
@@ -210,6 +223,7 @@ def check_surface(
     max_patch_bytes: int | None = None,
     max_added_line_chars: int | None = None,
     reject_renames: bool = False,
+    reject_mode_changes: bool = False,
 ) -> GateResult:
     """The optional limits come from ``bench.patch_limits``; unset is unlimited."""
     if max_patch_bytes is not None and len(patch_bytes) > max_patch_bytes:
@@ -249,6 +263,10 @@ def check_surface(
         final = ch.path
         if reject_renames and ch.old_path and ch.old_path != final and not ch.is_copy:
             return GateResult.reject("rename_forbidden", path=ch.old_path)
+        if reject_mode_changes and ch.mode_change:
+            return GateResult.reject(
+                "mode_change_forbidden", path=final, mode=ch.mode_change
+            )
         if _match_globs(final, denied_paths):
             return GateResult.reject("path_denied", path=final)
         if not _match_globs(final, allowed_paths):

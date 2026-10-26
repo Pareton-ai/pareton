@@ -257,3 +257,82 @@ def test_reject_renames_blocks_in_bounds_rename():
     )
     assert res.reason == "rename_forbidden"
     assert res.evidence["path"] == "vllm/a.py"
+
+
+_MODE_CHANGE = b"""diff --git a/vllm/a.py b/vllm/a.py
+old mode 100644
+new mode 100755
+"""
+
+_MODE_CHANGE_WITH_EDIT = (
+    _MODE_CHANGE
+    + b"""index 1111111..2222222
+--- a/vllm/a.py
++++ b/vllm/a.py
+@@ -1 +1 @@
+-old
++new
+"""
+)
+
+_NEW_EXECUTABLE = b"""diff --git a/vllm/run.py b/vllm/run.py
+new file mode 100755
+index 0000000..2222222
+--- /dev/null
++++ b/vllm/run.py
+@@ -0,0 +1 @@
++new
+"""
+
+_NEW_REGULAR = _NEW_EXECUTABLE.replace(b"100755", b"100644")
+
+
+def test_mode_changes_pass_when_unset():
+    for patch in (_MODE_CHANGE_WITH_EDIT, _NEW_EXECUTABLE):
+        res = check_surface(patch_bytes=patch, allowed_paths=ALLOW, denied_paths=DENY)
+        assert res.ok, res.reason
+
+
+@pytest.mark.parametrize(
+    ("patch", "path", "mode"),
+    [
+        (_MODE_CHANGE, "vllm/a.py", "100755"),
+        (_MODE_CHANGE_WITH_EDIT, "vllm/a.py", "100755"),
+        (_NEW_EXECUTABLE, "vllm/run.py", "100755"),
+    ],
+)
+def test_reject_mode_changes_blocks_mode_edits(patch, path, mode):
+    res = check_surface(
+        patch_bytes=patch,
+        allowed_paths=ALLOW,
+        denied_paths=DENY,
+        reject_mode_changes=True,
+    )
+    assert res.reason == "mode_change_forbidden"
+    assert res.evidence == {"path": path, "mode": mode}
+
+
+def test_reject_mode_changes_blocks_copies():
+    # A copy takes its source's mode (an executable copies as executable), and
+    # without the baseline the gate can't tell which, so copies are refused.
+    copy = b"""diff --git a/vllm/run.sh b/vllm/run2.py
+similarity index 100%
+copy from vllm/run.sh
+copy to vllm/run2.py
+"""
+    kwargs = {"allowed_paths": ALLOW, "denied_paths": DENY}
+    assert check_surface(patch_bytes=copy, **kwargs).ok
+    res = check_surface(patch_bytes=copy, reject_mode_changes=True, **kwargs)
+    assert res.reason == "mode_change_forbidden"
+    assert res.evidence == {"path": "vllm/run2.py", "mode": "copy"}
+
+
+def test_reject_mode_changes_allows_plain_edits_and_new_files():
+    for patch in (_ok_diff(), _NEW_REGULAR):
+        res = check_surface(
+            patch_bytes=patch,
+            allowed_paths=ALLOW,
+            denied_paths=DENY,
+            reject_mode_changes=True,
+        )
+        assert res.ok, res.reason
