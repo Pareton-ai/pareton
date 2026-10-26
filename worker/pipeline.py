@@ -159,10 +159,14 @@ def process_submission(
     append_event(submission_id, SubmissionState.APPLIED, detail={"ok": True})
 
     # d. Surface
+    patch_limits = (campaign.bench or {}).get("patch_limits") or {}
     surface_res = check_surface(
         patch_bytes=patch_bytes,
         allowed_paths=list(campaign.allowed_paths),
         denied_paths=list(campaign.denied_paths),
+        max_patch_bytes=patch_limits.get("max_patch_bytes"),
+        max_added_line_chars=patch_limits.get("max_added_line_chars"),
+        reject_renames=bool(patch_limits.get("reject_renames")),
     )
     if not surface_res.ok:
         obs.gate_failed(

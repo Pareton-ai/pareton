@@ -20,6 +20,7 @@ _DELETED_FILE_RE = re.compile(r"^deleted file mode (\d+)$")
 _SIMILARITY_RE = re.compile(r"^similarity index ")
 _INDEX_RE = re.compile(r"^index ")
 _BINARY_RE = re.compile(r"^GIT binary patch$|^Binary files .* differ$")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class DiffFileChange:
     is_binary: bool = False
     is_new: bool = False
     is_deleted: bool = False
+    is_copy: bool = False
 
 
 def _normalize_path(path: str) -> str:
@@ -124,6 +126,7 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
         is_deleted = False
         rename_from: str | None = None
         rename_to: str | None = None
+        is_copy = False
         j = i + 1
         while j < len(lines) and not lines[j].startswith("diff --git "):
             l2 = lines[j]
@@ -149,6 +152,7 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
             cm = _COPY_TO_RE.match(l2)
             if cm:
                 rename_to = _normalize_path(cm.group(1))
+                is_copy = True
             cfm = _COPY_FROM_RE.match(l2)
             if cfm:
                 rename_from = _normalize_path(cfm.group(1))
@@ -165,10 +169,37 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
                 is_binary=is_binary,
                 is_new=is_new,
                 is_deleted=is_deleted,
+                is_copy=is_copy,
             )
         )
         i = j
     return changes
+
+
+def _added_lines(patch_text: str):
+    """Yield the content of each added line, counted by hunk headers.
+
+    Counting keeps ``+++`` file headers out, and splitting on ``\\n`` only stops
+    Unicode line separators from hiding one long line as several short ones.
+    """
+    old_left = new_left = 0
+    for line in patch_text.split("\n"):
+        if old_left > 0 or new_left > 0:
+            if line.startswith("\\"):  # "\ No newline at end of file"
+                continue
+            if line.startswith("+"):
+                new_left -= 1
+                yield line[1:].removesuffix("\r")
+            elif line.startswith("-"):
+                old_left -= 1
+            else:
+                old_left -= 1
+                new_left -= 1
+            continue
+        m = _HUNK_RE.match(line)
+        if m:
+            old_left = int(m.group(1) or 1)
+            new_left = int(m.group(2) or 1)
 
 
 def check_surface(
@@ -176,7 +207,15 @@ def check_surface(
     patch_bytes: bytes,
     allowed_paths: list[str],
     denied_paths: list[str],
+    max_patch_bytes: int | None = None,
+    max_added_line_chars: int | None = None,
+    reject_renames: bool = False,
 ) -> GateResult:
+    """The optional limits come from ``bench.patch_limits``; unset is unlimited."""
+    if max_patch_bytes is not None and len(patch_bytes) > max_patch_bytes:
+        return GateResult.reject(
+            "patch_too_large", size=len(patch_bytes), limit=max_patch_bytes
+        )
     try:
         text = patch_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -208,6 +247,8 @@ def check_surface(
                 return GateResult.reject("submodule_change_forbidden", path=candidate)
 
         final = ch.path
+        if reject_renames and ch.old_path and ch.old_path != final and not ch.is_copy:
+            return GateResult.reject("rename_forbidden", path=ch.old_path)
         if _match_globs(final, denied_paths):
             return GateResult.reject("path_denied", path=final)
         if not _match_globs(final, allowed_paths):
@@ -218,6 +259,15 @@ def check_surface(
                 return GateResult.reject("rename_from_denied", path=ch.old_path)
             if not _match_globs(ch.old_path, allowed_paths):
                 return GateResult.reject("rename_from_not_allowed", path=ch.old_path)
+
+    if max_added_line_chars is not None:
+        for added in _added_lines(text):
+            if len(added) > max_added_line_chars:
+                return GateResult.reject(
+                    "added_line_too_long",
+                    length=len(added),
+                    limit=max_added_line_chars,
+                )
 
     git_paths, git_error = _git_numstat_paths(patch_bytes)
     if git_error is not None:

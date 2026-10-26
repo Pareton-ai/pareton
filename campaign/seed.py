@@ -198,6 +198,27 @@ def require_emission_rule(emission_rule: dict | None) -> None:
         )
 
 
+def validate_patch_limits(limits: dict) -> dict:
+    """Check bench.patch_limits, so a bad value fails at seed, not in the gate."""
+    unknown = set(limits) - {
+        "max_patch_bytes",
+        "max_added_line_chars",
+        "reject_renames",
+    }
+    if unknown:
+        raise ValueError(f"unknown patch_limits keys: {sorted(unknown)}")
+    for key in ("max_patch_bytes", "max_added_line_chars"):
+        value = limits.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(f"patch_limits.{key} must be a positive integer")
+    if not isinstance(limits.get("reject_renames", False), bool):
+        raise ValueError("patch_limits.reject_renames must be a boolean")
+    # Unset and False mean no limit, so they stay out of the manifest pin.
+    return {k: v for k, v in limits.items() if v is not None and v is not False}
+
+
 def build_seed_bench_spec(
     *,
     model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -212,6 +233,7 @@ def build_seed_bench_spec(
     correctness_serve_args: list[str] | None = None,
     correctness_thresholds: dict | None = None,
     draft_model: dict | None = None,
+    patch_limits: dict | None = None,
 ) -> dict:
     # Every campaign pins its own correctness thresholds. The values default
     # from config, but they are copied into the manifest here rather than read
@@ -238,6 +260,10 @@ def build_seed_bench_spec(
     # Added only when pinned, so campaigns without a draft keep their hashes.
     if draft_model is not None:
         bench["draft_model"] = dict(draft_model)
+    # Same rule: the gate reads these, and campaigns without them keep hashes.
+    patch_limits = validate_patch_limits(patch_limits or {})
+    if patch_limits:
+        bench["patch_limits"] = patch_limits
     return bench
 
 
@@ -259,6 +285,7 @@ def seed_synthetic_campaign(
     bench_correctness_serve_args: list[str] | None = None,
     bench_correctness_thresholds: dict | None = None,
     bench_draft_model: dict | None = None,
+    bench_patch_limits: dict | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
     scoring_rule: dict | None = None,
@@ -353,6 +380,7 @@ def seed_synthetic_campaign(
             correctness_serve_args=bench_correctness_serve_args,
             correctness_thresholds=bench_correctness_thresholds,
             draft_model=bench_draft_model,
+            patch_limits=bench_patch_limits,
         )
     )
 
@@ -688,6 +716,23 @@ def main(argv: list[str] | None = None) -> int:
         default="private",
     )
     p.add_argument("--patch-reveal-delay-s", type=int, default=None)
+    p.add_argument(
+        "--max-patch-bytes",
+        type=int,
+        default=None,
+        help="Reject patches over this many bytes (unset: no limit)",
+    )
+    p.add_argument(
+        "--max-added-line-chars",
+        type=int,
+        default=None,
+        help="Reject patches with an added line over this many characters",
+    )
+    p.add_argument(
+        "--reject-renames",
+        action="store_true",
+        help="Reject every file rename, not only renames out of allowed paths",
+    )
     args = p.parse_args(argv)
     try:
         visibility = {"mode": args.patch_visibility}
@@ -740,6 +785,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.bench_draft_model_repo is not None
             else None
         )
+        patch_limits = {
+            "max_patch_bytes": args.max_patch_bytes,
+            "max_added_line_chars": args.max_added_line_chars,
+        }
+        if args.reject_renames:
+            patch_limits["reject_renames"] = True
+        patch_limits = validate_patch_limits(patch_limits)
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -757,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_correctness_serve_args=args.bench_correctness_serve_args,
             bench_correctness_thresholds=correctness_thresholds,
             bench_draft_model=draft_model,
+            bench_patch_limits=patch_limits or None,
             workload_pool=pool,
             sampling_rule=rule,
             scoring_rule=scoring,
