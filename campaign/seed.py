@@ -204,6 +204,7 @@ def validate_patch_limits(limits: dict) -> dict:
         "max_patch_bytes",
         "max_added_line_chars",
         "reject_renames",
+        "reject_mode_changes",
     }
     if unknown:
         raise ValueError(f"unknown patch_limits keys: {sorted(unknown)}")
@@ -213,8 +214,9 @@ def validate_patch_limits(limits: dict) -> dict:
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
         ):
             raise ValueError(f"patch_limits.{key} must be a positive integer")
-    if not isinstance(limits.get("reject_renames", False), bool):
-        raise ValueError("patch_limits.reject_renames must be a boolean")
+    for key in ("reject_renames", "reject_mode_changes"):
+        if not isinstance(limits.get(key, False), bool):
+            raise ValueError(f"patch_limits.{key} must be a boolean")
     # Unset and False mean no limit, so they stay out of the manifest pin.
     return {k: v for k, v in limits.items() if v is not None and v is not False}
 
@@ -733,6 +735,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reject every file rename, not only renames out of allowed paths",
     )
+    p.add_argument(
+        "--reject-mode-changes",
+        action="store_true",
+        help="Reject file mode changes and new files not created 100644",
+    )
     args = p.parse_args(argv)
     try:
         visibility = {"mode": args.patch_visibility}
@@ -791,6 +798,8 @@ def main(argv: list[str] | None = None) -> int:
         }
         if args.reject_renames:
             patch_limits["reject_renames"] = True
+        if args.reject_mode_changes:
+            patch_limits["reject_mode_changes"] = True
         patch_limits = validate_patch_limits(patch_limits)
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,

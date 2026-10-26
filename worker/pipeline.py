@@ -167,6 +167,7 @@ def process_submission(
         max_patch_bytes=patch_limits.get("max_patch_bytes"),
         max_added_line_chars=patch_limits.get("max_added_line_chars"),
         reject_renames=bool(patch_limits.get("reject_renames")),
+        reject_mode_changes=bool(patch_limits.get("reject_mode_changes")),
     )
     if not surface_res.ok:
         obs.gate_failed(
