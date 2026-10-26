@@ -1,4 +1,4 @@
-# Trusted SGLang build base for 11972e520709a76766f91744a672e92727fdcb09.
+# Trusted SGLang build base for a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f.
 # The final image digest pins the resolved OS, Python, CUDA and kernel wheels.
 # Build on linux/amd64, then use python -m builder --engine sglang for
 # the offline empty-patch baseline and the non-empty miner build check.
@@ -36,9 +36,9 @@ RUN pip install -r /tmp/requirements-runtime.txt \
 WORKDIR /src
 RUN git init \
     && git remote add origin https://github.com/sgl-project/sglang.git \
-    && git fetch --depth=1 origin 11972e520709a76766f91744a672e92727fdcb09 \
+    && git fetch --depth=1 origin a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = 11972e520709a76766f91744a672e92727fdcb09 \
+    && test "$(git rev-parse HEAD)" = a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f \
     && CARGO_BUILD_JOBS=4 pip install --no-deps --no-build-isolation -e python/ \
     && python -c "from pathlib import Path; assert list(Path('/src/python/sglang').rglob('*.so')), 'Rust extensions missing'" \
     && pip check \
@@ -56,7 +56,7 @@ ENV SGLANG_BUILD_RUST_EXTS=none \
 
 LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
       org.opencontainers.image.description="Pareton hermetic SGLang baseline" \
-      ai.pareton.sglang.commit="11972e520709a76766f91744a672e92727fdcb09"
+      ai.pareton.sglang.commit="a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f"
 
 # Reuse the verified dependency/Rust bootstrap by digest. The subsequent trusted
 # empty-patch build replaces the prebuilt AOT package with the pinned source build.

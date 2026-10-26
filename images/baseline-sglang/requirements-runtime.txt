@@ -1,5 +1,5 @@
 # Runtime dependencies from SGLang python/pyproject.toml at
-# 11972e520709a76766f91744a672e92727fdcb09.
+# a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f.
 # Torch 2.14.1+cu130, the matching torchvision and torchaudio 2.11.0 are
 # installed together by the Dockerfile from the cu130 index, so torchvision
 # stays unpinned here as it is upstream.
