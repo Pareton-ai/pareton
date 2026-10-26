@@ -4,7 +4,10 @@ An optional, reject-only gate that asks an LLM whether a patch lowers
 activation or KV-cache precision. It runs after the surface check (d) and
 before the hermetic build (e).
 
-It is a deterrent, not a proof. Dtypes chosen through string lookups, enum
+It is a deterrent, not a proof. The gate always ends in pass, reject or (on
+an outage) skip, but the model's judgement is not guaranteed: it can miss a
+change or flag a legitimate one, and `temperature: 0` is not deterministic
+across calls, which is why verdicts are cached. Dtypes chosen through string lookups, enum
 integers or casts inside kernels are easy to miss, and a legitimate FP8-KV
 kernel looks a lot like a cheat. The calibrated correctness bars stay the
 numerical authority; treat every `llm_review_rejected` as a candidate for
@@ -14,9 +17,12 @@ manual review.
 
 - One tool-free `POST <base_url>/chat/completions` call with a fixed system
   prompt and `temperature: 0`.
-- The diff is sent with comments removed (`#` in Python, `//` and `/* */` in
-  C, C++, CUDA and Rust), inside a fence tag derived from the patch hash so
-  the patch cannot close the fence itself.
+- The diff is sent verbatim inside a fence tag derived from the patch hash,
+  so the patch cannot close the fence itself. Comments are not stripped: a
+  line-level stripper can be fooled into hiding real code (a line starting
+  with `#` inside a triple-quoted string that closes and continues as code).
+  Instead the prompt treats comments as untrusted and rejects text addressed
+  to the reviewer.
 - The answer must be one JSON object:
   `{"verdict": "pass" | "reject", "reason": str, "offending_hunks": [{"file", "hunk", "why"}]}`.
   Every cited hunk must exist in the diff. Anything else is invalid output.
