@@ -1375,3 +1375,40 @@ def test_seed_api_omits_patch_limits_that_set_nothing(monkeypatch):
         },
     )
     assert "patch_limits" not in captured["manifest"].bench
+
+
+def test_seed_cli_pins_llm_review_only_when_set(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    base = ["--submission-fee-tao", "0.15", "--allow-placeholders"]
+    assert main(base) == 0
+    assert "llm_review" not in captured["manifest"].bench
+    assert (
+        main(
+            [
+                *base,
+                "--llm-review",
+                "dtype_precision_v1",
+                "--llm-review-model",
+                "kimi-k3",
+            ]
+        )
+        == 0
+    )
+    assert captured["manifest"].bench["llm_review"] == {
+        "policy": "dtype_precision_v1",
+        "model": "kimi-k3",
+    }
+
+
+def test_seed_cli_llm_review_flags_must_be_paired(monkeypatch):
+    _patch_store(monkeypatch)
+    rc = main(
+        [
+            "--submission-fee-tao",
+            "0.15",
+            "--allow-placeholders",
+            "--llm-review",
+            "dtype_precision_v1",
+        ]
+    )
+    assert rc != 0

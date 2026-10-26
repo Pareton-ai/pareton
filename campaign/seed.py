@@ -39,6 +39,7 @@ from campaign.models import (
 )
 from campaign.store import insert_campaign, insert_profile, list_campaigns
 from campaign.visibility import validate_patch_visibility
+from gate.llm_review import POLICIES, validate_llm_review
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SAMPLING_RULE = (
@@ -236,6 +237,7 @@ def build_seed_bench_spec(
     correctness_thresholds: dict | None = None,
     draft_model: dict | None = None,
     patch_limits: dict | None = None,
+    llm_review: dict | None = None,
 ) -> dict:
     # Every campaign pins its own correctness thresholds. The values default
     # from config, but they are copied into the manifest here rather than read
@@ -266,6 +268,9 @@ def build_seed_bench_spec(
     patch_limits = validate_patch_limits(patch_limits or {})
     if patch_limits:
         bench["patch_limits"] = patch_limits
+    llm_review = validate_llm_review(llm_review)
+    if llm_review:
+        bench["llm_review"] = llm_review
     return bench
 
 
@@ -288,6 +293,7 @@ def seed_synthetic_campaign(
     bench_correctness_thresholds: dict | None = None,
     bench_draft_model: dict | None = None,
     bench_patch_limits: dict | None = None,
+    bench_llm_review: dict | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
     scoring_rule: dict | None = None,
@@ -383,6 +389,7 @@ def seed_synthetic_campaign(
             correctness_thresholds=bench_correctness_thresholds,
             draft_model=bench_draft_model,
             patch_limits=bench_patch_limits,
+            llm_review=bench_llm_review,
         )
     )
 
@@ -740,6 +747,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reject file mode changes and new files not created 100644",
     )
+    p.add_argument(
+        "--llm-review",
+        choices=POLICIES,
+        default=None,
+        help="Reject patches an LLM flags under this policy (unset: no review)",
+    )
+    p.add_argument(
+        "--llm-review-model",
+        default=None,
+        help="Model id sent to PARETON_LLM_REVIEW_BASE_URL; pinned in the manifest",
+    )
     args = p.parse_args(argv)
     try:
         visibility = {"mode": args.patch_visibility}
@@ -801,6 +819,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.reject_mode_changes:
             patch_limits["reject_mode_changes"] = True
         patch_limits = validate_patch_limits(patch_limits)
+        if (args.llm_review is None) != (args.llm_review_model is None):
+            raise ValueError("--llm-review and --llm-review-model go together")
+        llm_review = validate_llm_review(
+            {"policy": args.llm_review, "model": args.llm_review_model}
+            if args.llm_review is not None
+            else None
+        )
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,
@@ -819,6 +844,7 @@ def main(argv: list[str] | None = None) -> int:
             bench_correctness_thresholds=correctness_thresholds,
             bench_draft_model=draft_model,
             bench_patch_limits=patch_limits or None,
+            bench_llm_review=llm_review or None,
             workload_pool=pool,
             sampling_rule=rule,
             scoring_rule=scoring,

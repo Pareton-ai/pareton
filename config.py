@@ -365,3 +365,27 @@ DEFAULT_DENIED_PATHS: list[str] = [
     "**/requirements*.txt",
     "**/CMakeLists.txt",
 ]
+
+# Optional LLM review gate (campaign bench.llm_review). Any OpenAI-style
+# /chat/completions endpoint; the base URL is the part before /chat/completions.
+LLM_REVIEW_BASE_URL: str = os.environ.get("PARETON_LLM_REVIEW_BASE_URL", "").strip()
+LLM_REVIEW_API_KEY: str = os.environ.get("PARETON_LLM_REVIEW_API_KEY", "")
+LLM_REVIEW_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_LLM_REVIEW_TIMEOUT_S", "300")
+)
+LLM_REVIEW_MAX_OUTPUT_TOKENS: int = int(
+    os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "4096")
+)
+# Patches whose comment-stripped diff is longer than this are rejected rather
+# than truncated, since a truncated review would miss the tail.
+LLM_REVIEW_MAX_INPUT_CHARS: int = int(
+    os.environ.get("PARETON_LLM_REVIEW_MAX_INPUT_CHARS", "1000000")
+)
+# Sends response_format={"type": "json_object"}. Off until the provider is
+# confirmed to support it; the verdict is validated either way.
+LLM_REVIEW_JSON_MODE: bool = os.environ.get(
+    "PARETON_LLM_REVIEW_JSON_MODE", ""
+).strip().lower() in ("1", "true", "yes")
+LLM_REVIEW_CACHE_DIR: Path = Path(
+    os.environ.get("PARETON_LLM_REVIEW_CACHE_DIR", str(WORK_DIR / "llm-review"))
+)

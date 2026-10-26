@@ -1,4 +1,4 @@
-"""Run gates a–e for one claimed submission job."""
+"""Run gates a–e (plus the optional d2 LLM review) for one claimed submission job."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from campaign.store import (
 from gate.base_apply import check_base_apply, check_base_apply_local
 from gate.identity import check_identity
 from gate.integrity import check_integrity
+from gate.llm_review import check_llm_review
 from gate.surface import check_surface
 from gate.types import GateResult, SubmissionState
 from observability import events as obs
@@ -186,6 +187,27 @@ def process_submission(
         SubmissionState.SURFACE_OK,
         detail={"files": surface_res.evidence.get("files")},
     )
+
+    # d2. LLM review (optional, reject-only; never rewrites the patch)
+    llm_review = (campaign.bench or {}).get("llm_review")
+    if llm_review:
+        review_res = check_llm_review(
+            patch_bytes=patch_bytes,
+            patch_hash=patch_hash,
+            spec=llm_review,
+        )
+        if not review_res.ok:
+            obs.gate_failed(
+                submission_id=submission_id,
+                gate="llm_review",
+                error=review_res.reason or "",
+                patch_sha256=patch_hash,
+            )
+            _fail(submission_id, review_res, job_id=job_id)
+            return review_res
+        obs.gate_passed(
+            submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
+        )
 
     # e. Hermetic build
     append_event(submission_id, SubmissionState.BUILDING, detail={})
