@@ -1313,3 +1313,28 @@ def test_draft_model_flags_must_be_paired(monkeypatch):
         ]
     )
     assert rc != 0
+
+
+def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    base = ["--submission-fee-tao", "0.15", "--allow-placeholders"]
+    assert main(base) == 0
+    assert "patch_limits" not in captured["manifest"].bench
+    assert (
+        main(
+            [
+                *base,
+                "--max-patch-bytes",
+                "737280",
+                "--max-added-line-chars",
+                "400",
+                "--reject-renames",
+            ]
+        )
+        == 0
+    )
+    assert captured["manifest"].bench["patch_limits"] == {
+        "max_patch_bytes": 737280,
+        "max_added_line_chars": 400,
+        "reject_renames": True,
+    }

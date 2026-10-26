@@ -183,3 +183,77 @@ def test_parse_diff_paths_basic():
     changes = parse_diff_paths(_ok_diff().decode())
     assert len(changes) == 1
     assert changes[0].path == "vllm/foo.py"
+
+
+_RENAME = b"""diff --git a/vllm/a.py b/vllm/b.py
+similarity index 100%
+rename from vllm/a.py
+rename to vllm/b.py
+"""
+
+
+def test_patch_limits_unset_keep_current_behavior():
+    long_line = _ok_diff().replace(b"+new", b"+" + b"x" * 5000)
+    for patch in (long_line, _RENAME):
+        res = check_surface(patch_bytes=patch, allowed_paths=ALLOW, denied_paths=DENY)
+        assert res.ok, res.reason
+
+
+def test_rejects_patch_over_max_bytes():
+    patch = _ok_diff()
+    kwargs = {"allowed_paths": ALLOW, "denied_paths": DENY}
+    assert check_surface(patch_bytes=patch, max_patch_bytes=len(patch), **kwargs).ok
+    res = check_surface(patch_bytes=patch, max_patch_bytes=len(patch) - 1, **kwargs)
+    assert res.reason == "patch_too_large"
+    assert res.evidence["size"] == len(patch)
+
+
+def test_rejects_added_line_over_max_chars():
+    patch = _ok_diff().replace(b"+new", b"+" + b"x" * 401)
+    kwargs = {"allowed_paths": ALLOW, "denied_paths": DENY}
+    res = check_surface(patch_bytes=patch, max_added_line_chars=400, **kwargs)
+    assert res.reason == "added_line_too_long"
+    assert res.evidence["length"] == 401
+    ok = _ok_diff().replace(b"+new", b"+" + b"x" * 400)
+    assert check_surface(patch_bytes=ok, max_added_line_chars=400, **kwargs).ok
+
+
+def test_line_limit_ignores_headers_and_removed_lines():
+    path = "vllm/" + "d" * 60 + ".py"
+    patch = f"""diff --git a/{path} b/{path}
+index 1111111..2222222 100644
+--- a/{path}
++++ b/{path}
+@@ -1 +1 @@
+-{"y" * 100}
++new
+""".encode()
+    res = check_surface(
+        patch_bytes=patch,
+        allowed_paths=ALLOW,
+        denied_paths=DENY,
+        max_added_line_chars=20,
+    )
+    assert res.ok, res.reason
+
+
+def test_line_limit_counts_unicode_separators_as_one_line():
+    patch = _ok_diff().replace(b"+new", ("+" + "x " * 30).encode())
+    res = check_surface(
+        patch_bytes=patch,
+        allowed_paths=ALLOW,
+        denied_paths=DENY,
+        max_added_line_chars=40,
+    )
+    assert res.reason == "added_line_too_long"
+
+
+def test_reject_renames_blocks_in_bounds_rename():
+    res = check_surface(
+        patch_bytes=_RENAME,
+        allowed_paths=ALLOW,
+        denied_paths=DENY,
+        reject_renames=True,
+    )
+    assert res.reason == "rename_forbidden"
+    assert res.evidence["path"] == "vllm/a.py"
