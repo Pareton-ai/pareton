@@ -198,6 +198,26 @@ def require_emission_rule(emission_rule: dict | None) -> None:
         )
 
 
+def validate_patch_limits(limits: dict) -> dict:
+    """Check bench.patch_limits, so a bad value fails at seed, not in the gate."""
+    unknown = set(limits) - {
+        "max_patch_bytes",
+        "max_added_line_chars",
+        "reject_renames",
+    }
+    if unknown:
+        raise ValueError(f"unknown patch_limits keys: {sorted(unknown)}")
+    for key in ("max_patch_bytes", "max_added_line_chars"):
+        value = limits.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise ValueError(f"patch_limits.{key} must be a positive integer")
+    if not isinstance(limits.get("reject_renames", False), bool):
+        raise ValueError("patch_limits.reject_renames must be a boolean")
+    return {k: v for k, v in limits.items() if v is not None}
+
+
 def build_seed_bench_spec(
     *,
     model_repo: str = DEFAULT_BENCH_MODEL_REPO,
@@ -241,7 +261,7 @@ def build_seed_bench_spec(
         bench["draft_model"] = dict(draft_model)
     # Same rule: the gate reads these, and campaigns without them keep hashes.
     if patch_limits:
-        bench["patch_limits"] = dict(patch_limits)
+        bench["patch_limits"] = validate_patch_limits(patch_limits)
     return bench
 
 
@@ -763,15 +783,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.bench_draft_model_repo is not None
             else None
         )
-        patch_limits: dict = {}
-        for key in ("max_patch_bytes", "max_added_line_chars"):
-            value = getattr(args, key)
-            if value is not None:
-                if value <= 0:
-                    raise ValueError(f"--{key.replace('_', '-')} must be positive")
-                patch_limits[key] = value
+        patch_limits = {
+            "max_patch_bytes": args.max_patch_bytes,
+            "max_added_line_chars": args.max_added_line_chars,
+        }
         if args.reject_renames:
             patch_limits["reject_renames"] = True
+        patch_limits = validate_patch_limits(patch_limits)
         seed_synthetic_campaign(
             baseline_repo=args.baseline_repo,
             baseline_commit=args.baseline_commit,

@@ -1338,3 +1338,23 @@ def test_seed_cli_pins_patch_limits_only_when_set(monkeypatch):
         "max_added_line_chars": 400,
         "reject_renames": True,
     }
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"max_patch_bytes": "737280"},
+        {"max_added_line_chars": 0},
+        {"max_patch_bytes": True},
+        {"reject_renames": "yes"},
+        {"max_line": 400},
+    ],
+)
+def test_seed_api_rejects_bad_patch_limits(monkeypatch, limits):
+    _patch_store(monkeypatch)
+    with pytest.raises(ValueError, match="patch_limits"):
+        seed_synthetic_campaign(
+            submission_fee_tao="0.15",
+            allow_placeholders=True,
+            bench_patch_limits=limits,
+        )
