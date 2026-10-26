@@ -1358,3 +1358,13 @@ def test_seed_api_rejects_bad_patch_limits(monkeypatch, limits):
             allow_placeholders=True,
             bench_patch_limits=limits,
         )
+
+
+def test_seed_api_omits_patch_limits_that_set_nothing(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15",
+        allow_placeholders=True,
+        bench_patch_limits={"max_patch_bytes": None, "reject_renames": False},
+    )
+    assert "patch_limits" not in captured["manifest"].bench

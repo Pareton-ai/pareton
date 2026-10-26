@@ -215,7 +215,8 @@ def validate_patch_limits(limits: dict) -> dict:
             raise ValueError(f"patch_limits.{key} must be a positive integer")
     if not isinstance(limits.get("reject_renames", False), bool):
         raise ValueError("patch_limits.reject_renames must be a boolean")
-    return {k: v for k, v in limits.items() if v is not None}
+    # Unset and False mean no limit, so they stay out of the manifest pin.
+    return {k: v for k, v in limits.items() if v is not None and v is not False}
 
 
 def build_seed_bench_spec(
@@ -260,8 +261,9 @@ def build_seed_bench_spec(
     if draft_model is not None:
         bench["draft_model"] = dict(draft_model)
     # Same rule: the gate reads these, and campaigns without them keep hashes.
+    patch_limits = validate_patch_limits(patch_limits or {})
     if patch_limits:
-        bench["patch_limits"] = validate_patch_limits(patch_limits)
+        bench["patch_limits"] = patch_limits
     return bench
 
 
