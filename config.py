@@ -367,14 +367,15 @@ DEFAULT_DENIED_PATHS: list[str] = [
 ]
 
 # Optional LLM review gate (campaign bench.llm_review). Any OpenAI-style
-# /chat/completions endpoint; the base URL is the part before /chat/completions.
+# /chat/completions endpoint; the base URL is the part before /chat/completions
+# (Engy: https://api.engy.ai/v1, model id kimi-k3).
 LLM_REVIEW_BASE_URL: str = os.environ.get("PARETON_LLM_REVIEW_BASE_URL", "").strip()
 LLM_REVIEW_API_KEY: str = os.environ.get("PARETON_LLM_REVIEW_API_KEY", "")
 LLM_REVIEW_TIMEOUT_S: float = float(
     os.environ.get("PARETON_LLM_REVIEW_TIMEOUT_S", "300")
 )
 LLM_REVIEW_MAX_OUTPUT_TOKENS: int = int(
-    os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "4096")
+    os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "16384")
 )
 # Patches whose comment-stripped diff is longer than this are rejected rather
 # than truncated, since a truncated review would miss the tail.

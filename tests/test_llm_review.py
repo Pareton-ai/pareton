@@ -145,6 +145,11 @@ def test_parse_accepts_fenced_json():
     assert parse_verdict("```json\n" + _verdict() + "\n```", HUNKS)["verdict"] == "pass"
 
 
+def test_parse_drops_leading_think_block():
+    content = "<think>the KV pool {looks} fine</think>\n" + _verdict()
+    assert parse_verdict(content, HUNKS)["verdict"] == "pass"
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -218,7 +223,7 @@ def test_cache_is_keyed_on_model(tmp_path):
 @pytest.mark.parametrize(
     "response",
     [
-        llm_review.LLMReviewError("llm_review_unavailable", "HTTP 503"),
+        llm_review.LLMReviewError("llm_review_request_rejected", "HTTP 400"),
         "not json at all",
         _verdict("pass", [{"file": FILE, "hunk": HUNK, "why": "x"}]),
     ],
@@ -226,8 +231,25 @@ def test_cache_is_keyed_on_model(tmp_path):
 def test_fails_closed_and_does_not_cache_failures(tmp_path, response):
     res = _check(tmp_path, FakeClient(response))
     assert not res.ok
-    assert res.reason in ("llm_review_unavailable", "llm_review_invalid_output")
+    assert res.reason in ("llm_review_request_rejected", "llm_review_invalid_output")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_provider_outage_skips_gate_and_does_not_cache(tmp_path):
+    down = llm_review.LLMReviewError("llm_review_unavailable", "HTTP 503")
+    res = _check(tmp_path, FakeClient(down))
+    assert res.ok
+    assert res.evidence["skipped"] is True
+    assert res.evidence["detail"] == "HTTP 503"
+    assert list(tmp_path.iterdir()) == []
+    # Once the provider is back, the same patch is actually reviewed.
+    client = FakeClient(_verdict("reject", [{"file": FILE, "hunk": HUNK, "why": "x"}]))
+    assert not _check(tmp_path, client).ok
+    assert len(client.calls) == 1
+
+
+def test_reviewed_pass_is_not_marked_skipped(tmp_path):
+    assert _check(tmp_path, FakeClient(_verdict("pass"))).evidence["skipped"] is False
 
 
 def test_unconfigured_endpoint_fails_closed(tmp_path, monkeypatch):
@@ -292,6 +314,14 @@ def test_client_posts_tool_free_chat_completion(endpoint, monkeypatch):
     ("post", "reason"),
     [
         (lambda *_, **__: _resp(status=500), "llm_review_unavailable"),
+        (lambda *_, **__: _resp(status=429), "llm_review_unavailable"),
+        (lambda *_, **__: _resp(status=402), "llm_review_unavailable"),
+        (lambda *_, **__: _resp(status=400), "llm_review_request_rejected"),
+        (lambda *_, **__: _resp(status=413), "llm_review_request_rejected"),
+        (
+            lambda *_, **__: (_ for _ in ()).throw(requests.ConnectionError()),
+            "llm_review_unavailable",
+        ),
         (
             lambda *_, **__: (_ for _ in ()).throw(requests.Timeout()),
             "llm_review_unavailable",

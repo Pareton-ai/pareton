@@ -5,8 +5,11 @@ with comments stripped, and the model must answer with a small JSON verdict
 that is validated here. The gate only ever passes or rejects: it never edits
 the patch, because the on-chain patch_hash binds the exact bytes that build.
 
-Every failure (no endpoint configured, HTTP error, timeout, malformed output)
-rejects. A valid verdict is cached per (patch_hash, policy, model, prompt), so
+If the provider is down (connection error, timeout, 429, 5xx, or an auth or
+credit error on the operator's key), the gate is skipped and the submission
+continues to the build: an outage should not cost miners their fee. Every
+failure the patch itself could cause (a 400/413/422 on the request, malformed
+or off-schema output, an oversized patch) rejects. A valid verdict is cached per (patch_hash, policy, model, prompt), so
 a retry of the same patch gets the same answer instead of a fresh sample.
 
 This is a deterrent, not a proof: obfuscated dtype selection is easy to miss.
@@ -86,6 +89,10 @@ _C_SUFFIXES = (
     ".cuh",
     ".rs",
 )
+# 4xx statuses the request content can cause; anything else non-200 is treated
+# as the provider being unavailable.
+_REQUEST_REJECTED_STATUSES = (400, 413, 422)
+_THINK_RE = re.compile(r"^\s*<think>.*?</think>", flags=re.DOTALL)
 _MAX_REASON_CHARS = 2000
 _MAX_HUNKS = 200
 
@@ -262,7 +269,8 @@ def build_messages(
 
 
 def _extract_json(content: str) -> Any:
-    text = content.strip()
+    # Some reasoning models leave their thinking inline in content.
+    text = _THINK_RE.sub("", content, count=1).strip()
     fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL)
     if fence:
         text = fence.group(1)
@@ -348,6 +356,10 @@ def openai_chat_client(model: str) -> ChatClient:
             )
         except requests.RequestException as exc:
             raise LLMReviewError("llm_review_unavailable", type(exc).__name__) from exc
+        if resp.status_code in _REQUEST_REJECTED_STATUSES:
+            raise LLMReviewError(
+                "llm_review_request_rejected", f"HTTP {resp.status_code}"
+            )
         if resp.status_code != 200:
             raise LLMReviewError("llm_review_unavailable", f"HTTP {resp.status_code}")
         try:
@@ -414,7 +426,7 @@ def check_llm_review(
     client: ChatClient | None = None,
     cache_dir: Path | None = None,
 ) -> GateResult:
-    """Pass or reject the patch. Never modifies it; fails closed."""
+    """Pass or reject the patch; skip on a provider outage. Never modifies it."""
     spec = validate_llm_review(spec)
     cache_dir = cache_dir or config.LLM_REVIEW_CACHE_DIR
     key = _cache_key(patch_hash, spec)
@@ -440,6 +452,19 @@ def check_llm_review(
             content = call(build_messages(spec["policy"], patch_hash, review_text))
             verdict = parse_verdict(content, _diff_hunks(review_text))
         except LLMReviewError as exc:
+            if exc.reason == "llm_review_unavailable":
+                # Not cached, so a later submission of this patch is reviewed.
+                logger.warning(
+                    "llm review skipped for %s, provider unavailable: %s",
+                    patch_hash,
+                    exc,
+                )
+                return GateResult.success(
+                    SubmissionState.SURFACE_OK,
+                    skipped=True,
+                    detail=exc.detail,
+                    **evidence,
+                )
             logger.warning("llm review failed closed for %s: %s", patch_hash, exc)
             return GateResult.reject(exc.reason, detail=exc.detail, **evidence)
         try:
@@ -465,6 +490,7 @@ def check_llm_review(
         )
     return GateResult.success(
         SubmissionState.SURFACE_OK,
+        skipped=False,
         llm_reason=verdict["reason"],
         cached=cached,
         **evidence,

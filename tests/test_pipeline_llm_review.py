@@ -106,3 +106,13 @@ def test_review_pass_continues_to_build(run):
     res, calls = run({"llm_review": spec}, passed)
     assert len(calls["review"]) == 1
     assert calls["build"] == 1
+
+
+def test_review_skipped_on_outage_continues_to_build(run):
+    spec = {"policy": "dtype_precision_v1", "model": "kimi-k3"}
+    skipped = GateResult.success(
+        SubmissionState.SURFACE_OK, skipped=True, detail="HTTP 503"
+    )
+    res, calls = run({"llm_review": spec}, skipped)
+    assert calls["build"] == 1
+    assert res.reason == "stop_after_gates"

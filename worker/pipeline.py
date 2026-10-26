@@ -188,7 +188,8 @@ def process_submission(
         detail={"files": surface_res.evidence.get("files")},
     )
 
-    # d2. LLM review (optional, reject-only; never rewrites the patch)
+    # d2. LLM review (optional, reject-only; never rewrites the patch). A
+    # provider outage skips it rather than rejecting.
     llm_review = (campaign.bench or {}).get("llm_review")
     if llm_review:
         review_res = check_llm_review(
@@ -205,9 +206,16 @@ def process_submission(
             )
             _fail(submission_id, review_res, job_id=job_id)
             return review_res
-        obs.gate_passed(
-            submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
-        )
+        if review_res.evidence.get("skipped"):
+            logger.warning(
+                "submission %s: llm review skipped (%s); continuing to build",
+                submission_id,
+                review_res.evidence.get("detail"),
+            )
+        else:
+            obs.gate_passed(
+                submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
+            )
 
     # e. Hermetic build
     append_event(submission_id, SubmissionState.BUILDING, detail={})
