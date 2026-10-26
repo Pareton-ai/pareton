@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config  # noqa: E402
 from gate import llm_review  # noqa: E402
 from gate.integrity import hash_patch_bytes  # noqa: E402
+from gate.obfuscation import check_obfuscation  # noqa: E402
 
 PREVIEW_CHARS = 2000
 
@@ -66,7 +67,19 @@ def review(args: argparse.Namespace) -> int:
         return 1
     _ok(True, "patch is UTF-8")
 
-    _step(3, "What the reviewer sees")
+    _step(3, "Obfuscation scan (d1, runs before the LLM)")
+    obf = check_obfuscation(patch_bytes=patch_bytes)
+    if obf.ok:
+        print("  [OK] no obfuscation findings")
+    else:
+        print(
+            f"  [INFO] d1 would reject: {obf.reason}, rules={obf.evidence.get('rules')}"
+        )
+        for f in obf.evidence.get("findings", [])[:20]:
+            print(f"    {f['file']}:{f['line']} {f['rule']}: {f['snippet']}")
+        print("  (the LLM review below still runs, for comparison)")
+
+    _step(4, "What the reviewer sees")
     hunks = llm_review._diff_hunks(patch_text)
     n_hunks = sum(len(h) for h in hunks.values())
     print(f"  files = {len(hunks)}, hunks = {n_hunks}")
@@ -92,7 +105,7 @@ def review(args: argparse.Namespace) -> int:
         f"within MAX_INPUT_CHARS ({config.LLM_REVIEW_MAX_INPUT_CHARS})",
     )
 
-    _step(4, "Model call through the gate")
+    _step(5, "Model call through the gate")
     cache_dir = Path(args.cache_dir or tempfile.mkdtemp(prefix="llm-review-manual-"))
     print(f"  cache_dir = {cache_dir}")
     raw: dict = {}
@@ -134,10 +147,10 @@ def review(args: argparse.Namespace) -> int:
         except ValueError:
             print(
                 "  [INFO] raw response is not bare JSON; the gate unwraps a "
-                "leading <think> block or ``` fence, see step 5"
+                "leading <think> block or ``` fence, see step 6"
             )
 
-    _step(5, "Verdict validation")
+    _step(6, "Verdict validation")
     if result.evidence.get("retryable"):
         _ok(False, "provider unavailable; the worker would defer and retry")
     elif result.ok or result.reason == "llm_review_rejected":
@@ -145,7 +158,7 @@ def review(args: argparse.Namespace) -> int:
     else:
         ok &= _ok(False, f"gate failed closed: {result.reason}")
 
-    _step(6, "Cache")
+    _step(7, "Cache")
     again = llm_review.check_llm_review(
         patch_bytes=patch_bytes,
         patch_hash=patch_hash,
@@ -163,7 +176,7 @@ def review(args: argparse.Namespace) -> int:
             "second run is served from cache with the same outcome",
         )
 
-    _step(7, "Gate result")
+    _step(8, "Gate result")
     outcome = (
         "DEFER"
         if result.evidence.get("retryable")
