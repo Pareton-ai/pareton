@@ -161,3 +161,124 @@ def test_gate_passes_clean_patch():
 
 def test_non_utf8_patch_rejected():
     assert check_obfuscation(patch_bytes=b"\xff").reason == "obfuscation_invalid_patch"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "torch.bfloat16 = torch.float8_e4m3fn",
+        "    tl.float32 = tl.float16",
+        "torch.backends.cuda.matmul.allow_tf32 = True",
+        "torch.bmm = my_bmm",
+        "T.float32 = T.float16",
+    ],
+)
+def test_python_dtype_rebinding_is_flagged(line):
+    assert "dtype_rebinding" in _rules("python/sglang/srt/x.py", line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x: torch.Tensor = None",
+        "dtype: torch.dtype = torch.bfloat16,",
+        "self.dtype = torch.bfloat16",
+        "if torch.float16 == dt:",
+    ],
+)
+def test_python_dtype_use_is_not_rebinding(line):
+    assert "dtype_rebinding" not in _rules("python/sglang/srt/x.py", line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "#define half __nv_fp8_e4m3",
+        "# define __nv_bfloat16 __nv_fp8_e5m2",
+        "#undef float",
+        "using half_t = cutlass::float_e4m3_t;",
+        "typedef __nv_fp8_e4m3 __nv_bfloat16;",
+    ],
+)
+def test_c_dtype_rebinding_is_flagged(line):
+    assert "dtype_rebinding" in _rules("csrc/attention/k.cuh", line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "using Element = cutlass::half_t;",
+        "typedef __nv_bfloat16 bf16_t;",
+        "#define DTYPE half",
+    ],
+)
+def test_c_dtype_aliases_are_allowed(line):
+    assert "dtype_rebinding" not in _rules("csrc/attention/k.cuh", line)
+
+
+def test_c_token_splice_is_flagged():
+    assert "token_splice" in _rules("k.cu", "auto kv_dt\\")
+    assert "token_splice" not in _rules("k.cu", "#define X(a) \\")
+
+
+def _post(path: str, text: str, *added_lines: int) -> list:
+    lines = text.splitlines()
+    body = "".join(
+        ("+" if i + 1 in added_lines else " ") + line + "\n"
+        for i, line in enumerate(lines)
+    )
+    diff = (
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        f"@@ -1,{len(lines) - len(added_lines)} +1,{len(lines)} @@\n{body}"
+    )
+    return scan_patch(diff, {path: text})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "run = eval\nrun(src)\n",
+        "f = (exec)\n",
+        "g = __builtins__\n",
+        "h = [compile][0]\n",
+    ],
+)
+def test_python_bare_reference_to_dynamic_builtin_is_flagged(text):
+    findings = _post("x.py", text, 1)
+    assert [(f.line, f.rule) for f in findings] == [(1, "dynamic_code")]
+
+
+def test_python_call_split_across_lines_is_flagged():
+    text = "y = eval \\\n  (src)\n"
+    assert {f.rule for f in _post("x.py", text, 1, 2)} == {"dynamic_code"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "model.eval()\n",
+        "fn = torch.compile(fn)\n",
+        "def eval(self):\n    pass\n",
+        "f(eval=False)\n",
+        "def f(compile=True):\n    pass\n",
+        "s = 'eval'\n",
+    ],
+)
+def test_python_method_and_keyword_uses_are_allowed(text):
+    added = range(1, text.count("\n") + 1)
+    assert _post("x.py", text, *added) == []
+
+
+def test_token_check_only_looks_at_added_lines():
+    text = "run = eval\ny = 1\n"
+    assert _post("x.py", text, 2) == []
+
+
+def test_gate_uses_post_texts():
+    text = "run = eval\n"
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+run = eval\n"
+    )
+    assert check_obfuscation(patch_bytes=diff.encode()).ok
+    res = check_obfuscation(patch_bytes=diff.encode(), post_texts={"x.py": text})
+    assert res.reason == "obfuscation_detected"

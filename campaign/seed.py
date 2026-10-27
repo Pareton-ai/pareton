@@ -206,7 +206,6 @@ def validate_patch_limits(limits: dict) -> dict:
         "max_added_line_chars",
         "reject_renames",
         "reject_mode_changes",
-        "reject_obfuscation",
     }
     if unknown:
         raise ValueError(f"unknown patch_limits keys: {sorted(unknown)}")
@@ -216,7 +215,7 @@ def validate_patch_limits(limits: dict) -> dict:
             isinstance(value, bool) or not isinstance(value, int) or value <= 0
         ):
             raise ValueError(f"patch_limits.{key} must be a positive integer")
-    for key in ("reject_renames", "reject_mode_changes", "reject_obfuscation"):
+    for key in ("reject_renames", "reject_mode_changes"):
         if not isinstance(limits.get(key, False), bool):
             raise ValueError(f"patch_limits.{key} must be a boolean")
     # Unset and False mean no limit, so they stay out of the manifest pin.
@@ -749,13 +748,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Reject file mode changes and new files not created 100644",
     )
     p.add_argument(
-        "--reject-obfuscation",
-        action="store_true",
-        help="Reject added code that hides what it does (dynamic code, "
-        "reflection, encoded payloads, invisible characters, reviewer-directed "
-        "text); see gate/obfuscation.py",
-    )
-    p.add_argument(
         "--llm-review",
         choices=POLICIES,
         default=None,
@@ -826,8 +818,6 @@ def main(argv: list[str] | None = None) -> int:
             patch_limits["reject_renames"] = True
         if args.reject_mode_changes:
             patch_limits["reject_mode_changes"] = True
-        if args.reject_obfuscation:
-            patch_limits["reject_obfuscation"] = True
         patch_limits = validate_patch_limits(patch_limits)
         if (args.llm_review is None) != (args.llm_review_model is None):
             raise ValueError("--llm-review and --llm-review-model go together")

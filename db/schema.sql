@@ -308,10 +308,6 @@ CREATE TABLE IF NOT EXISTS submission_jobs (
 
 CREATE INDEX IF NOT EXISTS submission_jobs_status_idx ON submission_jobs (status, created_at);
 
--- A deferred gates job (e.g. the LLM review provider was down) returns to
--- 'pending' and is not claimed again before this time.
-ALTER TABLE submission_jobs ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ;
-
 -- Round-based benchmarking. One round rents one pod, draws one prompt set, and
 -- runs the baseline, the leader, and every challenger against that set.
 CREATE TABLE IF NOT EXISTS rounds (

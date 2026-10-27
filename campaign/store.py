@@ -9,6 +9,8 @@ from uuid import UUID
 
 from psycopg2.extras import Json, RealDictCursor
 
+import config
+
 from db.connection import db_connection
 from gate.types import SUBMISSION_STATES
 
@@ -458,14 +460,14 @@ def set_job_status(
             )
 
 
-def defer_job(
-    *,
-    job_id: int,
-    attempt: int,
-    delay_s: float,
-    last_error: str,
-) -> bool:
-    """Return a running gates job to 'pending', not claimable for delay_s.
+# last_error prefix of a gates job deferred because the LLM review provider was
+# down. claim_next_job leaves such a job alone until RETRY_AFTER_S has passed
+# since it was deferred (updated_at), so no extra column is needed.
+DEFERRED_ERROR_PREFIX = "llm_review_deferred:"
+
+
+def defer_job(*, job_id: int, attempt: int, last_error: str) -> bool:
+    """Return a running gates job to 'pending' as a deferred job.
 
     Matches (job_id, attempt, status=running) so a superseded attempt cannot
     requeue. The next claim reruns the gates from the start.
@@ -476,7 +478,6 @@ def defer_job(
                 """
                 UPDATE submission_jobs
                 SET status = 'pending',
-                    retry_after = now() + make_interval(secs => %s),
                     last_error = %s,
                     phase = NULL,
                     phase_started_at = NULL,
@@ -485,7 +486,7 @@ def defer_job(
                     updated_at = now()
                 WHERE id = %s AND attempts = %s AND status = 'running'
                 """,
-                (float(delay_s), last_error, job_id, attempt),
+                (f"{DEFERRED_ERROR_PREFIX} {last_error}", job_id, attempt),
             )
             return cur.rowcount > 0
 
@@ -639,11 +640,20 @@ def claim_next_job() -> dict[str, Any] | None:
                 SELECT j.id AS job_id, j.submission_id
                 FROM submission_jobs j
                 WHERE j.status = 'pending'
-                  AND (j.retry_after IS NULL OR j.retry_after <= now())
+                  AND NOT (
+                    -- last_error is often NULL; NOT (NULL AND ...) would
+                    -- hide the job, so compare a non-NULL value.
+                    coalesce(j.last_error, '') LIKE %s
+                    AND j.updated_at > now() - make_interval(secs => %s)
+                  )
                 ORDER BY j.created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
-                """
+                """,
+                (
+                    DEFERRED_ERROR_PREFIX + "%",
+                    float(config.LLM_REVIEW_RETRY_AFTER_S),
+                ),
             )
             job = cur.fetchone()
             if job is None:

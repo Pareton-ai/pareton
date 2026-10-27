@@ -389,16 +389,13 @@ LLM_REVIEW_RESPONSE_FORMAT: str = (
     os.environ.get("PARETON_LLM_REVIEW_RESPONSE_FORMAT", "off").strip().lower()
 )
 # A provider outage defers the gates job instead of skipping the review. The
-# job is retried after RETRY_BASE_S * 2**(attempt-1) seconds (capped at
-# RETRY_MAX_S) and rejected once MAX_ATTEMPTS claims have failed this way.
+# job is claimable again RETRY_AFTER_S after it was deferred, and the
+# submission is rejected once MAX_ATTEMPTS claims have failed this way.
 LLM_REVIEW_MAX_ATTEMPTS: int = int(
     os.environ.get("PARETON_LLM_REVIEW_MAX_ATTEMPTS", "6")
 )
-LLM_REVIEW_RETRY_BASE_S: float = float(
-    os.environ.get("PARETON_LLM_REVIEW_RETRY_BASE_S", "300")
-)
-LLM_REVIEW_RETRY_MAX_S: float = float(
-    os.environ.get("PARETON_LLM_REVIEW_RETRY_MAX_S", "3600")
+LLM_REVIEW_RETRY_AFTER_S: float = float(
+    os.environ.get("PARETON_LLM_REVIEW_RETRY_AFTER_S", "600")
 )
 LLM_REVIEW_CACHE_DIR: Path = Path(
     os.environ.get("PARETON_LLM_REVIEW_CACHE_DIR", str(WORK_DIR / "llm-review"))

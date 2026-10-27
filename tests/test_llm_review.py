@@ -54,7 +54,7 @@ class FakeClient:
 
 def _check(tmp_path, client, patch=PATCH, spec=SPEC, patch_hash="ab" * 32):
     return check_llm_review(
-        patch_bytes=patch,
+        review_text=patch.decode(),
         patch_hash=patch_hash,
         spec=spec,
         client=client,
@@ -150,30 +150,51 @@ def test_reject_verdict_rejects_with_hunks(tmp_path):
     assert res.evidence["offending_hunks"] == hunks
 
 
-def test_prompt_is_tool_free_and_diff_is_fenced_and_verbatim(tmp_path):
+def test_prompt_is_tool_free_and_review_diff_is_fenced(tmp_path):
     client = FakeClient(_verdict("pass"))
     _check(tmp_path, client)
     (messages,) = client.calls
     assert [m["role"] for m in messages] == ["system", "user"]
     user = messages[1]["content"]
-    # Nothing is stripped: the reviewer sees exactly the bytes that build.
     assert PATCH.decode() in user
     tag = user.split("<", 1)[1].split(">", 1)[0]
     assert tag.startswith("diff-")
     assert f"</{tag}>" in user
+    assert "Comments were removed" in messages[0]["content"]
 
 
-def test_code_that_looks_like_a_comment_reaches_the_reviewer(tmp_path):
-    # Line 2 starts with "#" but closes the string and assigns a dtype. A
-    # line-level comment stripper would have hidden it.
-    patch = (
-        b"diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1,0 +1,2 @@\n"
-        b'+_doc = """\n'
-        b'+# """; KV_DTYPE = torch.float4_e2m1fn_x2\n'
+def test_comment_only_change_passes_without_a_call(tmp_path):
+    # The stripped review diff is empty when only comments changed.
+    res = check_llm_review(
+        review_text="",
+        patch_hash="ab" * 32,
+        spec=SPEC,
+        client=FakeClient(),
+        cache_dir=tmp_path,
     )
+    assert res.ok
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_strip_summary_is_recorded(tmp_path):
+    summary = {"status_counts": {"stripped": 2}, "comments_kept": []}
+    res = check_llm_review(
+        review_text=PATCH.decode(),
+        patch_hash="ab" * 32,
+        spec=SPEC,
+        strip_summary=summary,
+        client=FakeClient(_verdict("pass")),
+        cache_dir=tmp_path,
+    )
+    assert res.evidence["comment_strip"] == summary
+
+
+def test_cache_is_keyed_on_review_view_version(tmp_path, monkeypatch):
+    _check(tmp_path, FakeClient(_verdict("pass")))
+    monkeypatch.setattr(llm_review, "REVIEW_VIEW_VERSION", "stripped-v2")
     client = FakeClient(_verdict("pass"))
-    _check(tmp_path, client, patch=patch)
-    assert "KV_DTYPE = torch.float4_e2m1fn_x2" in client.calls[0][1]["content"]
+    _check(tmp_path, client)
+    assert len(client.calls) == 1
 
 
 def test_malformed_cache_entry_is_ignored(tmp_path):
@@ -241,7 +262,7 @@ def test_unconfigured_endpoint_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "LLM_REVIEW_BASE_URL", "")
     monkeypatch.setattr(config, "LLM_REVIEW_API_KEY", "")
     res = check_llm_review(
-        patch_bytes=PATCH, patch_hash="ab" * 32, spec=SPEC, cache_dir=tmp_path
+        review_text=PATCH.decode(), patch_hash="ab" * 32, spec=SPEC, cache_dir=tmp_path
     )
     assert not res.ok
     assert res.reason == "llm_review_unconfigured"
@@ -252,11 +273,6 @@ def test_oversized_patch_rejected_without_call(tmp_path, monkeypatch):
     res = _check(tmp_path, FakeClient())
     assert not res.ok
     assert res.reason == "llm_review_patch_too_large"
-
-
-def test_non_utf8_patch_rejected(tmp_path):
-    res = _check(tmp_path, FakeClient(), patch=b"\xff\xfe")
-    assert res.reason == "llm_review_invalid_patch"
 
 
 # -- HTTP client -------------------------------------------------------------

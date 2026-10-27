@@ -127,7 +127,7 @@ def _job(sid: str) -> tuple:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT status, attempts, retry_after > now(), last_error
+                SELECT status, attempts, last_error
                 FROM submission_jobs WHERE submission_id = %s
                 """,
                 (sid,),
@@ -136,14 +136,16 @@ def _job(sid: str) -> tuple:
 
 
 def _make_due(sid: str) -> None:
+    import config
     from db.connection import db_connection
 
     with db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE submission_jobs SET retry_after = now() - interval '1 second'"
+                "UPDATE submission_jobs"
+                " SET updated_at = now() - make_interval(secs => %s)"
                 " WHERE submission_id = %s",
-                (sid,),
+                (config.LLM_REVIEW_RETRY_AFTER_S + 1, sid),
             )
 
 
@@ -154,7 +156,13 @@ def test_outage_defers_then_rejects_and_never_builds(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "S3_PREFIX", "stage0")
     monkeypatch.setattr(config, "WORK_DIR", tmp_path / "work")
     monkeypatch.setattr(config, "LLM_REVIEW_MAX_ATTEMPTS", 2)
-    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_BASE_S", 300.0)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_AFTER_S", 300.0)
+    seen = []
+    monkeypatch.setattr(
+        pipeline,
+        "check_obfuscation",
+        lambda **kw: seen.append(kw) or GateResult.success(SubmissionState.SURFACE_OK),
+    )
     monkeypatch.setattr(
         pipeline,
         "check_llm_review",
@@ -182,11 +190,13 @@ def test_outage_defers_then_rejects_and_never_builds(tmp_path, monkeypatch):
     row = claim_next_job()
     assert str(row["id"]) == sid and row["job_attempt"] == 1
     assert run(row).reason == "llm_review_deferred"
-    status, attempts, in_future, last_error = _job(sid)
-    assert (status, attempts, in_future) == ("pending", 1, True)
-    assert last_error == "llm_review_unavailable: ReadTimeout"
+    status, attempts, last_error = _job(sid)
+    assert (status, attempts) == ("pending", 1)
+    assert last_error == "llm_review_deferred: llm_review_unavailable: ReadTimeout"
+    # d1 ran on the real source view of the patched file.
+    assert seen[0]["post_texts"] == {"vllm/kv.py": "KV_DTYPE = 'fp4'\n"}
     assert SubmissionState.REJECTED not in [e["state"] for e in list_events(sid)]
-    # Not claimable until retry_after passes.
+    # Not claimable until RETRY_AFTER_S has passed since the deferral.
     assert claim_next_job() is None
 
     _make_due(sid)

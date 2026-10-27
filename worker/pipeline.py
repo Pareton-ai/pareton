@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,7 @@ from gate.identity import check_identity
 from gate.integrity import check_integrity
 from gate.llm_review import check_llm_review
 from gate.obfuscation import check_obfuscation
+from gate.source_view import SourceViewError, build_source_view
 from gate.surface import check_surface
 from gate.types import GateResult, SubmissionState
 from observability import events as obs
@@ -137,100 +142,20 @@ def process_submission(
         detail={"patch_hash": int_res.evidence.get("patch_hash"), "identity": "ok"},
     )
 
-    # c. Base apply
-    if local_repo is not None:
-        apply_res = check_base_apply_local(repo_dir=local_repo, patch_bytes=patch_bytes)
-    else:
-        apply_res = check_base_apply(
-            baseline_repo=row["baseline_repo"],
-            baseline_commit=campaign.baseline_commit,
-            patch_bytes=patch_bytes,
-            work_root=work_root,
-        )
-    if not apply_res.ok:
-        obs.gate_failed(
+    # c to d2 read the baseline checkout, which is removed before the build.
+    with _apply_workspace(work_root) as apply_root:
+        stop = _apply_and_review(
             submission_id=submission_id,
-            gate="base_apply",
-            error=apply_res.reason or "",
-            patch_sha256=patch_hash,
-        )
-        _fail(submission_id, apply_res, job_id=job_id)
-        return apply_res
-    obs.gate_passed(
-        submission_id=submission_id, gate="base_apply", patch_sha256=patch_hash
-    )
-    append_event(submission_id, SubmissionState.APPLIED, detail={"ok": True})
-
-    # d. Surface
-    patch_limits = (campaign.bench or {}).get("patch_limits") or {}
-    surface_res = check_surface(
-        patch_bytes=patch_bytes,
-        allowed_paths=list(campaign.allowed_paths),
-        denied_paths=list(campaign.denied_paths),
-        max_patch_bytes=patch_limits.get("max_patch_bytes"),
-        max_added_line_chars=patch_limits.get("max_added_line_chars"),
-        reject_renames=bool(patch_limits.get("reject_renames")),
-        reject_mode_changes=bool(patch_limits.get("reject_mode_changes")),
-    )
-    if not surface_res.ok:
-        obs.gate_failed(
-            submission_id=submission_id,
-            gate="surface",
-            error=surface_res.reason or "",
-            patch_sha256=patch_hash,
-        )
-        _fail(submission_id, surface_res, job_id=job_id)
-        return surface_res
-    obs.gate_passed(
-        submission_id=submission_id, gate="surface", patch_sha256=patch_hash
-    )
-    append_event(
-        submission_id,
-        SubmissionState.SURFACE_OK,
-        detail={"files": surface_res.evidence.get("files")},
-    )
-
-    # d1. Obfuscation scan (optional, deterministic)
-    if patch_limits.get("reject_obfuscation"):
-        obf_res = check_obfuscation(patch_bytes=patch_bytes)
-        if not obf_res.ok:
-            obs.gate_failed(
-                submission_id=submission_id,
-                gate="obfuscation",
-                error=obf_res.reason or "",
-                patch_sha256=patch_hash,
-            )
-            _fail(submission_id, obf_res, job_id=job_id)
-            return obf_res
-        obs.gate_passed(
-            submission_id=submission_id, gate="obfuscation", patch_sha256=patch_hash
-        )
-
-    # d2. LLM review (optional, reject-only; never rewrites the patch). A
-    # provider outage defers the job; it never skips the review.
-    llm_review = (campaign.bench or {}).get("llm_review")
-    if llm_review:
-        review_res = check_llm_review(
+            row=row,
+            campaign=campaign,
             patch_bytes=patch_bytes,
             patch_hash=patch_hash,
-            spec=llm_review,
+            job_id=job_id,
+            local_repo=local_repo,
+            apply_root=apply_root,
         )
-        if not review_res.ok and review_res.evidence.get("retryable"):
-            deferred = _defer_llm_review(submission_id, row, review_res)
-            if deferred is not None:
-                return deferred
-        if not review_res.ok:
-            obs.gate_failed(
-                submission_id=submission_id,
-                gate="llm_review",
-                error=review_res.reason or "",
-                patch_sha256=patch_hash,
-            )
-            _fail(submission_id, review_res, job_id=job_id)
-            return review_res
-        obs.gate_passed(
-            submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
-        )
+    if stop is not None:
+        return stop
 
     # e. Hermetic build
     append_event(submission_id, SubmissionState.BUILDING, detail={})
@@ -334,6 +259,136 @@ def process_submission(
     return build_res
 
 
+@contextmanager
+def _apply_workspace(work_root: Path | None) -> Iterator[Path]:
+    """A caller's work_root is left in place; otherwise a temporary one is used."""
+    if work_root is not None:
+        yield work_root
+        return
+    root = Path(tempfile.mkdtemp(prefix="pareton-apply-"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _apply_and_review(
+    *,
+    submission_id: str,
+    row: dict[str, Any],
+    campaign: Any,
+    patch_bytes: bytes,
+    patch_hash: str,
+    job_id: Any,
+    local_repo: Path | None,
+    apply_root: Path,
+) -> GateResult | None:
+    """Gates c to d2. Returns the result that stops the pipeline, else None."""
+    # c. Base apply
+    if local_repo is not None:
+        apply_res = check_base_apply_local(repo_dir=local_repo, patch_bytes=patch_bytes)
+    else:
+        apply_res = check_base_apply(
+            baseline_repo=row["baseline_repo"],
+            baseline_commit=campaign.baseline_commit,
+            patch_bytes=patch_bytes,
+            work_root=apply_root,
+        )
+    if not apply_res.ok:
+        obs.gate_failed(
+            submission_id=submission_id,
+            gate="base_apply",
+            error=apply_res.reason or "",
+            patch_sha256=patch_hash,
+        )
+        _fail(submission_id, apply_res, job_id=job_id)
+        return apply_res
+    obs.gate_passed(
+        submission_id=submission_id, gate="base_apply", patch_sha256=patch_hash
+    )
+    append_event(submission_id, SubmissionState.APPLIED, detail={"ok": True})
+
+    # d. Surface
+    patch_limits = (campaign.bench or {}).get("patch_limits") or {}
+    surface_res = check_surface(
+        patch_bytes=patch_bytes,
+        allowed_paths=list(campaign.allowed_paths),
+        denied_paths=list(campaign.denied_paths),
+        max_patch_bytes=patch_limits.get("max_patch_bytes"),
+        max_added_line_chars=patch_limits.get("max_added_line_chars"),
+        reject_renames=bool(patch_limits.get("reject_renames")),
+        reject_mode_changes=bool(patch_limits.get("reject_mode_changes")),
+    )
+    if not surface_res.ok:
+        obs.gate_failed(
+            submission_id=submission_id,
+            gate="surface",
+            error=surface_res.reason or "",
+            patch_sha256=patch_hash,
+        )
+        _fail(submission_id, surface_res, job_id=job_id)
+        return surface_res
+    obs.gate_passed(
+        submission_id=submission_id, gate="surface", patch_sha256=patch_hash
+    )
+    append_event(
+        submission_id,
+        SubmissionState.SURFACE_OK,
+        detail={"files": surface_res.evidence.get("files")},
+    )
+
+    # Baseline and patched files, comments stripped, for d1 and d2.
+    try:
+        view = build_source_view(Path(apply_res.evidence["repo_dir"]), patch_bytes)
+    except (SourceViewError, KeyError, subprocess.TimeoutExpired) as exc:
+        result = GateResult.reject("source_view_failed", error=str(exc)[:500])
+        _fail(submission_id, result, job_id=job_id)
+        return result
+
+    # d1. Obfuscation scan (every campaign; deterministic)
+    obf_res = check_obfuscation(patch_bytes=patch_bytes, post_texts=view.post_texts)
+    if not obf_res.ok:
+        obs.gate_failed(
+            submission_id=submission_id,
+            gate="obfuscation",
+            error=obf_res.reason or "",
+            patch_sha256=patch_hash,
+        )
+        _fail(submission_id, obf_res, job_id=job_id)
+        return obf_res
+    obs.gate_passed(
+        submission_id=submission_id, gate="obfuscation", patch_sha256=patch_hash
+    )
+
+    # d2. LLM review (optional, reject-only; never rewrites the patch). A
+    # provider outage defers the job; it never skips the review.
+    llm_review = (campaign.bench or {}).get("llm_review")
+    if llm_review:
+        review_res = check_llm_review(
+            review_text=view.review_diff,
+            patch_hash=patch_hash,
+            spec=llm_review,
+            strip_summary=view.strip_summary(),
+        )
+        if not review_res.ok and review_res.evidence.get("retryable"):
+            deferred = _defer_llm_review(submission_id, row, review_res)
+            if deferred is not None:
+                return deferred
+        if not review_res.ok:
+            obs.gate_failed(
+                submission_id=submission_id,
+                gate="llm_review",
+                error=review_res.reason or "",
+                patch_sha256=patch_hash,
+            )
+            _fail(submission_id, review_res, job_id=job_id)
+            return review_res
+        obs.gate_passed(
+            submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
+        )
+    return None
+
+
 def _defer_llm_review(
     submission_id: str, row: dict[str, Any], result: GateResult
 ) -> GateResult | None:
@@ -345,16 +400,8 @@ def _defer_llm_review(
     attempt = int(row.get("job_attempt") or 1)
     if job_id is None or attempt >= config.LLM_REVIEW_MAX_ATTEMPTS:
         return None
-    delay_s = min(
-        config.LLM_REVIEW_RETRY_BASE_S * 2 ** (attempt - 1),
-        config.LLM_REVIEW_RETRY_MAX_S,
-    )
-    if not defer_job(
-        job_id=int(job_id),
-        attempt=attempt,
-        delay_s=delay_s,
-        last_error=f"{result.reason}: {result.evidence.get('detail', '')}",
-    ):
+    detail = f"{result.reason}: {result.evidence.get('detail', '')}"
+    if not defer_job(job_id=int(job_id), attempt=attempt, last_error=detail):
         # Superseded attempt; whoever holds the job now settles it.
         logger.warning("submission %s: deferral did not land", submission_id)
     logger.warning(
@@ -363,13 +410,17 @@ def _defer_llm_review(
         result.evidence.get("detail"),
         attempt + 1,
         config.LLM_REVIEW_MAX_ATTEMPTS,
-        delay_s,
+        config.LLM_REVIEW_RETRY_AFTER_S,
     )
     return GateResult(
         ok=False,
         state=SubmissionState.SURFACE_OK,
         reason="llm_review_deferred",
-        evidence={**result.evidence, "retry_in_s": delay_s, "attempt": attempt},
+        evidence={
+            **result.evidence,
+            "retry_in_s": config.LLM_REVIEW_RETRY_AFTER_S,
+            "attempt": attempt,
+        },
     )
 
 

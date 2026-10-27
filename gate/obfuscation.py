@@ -18,29 +18,21 @@ be written another way; that trade-off is deliberate.
 
 from __future__ import annotations
 
+import io
 import re
+import tokenize
 import unicodedata
 from dataclasses import dataclass
 
+from gate.comment_strip import C_SUFFIXES as _C_ONLY
+from gate.comment_strip import CXX_SUFFIXES
 from gate.types import GateResult, SubmissionState
 
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 _PY_SUFFIXES = (".py", ".pyi", ".pyx", ".pxd")
-_C_SUFFIXES = (
-    ".c",
-    ".cc",
-    ".cpp",
-    ".cxx",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".cu",
-    ".cuh",
-    ".inl",
-    ".tcc",
-)
+_C_SUFFIXES = _C_ONLY + CXX_SUFFIXES
 
 _MAX_FINDINGS = 50
 _SNIPPET_CHARS = 160
@@ -79,7 +71,7 @@ _NON_LITERAL_ATTR = r"\s*,(?!\s*[\"'][\w.]*[\"']\s*[,)])"
 
 _PY_RULES = _rules(
     # Code built or loaded at runtime.
-    ("dynamic_code", r"(?<![\w.])(?:exec|eval|compile)\s*\("),
+    ("dynamic_code", r"(?<![\w.])(?<!def )(?:exec|eval|compile)\s*\("),
     ("dynamic_code", r"\b__import__\s*\("),
     (
         "dynamic_code",
@@ -137,6 +129,16 @@ _PY_RULES = _rules(
     # Environment flips can select a dtype far from the code that uses it.
     ("env_mutation", r"\bos\s*\.\s*environ\s*\[[^\]]+\]\s*=(?!=)"),
     ("env_mutation", r"\bos\s*\.\s*(?:environ\s*\.\s*(?:update|setdefault)|putenv)\b"),
+    # Assigning into a framework module, e.g. torch.bfloat16 = torch.float8_e4m3fn
+    # or tl.float32 = tl.float16, changes every use of it far from this line.
+    # Anchored at the start of a statement so annotations (x: torch.Tensor = ...)
+    # don't match.
+    (
+        "dtype_rebinding",
+        r"^\s*(?:torch|tl|triton\s*\.\s*language|T|tilelang\s*\.\s*language"
+        r"|cute|cutlass|flashinfer|deep_gemm)\s*\.\s*[\w.]+\s*(?:\[[^\]]*\])?\s*"
+        r"(?:=(?!=)|[-+*/|&^%@]=)",
+    ),
 )
 
 _C_RULES = _rules(
@@ -145,6 +147,31 @@ _C_RULES = _rules(
     ("encoded_payload", r"\\[uU][0-9a-fA-F]{4,8}"),
     # Trigraphs.
     ("encoded_payload", r"\?\?[=/'()!<>\-]"),
+    # A line splice inside a token (an identifier or number split across
+    # lines) reads as two words to a person and as one to the compiler.
+    ("token_splice", r"[A-Za-z0-9_]\\[ \t]*$"),
+    # Redefining a built-in or CUDA floating-point type name, so that code
+    # which says half or float gets a different type.
+    (
+        "dtype_rebinding",
+        r"^\s*#\s*(?:define|undef)\s+(?:half2?|__half2?|float|double|"
+        r"(?:__)?nv_bfloat162?|__nv_fp8\w*|__nv_fp4\w*|bfloat16(?:_t)?|half_t|"
+        r"float_e\dm\d_t|tfloat32_t|float32_t|float16_t|__float2half\w*|"
+        r"__float2bfloat16\w*|__half2float|__bfloat162float)\b",
+    ),
+    (
+        "dtype_rebinding",
+        r"\b(?:using\s+(?:half2?|__half2?|(?:__)?nv_bfloat162?|bfloat16_t|half_t"
+        r"|float_e\dm\d_t)\s*=|typedef\b[^;]*\b(?:half2?|__half2?|"
+        r"(?:__)?nv_bfloat162?|bfloat16_t|half_t|float_e\dm\d_t)\s*;)",
+    ),
+)
+
+# Names that run code from data. Checked on the token stream of the patched
+# file, so an alias (f = eval), a call split across lines or a reference
+# without parentheses is caught too.
+_PY_DYNAMIC_NAMES = frozenset(
+    {"exec", "eval", "compile", "__import__", "__builtins__", "breakpoint"}
 )
 
 
@@ -179,8 +206,52 @@ def _char_findings(text: str) -> list[str]:
     return rules
 
 
-def scan_patch(patch_text: str) -> list[Finding]:
+def _python_token_findings(
+    path: str, text: str, added: dict[int, str]
+) -> list[Finding]:
+    """Bare references to the builtins in _PY_DYNAMIC_NAMES on added lines."""
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        return []
+    significant = [
+        t
+        for t in toks
+        if t.type
+        not in (tokenize.NL, tokenize.COMMENT, tokenize.INDENT, tokenize.DEDENT)
+    ]
+    out: list[Finding] = []
+    for i, tok in enumerate(significant):
+        if tok.type != tokenize.NAME or tok.string not in _PY_DYNAMIC_NAMES:
+            continue
+        if tok.start[0] not in added:
+            continue
+        prev = significant[i - 1].string if i else ""
+        nxt = significant[i + 1].string if i + 1 < len(significant) else ""
+        # model.eval(), torch.compile(...), def eval(self), eval=False as a
+        # keyword argument or parameter.
+        if prev in (".", "def", "class"):
+            continue
+        if nxt == "=" and prev in ("(", ","):
+            continue
+        out.append(
+            Finding(
+                path,
+                tok.start[0],
+                "dynamic_code",
+                added[tok.start[0]].strip()[:_SNIPPET_CHARS],
+            )
+        )
+    return out
+
+
+def scan_patch(
+    patch_text: str, post_texts: dict[str, str] | None = None
+) -> list[Finding]:
+    """Scan added lines; ``post_texts`` (patched file contents) enables the
+    token-level Python checks."""
     findings: list[Finding] = []
+    added_by_file: dict[str, dict[int, str]] = {}
     path = ""
     new_line = 0
     in_hunk = False
@@ -201,6 +272,7 @@ def scan_patch(patch_text: str) -> list[Finding]:
             new_line += 1
             continue
         code = raw[1:]
+        added_by_file.setdefault(path, {})[new_line] = code
         rules: list[tuple[str, re.Pattern[str]]] = list(_GENERAL_RULES)
         if path.endswith(_PY_SUFFIXES):
             rules += _PY_RULES
@@ -211,16 +283,33 @@ def scan_patch(patch_text: str) -> list[Finding]:
         snippet = code.strip()[:_SNIPPET_CHARS]
         findings.extend(Finding(path, new_line, rule, snippet) for rule in sorted(hits))
         new_line += 1
+    if post_texts:
+        seen = {(f.file, f.line, f.rule) for f in findings}
+        for path, added in added_by_file.items():
+            text = post_texts.get(path)
+            if text is None or not path.endswith(_PY_SUFFIXES):
+                continue
+            for f in _python_token_findings(path, text, added):
+                if (f.file, f.line, f.rule) not in seen:
+                    seen.add((f.file, f.line, f.rule))
+                    findings.append(f)
+    findings.sort(key=lambda f: (f.file, f.line, f.rule))
     return findings
 
 
-def check_obfuscation(*, patch_bytes: bytes) -> GateResult:
-    """Reject the patch if any added line matches an obfuscation rule."""
+def check_obfuscation(
+    *, patch_bytes: bytes, post_texts: dict[str, str] | None = None
+) -> GateResult:
+    """Reject the patch if any added line matches an obfuscation rule.
+
+    Mandatory for every campaign. ``post_texts`` maps each touched path to its
+    patched contents (from the source view) for the token-level checks.
+    """
     try:
         patch_text = patch_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return GateResult.reject("obfuscation_invalid_patch")
-    findings = scan_patch(patch_text)
+    findings = scan_patch(patch_text, post_texts)
     if findings:
         return GateResult.reject(
             "obfuscation_detected",
