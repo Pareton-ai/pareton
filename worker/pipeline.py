@@ -346,7 +346,11 @@ def _apply_and_review(
         return result
 
     # d1. Obfuscation scan (every campaign; deterministic)
-    obf_res = check_obfuscation(patch_bytes=patch_bytes, post_texts=view.post_texts)
+    obf_res = check_obfuscation(
+        patch_bytes=patch_bytes,
+        post_texts=view.post_texts,
+        added_lines=view.added_lines,
+    )
     if not obf_res.ok:
         obf_res = _private_until_reveal(obf_res)
         obs.gate_failed(

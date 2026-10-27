@@ -15,6 +15,7 @@ PATCH = b"diff --git a/x.py b/x.py\n"
 VIEW = SimpleNamespace(
     review_diff="diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n",
     post_texts={"x.py": "b\n"},
+    added_lines={"x.py": {1: "b"}},
     strip_summary=lambda: {"status_counts": {"no_comments": 2}, "comments_kept": []},
 )
 
@@ -189,6 +190,7 @@ def test_obfuscation_gate_runs_for_every_campaign(run):
     (call,) = calls["obfuscation"]
     assert call["patch_bytes"] is PATCH
     assert call["post_texts"] == VIEW.post_texts
+    assert call["added_lines"] == VIEW.added_lines
     assert calls["view"] == [(pipeline.Path("/repo"), PATCH)]
     assert calls["build"] == 1
 

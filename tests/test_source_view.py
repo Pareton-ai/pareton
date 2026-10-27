@@ -131,3 +131,29 @@ def test_patch_that_does_not_apply_raises(repo):
     )
     with pytest.raises(SourceViewError):
         build_source_view(repo, bad)
+
+
+def test_added_lines_come_from_git(repo):
+    def edit(r):
+        p = r / "pkg" / "kv.py"
+        p.write_text(p.read_text() + "run = eval  # new\n")
+        (r / "pkg" / "n.cu").write_text("int a;\n")
+
+    view = build_source_view(repo, _patch(repo, edit))
+    assert view.added_lines == {
+        "pkg/kv.py": {7: "run = eval  # new"},
+        "pkg/n.cu": {1: "int a;"},
+    }
+
+
+def test_section_without_diff_git_header_is_still_seen(repo):
+    # A plain unified section after a git one: git applies it, so the source
+    # view (and d1) see its added lines under the right path.
+    patch = (
+        b"diff --git a/pkg/old.py b/pkg/old.py\n--- a/pkg/old.py\n+++ b/pkg/old.py\n"
+        b"@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        b"--- a/pkg/kv.py\n+++ b/pkg/kv.py\n@@ -5,2 +5,3 @@\n def f():\n"
+        b"     return 1\n+run = eval\n"
+    )
+    view = build_source_view(repo, patch)
+    assert view.added_lines.get("pkg/kv.py") == {7: "run = eval"}

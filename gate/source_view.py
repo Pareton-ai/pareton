@@ -11,6 +11,7 @@ of the real files, because stripping keeps every line.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from pathlib import Path
 from gate.comment_strip import STRIPPED, StripResult, strip_comments
 
 _GIT_TIMEOUT_S = 120
+_HUNK_NEW_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 class SourceViewError(Exception):
@@ -33,6 +35,9 @@ class FileView:
     pre_strip: StripResult | None
     post_strip: StripResult | None
     utf8: bool = True
+    # Lines the patch adds to this file, by line number in the patched file,
+    # as git computes them from the two versions (comments included).
+    added: dict[int, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +48,10 @@ class SourceView:
     @property
     def post_texts(self) -> dict[str, str]:
         return {f.path: f.post for f in self.files if f.post is not None}
+
+    @property
+    def added_lines(self) -> dict[str, dict[int, str]]:
+        return {f.path: f.added for f in self.files if f.added}
 
     def strip_summary(self) -> dict[str, object]:
         """Per-status file counts and the files whose comments were kept."""
@@ -162,6 +171,7 @@ def build_source_view(
                     path=path,
                     pre=pre,
                     post=post,
+                    added=_added_lines(tmp, pre, post),
                     # A file that isn't valid UTF-8 is shown as is.
                     pre_strip=strip_comments(path, pre)
                     if pre is not None and utf8
@@ -174,6 +184,41 @@ def build_source_view(
             )
         review = "".join(_file_diff(tmp, f) for f in files)
     return SourceView(tuple(files), review)
+
+
+def _added_lines(tmp: Path, pre: str | None, post: str | None) -> dict[int, str]:
+    """Lines of ``post`` that are not in ``pre``, by git's own diff."""
+    if post is None:
+        return {}
+    sides = []
+    for name, text in (("pre-raw", pre), ("post-raw", post)):
+        if text is None:
+            sides.append("/dev/null")
+            continue
+        p = tmp / name
+        p.write_text(text, encoding="utf-8", errors="surrogatepass")
+        sides.append(str(p))
+    proc = subprocess.run(
+        ["git", "diff", "--no-index", "--no-color", "--no-ext-diff", "--text", "-U0"]
+        + sides,
+        capture_output=True,
+        timeout=_GIT_TIMEOUT_S,
+    )
+    if proc.returncode not in (0, 1):
+        raise SourceViewError("git diff failed")
+    added: dict[int, str] = {}
+    new_line = 0
+    in_hunk = False
+    for raw in proc.stdout.decode("utf-8", errors="replace").split("\n"):
+        h = _HUNK_NEW_RE.match(raw)
+        if h:
+            new_line, in_hunk = int(h.group(1)), True
+            continue
+        # With -U0 a hunk has only "-", "+" and "\ No newline" lines.
+        if in_hunk and raw.startswith("+"):
+            added[new_line] = raw[1:]
+            new_line += 1
+    return added
 
 
 def _view_text(text: str | None, res: StripResult | None) -> str | None:

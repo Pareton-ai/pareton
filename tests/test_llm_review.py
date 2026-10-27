@@ -377,3 +377,22 @@ def test_unknown_response_format_fails_closed(endpoint, monkeypatch):
     with pytest.raises(llm_review.LLMReviewError) as exc:
         llm_review.openai_chat_client("kimi-k3")([])
     assert exc.value.reason == "llm_review_unconfigured"
+
+
+@pytest.mark.parametrize(
+    "url", ["http://api.engy.ai/v1", "ftp://llm.test", "api.engy.ai/v1"]
+)
+def test_client_requires_https(endpoint, monkeypatch, url):
+    monkeypatch.setattr(config, "LLM_REVIEW_BASE_URL", url)
+    monkeypatch.setattr(
+        llm_review.requests, "post", lambda *a, **k: pytest.fail("must not send")
+    )
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")
+    assert exc.value.reason == "llm_review_unconfigured"
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1:9/v1", "http://localhost:8765/v1"])
+def test_client_allows_plain_http_to_this_host(endpoint, monkeypatch, url):
+    monkeypatch.setattr(config, "LLM_REVIEW_BASE_URL", url)
+    assert callable(llm_review.openai_chat_client("kimi-k3"))

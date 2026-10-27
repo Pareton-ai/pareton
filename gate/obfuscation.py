@@ -245,13 +245,14 @@ def _python_token_findings(
     return out
 
 
-def scan_patch(
-    patch_text: str, post_texts: dict[str, str] | None = None
-) -> list[Finding]:
-    """Scan added lines; ``post_texts`` (patched file contents) enables the
-    token-level Python checks."""
-    findings: list[Finding] = []
-    added_by_file: dict[str, dict[int, str]] = {}
+def added_lines_from_patch(patch_text: str) -> dict[str, dict[int, str]]:
+    """Added lines per file and new line number, parsed from a git diff.
+
+    The worker does not use this: it takes added lines from the source view,
+    which git computed from the files it actually applied. This parser is for
+    tests and tools that have only a patch.
+    """
+    added: dict[str, dict[int, str]] = {}
     path = ""
     new_line = 0
     in_hunk = False
@@ -266,30 +267,44 @@ def scan_patch(
             continue
         if not in_hunk or not raw:
             continue
-        if raw[0] == "-":
+        if raw[0] in "-\\":
+            # Removed lines, and "\ No newline at end of file", which is not
+            # a line of either side.
             continue
         if raw[0] != "+":
             new_line += 1
             continue
-        code = raw[1:]
-        added_by_file.setdefault(path, {})[new_line] = code
+        added.setdefault(path, {})[new_line] = raw[1:]
+        new_line += 1
+    return added
+
+
+def scan_added(
+    added: dict[str, dict[int, str]], post_texts: dict[str, str] | None = None
+) -> list[Finding]:
+    """Scan added lines; ``post_texts`` (patched file contents) enables the
+    token-level Python checks."""
+    findings: list[Finding] = []
+    for path, lines in added.items():
         rules: list[tuple[str, re.Pattern[str]]] = list(_GENERAL_RULES)
         if path.endswith(_PY_SUFFIXES):
             rules += _PY_RULES
         elif path.endswith(_C_SUFFIXES):
             rules += _C_RULES
-        hits = {name for name, pattern in rules if pattern.search(code)}
-        hits.update(_char_findings(code))
-        snippet = code.strip()[:_SNIPPET_CHARS]
-        findings.extend(Finding(path, new_line, rule, snippet) for rule in sorted(hits))
-        new_line += 1
+        for line_no, code in lines.items():
+            hits = {name for name, pattern in rules if pattern.search(code)}
+            hits.update(_char_findings(code))
+            snippet = code.strip()[:_SNIPPET_CHARS]
+            findings.extend(
+                Finding(path, line_no, rule, snippet) for rule in sorted(hits)
+            )
     if post_texts:
         seen = {(f.file, f.line, f.rule) for f in findings}
-        for path, added in added_by_file.items():
+        for path, lines in added.items():
             text = post_texts.get(path)
             if text is None or not path.endswith(_PY_SUFFIXES):
                 continue
-            for f in _python_token_findings(path, text, added):
+            for f in _python_token_findings(path, text, lines):
                 if (f.file, f.line, f.rule) not in seen:
                     seen.add((f.file, f.line, f.rule))
                     findings.append(f)
@@ -297,19 +312,32 @@ def scan_patch(
     return findings
 
 
+def scan_patch(
+    patch_text: str, post_texts: dict[str, str] | None = None
+) -> list[Finding]:
+    return scan_added(added_lines_from_patch(patch_text), post_texts)
+
+
 def check_obfuscation(
-    *, patch_bytes: bytes, post_texts: dict[str, str] | None = None
+    *,
+    patch_bytes: bytes,
+    post_texts: dict[str, str] | None = None,
+    added_lines: dict[str, dict[int, str]] | None = None,
 ) -> GateResult:
     """Reject the patch if any added line matches an obfuscation rule.
 
     Mandatory for every campaign. ``post_texts`` maps each touched path to its
     patched contents (from the source view) for the token-level checks.
+    ``added_lines`` (also from the source view) are the lines git added, per
+    file; without them the patch text is parsed instead.
     """
     try:
         patch_text = patch_bytes.decode("utf-8")
     except UnicodeDecodeError:
         return GateResult.reject("obfuscation_invalid_patch")
-    findings = scan_patch(patch_text, post_texts)
+    if added_lines is None:
+        added_lines = added_lines_from_patch(patch_text)
+    findings = scan_added(added_lines, post_texts)
     if findings:
         return GateResult.reject(
             "obfuscation_detected",

@@ -282,3 +282,27 @@ def test_gate_uses_post_texts():
     assert check_obfuscation(patch_bytes=diff.encode()).ok
     res = check_obfuscation(patch_bytes=diff.encode(), post_texts={"x.py": text})
     assert res.reason == "obfuscation_detected"
+
+
+def test_no_newline_marker_does_not_shift_line_numbers():
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -1,2 +1,3 @@\n y = 1\n-last\n\\ No newline at end of file\n"
+        "+run = eval\n+run(src)\n"
+    )
+    text = "y = 1\nrun = eval\nrun(src)\n"
+    findings = scan_patch(diff, {"x.py": text})
+    assert [(f.line, f.rule) for f in findings] == [(2, "dynamic_code")]
+
+
+def test_gate_prefers_git_added_lines_over_patch_text():
+    # A section without a "diff --git" header would be misattributed by a
+    # patch parser; the worker passes the lines git actually added.
+    diff = "diff --git a/n.md b/n.md\n--- a/n.md\n+++ b/n.md\n@@ -0,0 +1 @@\n+ok\n"
+    res = check_obfuscation(
+        patch_bytes=diff.encode(),
+        post_texts={"x.py": "run = eval\n"},
+        added_lines={"x.py": {1: "run = eval"}},
+    )
+    assert res.reason == "obfuscation_detected"
+    assert res.evidence["findings"][0]["file"] == "x.py"

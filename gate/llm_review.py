@@ -30,6 +30,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -89,6 +90,7 @@ _THINK_RE = re.compile(r"^\s*<think>.*?</think>", flags=re.DOTALL)
 _MAX_REASON_CHARS = 2000
 _MAX_WHY_CHARS = 500
 _MAX_HUNKS = 200
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 
 class LLMReviewError(Exception):
@@ -272,6 +274,15 @@ def openai_chat_client(model: str) -> ChatClient:
         raise LLMReviewError(
             "llm_review_unconfigured",
             "set PARETON_LLM_REVIEW_BASE_URL and PARETON_LLM_REVIEW_API_KEY",
+        )
+    # The key and private patches go to this URL: TLS only, except to this
+    # host (tests, the manual outage check).
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS
+    ):
+        raise LLMReviewError(
+            "llm_review_unconfigured", "PARETON_LLM_REVIEW_BASE_URL must use https"
         )
 
     def _call(messages: list[dict[str, str]]) -> str:

@@ -132,7 +132,11 @@ def review(args: argparse.Namespace) -> int:
     )
 
     _step(5, "Obfuscation scan (gate d1, every campaign)")
-    obf = check_obfuscation(patch_bytes=patch_bytes, post_texts=view.post_texts)
+    obf = check_obfuscation(
+        patch_bytes=patch_bytes,
+        post_texts=view.post_texts,
+        added_lines=view.added_lines,
+    )
     if obf.ok:
         print("  [OK] no obfuscation findings")
     else:

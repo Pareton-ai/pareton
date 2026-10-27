@@ -81,7 +81,7 @@ already uses these constructs is not penalised. Any hit rejects with
 | `dynamic_code` | Python | `exec`/`eval`/builtin `compile`, `__import__`, `importlib.import_module`, `pickle`/`marshal` loads, `builtins`, `types.CodeType`; also any bare reference to `exec`, `eval`, `compile`, `__import__`, `__builtins__` or `breakpoint` on an added line (an alias like `run = eval`, or a call split across lines), found on the token stream of the patched file |
 | `dynamic_code` | C family | `dlopen`, `dlsym`, `system`, `popen`, `exec*` |
 | `encoded_payload` | Python | base64/hex/codecs/rot13 decoding, `zlib`/`lzma`/`bz2`/`gzip` decompress |
-| `encoded_payload` | C family | universal character names (`a`), trigraphs |
+| `encoded_payload` | C family | universal character names (`\u0061`), trigraphs |
 | `reflection` | Python | `getattr`/`setattr` on `torch`, `sys`, `os`, `config`, `server_args` with a non-literal name; writes through `globals()`, `sys.modules[...]`, `__dict__[...]`, `__code__`, `operator.attrgetter` |
 | `runtime_native_code` | Python | `load_inline`, `cpp_extension`, `ctypes.CDLL`, `cffi`, `nvrtc`, `cupy.RawKernel`, `torch.ops.load_library` |
 | `env_mutation` | Python | writing `os.environ` or `os.putenv` |
