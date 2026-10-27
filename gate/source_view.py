@@ -58,6 +58,11 @@ class SourceView:
         counts: dict[str, int] = {}
         kept: list[dict[str, str]] = []
         for f in self.files:
+            if not f.utf8:
+                # Not decoded, so not stripped: the reviewer sees it as is.
+                counts["not_utf8"] = counts.get("not_utf8", 0) + 1
+                kept.append({"file": f.path, "side": "both", "status": "not_utf8"})
+                continue
             for side, res in (("pre", f.pre_strip), ("post", f.post_strip)):
                 if res is None:
                     continue

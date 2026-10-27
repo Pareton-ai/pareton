@@ -256,6 +256,37 @@ def test_python_call_split_across_lines_is_flagged():
 @pytest.mark.parametrize(
     "text",
     [
+        'void* h = dlopen \\\n  ("libx.so", RTLD_NOW);\n',
+        'void* h = dlopen /* load */ ("libx.so", RTLD_NOW);\n',
+        'void* h = dlopen\n  ("libx.so", RTLD_NOW);\n',
+        'int r = sys\\\ntem("id");\n',
+    ],
+)
+def test_c_call_split_across_lines_is_flagged(text):
+    added = range(1, text.count("\n") + 1)
+    assert "dynamic_code" in {f.rule for f in _post("k.cu", text, *added)}
+
+
+def test_python_rule_split_across_lines_is_flagged():
+    text = "import zlib\nx = zlib \\\n  .decompress(b)\ny = getattr(\n  torch, name)\n"
+    rules = {f.rule for f in _post("x.py", text, 2, 3, 4, 5)}
+    assert {"encoded_payload", "reflection"} <= rules
+
+
+def test_statement_match_in_unchanged_code_is_not_flagged():
+    text = 'void* h = dlopen\n  ("libx.so", RTLD_NOW);\nint y = 1;\n'
+    assert _post("k.cu", text, 3) == []
+
+
+def test_comment_text_does_not_join_a_statement():
+    # Stripped comments never feed a cross-line match.
+    text = "int x = 1; // dlopen\n(void)x;\n"
+    assert _post("k.cu", text, 1, 2) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "model.eval()\n",
         "fn = torch.compile(fn)\n",
         "def eval(self):\n    pass\n",

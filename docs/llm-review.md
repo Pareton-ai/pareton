@@ -76,6 +76,12 @@ already uses these constructs is not penalised. Any hit rejects with
 `obfuscation_detected`; the event detail lists `rules` and up to 50
 `findings` (file, new line number, rule, snippet).
 
+Each rule is matched twice: on every added line, and over the whole patched
+file with comments stripped and line splices joined, so a construct split
+across lines (`dlopen \` then `("x", RTLD_NOW)`, `dlopen /* c */ (`, a call
+broken after its name, `getattr(` with its arguments on the next line) is
+caught when any of its lines is added. `token_splice` is checked per line only.
+
 | rule | files | catches |
 | --- | --- | --- |
 | `dynamic_code` | Python | `exec`/`eval`/builtin `compile`, `__import__`, `importlib.import_module`, `pickle`/`marshal` loads, `builtins`, `types.CodeType`; also any bare reference to `exec`, `eval`, `compile`, `__import__`, `__builtins__` or `breakpoint` on an added line (an alias like `run = eval`, or a call split across lines), found on the token stream of the patched file |

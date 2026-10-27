@@ -115,6 +115,24 @@ def test_unparseable_file_is_shown_with_comments_and_a_note(repo):
     ]
 
 
+def test_non_utf8_file_is_listed_as_kept(repo):
+    (repo / "pkg" / "k.cu").write_bytes(b"// \xff kernel\nusing T = float;\n")
+    _git(repo, "add", "-A")
+    patch = subprocess.run(
+        ["git", "diff", "--cached", "--binary"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    ).stdout
+    _git(repo, "reset", "-q", "--hard")
+
+    summary = build_source_view(repo, patch).strip_summary()
+    assert {"file": "pkg/k.cu", "side": "both", "status": "not_utf8"} in summary[
+        "comments_kept"
+    ]
+    assert summary["status_counts"]["not_utf8"] == 1
+
+
 def test_working_tree_is_not_touched(repo):
     def edit(r):
         (r / "pkg" / "kv.py").write_text("KV_DTYPE = 'fp4'\n")

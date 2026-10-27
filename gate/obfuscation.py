@@ -18,6 +18,7 @@ be written another way; that trade-off is deliberate.
 
 from __future__ import annotations
 
+import bisect
 import io
 import re
 import tokenize
@@ -25,7 +26,7 @@ import unicodedata
 from dataclasses import dataclass
 
 from gate.comment_strip import C_SUFFIXES as _C_ONLY
-from gate.comment_strip import CXX_SUFFIXES
+from gate.comment_strip import CXX_SUFFIXES, NO_COMMENTS, STRIPPED, strip_comments
 from gate.types import GateResult, SubmissionState
 
 _DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
@@ -167,6 +168,22 @@ _C_RULES = _rules(
     ),
 )
 
+# The same rules, for matching across the lines of one statement (a call
+# split by a line splice, a comment or a newline). token_splice is about a
+# single physical line, so it stays per-line only.
+_STATEMENT_RULES = {
+    lang: tuple(
+        (name, re.compile(p.pattern, p.flags | re.MULTILINE))
+        for name, p in rules
+        if name != "token_splice"
+    )
+    for lang, rules in (
+        ("py", _GENERAL_RULES + _PY_RULES),
+        ("c", _GENERAL_RULES + _C_RULES),
+    )
+}
+_SPLICE_RE = re.compile(r"\\\r?\n")
+
 # Names that run code from data. Checked on the token stream of the patched
 # file, so an alias (f = eval), a call split across lines or a reference
 # without parentheses is caught too.
@@ -245,6 +262,52 @@ def _python_token_findings(
     return out
 
 
+def _statement_findings(
+    path: str, text: str, added: dict[int, str], lang: str
+) -> list[Finding]:
+    """Rule matches over the whole patched file that touch an added line.
+
+    Comments are stripped (when that is verified safe; stripping keeps every
+    newline) and line splices are joined as the compiler joins them, so a
+    match can span the lines of a statement. Offsets are mapped back to line
+    numbers in the patched file.
+    """
+    stripped = strip_comments(path, text)
+    if stripped.status in (STRIPPED, NO_COMMENTS):
+        text = stripped.text
+    parts = _SPLICE_RE.split(text)
+    # Offset in the joined text at which each splice was removed.
+    splices: list[int] = []
+    pos = 0
+    for part in parts[:-1]:
+        pos += len(part)
+        splices.append(pos)
+    text = "".join(parts)
+    newlines = [m.start() for m in re.finditer("\n", text)]
+
+    def line_of(offset: int) -> int:
+        return (
+            1
+            + bisect.bisect_left(newlines, offset)
+            + bisect.bisect_right(splices, offset)
+        )
+
+    out: list[Finding] = []
+    for name, pattern in _STATEMENT_RULES[lang]:
+        for m in pattern.finditer(text):
+            # A leading \s* can reach back over blank lines; start at the
+            # first character of the match that is not whitespace.
+            start = m.start() + len(m.group()) - len(m.group().lstrip())
+            first = line_of(start)
+            last = line_of(max(start, m.end() - 1))
+            for line_no in range(first, last + 1):
+                if line_no in added:
+                    snippet = added[line_no].strip()[:_SNIPPET_CHARS]
+                    out.append(Finding(path, line_no, name, snippet))
+                    break
+    return out
+
+
 def added_lines_from_patch(patch_text: str) -> dict[str, dict[int, str]]:
     """Added lines per file and new line number, parsed from a git diff.
 
@@ -283,6 +346,7 @@ def scan_added(
     added: dict[str, dict[int, str]], post_texts: dict[str, str] | None = None
 ) -> list[Finding]:
     """Scan added lines; ``post_texts`` (patched file contents) enables the
+    checks that span lines: the rules matched over whole statements, and the
     token-level Python checks."""
     findings: list[Finding] = []
     for path, lines in added.items():
@@ -302,9 +366,16 @@ def scan_added(
         seen = {(f.file, f.line, f.rule) for f in findings}
         for path, lines in added.items():
             text = post_texts.get(path)
-            if text is None or not path.endswith(_PY_SUFFIXES):
+            if text is None:
                 continue
-            for f in _python_token_findings(path, text, lines):
+            if path.endswith(_PY_SUFFIXES):
+                extra = _statement_findings(path, text, lines, "py")
+                extra += _python_token_findings(path, text, lines)
+            elif path.endswith(_C_SUFFIXES):
+                extra = _statement_findings(path, text, lines, "c")
+            else:
+                continue
+            for f in extra:
                 if (f.file, f.line, f.rule) not in seen:
                     seen.add((f.file, f.line, f.rule))
                     findings.append(f)
