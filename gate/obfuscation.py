@@ -182,7 +182,13 @@ _STATEMENT_RULES = {
         ("c", _GENERAL_RULES + _C_RULES),
     )
 }
-_SPLICE_RE = re.compile(r"\\\r?\n")
+# Line splices as each language joins them. GCC, like the comment lexer
+# (_CLexer.splice_len), also accepts blanks between the backslash and the
+# newline; Python does not.
+_SPLICE_RE = {
+    "py": re.compile(r"\\\r?\n"),
+    "c": re.compile(r"\\[ \t\f\v]*\r?\n"),
+}
 
 # Names that run code from data. Checked on the token stream of the patched
 # file, so an alias (f = eval), a call split across lines or a reference
@@ -275,7 +281,7 @@ def _statement_findings(
     stripped = strip_comments(path, text)
     if stripped.status in (STRIPPED, NO_COMMENTS):
         text = stripped.text
-    parts = _SPLICE_RE.split(text)
+    parts = _SPLICE_RE[lang].split(text)
     # Offset in the joined text at which each splice was removed.
     splices: list[int] = []
     pos = 0

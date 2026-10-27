@@ -273,6 +273,14 @@ def test_python_rule_split_across_lines_is_flagged():
     assert {"encoded_payload", "reflection"} <= rules
 
 
+def test_c_splice_with_trailing_blanks_from_unchanged_line_is_flagged():
+    # GCC joins "sys\ " and the next line into system(...); only the second
+    # line is added, so the per-line token_splice rule never sees the first.
+    text = 'int r = sys\\  \ntem("id");\n'
+    findings = _post("k.cu", text, 2)
+    assert [(f.line, f.rule) for f in findings] == [(2, "dynamic_code")]
+
+
 def test_statement_match_in_unchanged_code_is_not_flagged():
     text = 'void* h = dlopen\n  ("libx.so", RTLD_NOW);\nint y = 1;\n'
     assert _post("k.cu", text, 3) == []
