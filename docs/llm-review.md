@@ -126,7 +126,8 @@ calibrated correctness bars stay the numerical authority; treat every
 ### What it does
 
 - One tool-free `POST <base_url>/chat/completions` call with a fixed system
-  prompt and `temperature: 0`.
+  prompt and `temperature: 0`. The base URL must be `https` (plain `http`
+  only to this host), and redirects are not followed.
 - The comment-stripped review diff goes inside a fence tag derived from the
   patch hash, so the patch cannot close the fence itself. The prompt says that
   comments were removed, and treats anything left (strings, and files marked
@@ -166,8 +167,9 @@ Everything else rejects at once:
 | `llm_review_patch_too_large` | review diff longer than `PARETON_LLM_REVIEW_MAX_INPUT_CHARS` |
 
 Valid verdicts are cached on disk, keyed by patch hash, policy, model, a hash
-of the system prompt and the review-view version (bumped when stripping
-changes), so a retry of the same patch gets the same answer. Failures and
+of the system prompt, the review-view version (bumped when stripping
+changes) and a hash of the review diff itself (the same patch can apply to two
+baselines with different context), so a retry of the same patch gets the same answer. Failures and
 deferrals are not cached.
 
 ### Engy

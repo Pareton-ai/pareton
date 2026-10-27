@@ -292,8 +292,8 @@ def endpoint(monkeypatch):
 def test_client_posts_tool_free_chat_completion(endpoint, monkeypatch):
     seen = {}
 
-    def post(url, headers, json, timeout):
-        seen.update(url=url, headers=headers, body=json)
+    def post(url, headers, json, timeout, allow_redirects=True):
+        seen.update(url=url, headers=headers, body=json, redirects=allow_redirects)
         return _resp(
             body={"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}
         )
@@ -357,7 +357,7 @@ def test_client_sends_requested_response_format(
     monkeypatch.setattr(config, "LLM_REVIEW_RESPONSE_FORMAT", mode)
     seen = {}
 
-    def post(url, headers, json, timeout):
+    def post(url, headers, json, timeout, allow_redirects=True):
         seen["body"] = json
         return _resp(
             body={"choices": [{"message": {"content": "x"}, "finish_reason": "stop"}]}
@@ -396,3 +396,30 @@ def test_client_requires_https(endpoint, monkeypatch, url):
 def test_client_allows_plain_http_to_this_host(endpoint, monkeypatch, url):
     monkeypatch.setattr(config, "LLM_REVIEW_BASE_URL", url)
     assert callable(llm_review.openai_chat_client("kimi-k3"))
+
+
+def test_client_does_not_follow_redirects(endpoint, monkeypatch):
+    seen = {}
+
+    def post(url, headers, json, timeout, allow_redirects=True):
+        seen["redirects"] = allow_redirects
+        return _resp(status=307)
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    with pytest.raises(llm_review.LLMReviewError):
+        llm_review.openai_chat_client("kimi-k3")([{"role": "user", "content": "x"}])
+    assert seen["redirects"] is False
+
+
+def test_cache_is_keyed_on_review_text(tmp_path):
+    # Same patch hash, different baseline context: a fresh review.
+    _check(tmp_path, FakeClient(_verdict("pass")))
+    client = FakeClient(_verdict("pass"))
+    check_llm_review(
+        review_text=PATCH.decode().replace("class KVPool:", "class KVPool2:"),
+        patch_hash="ab" * 32,
+        spec=SPEC,
+        client=client,
+        cache_dir=tmp_path,
+    )
+    assert len(client.calls) == 1

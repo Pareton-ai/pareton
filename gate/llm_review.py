@@ -301,6 +301,8 @@ def openai_chat_client(model: str) -> ChatClient:
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=body,
                 timeout=config.LLM_REVIEW_TIMEOUT_S,
+                # A 307/308 would resend the private diff to wherever it points.
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise LLMReviewError("llm_review_unavailable", type(exc).__name__) from exc
@@ -331,7 +333,7 @@ def openai_chat_client(model: str) -> ChatClient:
 REVIEW_VIEW_VERSION = "stripped-v1"
 
 
-def _cache_key(patch_hash: str, spec: dict) -> str:
+def _cache_key(patch_hash: str, spec: dict, review_text: str) -> str:
     prompt_sha = hashlib.sha256(_SYSTEM_PROMPTS[spec["policy"]].encode()).hexdigest()
     pin = json.dumps(
         {
@@ -340,6 +342,10 @@ def _cache_key(patch_hash: str, spec: dict) -> str:
             "model": spec["model"],
             "prompt_sha256": prompt_sha,
             "view": REVIEW_VIEW_VERSION,
+            # The same patch can apply to two baselines with different context.
+            "review_sha256": hashlib.sha256(
+                review_text.encode("utf-8", errors="surrogatepass")
+            ).hexdigest(),
         },
         sort_keys=True,
     )
@@ -400,7 +406,7 @@ def check_llm_review(
     """
     spec = validate_llm_review(spec)
     cache_dir = cache_dir or config.LLM_REVIEW_CACHE_DIR
-    key = _cache_key(patch_hash, spec)
+    key = _cache_key(patch_hash, spec, review_text)
     evidence: dict[str, Any] = {"policy": spec["policy"], "model": spec["model"]}
     if strip_summary is not None:
         evidence["comment_strip"] = strip_summary
