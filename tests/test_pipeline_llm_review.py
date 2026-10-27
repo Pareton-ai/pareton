@@ -203,3 +203,17 @@ def test_source_view_failure_rejects(run):
     assert res.reason == "source_view_failed"
     assert calls["review"] == []
     assert calls["build"] == 0
+
+
+def test_obfuscation_event_omits_patch_snippets(run):
+    finding = {"file": "x.py", "line": 3, "rule": "dynamic_code", "snippet": "eval(s)"}
+    res, calls = run(
+        {},
+        obfuscation=GateResult.reject(
+            "obfuscation_detected", rules=["dynamic_code"], findings=[finding]
+        ),
+    )
+    state, detail = calls["events"][-1]
+    assert state == SubmissionState.REJECTED
+    assert detail["findings"] == [{"file": "x.py", "line": 3, "rule": "dynamic_code"}]
+    assert "eval(s)" not in str(detail)

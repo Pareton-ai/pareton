@@ -348,6 +348,7 @@ def _apply_and_review(
     # d1. Obfuscation scan (every campaign; deterministic)
     obf_res = check_obfuscation(patch_bytes=patch_bytes, post_texts=view.post_texts)
     if not obf_res.ok:
+        obf_res = _without_snippets(submission_id, obf_res)
         obs.gate_failed(
             submission_id=submission_id,
             gate="obfuscation",
@@ -387,6 +388,38 @@ def _apply_and_review(
             submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
         )
     return None
+
+
+def _without_snippets(submission_id: str, result: GateResult) -> GateResult:
+    """Drop patch text from d1 findings before they go into a public event.
+
+    Submission events are served by the public API, and a patch can be
+    private until reveal. File, line and rule are enough for the miner, who
+    has the patch; the snippets go to the worker log only.
+    """
+    findings = result.evidence.get("findings")
+    if not findings:
+        return result
+    for f in findings:
+        logger.warning(
+            "submission %s: obfuscation %s at %s:%s: %s",
+            submission_id,
+            f.get("rule"),
+            f.get("file"),
+            f.get("line"),
+            f.get("snippet"),
+        )
+    return GateResult(
+        ok=result.ok,
+        state=result.state,
+        reason=result.reason,
+        evidence={
+            **result.evidence,
+            "findings": [
+                {k: v for k, v in f.items() if k != "snippet"} for f in findings
+            ],
+        },
+    )
 
 
 def _defer_llm_review(
