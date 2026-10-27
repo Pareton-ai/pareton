@@ -92,7 +92,11 @@ def review(args: argparse.Namespace) -> int:
             patch_bytes=patch_bytes,
             work_root=work,
         )
-    if not _ok(apply_res.ok, f"patch applies to the baseline ({apply_res.reason})"):
+    if not _ok(
+        apply_res.ok,
+        "patch applies to the baseline"
+        + (f" ({apply_res.reason})" if apply_res.reason else ""),
+    ):
         print(json.dumps(apply_res.evidence, indent=2, default=str)[:PREVIEW_CHARS])
         return 1
 
