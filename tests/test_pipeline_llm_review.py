@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gate.types import GateResult, SubmissionState
+from gate.types import PRIVATE_DETAIL_KEY, GateResult, SubmissionState
 from worker import pipeline
 
 pytestmark = pytest.mark.unit
@@ -121,7 +121,7 @@ def test_review_reject_stops_before_build_and_keeps_patch(run):
     assert call["spec"] == spec
     state, detail = calls["events"][-1]
     assert state == SubmissionState.REJECTED
-    assert detail["llm_reason"] == "KV fp4"
+    assert detail[PRIVATE_DETAIL_KEY]["llm_reason"] == "KV fp4"
 
 
 def test_review_pass_continues_to_build(run):
@@ -205,7 +205,7 @@ def test_source_view_failure_rejects(run):
     assert calls["build"] == 0
 
 
-def test_obfuscation_event_omits_patch_snippets(run):
+def test_obfuscation_snippets_are_private_until_reveal(run):
     finding = {"file": "x.py", "line": 3, "rule": "dynamic_code", "snippet": "eval(s)"}
     res, calls = run(
         {},
@@ -216,4 +216,21 @@ def test_obfuscation_event_omits_patch_snippets(run):
     state, detail = calls["events"][-1]
     assert state == SubmissionState.REJECTED
     assert detail["findings"] == [{"file": "x.py", "line": 3, "rule": "dynamic_code"}]
-    assert "eval(s)" not in str(detail)
+    assert detail[PRIVATE_DETAIL_KEY] == {"findings": [finding]}
+
+
+def test_llm_reasons_are_private_until_reveal(run):
+    hunk = {"file": "x.py", "hunk": "@@ -1 +1 @@", "why": "KV cast to fp4"}
+    rejected = GateResult.reject(
+        "llm_review_rejected", llm_reason="lowers KV to fp4", offending_hunks=[hunk]
+    )
+    _res, calls = run({"llm_review": SPEC}, rejected)
+    _state, detail = calls["events"][-1]
+    assert "llm_reason" not in detail
+    assert detail["offending_hunks"] == [{"file": "x.py", "hunk": "@@ -1 +1 @@"}]
+    assert detail[PRIVATE_DETAIL_KEY] == {
+        "llm_reason": "lowers KV to fp4",
+        "offending_hunks": [hunk],
+    }
+    public = {k: v for k, v in detail.items() if k != PRIVATE_DETAIL_KEY}
+    assert "fp4" not in str(public)

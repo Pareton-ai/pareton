@@ -58,6 +58,17 @@ Validation on upstream trees (every file, not just samples):
 `tests/test_comment_strip.py` runs the tricky cases against `g++` when it is
 installed.
 
+## What the public API shows
+
+Submission events are public, and a patch can be private. Text that describes
+the patch goes under `detail.private_until_reveal` in the reject event: the
+d1 `findings` with their snippets, and the d2 `llm_reason` and
+`offending_hunks` with the model's `why`. The API replaces it with
+`"withheld"` until the patch is revealed, which never happens for a campaign in
+`private` patch mode or for a patch rejected before evaluation. The public
+part keeps file, line and rule for d1 and file and hunk header for d2, which
+the miner can match against their own patch.
+
 ## Obfuscation scan (d1)
 
 `gate/obfuscation.py` scans only the lines a patch adds, so upstream code that

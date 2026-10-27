@@ -343,3 +343,58 @@ def test_download_rejects_ambiguous_hash_and_missing_submission(revealing, monke
     assert response.status_code == 404
     assert response.headers["cache-control"] == "no-store"
     assert publications == []
+
+
+SECRET = {
+    "llm_reason": "casts the KV cache to fp4",
+    "findings": [
+        {"file": "x.py", "line": 3, "rule": "dynamic_code", "snippet": "eval(s)"}
+    ],
+}
+
+
+def _reject_with_private_detail(events):
+    events.append(
+        {
+            "state": "rejected",
+            "detail": {
+                "reason": "llm_review_rejected",
+                "offending_hunks": [{"file": "x.py", "hunk": "@@ -1 +1 @@"}],
+                "private_until_reveal": SECRET,
+            },
+            "created_at": NOW,
+        }
+    )
+
+
+def _rejected_detail(client, path):
+    events = client.get(path).json()["events"]
+    return next(e["detail"] for e in events if e["state"] == "rejected")
+
+
+def test_review_reasons_never_shown_for_private_campaigns(scenario):
+    client, row, events = scenario
+    row["_patch_visibility"] = {"mode": "private"}
+    _reject_with_private_detail(events)
+    for path in (BASE, f"/v1/submissions/{HASH}"):
+        response = client.get(path)
+        assert "fp4" not in response.text
+        assert "eval(s)" not in response.text
+        detail = _rejected_detail(client, path)
+        assert detail["private_until_reveal"] == "withheld"
+        assert detail["offending_hunks"] == [{"file": "x.py", "hunk": "@@ -1 +1 @@"}]
+
+
+@pytest.mark.parametrize("age", [None, 21599, 21600])
+def test_review_reasons_shown_only_after_reveal(revealing, age):
+    client, row, events, _ = revealing
+    row["_patch_evaluated_at"] = (
+        NOW - timedelta(seconds=age) if age is not None else None
+    )
+    _reject_with_private_detail(events)
+    detail = _rejected_detail(client, BASE)
+    if age is not None and age >= 21600:
+        assert detail["private_until_reveal"] == SECRET
+    else:
+        assert detail["private_until_reveal"] == "withheld"
+        assert "fp4" not in client.get(BASE).text
