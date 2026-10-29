@@ -693,13 +693,17 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
             ),
             "max_model_len": context.get("max_model_len"),
         }
+        # Long-form receipts store selections without ids; the trace names
+        # them hf-NNN by position and gives every request the rule's
+        # max_tokens.
         metadata = {
-            request["request_id"]: {
-                key: request.get(key)
-                for key in ("input_tokens", "max_tokens", "input_length_group")
+            request.get("request_id", f"hf-{index:03d}"): {
+                "input_tokens": request.get("input_tokens"),
+                "max_tokens": request.get("max_tokens", receipt.get("max_tokens")),
+                "input_length_group": request.get("input_length_group"),
             }
-            for request in receipt.get("requests", [])
-            if isinstance(request, dict) and "request_id" in request
+            for index, request in enumerate(receipt.get("requests", []))
+            if isinstance(request, dict)
         }
         prompts = [
             {**prompt, **metadata.get(prompt.get("request_id"), {})}

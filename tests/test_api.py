@@ -1270,7 +1270,14 @@ def test_fixed_length_exgentic_report_keeps_concurrency_and_ttft_cap(
         "request_concurrency": 16,
         "request_timeout_s": 600,
         "ignore_eos": True,
+        "max_tokens": 220,
+        "requests": [
+            {"row_index": 7, "input_tokens": 2048, "input_length_group": "2k"}
+        ],
     }
+    row["report"]["score_report"]["prompts"] = [
+        {"request_id": "hf-000", "speedup": 0.3, "aligned_tokens": 220}
+    ]
     breakdown = {
         "weighted_speedup": 0.3,
         "eligible_speedup": 0.0,
@@ -1296,6 +1303,8 @@ def test_fixed_length_exgentic_report_keeps_concurrency_and_ttft_cap(
     assert body["workload"]["ignore_eos"] is True
     assert body["workload"]["request_concurrency"] == 16
     assert "request_interval_ms" not in body["workload"]
+    assert body["prompts"][0]["max_tokens"] == 220
+    assert body["prompts"][0]["input_length_group"] == "2k"
 
 
 @pytest.mark.parametrize("kind", ["baseline", "scored", "infra_failed"])
