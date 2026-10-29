@@ -86,7 +86,7 @@ def _seed(tmp_path: Path) -> tuple[Path, bytes, str]:
         success_threshold=">=10% at SLA",
         submission_fee={"amount_tao": "0", "recipient": "5Test"},
         status="open",
-        bench={"llm_review": SPEC},
+        bench={"llm_review": SPEC, "obfuscation": {"rules": "v1"}},
     )
     now = datetime.now(timezone.utc)
     draft = build_manifest(

@@ -337,6 +337,12 @@ def _apply_and_review(
         detail={"files": surface_res.evidence.get("files")},
     )
 
+    bench = campaign.bench or {}
+    obfuscation = bench.get("obfuscation")
+    llm_review = bench.get("llm_review")
+    if not (obfuscation or llm_review):
+        return None
+
     # Baseline and patched files, comments stripped, for d1 and d2.
     try:
         view = build_source_view(Path(apply_res.evidence["repo_dir"]), patch_bytes)
@@ -345,29 +351,29 @@ def _apply_and_review(
         _fail(submission_id, result, job_id=job_id)
         return result
 
-    # d1. Obfuscation scan (every campaign; deterministic)
-    obf_res = check_obfuscation(
-        patch_bytes=patch_bytes,
-        post_texts=view.post_texts,
-        added_lines=view.added_lines,
-    )
-    if not obf_res.ok:
-        obf_res = _private_until_reveal(obf_res)
-        obs.gate_failed(
-            submission_id=submission_id,
-            gate="obfuscation",
-            error=obf_res.reason or "",
-            patch_sha256=patch_hash,
+    # d1. Obfuscation scan (optional per campaign; deterministic)
+    if obfuscation:
+        obf_res = check_obfuscation(
+            patch_bytes=patch_bytes,
+            post_texts=view.post_texts,
+            added_lines=view.added_lines,
         )
-        _fail(submission_id, obf_res, job_id=job_id)
-        return obf_res
-    obs.gate_passed(
-        submission_id=submission_id, gate="obfuscation", patch_sha256=patch_hash
-    )
+        if not obf_res.ok:
+            obf_res = _private_until_reveal(obf_res)
+            obs.gate_failed(
+                submission_id=submission_id,
+                gate="obfuscation",
+                error=obf_res.reason or "",
+                patch_sha256=patch_hash,
+            )
+            _fail(submission_id, obf_res, job_id=job_id)
+            return obf_res
+        obs.gate_passed(
+            submission_id=submission_id, gate="obfuscation", patch_sha256=patch_hash
+        )
 
     # d2. LLM review (optional, reject-only; never rewrites the patch). A
     # provider outage defers the job; it never skips the review.
-    llm_review = (campaign.bench or {}).get("llm_review")
     if llm_review:
         review_res = check_llm_review(
             review_text=view.review_diff,

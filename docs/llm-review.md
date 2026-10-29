@@ -3,13 +3,16 @@
 Two reject-only gates run after the surface check (d) and before the hermetic
 build (e). Neither rewrites the patch.
 
-- **d1, obfuscation scan**: runs for every campaign. A deterministic scan
-  that rejects added code which hides what it does.
+- **d1, obfuscation scan** (`bench.obfuscation`, optional per campaign): a
+  deterministic scan that rejects added code which hides what it does.
 - **d2, LLM review** (`bench.llm_review`, optional per campaign): asks an
   LLM whether a patch lowers activation or KV-cache precision. It reads the
   patch with comments removed.
 
-d1 forces a dtype change to be written plainly, and d2 looks for it.
+d1 forces a dtype change to be written plainly, and d2 looks for it. Both are
+pinned in the campaign manifest like every other acceptance rule; the dtype
+campaign turns both on. With neither set, the worker skips the source view
+too.
 
 ## Source view
 
@@ -72,7 +75,11 @@ the miner can match against their own patch.
 ## Obfuscation scan (d1)
 
 `gate/obfuscation.py` scans only the lines a patch adds, so upstream code that
-already uses these constructs is not penalised. Any hit rejects with
+already uses these constructs is not penalised. It reads them with comments
+stripped, the same code d2 sees, so a comment that says `compile` or uses a
+Greek letter is not a finding; only the invisible/bidi character check reads
+the raw line. (When a file's comments can't be stripped safely, both gates
+read it as is.) Any hit rejects with
 `obfuscation_detected`; the event detail lists `rules` and up to 50
 `findings` (file, new line number, rule, snippet).
 
@@ -84,14 +91,14 @@ caught when any of its lines is added. `token_splice` is checked per line only.
 
 | rule | files | catches |
 | --- | --- | --- |
-| `dynamic_code` | Python | `exec`/`eval`/builtin `compile`, `__import__`, `importlib.import_module`, `pickle`/`marshal` loads, `builtins`, `types.CodeType`; also any bare reference to `exec`, `eval`, `compile`, `__import__`, `__builtins__` or `breakpoint` on an added line (an alias like `run = eval`, or a call split across lines), found on the token stream of the patched file |
+| `dynamic_code` | Python | `exec`/`eval`/builtin `compile`, `__import__`, `importlib.import_module` unless its argument starts with a literal module path, `pickle`/`marshal` loads, `builtins`, `types.CodeType`; also any bare reference to `exec`, `eval`, `compile`, `__import__`, `__builtins__` or `breakpoint` on an added line (an alias like `run = eval`, or a call split across lines), found on the token stream of the patched file |
 | `dynamic_code` | C family | `dlopen`, `dlsym`, `system`, `popen`, `exec*` |
 | `encoded_payload` | Python | base64/hex/codecs/rot13 decoding, `zlib`/`lzma`/`bz2`/`gzip` decompress |
-| `encoded_payload` | C family | universal character names (`\u0061`), trigraphs |
+| `encoded_payload` | C family | universal character names (`\u0061`) outside string and character literals, trigraphs |
 | `reflection` | Python | `getattr`/`setattr` on `torch`, `sys`, `os`, `config`, `server_args` with a non-literal name; writes through `globals()`, `sys.modules[...]`, `__dict__[...]`, `__code__`, `operator.attrgetter` |
 | `runtime_native_code` | Python | `load_inline`, `cpp_extension`, `ctypes.CDLL`, `cffi`, `nvrtc`, `cupy.RawKernel`, `torch.ops.load_library` |
-| `env_mutation` | Python | writing `os.environ` or `os.putenv` |
-| `dtype_rebinding` | Python | assigning into a framework module at the start of a statement: `torch.bfloat16 = ...`, `tl.float32 = ...`, `torch.bmm = ...`, `torch.backends...allow_tf32 = ...` (also `T.`, `cute.`, `cutlass.`, `flashinfer.`, `deep_gemm.`) |
+| `env_mutation` | Python | writing an environment variable whose name is about precision (`DTYPE`, `PRECISION`, `FP8`, `FP4`, `BF16`, `TF32`, `QUANT`, ...) through `os.environ[...] =`, `setdefault`, `update` or `os.putenv`; NCCL, logging and other tuning variables are allowed |
+| `dtype_rebinding` | Python | assigning into a framework module at the start of a statement: `torch.bfloat16 = ...`, `tl.float32 = ...`, `torch.bmm = ...`, `torch.backends...allow_tf32 = ...`, but not the compiler knobs under `torch._dynamo.config` or `torch._inductor.config` (also `T.`, `cute.`, `cutlass.`, `flashinfer.`, `deep_gemm.`) |
 | `dtype_rebinding` | C family | `#define`/`#undef` of `half`, `float`, `__nv_bfloat16`, `__nv_fp8_*`, `bfloat16_t`, `half_t`, `float_e4m3_t` and the like, or `using`/`typedef` that redefines one of those names |
 | `token_splice` | C family | a backslash line splice right after an identifier or number character, which splits one token across two lines |
 | `encoded_blob` | all | a 120+ character base64 run or 128+ character hex run |
@@ -106,9 +113,11 @@ macro token pasting, aliases such as `using Element = cutlass::half_t;`,
 are allowed.
 
 Calibration: treating every line of upstream `sglang/srt` 0.5.22 (881k lines)
-as added produces about 340 findings, mostly in `environ.py`, lazy-import
-plumbing, chat templates and `torch._dynamo.config` tuning, so ordinary kernel
-and scheduler work rarely trips it. Two real Kimi-K3 candidate patches produced
+as added produces 229 findings (339 before comments were stripped and the
+`env_mutation`/`dtype_rebinding` rules were narrowed), mostly `pickle.loads`
+in IPC code, dynamic imports in registries, base64 decoding of multimodal
+inputs, and non-ASCII text in chat templates, so ordinary kernel and scheduler
+work rarely trips it. Two real Kimi-K3 candidate patches produced
 none under the earlier rule set (before `dtype_rebinding`, `token_splice` and
 the token-level check); `scripts/llm_review_manual.py` shows d1 findings for
 any saved patch. A legitimate patch that needs one of these constructs has to be written
@@ -190,16 +199,22 @@ may be silently ignored. Probe it with `scripts/llm_review_manual.py
 decoding, the gate still validates the verdict: a schema can't check that a
 cited hunk exists in the diff.
 
-## Enabling d2 for a campaign
+## Enabling the gates for a campaign
 
-d1 needs no setting. d2 is a campaign field added only when set
-(`bench.llm_review`), so existing campaigns keep their manifest hashes:
+Both are campaign fields added only when set (`bench.obfuscation`,
+`bench.llm_review`), so existing campaigns keep their manifest hashes. The
+dtype campaign is seeded with both:
 
 ```bash
 python -m campaign.seed ... \
+  --obfuscation v1 \
   --llm-review dtype_precision_v1 \
   --llm-review-model kimi-k3
 ```
+
+`v1` names d1's rule set. A later change to the rules ships as a new value
+that a new campaign opts into, so a live campaign's acceptance rules don't
+move under it.
 
 The model id is pinned in the manifest. The endpoint and key live in `.env`:
 

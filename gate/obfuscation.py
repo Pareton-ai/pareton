@@ -1,6 +1,7 @@
 """Gate d1: reject added code that hides what it does.
 
-A deterministic scan of the lines a patch adds. It does not try to prove a
+Optional per campaign (bench.obfuscation), pinned in the manifest like every
+other acceptance rule. A deterministic scan of the lines a patch adds. It does not try to prove a
 patch honest; it rejects the constructs that make a patch hard to review, so
 that a dtype change has to be written plainly where the LLM review (d2) and a
 human can see it. Unlike the LLM review it gives the same answer every time,
@@ -35,6 +36,9 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _PY_SUFFIXES = (".py", ".pyi", ".pyx", ".pxd")
 _C_SUFFIXES = _C_ONLY + CXX_SUFFIXES
 
+# Rule sets a campaign can pin in bench.obfuscation.rules.
+RULE_SETS = ("v1",)
+
 _MAX_FINDINGS = 50
 _SNIPPET_CHARS = 160
 
@@ -67,6 +71,13 @@ _GENERAL_RULES = _rules(
     ("reviewer_directed_text", r"(?i)\bprecision[\s-]+neutral\b"),
 )
 
+# A fragment of an environment variable name that is about precision, e.g.
+# SGLANG_KV_CACHE_DTYPE, NVIDIA_TF32_OVERRIDE, SGLANG_ENABLE_FP8_GEMM.
+_DTYPE_ENV = (
+    r"(?i:dtype|precision|fp4|fp8|fp16|fp32|bf16|bfloat16|float16|half|tf32"
+    r"|quant|e4m3|e5m2|nvfp4|mxfp)"
+)
+
 # An attribute name that is not a plain string literal.
 _NON_LITERAL_ATTR = r"\s*,(?!\s*[\"'][\w.]*[\"']\s*[,)])"
 
@@ -76,8 +87,11 @@ _PY_RULES = _rules(
     ("dynamic_code", r"\b__import__\s*\("),
     (
         "dynamic_code",
-        r"\bimportlib\s*\.\s*(?:import_module|reload|util\s*\.\s*(?:spec_from|"
-        r"module_from))|\bfrom\s+importlib(?:\.util)?\s+import\b",
+        # import_module is allowed when its argument starts with a literal
+        # module path, as in import_module(f"sglang.srt.layers.{name}").
+        r"\bimportlib\s*\.\s*(?:import_module\s*\((?!\s*[rbuf]*[\"'][A-Za-z_][\w.]*)"
+        r"|reload|util\s*\.\s*(?:spec_from|module_from))"
+        r"|\bfrom\s+importlib(?:\.util)?\s+import\b",
     ),
     ("dynamic_code", r"\b(?:marshal|pickle|dill|cloudpickle)\s*\.\s*loads?\b"),
     ("dynamic_code", r"\btypes\s*\.\s*(?:CodeType|FunctionType)\b"),
@@ -128,15 +142,28 @@ _PY_RULES = _rules(
     ),
     ("runtime_native_code", r"\btorch\s*\.\s*ops\s*\.\s*load_library\b"),
     # Environment flips can select a dtype far from the code that uses it.
-    ("env_mutation", r"\bos\s*\.\s*environ\s*\[[^\]]+\]\s*=(?!=)"),
-    ("env_mutation", r"\bos\s*\.\s*(?:environ\s*\.\s*(?:update|setdefault)|putenv)\b"),
+    # Only variables whose name is about precision; NCCL, logging and other
+    # tuning variables are ordinary performance work.
+    (
+        "env_mutation",
+        r"\bos\s*\.\s*environ\s*\[\s*[rbuf]*[\"'][\w.-]*"
+        + _DTYPE_ENV
+        + r"[\w.-]*[\"']\s*\]\s*=(?!=)",
+    ),
+    (
+        "env_mutation",
+        r"\bos\s*\.\s*(?:environ\s*\.\s*(?:update|setdefault)|putenv)\s*\("
+        r"[^)]*?[\"'][\w.-]*" + _DTYPE_ENV,
+    ),
     # Assigning into a framework module, e.g. torch.bfloat16 = torch.float8_e4m3fn
     # or tl.float32 = tl.float16, changes every use of it far from this line.
     # Anchored at the start of a statement so annotations (x: torch.Tensor = ...)
-    # don't match.
+    # don't match. torch._dynamo.config and torch._inductor.config are compiler
+    # tuning knobs, not numerics; TF32 flags under torch.backends still match.
     (
         "dtype_rebinding",
-        r"^\s*(?:torch|tl|triton\s*\.\s*language|T|tilelang\s*\.\s*language"
+        r"^\s*(?:torch(?!\s*\.\s*_(?:dynamo|inductor)\s*\.\s*config\b)"
+        r"|tl|triton\s*\.\s*language|T|tilelang\s*\.\s*language"
         r"|cute|cutlass|flashinfer|deep_gemm)\s*\.\s*[\w.]+\s*(?:\[[^\]]*\])?\s*"
         r"(?:=(?!=)|[-+*/|&^%@]=)",
     ),
@@ -144,8 +171,6 @@ _PY_RULES = _rules(
 
 _C_RULES = _rules(
     ("dynamic_code", r"\b(?:dlopen|dlsym|popen|execve?|system)\s*\("),
-    # Universal character names smuggle identifiers past a reader.
-    ("encoded_payload", r"\\[uU][0-9a-fA-F]{4,8}"),
     # Trigraphs.
     ("encoded_payload", r"\?\?[=/'()!<>\-]"),
     # A line splice inside a token (an identifier or number split across
@@ -167,6 +192,11 @@ _C_RULES = _rules(
         r"(?:__)?nv_bfloat162?|bfloat16_t|half_t|float_e\dm\d_t)\s*;)",
     ),
 )
+
+# Universal character names outside string and character literals smuggle
+# identifiers past a reader; inside a literal ("µs") they are just text.
+_C_UCN_RE = re.compile(r"\\[uU][0-9a-fA-F]{4,8}")
+_C_LITERAL_RE = re.compile(r"\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'")
 
 # The same rules, for matching across the lines of one statement (a call
 # split by a line splice, a comment or a newline). token_splice is about a
@@ -227,6 +257,18 @@ def _char_findings(text: str) -> list[str]:
         elif cat.startswith("L"):
             rules.append("non_ascii_letter")
     return rules
+
+
+def _stripped_lines(path: str, text: str | None) -> list[str] | None:
+    """The patched file's lines with comments removed, or None when there is
+    no file text or stripping it isn't verified safe. Stripping keeps every
+    newline, so index i is line i + 1 of the patched file."""
+    if text is None:
+        return None
+    res = strip_comments(path, text)
+    if res.status not in (STRIPPED, NO_COMMENTS):
+        return None
+    return res.text.split("\n")
 
 
 def _python_token_findings(
@@ -353,7 +395,14 @@ def scan_added(
 ) -> list[Finding]:
     """Scan added lines; ``post_texts`` (patched file contents) enables the
     checks that span lines: the rules matched over whole statements, and the
-    token-level Python checks."""
+    token-level Python checks.
+
+    With the patched file at hand, the rules read each added line with its
+    comments stripped, the same code the LLM review sees, so a comment that
+    mentions ``compile`` or uses a Greek letter is not a finding. The
+    invisible/bidi character check always reads the raw line.
+    """
+    post_texts = post_texts or {}
     findings: list[Finding] = []
     for path, lines in added.items():
         rules: list[tuple[str, re.Pattern[str]]] = list(_GENERAL_RULES)
@@ -361,10 +410,19 @@ def scan_added(
             rules += _PY_RULES
         elif path.endswith(_C_SUFFIXES):
             rules += _C_RULES
-        for line_no, code in lines.items():
+        stripped = _stripped_lines(path, post_texts.get(path))
+        for line_no, raw in lines.items():
+            code = raw
+            if stripped is not None and line_no <= len(stripped):
+                code = stripped[line_no - 1]
             hits = {name for name, pattern in rules if pattern.search(code)}
-            hits.update(_char_findings(code))
-            snippet = code.strip()[:_SNIPPET_CHARS]
+            if path.endswith(_C_SUFFIXES) and _C_UCN_RE.search(
+                _C_LITERAL_RE.sub('""', code)
+            ):
+                hits.add("encoded_payload")
+            hits.update(r for r in _char_findings(code) if r == "non_ascii_letter")
+            hits.update(r for r in _char_findings(raw) if r != "non_ascii_letter")
+            snippet = raw.strip()[:_SNIPPET_CHARS]
             findings.extend(
                 Finding(path, line_no, rule, snippet) for rule in sorted(hits)
             )
@@ -393,6 +451,25 @@ def scan_patch(
     patch_text: str, post_texts: dict[str, str] | None = None
 ) -> list[Finding]:
     return scan_added(added_lines_from_patch(patch_text), post_texts)
+
+
+def validate_obfuscation(spec: dict | None) -> dict:
+    """Check bench.obfuscation, so a bad value fails at seed, not in the gate.
+
+    Returns {} when the scan is off; campaigns without it keep their hashes.
+    ``rules`` names the rule set, so a later change to the rules is a new
+    value a campaign opts into rather than a change under a live campaign.
+    """
+    if not spec:
+        return {}
+    if not isinstance(spec, dict):
+        raise ValueError("obfuscation must be an object")
+    unknown = set(spec) - {"rules"}
+    if unknown:
+        raise ValueError(f"unknown obfuscation keys: {sorted(unknown)}")
+    if spec.get("rules") not in RULE_SETS:
+        raise ValueError(f"obfuscation.rules must be one of {list(RULE_SETS)}")
+    return {"rules": spec["rules"]}
 
 
 def check_obfuscation(

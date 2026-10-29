@@ -110,6 +110,13 @@ def test_review_off_by_default_skips_gate(run):
     assert res.reason == "stop_after_gates"
 
 
+def test_gates_off_by_default_skip_source_view(run):
+    _res, calls = run({})
+    assert calls["obfuscation"] == []
+    assert calls["view"] == []
+    assert calls["build"] == 1
+
+
 def test_review_reject_stops_before_build_and_keeps_patch(run):
     spec = {"policy": "dtype_precision_v1", "model": "kimi-k3"}
     rejected = GateResult.reject("llm_review_rejected", llm_reason="KV fp4")
@@ -137,6 +144,7 @@ UNAVAILABLE = GateResult.reject(
     "llm_review_unavailable", retryable=True, detail="ReadTimeout"
 )
 SPEC = {"policy": "dtype_precision_v1", "model": "kimi-k3"}
+OBF = {"rules": "v1"}
 
 
 def test_outage_defers_job_and_never_builds(run, monkeypatch):
@@ -175,7 +183,7 @@ def test_outage_rejects_once_attempts_run_out(run, monkeypatch):
 
 def test_obfuscation_gate_runs_before_llm_review(run):
     res, calls = run(
-        {"llm_review": SPEC},
+        {"llm_review": SPEC, "obfuscation": OBF},
         GateResult.success(SubmissionState.SURFACE_OK),
         obfuscation=GateResult.reject("obfuscation_detected", rules=["dynamic_code"]),
     )
@@ -185,8 +193,8 @@ def test_obfuscation_gate_runs_before_llm_review(run):
     assert calls["events"][-1][0] == SubmissionState.REJECTED
 
 
-def test_obfuscation_gate_runs_for_every_campaign(run):
-    _res, calls = run({})
+def test_obfuscation_gate_runs_when_the_campaign_sets_it(run):
+    _res, calls = run({"obfuscation": OBF})
     (call,) = calls["obfuscation"]
     assert call["patch_bytes"] is PATCH
     assert call["post_texts"] == VIEW.post_texts
@@ -210,7 +218,7 @@ def test_source_view_failure_rejects(run):
 def test_obfuscation_snippets_are_private_until_reveal(run):
     finding = {"file": "x.py", "line": 3, "rule": "dynamic_code", "snippet": "eval(s)"}
     res, calls = run(
-        {},
+        {"obfuscation": OBF},
         obfuscation=GateResult.reject(
             "obfuscation_detected", rules=["dynamic_code"], findings=[finding]
         ),

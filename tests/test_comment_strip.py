@@ -172,12 +172,27 @@ _GCC_CASES = [
 ]
 
 
-@pytest.mark.skipif(shutil.which("g++") is None, reason="g++ not installed")
+_GCC_ARGS = ["g++", "-fpreprocessed", "-dD", "-E", "-P", "-x", "c++", "-w", "-"]
+
+
+def _gcc_preprocessed_supported() -> bool:
+    # On macOS g++ is Apple clang, which rejects -fpreprocessed.
+    if shutil.which("g++") is None:
+        return False
+    probe = subprocess.run(
+        _GCC_ARGS, input="int x;\n", capture_output=True, text=True, check=False
+    )
+    return probe.returncode == 0
+
+
+@pytest.mark.skipif(
+    not _gcc_preprocessed_supported(), reason="g++ with -fpreprocessed not available"
+)
 @pytest.mark.parametrize("src", _GCC_CASES)
 def test_c_matches_gcc_comment_removal(src):
     """g++ -fpreprocessed -E removes comments without expanding macros."""
     ref = subprocess.run(
-        ["g++", "-fpreprocessed", "-dD", "-E", "-P", "-x", "c++", "-w", "-"],
+        _GCC_ARGS,
         input=src,
         capture_output=True,
         text=True,

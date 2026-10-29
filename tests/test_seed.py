@@ -1401,6 +1401,23 @@ def test_seed_cli_pins_llm_review_only_when_set(monkeypatch):
     }
 
 
+def test_seed_cli_pins_obfuscation_only_when_set(monkeypatch):
+    captured = _patch_store(monkeypatch)
+    base = ["--submission-fee-tao", "0.15", "--allow-placeholders"]
+    assert main(base) == 0
+    assert "obfuscation" not in captured["manifest"].bench
+    assert main([*base, "--obfuscation", "v1"]) == 0
+    assert captured["manifest"].bench["obfuscation"] == {"rules": "v1"}
+
+
+@pytest.mark.parametrize("spec", [{"rules": "v2"}, {"rules": "v1", "extra": 1}, ["v1"]])
+def test_obfuscation_spec_is_validated(spec):
+    from gate.obfuscation import validate_obfuscation
+
+    with pytest.raises(ValueError):
+        validate_obfuscation(spec)
+
+
 def test_seed_cli_llm_review_flags_must_be_paired(monkeypatch):
     _patch_store(monkeypatch)
     rc = main(

@@ -40,6 +40,7 @@ from campaign.models import (
 from campaign.store import insert_campaign, insert_profile, list_campaigns
 from campaign.visibility import validate_patch_visibility
 from gate.llm_review import POLICIES, validate_llm_review
+from gate.obfuscation import RULE_SETS, validate_obfuscation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_SAMPLING_RULE = (
@@ -238,6 +239,7 @@ def build_seed_bench_spec(
     draft_model: dict | None = None,
     patch_limits: dict | None = None,
     llm_review: dict | None = None,
+    obfuscation: dict | None = None,
 ) -> dict:
     # Every campaign pins its own correctness thresholds. The values default
     # from config, but they are copied into the manifest here rather than read
@@ -271,6 +273,9 @@ def build_seed_bench_spec(
     llm_review = validate_llm_review(llm_review)
     if llm_review:
         bench["llm_review"] = llm_review
+    obfuscation = validate_obfuscation(obfuscation)
+    if obfuscation:
+        bench["obfuscation"] = obfuscation
     return bench
 
 
@@ -294,6 +299,7 @@ def seed_synthetic_campaign(
     bench_draft_model: dict | None = None,
     bench_patch_limits: dict | None = None,
     bench_llm_review: dict | None = None,
+    bench_obfuscation: dict | None = None,
     workload_pool: list[dict] | None = None,
     sampling_rule: dict | None = None,
     scoring_rule: dict | None = None,
@@ -390,6 +396,7 @@ def seed_synthetic_campaign(
             draft_model=bench_draft_model,
             patch_limits=bench_patch_limits,
             llm_review=bench_llm_review,
+            obfuscation=bench_obfuscation,
         )
     )
 
@@ -758,6 +765,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Model id sent to PARETON_LLM_REVIEW_BASE_URL; pinned in the manifest",
     )
+    p.add_argument(
+        "--obfuscation",
+        choices=RULE_SETS,
+        default=None,
+        help="Reject patches whose added code hides what it does, under this "
+        "rule set (unset: no scan)",
+    )
     args = p.parse_args(argv)
     try:
         visibility = {"mode": args.patch_visibility}
@@ -845,6 +859,9 @@ def main(argv: list[str] | None = None) -> int:
             bench_draft_model=draft_model,
             bench_patch_limits=patch_limits or None,
             bench_llm_review=llm_review or None,
+            bench_obfuscation=(
+                {"rules": args.obfuscation} if args.obfuscation else None
+            ),
             workload_pool=pool,
             sampling_rule=rule,
             scoring_rule=scoring,
