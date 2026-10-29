@@ -149,7 +149,13 @@ def verify_baseline_image(*, engine_ref, base_url, container):
 
 
 def evaluate_response(response, rule, input_tokens):
-    """Length is observed, never requested through min_tokens or ignore_eos."""
+    """Length is observed, never requested through min_tokens or ignore_eos.
+
+    A fixed-length rule (``ignore_eos``) is the exception: its rounds force
+    every output to ``max_tokens``, so a row only has to fill that allowance
+    with nonempty text. Forced tails are not graded for degeneracy here, as in
+    the round's baseline drop check.
+    """
     choices = response.get("choices")
     usage = response.get("usage")
     if (
@@ -184,7 +190,7 @@ def evaluate_response(response, rule, input_tokens):
         reason = "short_output"
     elif not text.strip():
         reason = "empty_output"
-    else:
+    elif not rule.get("ignore_eos"):
         reason = degeneracy_reason(text)
     return {
         "completion_tokens": count,
@@ -356,7 +362,7 @@ def qualify(
                         "prompt": candidate["prompt"],
                         "max_tokens": rule["max_tokens"],
                         **settings,
-                        "ignore_eos": False,
+                        "ignore_eos": bool(rule.get("ignore_eos")),
                         "stream": False,
                     },
                     timeout=timeout,
@@ -523,7 +529,7 @@ def qualify(
         "repetitions": repetitions,
         "min_output_tokens": rule["min_output_tokens"],
         "max_tokens": rule["max_tokens"],
-        "ignore_eos": False,
+        "ignore_eos": bool(rule.get("ignore_eos")),
         "enable_thinking": False,
         "sampling": {**generation_fields(rule), "top_p": 1.0},
         "sampling_rule_sha256": digest(rule),

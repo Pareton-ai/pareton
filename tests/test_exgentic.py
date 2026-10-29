@@ -575,6 +575,81 @@ def test_exgentic_preserves_kimi_output_floor():
         assert evaluate_response(response, rule, 16384)["rejection"] == rejection
 
 
+def fixed_fields():
+    f = fields()
+    f["sampling_rule"].update(ignore_eos=True, max_tokens=220)
+    f["sampling_rule"].pop("min_output_tokens")
+    return f
+
+
+def test_fixed_length_exgentic_forces_every_request_to_max_tokens(tmp_path):
+    f = fixed_fields()
+    rule = parse_sampling_rule(f["sampling_rule"])
+    assert rule["ignore_eos"] is True and rule["min_output_tokens"] == 220
+    value = sample(f)
+    trace = validate_workload_trace_dict(json.loads(value.body))
+    assert all(r.sampling.ignore_eos and r.max_tokens == 220 for r in trace.requests)
+    assert trace.meta.sampling["ignore_eos"] is True
+    assert value.receipt["ignore_eos"] is True
+    assert sample(f, sampling_receipt=value.receipt).body == value.body
+    path = materialize_round_trace(
+        {"sampled_trace_sha256": value.sha256, "sampling_receipt": value.receipt},
+        SimpleNamespace(bench=f["bench"], engine=f["engine"]),
+        tmp_path / "worker",
+        row_fetcher=snapshots().__getitem__,
+        prompt_formatter=formatter(),
+    )
+    assert path.read_bytes() == value.body
+    # A natural-EOS rule keeps its natural-EOS trace.
+    natural = validate_workload_trace_dict(json.loads(sample().body))
+    assert not any(r.sampling.ignore_eos for r in natural.requests)
+    assert "ignore_eos" not in natural.meta.sampling
+
+
+def test_fixed_length_needs_v6_and_a_floor_equal_to_the_allowance():
+    f = fixed_fields()
+    with pytest.raises(SamplerError, match="min_output_tokens equal to max_tokens"):
+        parse_sampling_rule({**f["sampling_rule"], "min_output_tokens": 200})
+    with pytest.raises(SamplerError, match="normal EOS stopping"):
+        parse_sampling_rule({**f["sampling_rule"], "algo_version": 5})
+
+
+def test_fixed_length_trace_rejects_mixed_eos_requests():
+    body = json.loads(sample(fixed_fields()).body)
+    body["requests"][0]["sampling"].pop("ignore_eos")
+    with pytest.raises(Exception, match="forced generation settings"):
+        validate_workload_trace_dict(body)
+    natural = json.loads(sample().body)
+    natural["requests"][0]["sampling"]["ignore_eos"] = True
+    with pytest.raises(Exception, match="forced generation settings"):
+        validate_workload_trace_dict(natural)
+
+
+def test_fixed_length_qualification_accepts_forced_tails_but_not_short_or_empty():
+    from bench.qualify_longform import evaluate_response
+
+    rule = parse_sampling_rule(fixed_fields()["sampling_rule"])
+
+    def response(count, text, finish="length"):
+        return {
+            "choices": [{"text": text, "finish_reason": finish}],
+            "usage": {"prompt_tokens": 16384, "completion_tokens": count},
+        }
+
+    assert (
+        evaluate_response(response(220, "loop " * 300), rule, 16384)["rejection"]
+        is None
+    )
+    assert (
+        evaluate_response(response(219, "x", "stop"), rule, 16384)["rejection"]
+        == "short_output"
+    )
+    assert (
+        evaluate_response(response(220, "  "), rule, 16384)["rejection"]
+        == "empty_output"
+    )
+
+
 @pytest.mark.parametrize("n_rows", [64, 68])
 def test_mixed_tier_qualification_refills_rejections_or_fails_closed(
     tmp_path, monkeypatch, n_rows
