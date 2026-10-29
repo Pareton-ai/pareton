@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -155,8 +156,9 @@ def max_ttft_ratio(rule: Mapping[str, Any]) -> float | None:
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 1
+        # A range check rejects NaN and inf, and math.isfinite would overflow
+        # on an int too large for a float.
+        or not 1 <= value <= sys.float_info.max
     ):
         raise ValueError("scoring_rule.max_ttft_ratio must be a finite number >= 1")
     return float(value)

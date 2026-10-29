@@ -1011,7 +1011,7 @@ def test_ttft_cap_removes_speed_credit_but_keeps_slowdown(
     assert plain.score == pytest.approx(1 - candidate_seconds / 10)
 
 
-@pytest.mark.parametrize("value", [0.5, float("nan"), float("inf"), True, "2"])
+@pytest.mark.parametrize("value", [0.5, float("nan"), float("inf"), 10**309, True, "2"])
 def test_ttft_cap_validation(value):
     with pytest.raises(ValueError, match="max_ttft_ratio"):
         validate_scoring_rule({"name": WEIGHTED_RULE, "max_ttft_ratio": value})

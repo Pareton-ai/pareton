@@ -5,7 +5,8 @@
 #   pip install --no-deps --no-build-isolation -e python/
 # Every SGLang build runs with --network=none, so this image stages what that
 # command needs offline: the build backend, the Rust toolchain and the Cargo
-# registry, plus a warm Cargo target directory for the a55ab7d5 workspace.
+# registry for every Cargo workspace under rust/ (sglang-radix-tree is its
+# own), plus a warm Cargo target directory for the a55ab7d5 workspace.
 # Build on linux/amd64, then use python -m builder --engine sglang-okc.
 FROM lmsysorg/sglang:dev-muse-spark-open@sha256:8cfc5a72cb296771f5f8a4a4688cb6d05685610a830cbb616fa4ab0eb7bb2b0a
 
@@ -35,7 +36,9 @@ RUN git init -q \
     && toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust/rust-toolchain.toml) \
     && rustup toolchain install "$toolchain" --profile minimal \
     && rustup default "$toolchain" \
-    && cargo fetch --locked --manifest-path rust/Cargo.toml
+    && for lock in $(find rust -name Cargo.lock); do \
+        cargo fetch --locked --manifest-path "$(dirname "$lock")/Cargo.toml"; \
+    done
 
 # Cargo builds dependencies outside /src so they survive into miner builds;
 # miners can't change rust/**, so their builds mostly reuse this target dir.
