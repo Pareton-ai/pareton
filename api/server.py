@@ -364,6 +364,10 @@ class ScoreBreakdownModel(BaseModel):
     failure_rate: float
     failure_penalty: float
     penalty: float
+    # Present only when the scoring rule sets max_ttft_ratio.
+    ttft_ratio: float | None = None
+    max_ttft_ratio: float | None = None
+    ttft_capped: bool | None = None
 
 
 class ReportWorkloadModel(BaseModel):
@@ -376,6 +380,7 @@ class ReportWorkloadModel(BaseModel):
     request_timeout_s: float | None = None
     enable_thinking: bool | None = None
     max_model_len: int | None = None
+    ignore_eos: bool | None = None
 
 
 class PromptSummaryModel(BaseModel):
@@ -667,7 +672,12 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
             "algo_version": version,
             **{
                 key: receipt[key]
-                for key in ("temperature", "temperature_range", "input_tiers")
+                for key in (
+                    "temperature",
+                    "temperature_range",
+                    "input_tiers",
+                    "ignore_eos",
+                )
                 if key in receipt
             },
             **(
@@ -675,7 +685,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
                     "request_concurrency": receipt.get("request_concurrency"),
                     "request_timeout_s": receipt.get("request_timeout_s"),
                 }
-                if version == 5
+                if version in (5, 6)
                 else {"request_interval_ms": receipt.get("request_interval_ms", 200)}
             ),
             "enable_thinking": receipt.get(
