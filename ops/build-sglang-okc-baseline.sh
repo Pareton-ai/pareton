@@ -48,5 +48,5 @@ python -m builder --engine sglang-okc --baseline-repo "$repo" \
   --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push --stream-build-logs \
   2>&1 | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python3 "$probe_tag" -c \
-  'import sglang.srt.rust_extensions, sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
+  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
   | tee "$output_dir/miner-import.txt"
