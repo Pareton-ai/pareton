@@ -489,6 +489,71 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
         )
 
 
+def test_sglang_okc_defaults_to_okc_patch_rules(monkeypatch):
+    from gate.surface import check_surface
+
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15",
+        engine="sglang-okc",
+        baseline_commit=SGLANG_COMMIT,
+        allow_placeholders=True,
+    )
+    m = captured["manifest"]
+    assert (
+        m.engine["install_cmd"]
+        == "pip install --no-deps --no-build-isolation -e python/"
+    )
+    assert m.bench["patch_limits"] == {
+        "max_patch_bytes": 737280,
+        "max_added_line_chars": 400,
+        "reject_renames": True,
+        "reject_mode_changes": True,
+    }
+    for path, allowed in [
+        ("python/sglang/__init__.py", True),
+        ("python/sglang/srt/layers/moe/fused_moe.py", True),
+        ("python/sglang/jit_kernel/csrc/moe/new_kernel.cu", True),
+        ("python/sglang/jit_kernel/include/new_kernel.cuh", True),
+        ("python/sglang/jit_kernel/include/util.hpp", True),
+        ("python/sglang/srt/layers/moe/configs/tuned.json", True),
+        ("python/sglang/srt/model_loader/loader.py", False),
+        ("python/sglang/test/test_utils.py", False),
+        ("python/sglang/kernels/aot/csrc/gemm/new_kernel.cu", False),
+        ("python/sglang/CMakeLists.txt", False),
+        ("python/sglang/srt/kernel.so", False),
+        ("python/sglang/srt/notes.txt", False),
+        ("rust/sglang-radix-tree/src/lib.rs", False),
+        ("python/pyproject.toml", False),
+    ]:
+        patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n".encode()
+        assert (
+            check_surface(
+                patch_bytes=patch,
+                allowed_paths=m.allowed_paths,
+                denied_paths=m.denied_paths,
+            ).ok
+            is allowed
+        ), path
+
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15",
+        engine=" SGLANG-OKC ",
+        baseline_commit=SGLANG_COMMIT,
+        allow_placeholders=True,
+        bench_patch_limits={"max_patch_bytes": 1000},
+        force=True,
+    )
+    m = captured["manifest"]
+    assert "rust/**" in m.denied_paths
+    assert m.bench["patch_limits"] == {
+        "max_patch_bytes": 1000,
+        "max_added_line_chars": 400,
+        "reject_renames": True,
+        "reject_mode_changes": True,
+    }
+
+
 def test_sglang_requires_source_pin_before_writing(monkeypatch):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="explicit --baseline-commit"):
