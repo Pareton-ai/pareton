@@ -384,3 +384,32 @@ def test_fixed_length_requests_are_streamed_with_ignore_eos(monkeypatch):
                 "http://engine", request, label="r", temperature=0.1, seed=1, timeout=5
             )
     assert seen == [True, False]
+
+
+def test_short_fixed_length_stream_is_an_engine_error(monkeypatch):
+    deadlines = []
+
+    def stream(url, **kwargs):
+        deadlines.append(kwargs["absolute_deadline_s"])
+        return StreamResult(
+            text="x",
+            ttft_s=0.1,
+            e2e_s=1.0,
+            itl_s=[],
+            prompt_tokens=7,
+            completion_tokens=219,
+            finish_reason="length",
+        )
+
+    monkeypatch.setattr(check, "post_completion_stream", stream)
+    request = {
+        "prompt": "p",
+        "input_tokens": 7,
+        "max_tokens": 220,
+        "sampling": {"ignore_eos": True},
+    }
+    with pytest.raises(check.EngineError, match="219 != 220"):
+        check.stream_one(
+            "http://engine", request, label="r", temperature=0.1, seed=1, timeout=5
+        )
+    assert deadlines and deadlines[0] is not None
