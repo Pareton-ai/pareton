@@ -535,6 +535,23 @@ def test_sglang_okc_defaults_to_okc_patch_rules(monkeypatch):
             is allowed
         ), path
 
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15",
+        engine=" SGLANG-OKC ",
+        baseline_commit=SGLANG_COMMIT,
+        allow_placeholders=True,
+        bench_patch_limits={"max_patch_bytes": 1000},
+        force=True,
+    )
+    m = captured["manifest"]
+    assert "rust/**" in m.denied_paths
+    assert m.bench["patch_limits"] == {
+        "max_patch_bytes": 1000,
+        "max_added_line_chars": 400,
+        "reject_renames": True,
+        "reject_mode_changes": True,
+    }
+
 
 def test_sglang_requires_source_pin_before_writing(monkeypatch):
     captured = _patch_store(monkeypatch)

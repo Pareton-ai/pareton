@@ -349,13 +349,13 @@ def seed_synthetic_campaign(
             "rust/**/tests/**",
             "rust/**/benches/**",
         ]
-        if engine == "sglang-okc":
+        if str(engine).strip().lower() == "sglang-okc":
             # The Open Kernel Challenge only accepts these file types under
             # python/sglang/; the .cu/.cuh/.h sources are compiled at runtime.
             default_allowed = list(OKC_ALLOWED_PATHS)
             default_denied = [*config.DEFAULT_DENIED_PATHS, *OKC_DENIED_PATHS]
-            if bench_patch_limits is None:
-                bench_patch_limits = dict(OKC_PATCH_LIMITS)
+            # Explicit limits override OKC's one by one; the rest still apply.
+            bench_patch_limits = {**OKC_PATCH_LIMITS, **(bench_patch_limits or {})}
     else:
         baseline_repo = baseline_repo or DEFAULT_BASELINE_REPO
         baseline_commit = baseline_commit or DEFAULT_BASELINE_COMMIT
