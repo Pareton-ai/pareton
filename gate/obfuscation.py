@@ -197,6 +197,9 @@ _C_RULES = _rules(
 # identifiers past a reader; inside a literal ("µs") they are just text.
 _C_UCN_RE = re.compile(r"\\[uU][0-9a-fA-F]{4,8}")
 _C_LITERAL_RE = re.compile(r"\"(?:[^\"\\\n]|\\.)*\"|'(?:[^'\\\n]|\\.)*'")
+# Python string literals within one line, for the per-line fallback when the
+# patched file can't be tokenized.
+_PY_LITERAL_RE = re.compile(r"[rRbBuUfF]{0,2}(\"\"\"|'''|\"|')(?:\\.|(?!\1).)*?\1")
 
 # The same rules, for matching across the lines of one statement (a call
 # split by a line splice, a comment or a newline). token_splice is about a
@@ -253,7 +256,8 @@ def _char_findings(text: str) -> list[str]:
         # Bidi controls, zero-width characters, BOMs (Trojan Source).
         if cat in ("Cf", "Co", "Cs", "Cn"):
             rules.append("invisible_or_bidi_char")
-        # Look-alike letters in identifiers or strings (homoglyphs).
+        # Look-alike letters (homoglyphs). Callers pass only code outside
+        # string literals, so prose like "γ=7" in a docstring is not a hit.
         elif cat.startswith("L"):
             rules.append("non_ascii_letter")
     return rules
@@ -271,14 +275,32 @@ def _stripped_lines(path: str, text: str | None) -> list[str] | None:
     return res.text.split("\n")
 
 
-def _python_token_findings(
-    path: str, text: str, added: dict[int, str]
-) -> list[Finding]:
-    """Bare references to the builtins in _PY_DYNAMIC_NAMES on added lines."""
+def _py_tokens(text: str | None) -> list[tokenize.TokenInfo] | None:
+    if text is None:
+        return None
     try:
-        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+        return list(tokenize.generate_tokens(io.StringIO(text).readline))
     except (tokenize.TokenError, SyntaxError, IndentationError):
-        return []
+        return None
+
+
+def _non_ascii_code(path: str, code: str) -> bool:
+    """Whether a line of Python or C has a non-ASCII letter outside string
+    literals. Other files (JSON, docs) carry text, not identifiers."""
+    if path.endswith(_PY_SUFFIXES):
+        code = _PY_LITERAL_RE.sub('""', code)
+    elif path.endswith(_C_SUFFIXES):
+        code = _C_LITERAL_RE.sub('""', code)
+    else:
+        return False
+    return "non_ascii_letter" in _char_findings(code)
+
+
+def _python_token_findings(
+    path: str, toks: list[tokenize.TokenInfo], added: dict[int, str]
+) -> list[Finding]:
+    """On added lines: bare references to the builtins in _PY_DYNAMIC_NAMES,
+    and identifiers with non-ASCII letters (homoglyphs)."""
     significant = [
         t
         for t in toks
@@ -287,9 +309,18 @@ def _python_token_findings(
     ]
     out: list[Finding] = []
     for i, tok in enumerate(significant):
-        if tok.type != tokenize.NAME or tok.string not in _PY_DYNAMIC_NAMES:
+        if tok.type != tokenize.NAME or tok.start[0] not in added:
             continue
-        if tok.start[0] not in added:
+        if "non_ascii_letter" in _char_findings(tok.string):
+            out.append(
+                Finding(
+                    path,
+                    tok.start[0],
+                    "non_ascii_letter",
+                    added[tok.start[0]].strip()[:_SNIPPET_CHARS],
+                )
+            )
+        if tok.string not in _PY_DYNAMIC_NAMES:
             continue
         prev = significant[i - 1].string if i else ""
         nxt = significant[i + 1].string if i + 1 < len(significant) else ""
@@ -411,6 +442,12 @@ def scan_added(
         elif path.endswith(_C_SUFFIXES):
             rules += _C_RULES
         stripped = _stripped_lines(path, post_texts.get(path))
+        # When the patched Python file tokenizes, its identifiers are checked
+        # on the token stream below; a docstring's inner lines carry no quotes
+        # for the per-line check to see.
+        py_toks = (
+            _py_tokens(post_texts.get(path)) if path.endswith(_PY_SUFFIXES) else None
+        )
         for line_no, raw in lines.items():
             code = raw
             if stripped is not None and line_no <= len(stripped):
@@ -420,7 +457,8 @@ def scan_added(
                 _C_LITERAL_RE.sub('""', code)
             ):
                 hits.add("encoded_payload")
-            hits.update(r for r in _char_findings(code) if r == "non_ascii_letter")
+            if py_toks is None and _non_ascii_code(path, code):
+                hits.add("non_ascii_letter")
             hits.update(r for r in _char_findings(raw) if r != "non_ascii_letter")
             snippet = raw.strip()[:_SNIPPET_CHARS]
             findings.extend(
@@ -434,7 +472,9 @@ def scan_added(
                 continue
             if path.endswith(_PY_SUFFIXES):
                 extra = _statement_findings(path, text, lines, "py")
-                extra += _python_token_findings(path, text, lines)
+                toks = _py_tokens(text)
+                if toks is not None:
+                    extra += _python_token_findings(path, toks, lines)
             elif path.endswith(_C_SUFFIXES):
                 extra = _statement_findings(path, text, lines, "c")
             else:

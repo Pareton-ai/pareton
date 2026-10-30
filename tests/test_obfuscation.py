@@ -385,3 +385,38 @@ def test_gate_prefers_git_added_lines_over_patch_text():
     )
     assert res.reason == "obfuscation_detected"
     assert res.evidence["findings"][0]["file"] == "x.py"
+
+
+@pytest.mark.parametrize(
+    ("path", "text"),
+    [
+        (
+            "x.py",
+            'def f():\n    """Dynamic γ would force\n    piecewise graphs, γ=7."""\n',
+        ),
+        ("x.py", "s = 'café naïve'\n"),
+        ("x.py", 't = f"日本語 {n}"\n'),
+        ("k.cu", 'printf("日本語");\n'),
+        ("python/sglang/x.json", '{"name": "café"}\n'),
+    ],
+)
+def test_non_ascii_letters_in_strings_and_docstrings_pass(path, text):
+    added = range(1, text.count("\n") + 1)
+    assert _post(path, text, *added) == []
+
+
+@pytest.mark.parametrize(
+    ("path", "line"),
+    [
+        ("x.py", "dtype = torch.flоat16"),
+        ("x.py", "γ = 7"),
+        ("k.cu", "int γ = 7;"),
+    ],
+)
+def test_non_ascii_identifiers_are_flagged(path, line):
+    assert {f.rule for f in _post(path, line + "\n", 1)} == {"non_ascii_letter"}
+    assert _rules(path, line) == {"non_ascii_letter"}
+
+
+def test_non_ascii_in_a_one_line_string_passes_without_the_file():
+    assert _rules("x.py", "s = 'café'") == set()

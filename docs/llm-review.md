@@ -104,7 +104,7 @@ caught when any of its lines is added. `token_splice` is checked per line only.
 | `encoded_blob` | all | a 120+ character base64 run or 128+ character hex run |
 | `reviewer_directed_text` | all | "ignore previous instructions", "you are an LLM/reviewer", "reviewer:", `"verdict":`, "precision-neutral" |
 | `invisible_or_bidi_char` | all | bidi controls, zero-width and other format characters (Trojan Source) |
-| `non_ascii_letter` | all | non-ASCII letters, including look-alike homoglyphs |
+| `non_ascii_letter` | Python / C family | non-ASCII letters in identifiers (look-alike homoglyphs); text in strings, docstrings and comments, and other file types, is not checked |
 
 Python rules cover PyTorch, Triton, TileLang and CuTe DSL code; the C family
 covers CUDA/C++ such as FlashInfer, DeepGEMM and CUTLASS. Inline PTX `asm`,
