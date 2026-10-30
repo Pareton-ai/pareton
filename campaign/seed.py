@@ -353,7 +353,11 @@ def seed_synthetic_campaign(
             # The Open Kernel Challenge only accepts these file types under
             # python/sglang/; the .cu/.cuh/.h sources are compiled at runtime.
             default_allowed = list(OKC_ALLOWED_PATHS)
-            default_denied = [*config.DEFAULT_DENIED_PATHS, *OKC_DENIED_PATHS]
+            default_denied = [
+                *config.DEFAULT_DENIED_PATHS,
+                *OKC_DENIED_PATHS,
+                "python/sglang/test/**",
+            ]
             # Explicit limits override OKC's one by one; the rest still apply.
             bench_patch_limits = {**OKC_PATCH_LIMITS, **(bench_patch_limits or {})}
     else:

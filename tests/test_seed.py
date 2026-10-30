@@ -518,6 +518,7 @@ def test_sglang_okc_defaults_to_okc_patch_rules(monkeypatch):
         ("python/sglang/jit_kernel/include/util.hpp", True),
         ("python/sglang/srt/layers/moe/configs/tuned.json", True),
         ("python/sglang/srt/model_loader/loader.py", False),
+        ("python/sglang/test/test_utils.py", False),
         ("python/sglang/kernels/aot/csrc/gemm/new_kernel.cu", False),
         ("python/sglang/CMakeLists.txt", False),
         ("python/sglang/srt/kernel.so", False),
