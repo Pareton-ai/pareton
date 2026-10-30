@@ -34,7 +34,9 @@ python -m builder --engine sglang-okc --baseline-repo "$repo" \
 engine_ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$engine_tag")
 printf '%s\n' "$engine_ref" > "$output_dir/engine-image.txt"
 
-# A Python-only miner patch, the only kind this campaign accepts.
+# A miner patch with a Python module and a JIT CUDA source, the two kinds of
+# file OKC accepts under python/sglang/. JIT sources compile on first use on
+# the GPU, so this offline check only proves the build ships the source.
 cat > "$output_dir/probe.diff" <<'DIFF'
 diff --git a/python/sglang/pareton_probe.py b/python/sglang/pareton_probe.py
 new file mode 100644
@@ -42,11 +44,17 @@ new file mode 100644
 +++ b/python/sglang/pareton_probe.py
 @@ -0,0 +1 @@
 +PARETON_OKC_PROBE = 41
+diff --git a/python/sglang/pareton_probe.cuh b/python/sglang/pareton_probe.cuh
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/pareton_probe.cuh
+@@ -0,0 +1 @@
++__device__ inline float pareton_okc_probe(float x) { return x + 41.0f; }
 DIFF
 python -m builder --engine sglang-okc --baseline-repo "$repo" \
   --baseline-commit "$commit" --base-image "$build_ref" \
   --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push --stream-build-logs \
   2>&1 | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python3 "$probe_tag" -c \
-  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
+  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from pathlib import Path; assert "41.0f" in Path(p.__file__).with_suffix(".cuh").read_text(); from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
   | tee "$output_dir/miner-import.txt"

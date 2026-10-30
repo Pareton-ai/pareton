@@ -46,11 +46,12 @@ ENV CARGO_NET_OFFLINE=true \
     CARGO_TARGET_DIR=/opt/sglang-rust-target
 
 # Warm build, offline, with the same command miners get. This proves the
-# staged inputs are enough and fills the Cargo target directory.
+# staged inputs are enough and fills the Cargo target directory. No pip check:
+# OKC's image installs several packages with --no-deps, so it may already fail.
 RUN --network=none CARGO_BUILD_JOBS="$MAX_JOBS" \
         pip install --no-deps --no-build-isolation -e python/ \
     && python3 -c "from pathlib import Path; assert list(Path('/src/python/sglang').rglob('*.so')), 'Rust extensions missing'" \
-    && pip check \
+    && python3 -c "import torch; assert torch.__version__.startswith('2.14.1'), torch.__version__" \
     && python3 -c "import sglang; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch()" \
     && rm -rf /src /tmp/pip-* /root/.cache/pip
 

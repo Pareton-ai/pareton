@@ -198,6 +198,25 @@ def require_emission_rule(emission_rule: dict | None) -> None:
         )
 
 
+# Defaults for --engine sglang-okc, matching the OKC serving track's patch rules.
+# fnmatch's * crosses "/", so python/sglang/*.py also matches nested files.
+OKC_ALLOWED_PATHS = tuple(
+    f"python/sglang/*.{ext}"
+    for ext in ("py", "cu", "cuh", "h", "hpp", "c", "cc", "cpp", "json")
+)
+OKC_DENIED_PATHS = (
+    "python/sglang/srt/model_loader/**",
+    "python/sglang/kernels/aot/**",
+    "rust/**",
+)
+OKC_PATCH_LIMITS = {
+    "max_patch_bytes": 737280,
+    "max_added_line_chars": 400,
+    "reject_renames": True,
+    "reject_mode_changes": True,
+}
+
+
 def validate_patch_limits(limits: dict) -> dict:
     """Check bench.patch_limits, so a bad value fails at seed, not in the gate."""
     unknown = set(limits) - {
@@ -330,6 +349,13 @@ def seed_synthetic_campaign(
             "rust/**/tests/**",
             "rust/**/benches/**",
         ]
+        if engine == "sglang-okc":
+            # The Open Kernel Challenge only accepts these file types under
+            # python/sglang/; the .cu/.cuh/.h sources are compiled at runtime.
+            default_allowed = list(OKC_ALLOWED_PATHS)
+            default_denied = [*config.DEFAULT_DENIED_PATHS, *OKC_DENIED_PATHS]
+            if bench_patch_limits is None:
+                bench_patch_limits = dict(OKC_PATCH_LIMITS)
     else:
         baseline_repo = baseline_repo or DEFAULT_BASELINE_REPO
         baseline_commit = baseline_commit or DEFAULT_BASELINE_COMMIT
