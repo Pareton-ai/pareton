@@ -149,7 +149,9 @@ calibrated correctness bars stay the numerical authority; treat every
   `# note:`) as untrusted.
 - The answer must be one JSON object:
   `{"verdict": "pass" | "reject", "reason": str, "offending_hunks": [{"file", "hunk", "why"}]}`.
-  Every cited hunk must exist in the review diff. Anything else is invalid
+  A cited hunk that is not in the review diff is dropped and counted in
+  `dropped_hunks`; the verdict stands if at least one cite is real. A reject
+  whose cites are all unknown, and anything else off-schema, is invalid
   output.
 - The patch is never modified. `patch_hash` binds the exact bytes the miner
   committed, so the gate can only pass or reject.
@@ -178,7 +180,7 @@ Everything else rejects at once:
 | `llm_review_rejected` | the model returned `reject`; `llm_reason` and `offending_hunks` are in the event detail |
 | `llm_review_unconfigured` | base URL or API key is not set (a deploy error, not an outage) |
 | `llm_review_request_rejected` | HTTP 400, 413 or 422 on the request |
-| `llm_review_invalid_output` | off-schema JSON, unknown hunk, or `finish_reason` other than `stop` |
+| `llm_review_invalid_output` | off-schema JSON, a reject whose cited hunks are all unknown, or `finish_reason` other than `stop` |
 | `llm_review_patch_too_large` | review diff longer than `PARETON_LLM_REVIEW_MAX_INPUT_CHARS` |
 
 Valid verdicts are cached on disk, keyed by patch hash, policy, model, a hash

@@ -198,6 +198,7 @@ def parse_verdict(content: str, hunks: dict[str, set[str]]) -> dict[str, Any]:
     if verdict == "pass" and offending:
         raise LLMReviewError("llm_review_invalid_output", "pass with hunks")
     cleaned: list[dict[str, str]] = []
+    dropped: list[str] = []
     for item in offending:
         if not isinstance(item, dict) or set(item) != {"file", "hunk", "why"}:
             raise LLMReviewError("llm_review_invalid_output", "bad hunk entry")
@@ -205,9 +206,11 @@ def parse_verdict(content: str, hunks: dict[str, set[str]]) -> dict[str, Any]:
             raise LLMReviewError("llm_review_invalid_output", "bad hunk entry")
         hunk = item["hunk"].strip()
         m = _HUNK_RE.match(hunk)
-        # A cited hunk must exist; otherwise the model is not reading this diff.
         if item["file"] not in hunks or not m or m.group(0) not in hunks[item["file"]]:
-            raise LLMReviewError("llm_review_invalid_output", "unknown hunk")
+            # On a large diff the model can misquote a header's line numbers.
+            # Drop that cite and keep the verdict if another cite is real.
+            dropped.append(f"{item['file'][:200]} {hunk[:80]}")
+            continue
         cleaned.append(
             {
                 "file": item["file"],
@@ -215,10 +218,16 @@ def parse_verdict(content: str, hunks: dict[str, set[str]]) -> dict[str, Any]:
                 "why": item["why"][:_MAX_WHY_CHARS],
             }
         )
+    if dropped:
+        logger.warning("llm review cited unknown hunks, dropped: %s", dropped)
+        # Every cite unknown: the model is not reading this diff.
+        if not cleaned:
+            raise LLMReviewError("llm_review_invalid_output", "unknown hunk")
     return {
         "verdict": verdict,
         "reason": reason.strip()[:_MAX_REASON_CHARS],
         "offending_hunks": cleaned,
+        "dropped_hunks": len(dropped),
     }
 
 
@@ -462,6 +471,7 @@ def check_llm_review(
             "llm_review_rejected",
             llm_reason=verdict["reason"],
             offending_hunks=verdict["offending_hunks"],
+            dropped_hunks=verdict.get("dropped_hunks", 0),
             cached=cached,
             **evidence,
         )

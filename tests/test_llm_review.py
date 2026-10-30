@@ -130,6 +130,28 @@ def test_parse_rejects_off_schema_output(content):
     assert exc.value.reason == "llm_review_invalid_output"
 
 
+def test_parse_drops_unknown_hunk_when_another_cite_is_real():
+    v = parse_verdict(
+        _verdict(
+            "reject",
+            [
+                {"file": FILE, "hunk": "@@ -1 +1 @@", "why": "made up"},
+                {"file": "other.py", "hunk": HUNK, "why": "wrong file"},
+                {"file": FILE, "hunk": HUNK, "why": "fp4"},
+            ],
+        ),
+        HUNKS,
+    )
+    assert v["verdict"] == "reject"
+    assert v["offending_hunks"] == [{"file": FILE, "hunk": HUNK, "why": "fp4"}]
+    assert v["dropped_hunks"] == 2
+
+
+def test_parse_accepts_reject_without_hunks():
+    v = parse_verdict(_verdict("reject", []), HUNKS)
+    assert v["offending_hunks"] == [] and v["dropped_hunks"] == 0
+
+
 # -- Gate --------------------------------------------------------------------
 
 
