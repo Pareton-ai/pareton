@@ -34,27 +34,38 @@ python -m builder --engine sglang-okc --baseline-repo "$repo" \
 engine_ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$engine_tag")
 printf '%s\n' "$engine_ref" > "$output_dir/engine-image.txt"
 
-# A miner patch with a Python module and a JIT CUDA source, the two kinds of
-# file OKC accepts under python/sglang/. JIT sources compile on first use on
-# the GPU, so this offline check only proves the build ships the source.
-cat > "$output_dir/probe.diff" <<'DIFF'
-diff --git a/python/sglang/pareton_probe.py b/python/sglang/pareton_probe.py
-new file mode 100644
---- /dev/null
-+++ b/python/sglang/pareton_probe.py
-@@ -0,0 +1 @@
-+PARETON_OKC_PROBE = 41
-diff --git a/python/sglang/pareton_probe.cuh b/python/sglang/pareton_probe.cuh
-new file mode 100644
---- /dev/null
-+++ b/python/sglang/pareton_probe.cuh
-@@ -0,0 +1 @@
-+__device__ inline float pareton_okc_probe(float x) { return x + 41.0f; }
-DIFF
+# A miner patch with a Python module and a JIT CUDA kernel, the two kinds of
+# source OKC accepts under python/sglang/. The kernel is the native probe's
+# (ops/make-sglang-native-probe.py) at its in-tree JIT path.
+python3 - "$output_dir/probe.diff" <<'PY'
+import difflib
+import runpy
+import sys
+
+jit_source = runpy.run_path("ops/make-sglang-native-probe.py")["JIT_SOURCE"]
+files = {
+    "python/sglang/pareton_probe.py": "PARETON_OKC_PROBE = 41\n",
+    "python/sglang/kernels/jit/csrc/pareton_probe.cuh": jit_source,
+}
+with open(sys.argv[1], "w") as out:
+    for path, text in files.items():
+        out.write(f"diff --git a/{path} b/{path}\nnew file mode 100644\n")
+        out.writelines(
+            difflib.unified_diff(
+                [], text.splitlines(keepends=True), "/dev/null", f"b/{path}", n=0
+            )
+        )
+PY
 python -m builder --engine sglang-okc --baseline-repo "$repo" \
   --baseline-commit "$commit" --base-image "$build_ref" \
   --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push --stream-build-logs \
   2>&1 | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python3 "$probe_tag" -c \
-  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from pathlib import Path; assert "41.0f" in Path(p.__file__).with_suffix(".cuh").read_text(); from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
+  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
   | tee "$output_dir/miner-import.txt"
+# JIT kernels compile with nvcc on first use, which needs no GPU. Compile the
+# probe kernel offline for H200 (sm_90) through SGLang's own load_jit, skipping
+# only the final load, which would need a GPU.
+docker run --rm --network none --entrypoint python3 "$probe_tag" -c \
+  'from sglang.kernels.jit.utils.arch import override_jit_cuda_arch; from sglang.kernels.jit.utils.compile import load_jit, loader; loader._load = lambda library: library; m = override_jit_cuda_arch(9, 0); m.__enter__(); load_jit("pareton_okc_probe", cuda_files=["pareton_probe.cuh"], cuda_wrappers=[("run", "pareton::run")]); print("offline OKC JIT compile: OK")' \
+  | tee "$output_dir/miner-jit-compile.txt"
