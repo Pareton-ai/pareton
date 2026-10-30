@@ -19,7 +19,7 @@ probe_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-probe"
 commit=a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f
 repo=https://github.com/sgl-project/sglang.git
 
-docker buildx build --platform linux/amd64 --load \
+docker buildx build --builder "${PARETON_BUILDER_NAME:-default}" --platform linux/amd64 --load \
   --build-arg MAX_JOBS="$PARETON_BUILD_MAX_JOBS" \
   --file images/baseline-sglang-okc/Dockerfile --tag "$build_tag" . \
   2>&1 | tee "$output_dir/base-build.txt"
