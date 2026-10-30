@@ -202,6 +202,8 @@ def stream_one(url, request, *, label, temperature, seed, timeout):
         temperature=temperature,
         top_p=request["sampling"].get("top_p"),
         seed=seed,
+        # Fixed-length rules force every output to max_tokens, as rounds do.
+        ignore_eos=bool(request["sampling"].get("ignore_eos")),
         timeout=timeout,
         # Speculative decoding may stream several tokens per chunk.
         require_token_timing=False,

@@ -367,3 +367,20 @@ def test_saved_outputs_need_a_qualified_rule(tmp_path):
                 str(tmp_path / "outputs.json"),
             ]
         )
+
+
+def test_fixed_length_requests_are_streamed_with_ignore_eos(monkeypatch):
+    seen = []
+
+    def stream(url, **kwargs):
+        seen.append(kwargs["ignore_eos"])
+        raise check.EngineError("stop")
+
+    monkeypatch.setattr(check, "post_completion_stream", stream)
+    for sampling, expected in [({"ignore_eos": True}, True), ({}, False)]:
+        request = {"prompt": "p", "max_tokens": 220, "sampling": sampling}
+        with pytest.raises(check.EngineError):
+            check.stream_one(
+                "http://engine", request, label="r", temperature=0.1, seed=1, timeout=5
+            )
+    assert seen == [True, False]
