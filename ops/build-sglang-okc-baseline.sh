@@ -36,7 +36,8 @@ printf '%s\n' "$engine_ref" > "$output_dir/engine-image.txt"
 
 # A miner patch with a Python module and a JIT CUDA kernel, the two kinds of
 # source OKC accepts under python/sglang/. The kernel is the native probe's
-# (ops/make-sglang-native-probe.py) at its in-tree JIT path.
+# (ops/make-sglang-native-probe.py) at its in-tree JIT path. Like a real miner
+# build, it starts from the engine image.
 python3 - "$output_dir/probe.diff" <<'PY'
 import difflib
 import runpy
@@ -57,7 +58,7 @@ with open(sys.argv[1], "w") as out:
         )
 PY
 python -m builder --engine sglang-okc --baseline-repo "$repo" \
-  --baseline-commit "$commit" --base-image "$build_ref" \
+  --baseline-commit "$commit" --base-image "$engine_ref" \
   --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push --stream-build-logs \
   2>&1 | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python3 "$probe_tag" -c \
