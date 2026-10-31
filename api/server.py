@@ -364,6 +364,10 @@ class ScoreBreakdownModel(BaseModel):
     failure_rate: float
     failure_penalty: float
     penalty: float
+    # Present only when the scoring rule sets max_ttft_ratio.
+    ttft_ratio: float | None = None
+    max_ttft_ratio: float | None = None
+    ttft_capped: bool | None = None
 
 
 class ReportWorkloadModel(BaseModel):
@@ -376,6 +380,7 @@ class ReportWorkloadModel(BaseModel):
     request_timeout_s: float | None = None
     enable_thinking: bool | None = None
     max_model_len: int | None = None
+    ignore_eos: bool | None = None
 
 
 class PromptSummaryModel(BaseModel):
@@ -667,7 +672,12 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
             "algo_version": version,
             **{
                 key: receipt[key]
-                for key in ("temperature", "temperature_range", "input_tiers")
+                for key in (
+                    "temperature",
+                    "temperature_range",
+                    "input_tiers",
+                    "ignore_eos",
+                )
                 if key in receipt
             },
             **(
@@ -675,7 +685,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
                     "request_concurrency": receipt.get("request_concurrency"),
                     "request_timeout_s": receipt.get("request_timeout_s"),
                 }
-                if version == 5
+                if version in (5, 6)
                 else {"request_interval_ms": receipt.get("request_interval_ms", 200)}
             ),
             "enable_thinking": receipt.get(
@@ -683,13 +693,17 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
             ),
             "max_model_len": context.get("max_model_len"),
         }
+        # Long-form receipts store selections without ids; the trace names
+        # them hf-NNN by position and gives every request the rule's
+        # max_tokens.
         metadata = {
-            request["request_id"]: {
-                key: request.get(key)
-                for key in ("input_tokens", "max_tokens", "input_length_group")
+            request.get("request_id", f"hf-{index:03d}"): {
+                "input_tokens": request.get("input_tokens"),
+                "max_tokens": request.get("max_tokens", receipt.get("max_tokens")),
+                "input_length_group": request.get("input_length_group"),
             }
-            for request in receipt.get("requests", [])
-            if isinstance(request, dict) and "request_id" in request
+            for index, request in enumerate(receipt.get("requests", []))
+            if isinstance(request, dict)
         }
         prompts = [
             {**prompt, **metadata.get(prompt.get("request_id"), {})}

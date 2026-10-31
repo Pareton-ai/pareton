@@ -202,7 +202,11 @@ def stream_one(url, request, *, label, temperature, seed, timeout):
         temperature=temperature,
         top_p=request["sampling"].get("top_p"),
         seed=seed,
+        # Fixed-length rules force every output to max_tokens, as rounds do.
+        ignore_eos=bool(request["sampling"].get("ignore_eos")),
         timeout=timeout,
+        # Bound the whole stream at timeout from admission, as rounds do.
+        absolute_deadline_s=time.monotonic() + timeout,
         # Speculative decoding may stream several tokens per chunk.
         require_token_timing=False,
     )
@@ -212,6 +216,11 @@ def stream_one(url, request, *, label, temperature, seed, timeout):
             f"trace has {request['input_tokens']}"
         )
     tokens = result.completion_tokens or 0
+    if request["sampling"].get("ignore_eos") and tokens != request["max_tokens"]:
+        raise EngineError(
+            f"{label}: engine did not honor the pinned output allowance "
+            f"({tokens} != {request['max_tokens']})"
+        )
     return {
         "request_id": label,
         "temperature": temperature,

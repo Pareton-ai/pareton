@@ -161,6 +161,25 @@ def test_hf_chat_formatter_renders_and_records_the_template_pin():
     assert formatter.receipt["chat_template"]["enable_thinking"] is False
 
 
+def test_hf_chat_formatter_renders_the_generation_tag_body():
+    # Muse Spark Open's template wraps the assistant turn in {% generation %}.
+    config = {
+        "chat_template": (
+            "{% for m in messages %}<{{ m['role'] }}>"
+            "{% if m['role'] == 'assistant' %}{% generation %}{{ m['content'] }}"
+            "{% endgeneration %}{% else %}{{ m['content'] }}{% endif %}"
+            "{% endfor %}{% if add_generation_prompt %}<assistant>{% endif %}"
+        ),
+    }
+    formatter = build_prompt_formatter(
+        _chat_rule(),
+        model_repo="org/model",
+        model_revision="a" * 40,
+        config_loader=lambda **_kwargs: config,
+    )
+    assert formatter.render("issue text") == "<user>issue text<assistant>"
+
+
 def test_hf_chat_formatter_honors_an_explicit_thinking_mode():
     formatter = build_prompt_formatter(
         _chat_rule(),

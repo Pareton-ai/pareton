@@ -461,6 +461,38 @@ def test_teardown_on_exception_still_removes(tmp_path: Path):
     assert not fake.containers
 
 
+def test_teardown_retries_until_a_zombie_container_is_removed(tmp_path, monkeypatch):
+    """A zombie keeps the GPUs until docker can remove its container."""
+    import bench.lifecycle as life
+
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("5" * 64)
+    refusals = iter([True, True, False])
+    zombie = DockerResult(1, "", "could not kill: container PID 7 is zombie")
+
+    def rm(argv):
+        if next(refusals):
+            return zombie
+        fake.containers.pop(argv[-1], None)
+        return DockerResult(0, "", "")
+
+    fake.add_handler(lambda argv: argv[:2] == ["docker", "rm"], rm)
+    sleeps: list[float] = []
+    monkeypatch.setattr(life.time, "sleep", sleeps.append)
+    monkeypatch.setattr(life, "wait_until_healthy", lambda *_a, **_k: None)
+    with BenchNetwork(run_id="zombie000001", runner=fake, cmd_timeout_s=30) as net:
+        with EngineContainer(
+            spec=spec, network=net, pull=False, logs_dir=tmp_path, cmd_timeout_s=30
+        ):
+            pass
+
+    assert sum(c[:2] == ["docker", "rm"] for c, _ in fake.calls) == 3
+    assert sleeps == [life._REMOVE_RETRY_S] * 2
+    assert not fake.containers
+
+
 def test_teardown_on_keyboard_interrupt(tmp_path: Path):
     """BaseException (Ctrl-C) during health check must still rm the container."""
     fake = FakeDocker()

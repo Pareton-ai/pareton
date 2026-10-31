@@ -1440,3 +1440,68 @@ def test_seed_api_omits_patch_limits_that_set_nothing(monkeypatch):
         },
     )
     assert "patch_limits" not in captured["manifest"].bench
+
+
+def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
+    """The Muse Spark Open fixture is what an sglang-okc seed of it produces."""
+    from types import SimpleNamespace
+
+    from bench.longform import length_groups, qualification_contract
+    from bench.sampler import parse_sampling_rule
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed,
+        "preflight_longform_campaign",
+        lambda *args: SimpleNamespace(row_indices=tuple(range(32))),
+    )
+    monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_muse_spark_open_h200_okc"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    scoring = json.loads((fixture / "scoring_rule.json").read_text())
+    assert fields["scoring_rule"] == scoring
+    bench = fields["bench"]
+    rule = parse_sampling_rule({**fields["sampling_rule"], "n_rows": 64})
+    rule["eligible_row_indices"] = list(range(64))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(rule, bench, fields["engine"]),
+        "repetitions": 2,
+    }
+    # Fixed 220-token outputs, and the largest tier still fits the context.
+    assert rule["ignore_eos"] is True
+    assert rule["max_tokens"] == rule["min_output_tokens"] == 220
+    top = length_groups(rule["n_prompts"], rule["input_tiers"])[-1]["max_tokens"]
+    assert top + rule["max_tokens"] <= bench["model"]["max_model_len"]
+
+    common = {
+        "submission_fee_tao": "0.15",
+        "engine": "sglang-okc",
+        "baseline_commit": fields["baseline_commit"],
+        "base_image_digest": fields["base_image_digest"],
+        "baseline_engine_image_digest": bench["baseline_engine_image_digest"],
+        "bench_model_repo": bench["model"]["hf_repo"],
+        "bench_model_revision": bench["model"]["hf_revision"],
+        "bench_dtype": bench["model"]["dtype"],
+        "bench_quantization": bench["model"]["quantization"],
+        "bench_max_model_len": bench["model"]["max_model_len"],
+        "bench_draft_model": bench["draft_model"],
+        "bench_gpu_count": bench["gpu_count"],
+        "bench_serve_args": bench["serve_args"],
+        "bench_correctness_num_prompts": bench["correctness"]["num_prompts"],
+        "bench_correctness_serve_args": bench["correctness"]["serve_args"],
+        "bench_correctness_thresholds": bench["correctness"]["thresholds"],
+        "sampling_rule": rule,
+        "scoring_rule": scoring,
+        "emission_rule": fields["emission_rule"],
+        "gpu_skus": fields["gpu_skus"],
+    }
+    # Both digests pin #216's engine image, as the Kimi fixtures do.
+    assert fields["base_image_digest"] == bench["baseline_engine_image_digest"]
+    seed_synthetic_campaign(**common)
+    m = captured["manifest"]
+    assert m.engine == fields["engine"]
+    assert m.allowed_paths == fields["allowed_paths"]
+    assert m.denied_paths == fields["denied_paths"]
+    assert m.bench == bench
+    assert m.scoring_rule["max_ttft_ratio"] == 2.0

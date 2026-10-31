@@ -967,3 +967,61 @@ def test_equal_throughput_completions_of_unequal_length_are_charged_one_sided():
             expected_ms
         )
         assert scaled == ({"2k-0"} if tokens == 80 else set())
+
+
+def ttft_timings(ttft_s, n=8):
+    return {r.id: PromptTiming(ttft_s, [0.5], 2, "length") for r in requests(n)}
+
+
+@pytest.mark.parametrize(
+    "candidate_ttft,candidate_seconds,capped,score",
+    [
+        (0.5, 5, False, 0.5),  # TTFT at the cap still earns credit
+        (0.51, 5, True, 0.0),  # just over the cap: no speed credit
+        (0.51, 12, True, -0.2),  # over the cap keeps a slowdown
+        (0.1, 5, False, 0.5),
+    ],
+)
+def test_ttft_cap_removes_speed_credit_but_keeps_slowdown(
+    candidate_ttft, candidate_seconds, capped, score
+):
+    rule = {"name": WEIGHTED_RULE, "max_ttft_ratio": 2.0}
+    result = score_candidate(
+        rule,
+        baseline=ttft_timings(0.25),
+        candidate=ttft_timings(candidate_ttft),
+        baseline_tiers=tier_stats(),
+        candidate_tiers=tier_stats(candidate_seconds),
+    )
+    assert result.score == pytest.approx(score)
+    assert result.breakdown["ttft_capped"] is capped
+    assert result.breakdown["ttft_ratio"] == pytest.approx(candidate_ttft / 0.25)
+    assert result.breakdown["weighted_speedup"] == pytest.approx(
+        1 - candidate_seconds / 10
+    )
+    # Without the key the breakdown and score are unchanged from before.
+    plain = score_candidate(
+        {"name": WEIGHTED_RULE},
+        baseline=ttft_timings(0.25),
+        candidate=ttft_timings(candidate_ttft),
+        baseline_tiers=tier_stats(),
+        candidate_tiers=tier_stats(candidate_seconds),
+    )
+    assert "ttft_ratio" not in plain.breakdown
+    assert plain.score == pytest.approx(1 - candidate_seconds / 10)
+
+
+@pytest.mark.parametrize("value", [0.5, float("nan"), float("inf"), 10**309, True, "2"])
+def test_ttft_cap_validation(value):
+    with pytest.raises(ValueError, match="max_ttft_ratio"):
+        validate_scoring_rule({"name": WEIGHTED_RULE, "max_ttft_ratio": value})
+
+
+def test_ttft_cap_is_pinned_only_when_set():
+    assert "max_ttft_ratio" not in validate_scoring_rule({"name": WEIGHTED_RULE})
+    assert (
+        validate_scoring_rule({"name": WEIGHTED_RULE, "max_ttft_ratio": 2})[
+            "max_ttft_ratio"
+        ]
+        == 2.0
+    )

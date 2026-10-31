@@ -1,0 +1,169 @@
+{
+  "baseline_repo": "https://github.com/sgl-project/sglang.git",
+  "baseline_commit": "a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:c149606817764a29a820fa74a7cf1f0c7d7ea1dae784613ec17fef32ee8760f4",
+  "gpu_skus": [
+    "H200"
+  ],
+  "sla": {
+    "p99_ttft_ms": 10000.0,
+    "p99_itl_ms": 100.0,
+    "quality_floor_spec": "logprob agreement with stock, as OKC requires"
+  },
+  "scoring_config_sha256": null,
+  "scoring_config_url": null,
+  "allowed_paths": [
+    "python/sglang/*.py",
+    "python/sglang/*.cu",
+    "python/sglang/*.cuh",
+    "python/sglang/*.h",
+    "python/sglang/*.hpp",
+    "python/sglang/*.c",
+    "python/sglang/*.cc",
+    "python/sglang/*.cpp",
+    "python/sglang/*.json"
+  ],
+  "denied_paths": [
+    "tests/**",
+    "benchmarks/**",
+    ".github/**",
+    "docker/**",
+    "**/Dockerfile*",
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/requirements*.txt",
+    "**/CMakeLists.txt",
+    "python/sglang/srt/model_loader/**",
+    "python/sglang/kernels/aot/**",
+    "rust/**",
+    "python/sglang/test/**"
+  ],
+  "status": "draft",
+  "priority_metric": "throughput",
+  "success_threshold": ">=10% completion speedup at C16 with TTFT within 2x stock",
+  "bench": {
+    "model": {
+      "hf_repo": "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
+      "hf_revision": "4239e4db19376904f2e82c167e78f70abb5455fe",
+      "dtype": "bfloat16",
+      "quantization": "modelopt_fp4",
+      "max_model_len": 131072
+    },
+    "draft_model": {
+      "hf_repo": "RadixArk/Muse-Spark-Open-DFlash2",
+      "hf_revision": "46c90f412549c472941a68382d91a99e5e6372a0"
+    },
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:c149606817764a29a820fa74a7cf1f0c7d7ea1dae784613ec17fef32ee8760f4",
+    "gpu_count": 8,
+    "patch_limits": {
+      "max_patch_bytes": 737280,
+      "max_added_line_chars": 400,
+      "reject_renames": true,
+      "reject_mode_changes": true
+    },
+    "serve_args": [
+      "--served-model-name",
+      "Muse-Spark-Open",
+      "--speculative-draft-model-path",
+      "/draft",
+      "--tp-size",
+      "8",
+      "--ep-size",
+      "8",
+      "--moe-runner-backend",
+      "marlin",
+      "--mem-fraction-static",
+      "0.85",
+      "--speculative-algorithm",
+      "DFLASH",
+      "--speculative-num-draft-tokens",
+      "8",
+      "--enable-hierarchical-cache",
+      "--chunked-prefill-size",
+      "16384",
+      "--enable-cache-report",
+      "--incremental-streaming-output",
+      "--random-seed",
+      "1234",
+      "--max-running-requests",
+      "32",
+      "--cuda-graph-max-bs-decode",
+      "32"
+    ],
+    "correctness": {
+      "thresholds": {
+        "min_mean_logprob": -4.0,
+        "min_token_logprob": -16.0,
+        "min_token_quantile": 0.001,
+        "min_coverage_ratio": 0.5,
+        "max_mean_logprob_drop": 2.5
+      },
+      "num_prompts": 32,
+      "serve_args": [
+        "--max-running-requests",
+        "1"
+      ]
+    }
+  },
+  "engine": {
+    "name": "sglang",
+    "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
+    "entrypoint": [
+      "python3",
+      "-m",
+      "sglang.launch_server"
+    ],
+    "cache_dir": "/root/.cache/sglang"
+  },
+  "scoring_rule": {
+    "name": "weighted_tier_completion_speedup",
+    "failure_penalty": 0.1,
+    "tier_weights": {
+      "8k": 0.25,
+      "16k": 0.25,
+      "32k": 0.25,
+      "64k": 0.25
+    },
+    "baseline_drift_ceiling": 0.15,
+    "max_ttft_ratio": 2.0
+  },
+  "emission_rule": {
+    "name": "linear_decay",
+    "start_weight": 0.5,
+    "floor_weight": 0.0,
+    "decay_blocks": 201600
+  },
+  "sampling_rule": {
+    "algo_version": 6,
+    "config": "default",
+    "dataset": "Exgentic/agent-llm-traces-v2",
+    "enable_thinking": false,
+    "max_tokens": 220,
+    "n_prompts": 32,
+    "n_rows": 0,
+    "revision": "4b8ad4ab198438e5a170f9171c19c6a2cf7c1814",
+    "seed_block_offset": 10,
+    "split": "train",
+    "type": "hf_rows",
+    "min_output_tokens": 220,
+    "request_concurrency": 16,
+    "request_timeout_s": 600,
+    "input_tiers": [
+      "8k",
+      "16k",
+      "32k",
+      "64k"
+    ],
+    "max_baseline_prompt_drops": 8,
+    "temperature_range": [
+      0.1,
+      1.01
+    ],
+    "followup_prompt": "Use the preceding conversation as background material for a new, original, self-contained work. Choose one substantial task and develop it fully. Suitable forms include: a software implementation with explanations, tests and worked examples; a mathematical exposition with definitions, derivations, proofs and examples; a scientific or engineering tutorial or design with calculations and trade-offs; an analytical essay that develops and compares arguments; or an original narrative. Choose the form that best suits the subject. Do not turn a coding, mathematical or analytical task into a story, and do not try to combine every form in one answer. Use relevant ideas from the background without merely summarizing or continuing the previous agent task. If the background offers no useful subject, choose a fresh topic. State necessary assumptions, explain important steps, and include concrete examples or edge cases. For code, provide complete implementations rather than stubs; for mathematics, provide explicit derivations rather than unsupported conclusions. Work entirely in this response without tools, browsing or external files. Produce the work itself, not an outline, proposal or discussion of what you would write. Aim for roughly 3,000 words of substantive prose, or comparable depth in code and mathematics. Prioritize correctness, useful detail and a complete treatment; avoid filler, repeated passages and invented citations.",
+    "ignore_eos": true
+  },
+  "patch_visibility": {
+    "mode": "private"
+  }
+}
