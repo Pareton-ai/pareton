@@ -601,6 +601,44 @@ def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
     assert evidence["probed"] is True
 
 
+def test_natural_stop_probe_accepts_speculative_multi_token_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """DFlash streams several tokens per chunk; the probe only needs the stop."""
+    request = TraceRequest(
+        id="forced",
+        arrival_offset_ms=0,
+        max_tokens=220,
+        sampling=TraceSampling(0.0, 1.0, ignore_eos=True),
+        prompt="solve this",
+    )
+    replay = SimpleNamespace(result=SimpleNamespace(timings={}), outputs={})
+    calls = []
+
+    def complete(*args, **kwargs):
+        calls.append(kwargs)
+        return StreamResult(
+            text="natural answer",
+            finish_reason="length",
+            completion_tokens=220,
+            prompt_tokens=1,
+            ttft_s=0.1,
+            itl_s=[0.1] * 37,
+            e2e_s=3.8,
+        )
+
+    monkeypatch.setattr("bench.sla_bench.post_completion_stream", complete)
+    references = capture_baseline_natural_stops(
+        "http://baseline",
+        requests=[request],
+        replay=replay,
+        evidence_dir=tmp_path,
+    )
+    assert calls[0]["require_token_timing"] is False
+    assert calls[0]["ignore_eos"] is False
+    assert references["forced"].completion_tokens == 220
+
+
 def test_median_rep_row_keeps_the_clean_mid_latency_on_a_one_in_three_loop():
     """Round 10 hf-003 baseline: the 74s loop is not the graded artifact."""
     rows = [

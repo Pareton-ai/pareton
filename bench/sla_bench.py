@@ -217,6 +217,7 @@ def _fire(
     group_start_s: float | None = None,
     concurrency: int | None = None,
     effective_concurrency: int | None = None,
+    require_token_timing: bool = True,
 ) -> None:
     delay = req.arrival_offset_ms / 1000.0 - (time.monotonic() - t0)
     if paced and delay > 0:
@@ -240,7 +241,7 @@ def _fire(
                     "require_token_timing": False,
                 }
                 if not paced
-                else {}
+                else {"require_token_timing": require_token_timing}
             ),
         )
         if req.input_tokens is not None and res.prompt_tokens != req.input_tokens:
@@ -332,6 +333,7 @@ def _replay(
     rep: int,
     is_warmup: bool,
     timeout_s: float,
+    require_token_timing: bool = True,
 ) -> tuple[list[dict], float, list[str]]:
     """Open-loop replay of one request set. Returns (rows, wall_s, errors)."""
     t0 = time.monotonic()
@@ -351,6 +353,7 @@ def _replay(
                 "out": rows,
                 "lock": lock,
                 "errs": errs,
+                "require_token_timing": require_token_timing,
             },
             daemon=True,
         )
@@ -523,6 +526,9 @@ def capture_baseline_natural_stops(
             rep=0,
             is_warmup=False,
             timeout_s=request_timeout_s,
+            # Untimed: only the stop boundary matters, and speculative
+            # decoding streams several tokens per chunk.
+            require_token_timing=False,
         )
         if errs:
             raise EngineError(
