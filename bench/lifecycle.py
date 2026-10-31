@@ -836,8 +836,11 @@ class EngineContainer:
                     ) from err
                 break
             except EngineError as err:
+                # The marker is only in the container's log tail, which a
+                # candidate controls: retry trusted (non-candidate) engines only.
                 if (
-                    "No accelerator" not in str(err)
+                    self.role.startswith("candidate")
+                    or "No accelerator" not in str(err)
                     or attempt == _NO_ACCELERATOR_ATTEMPTS
                 ):
                     self._teardown()

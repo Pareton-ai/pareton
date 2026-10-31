@@ -622,6 +622,34 @@ def test_engine_start_does_not_retry_other_crashes(tmp_path, monkeypatch):
     assert sum(c[:2] == ["docker", "run"] for c, _ in fake.calls) == 1
 
 
+def test_candidate_printing_no_accelerator_is_not_restarted(tmp_path, monkeypatch):
+    """The marker comes from the log tail, which a candidate controls."""
+    import bench.lifecycle as life
+
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("b" * 64)
+
+    def health(*_a, **_k):
+        raise EngineError("engine died; container log tail:\nNo accelerator")
+
+    monkeypatch.setattr(life, "wait_until_healthy", health)
+    with BenchNetwork(run_id="noaccel00003", runner=fake, cmd_timeout_s=30) as net:
+        with pytest.raises(EngineError, match="No accelerator"):
+            with EngineContainer(
+                spec=spec,
+                network=net,
+                role="candidate-0",
+                pull=False,
+                logs_dir=tmp_path,
+                cmd_timeout_s=30,
+            ):
+                pass
+
+    assert sum(c[:2] == ["docker", "run"] for c, _ in fake.calls) == 1
+
+
 def test_teardown_on_keyboard_interrupt(tmp_path: Path):
     """BaseException (Ctrl-C) during health check must still rm the container."""
     fake = FakeDocker()
