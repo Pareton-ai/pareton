@@ -286,3 +286,60 @@ def test_a_candidate_container_is_never_launched_with_a_cache_mount(
             assert mount not in argv, name
         else:
             assert mount in argv, name
+
+
+def test_a_gpu_host_keeps_its_gpus_when_a_later_probe_fails(monkeypatch):
+    """Round 2026-10-31: a slow nvidia-smi started baseline-drift without --gpus."""
+    import subprocess
+
+    import bench.main as bench_main
+
+    monkeypatch.setattr(bench_main, "_nvidia_runtime_seen", False)
+    results = iter(
+        [
+            subprocess.CompletedProcess(["nvidia-smi", "-L"], 0, "GPU 0: H200\n", ""),
+        ]
+    )
+
+    def probe(cmd, **_kwargs):
+        try:
+            return next(results)
+        except StopIteration:
+            raise subprocess.TimeoutExpired(cmd, 60) from None
+
+    monkeypatch.setattr(subprocess, "run", probe)
+    assert bench_main._effective_gpu_count(8) == 8
+    assert bench_main._effective_gpu_count(8) == 8
+
+
+def test_gpu_probe_retries_a_slow_nvidia_smi(monkeypatch):
+    import subprocess
+
+    import bench.main as bench_main
+
+    monkeypatch.setattr(bench_main, "_nvidia_runtime_seen", False)
+    calls = []
+
+    def probe(cmd, **_kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(cmd, 60)
+        return subprocess.CompletedProcess(cmd, 0, "GPU 0: H200\n", "")
+
+    monkeypatch.setattr(subprocess, "run", probe)
+    assert bench_main._effective_gpu_count(8) == 8
+    assert len(calls) == 2
+
+
+def test_gpu_probe_reports_no_gpus_without_nvidia_smi(monkeypatch):
+    import subprocess
+
+    import bench.main as bench_main
+
+    monkeypatch.setattr(bench_main, "_nvidia_runtime_seen", False)
+
+    def probe(cmd, **_kwargs):
+        raise FileNotFoundError(cmd[0])
+
+    monkeypatch.setattr(subprocess, "run", probe)
+    assert bench_main._effective_gpu_count(8) == 0
