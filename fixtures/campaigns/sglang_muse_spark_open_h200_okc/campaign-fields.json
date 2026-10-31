@@ -3,7 +3,7 @@
   "baseline_commit": "a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f",
   "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:c149606817764a29a820fa74a7cf1f0c7d7ea1dae784613ec17fef32ee8760f4",
   "gpu_skus": [
-    "H200-SXM-141GB"
+    "H200"
   ],
   "sla": {
     "p99_ttft_ms": 10000.0,
