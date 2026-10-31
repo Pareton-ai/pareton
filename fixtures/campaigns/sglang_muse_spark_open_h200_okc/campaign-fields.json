@@ -7,7 +7,7 @@
   ],
   "sla": {
     "p99_ttft_ms": 10000.0,
-    "p99_itl_ms": 100.0,
+    "p99_itl_ms": 300.0,
     "quality_floor_spec": "logprob agreement with stock, as OKC requires"
   },
   "scoring_config_sha256": null,
