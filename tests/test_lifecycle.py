@@ -493,6 +493,41 @@ def test_teardown_retries_until_a_zombie_container_is_removed(tmp_path, monkeypa
     assert not fake.containers
 
 
+def test_engine_start_waits_for_gpus_held_by_a_removed_container(tmp_path, monkeypatch):
+    """An engine started while the last one still holds the GPUs finds none."""
+    import bench.lifecycle as life
+
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("6" * 64)
+    holders = iter(["4242\n", "4242\n", ""])
+    fake.add_handler(
+        lambda argv: argv[0] == "nvidia-smi",
+        lambda _argv: DockerResult(0, next(holders), ""),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(life.time, "sleep", sleeps.append)
+    monkeypatch.setattr(life, "wait_until_healthy", lambda *_a, **_k: None)
+    with BenchNetwork(run_id="gpuwait00001", runner=fake, cmd_timeout_s=30) as net:
+        with EngineContainer(
+            spec=spec,
+            network=net,
+            pull=False,
+            logs_dir=tmp_path,
+            cmd_timeout_s=30,
+            gpu_count=8,
+        ):
+            pass
+
+    names = [c[0] if c[0] == "nvidia-smi" else " ".join(c[:2]) for c, _ in fake.calls]
+    assert names.count("nvidia-smi") == 3
+    assert names.index("docker run") > max(
+        i for i, n in enumerate(names) if n == "nvidia-smi"
+    )
+    assert sleeps == [life._GPU_FREE_POLL_S] * 2
+
+
 def test_teardown_on_keyboard_interrupt(tmp_path: Path):
     """BaseException (Ctrl-C) during health check must still rm the container."""
     fake = FakeDocker()

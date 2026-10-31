@@ -43,6 +43,10 @@ _PULL_ATTEMPTS = 3
 # started on them sees no accelerator. Keep retrying the removal until then.
 _REMOVE_TIMEOUT_S = 300.0
 _REMOVE_RETRY_S = 5.0
+# A removed container's processes can hold the GPUs a little longer; an engine
+# started meanwhile finds "No accelerator" and dies.
+_GPU_FREE_TIMEOUT_S = 300.0
+_GPU_FREE_POLL_S = 5.0
 
 
 def ensure_listen_args(serve_args: Sequence[str], port: int) -> list[str]:
@@ -636,6 +640,29 @@ class EngineContainer:
                     pass
                 self._env_file = None
 
+    def _wait_for_free_gpus(self) -> None:
+        """Wait until no compute process holds a GPU, if nvidia-smi can tell."""
+        assert self.runner is not None
+        query = ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"]
+        deadline = time.monotonic() + _GPU_FREE_TIMEOUT_S
+        while True:
+            try:
+                result = self.runner(query, timeout=self.cmd_timeout_s)
+            except (EngineError, HostEnvironmentError):
+                return
+            if result.returncode != 0:
+                return
+            pids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if not pids:
+                return
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "GPUs still busy (pids %s); starting anyway", ",".join(pids)
+                )
+                return
+            logger.info("waiting for GPU processes %s to exit", ",".join(pids))
+            time.sleep(_GPU_FREE_POLL_S)
+
     def __enter__(self) -> EngineHandle:
         assert self.runner is not None
         assert self.port is not None
@@ -677,6 +704,9 @@ class EngineContainer:
                     safe_v = str(v).replace("\n", "\\n")
                     tmp.write(f"{k}={safe_v}\n")
             self._env_file = Path(tmp.name)
+
+        if self.gpu_count > 0:
+            self._wait_for_free_gpus()
 
         run_cmd: list[str] = [
             "docker",
