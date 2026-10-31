@@ -269,8 +269,23 @@ def _special_token_value(value: Any) -> Any:
 
 def _compile_chat_template(template: str) -> Any:
     import jinja2
-    from jinja2.ext import LoopControlExtension
+    from jinja2 import nodes
+    from jinja2.ext import Extension, LoopControlExtension
     from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    class GenerationTagExtension(Extension):
+        # Hugging Face's {% generation %} block marks assistant tokens for
+        # training masks; rendering a prompt only needs its body.
+        tags = frozenset({"generation"})
+
+        def parse(self, parser: Any) -> Any:
+            lineno = next(parser.stream).lineno
+            body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+            call = self.call_method("_render_body")
+            return nodes.CallBlock(call, [], [], body).set_lineno(lineno)
+
+        def _render_body(self, caller: Any) -> str:
+            return caller()
 
     def raise_exception(message: str) -> None:
         raise jinja2.exceptions.TemplateError(message)
@@ -293,7 +308,7 @@ def _compile_chat_template(template: str) -> Any:
     environment = ImmutableSandboxedEnvironment(
         trim_blocks=True,
         lstrip_blocks=True,
-        extensions=[LoopControlExtension],
+        extensions=[LoopControlExtension, GenerationTagExtension],
     )
     environment.filters["tojson"] = tojson
     environment.globals["raise_exception"] = raise_exception
