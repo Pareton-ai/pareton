@@ -560,6 +560,68 @@ def test_engine_start_does_not_wait_when_enough_gpus_are_free(tmp_path, monkeypa
     assert sleeps == []
 
 
+def test_engine_start_retries_a_crash_with_no_accelerator(tmp_path, monkeypatch):
+    """A start that finds the GPUs not ready yet is retried, not fatal."""
+    import bench.lifecycle as life
+
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("9" * 64)
+    outcomes = iter([True, False])
+
+    def health(*_a, **_k):
+        if next(outcomes):
+            raise EngineError(
+                "engine died before becoming healthy; RuntimeError: No accelerator "
+                "(CUDA, XPU, HPU, NPU, MUSA, MPS) or platform plugin is available."
+            )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(life.time, "sleep", sleeps.append)
+    monkeypatch.setattr(life, "wait_until_healthy", health)
+    with BenchNetwork(run_id="noaccel00001", runner=fake, cmd_timeout_s=30) as net:
+        with EngineContainer(
+            spec=spec,
+            network=net,
+            pull=False,
+            logs_dir=tmp_path,
+            cmd_timeout_s=30,
+            env_extra={"HF_TOKEN": "x"},
+        ) as handle:
+            assert handle.container_id
+
+    runs = [c for c, _ in fake.calls if c[:2] == ["docker", "run"]]
+    assert len(runs) == 2
+    env_file = Path(runs[1][runs[1].index("--env-file") + 1])
+    assert runs[0] == runs[1]
+    assert not env_file.exists()  # Kept for the retry, removed at the end.
+    assert sleeps == [life._NO_ACCELERATOR_RETRY_S]
+    assert not fake.containers
+
+
+def test_engine_start_does_not_retry_other_crashes(tmp_path, monkeypatch):
+    import bench.lifecycle as life
+
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("a" * 64)
+
+    def health(*_a, **_k):
+        raise EngineError("engine died before becoming healthy; ImportError")
+
+    monkeypatch.setattr(life, "wait_until_healthy", health)
+    with BenchNetwork(run_id="noaccel00002", runner=fake, cmd_timeout_s=30) as net:
+        with pytest.raises(EngineError, match="ImportError"):
+            with EngineContainer(
+                spec=spec, network=net, pull=False, logs_dir=tmp_path, cmd_timeout_s=30
+            ):
+                pass
+
+    assert sum(c[:2] == ["docker", "run"] for c, _ in fake.calls) == 1
+
+
 def test_teardown_on_keyboard_interrupt(tmp_path: Path):
     """BaseException (Ctrl-C) during health check must still rm the container."""
     fake = FakeDocker()

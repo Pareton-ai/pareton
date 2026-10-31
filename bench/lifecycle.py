@@ -48,6 +48,8 @@ _REMOVE_RETRY_S = 5.0
 _GPU_FREE_TIMEOUT_S = 300.0
 _GPU_FREE_POLL_S = 5.0
 _GPU_FREE_MIB = 1024.0
+_NO_ACCELERATOR_ATTEMPTS = 4
+_NO_ACCELERATOR_RETRY_S = 15.0
 
 
 def ensure_listen_args(serve_args: Sequence[str], port: int) -> list[str]:
@@ -582,7 +584,7 @@ class EngineContainer:
         safe_role = re.sub(r"[^a-zA-Z0-9_.-]", "-", self.role) or "engine"
         self._container_name = f"{NAME_PREFIX}{self.network.run_id}-{safe_role}"
 
-    def _teardown(self) -> None:
+    def _teardown(self, *, keep_env_file: bool = False) -> None:
         """Capture logs then ``docker rm -f``. Safe to call from ``__enter__`` failure.
 
         Python does not invoke ``__exit__`` when ``__enter__`` raises, so any
@@ -634,7 +636,7 @@ class EngineContainer:
                     time.sleep(_REMOVE_RETRY_S)
         finally:
             self._container_id = None
-            if self._env_file is not None:
+            if self._env_file is not None and not keep_env_file:
                 try:
                     self._env_file.unlink(missing_ok=True)
                 except OSError:
@@ -759,81 +761,101 @@ class EngineContainer:
 
         # From docker run onward, any failure — including KeyboardInterrupt —
         # must tear down: __exit__ is NOT called when __enter__ raises.
-        try:
-            run_result = self.runner(run_cmd, timeout=self.cmd_timeout_s)
-            if run_result.returncode != 0:
-                raise_docker_failure(
-                    "docker run failed",
-                    run_result.stderr.strip() or run_result.stdout,
-                )
-            container_id = run_result.stdout.strip()
-            if not container_id:
-                raise EngineError("docker run returned empty container id")
-            self._container_id = container_id
-
-            if self.publish_port:
-                host_port = published_host_port(
-                    container_id,
-                    self.port,
-                    runner=self.runner,
-                    cmd_timeout_s=self.cmd_timeout_s,
-                )
-                base_url = f"http://127.0.0.1:{host_port}"
-            else:
-                ip = container_ip_on_network(
-                    container_id,
-                    self.network.name,
-                    runner=self.runner,
-                    cmd_timeout_s=self.cmd_timeout_s,
-                )
-                base_url = f"http://{ip}:{self.port}"
-
-            def _alive() -> bool:
-                assert self.runner is not None and self.cmd_timeout_s is not None
-                exited = container_exit_state(
-                    container_id,
-                    runner=self.runner,
-                    cmd_timeout_s=self.cmd_timeout_s,
-                )
-                if exited is None:
-                    return True
-                exit_code, oom_killed = exited
-                # SIGKILL/SIGTERM or the host OOM killer means something
-                # outside the image ended the process: infrastructure, not a
-                # candidate crash.
-                if oom_killed or exit_code in (137, 143):
-                    raise EngineError(
-                        f"engine container was killed before becoming healthy "
-                        f"(exit {exit_code}, oom_killed={oom_killed})"
-                    )
-                return False
-
+        for attempt in range(1, _NO_ACCELERATOR_ATTEMPTS + 1):
             try:
-                wait_until_healthy(
-                    base_url,
-                    timeout_s=self.health_timeout_s,
-                    poll_s=self.health_poll_s,
-                    is_alive=_alive,
-                )
-            except EngineError as err:
-                try:
-                    tail = fetch_container_logs(
+                run_result = self.runner(run_cmd, timeout=self.cmd_timeout_s)
+                if run_result.returncode != 0:
+                    raise_docker_failure(
+                        "docker run failed",
+                        run_result.stderr.strip() or run_result.stdout,
+                    )
+                container_id = run_result.stdout.strip()
+                if not container_id:
+                    raise EngineError("docker run returned empty container id")
+                self._container_id = container_id
+
+                if self.publish_port:
+                    host_port = published_host_port(
+                        container_id,
+                        self.port,
+                        runner=self.runner,
+                        cmd_timeout_s=self.cmd_timeout_s,
+                    )
+                    base_url = f"http://127.0.0.1:{host_port}"
+                else:
+                    ip = container_ip_on_network(
+                        container_id,
+                        self.network.name,
+                        runner=self.runner,
+                        cmd_timeout_s=self.cmd_timeout_s,
+                    )
+                    base_url = f"http://{ip}:{self.port}"
+
+                def _alive() -> bool:
+                    assert self.runner is not None and self.cmd_timeout_s is not None
+                    exited = container_exit_state(
                         container_id,
                         runner=self.runner,
                         cmd_timeout_s=self.cmd_timeout_s,
-                        tail=200,
                     )
-                except EngineError:
-                    tail = ""
-                # Keep the subclass: a crash must still read as a crash once
-                # the log tail is attached.
-                raise type(err)(
-                    f"{err}; container log tail:\n{tail[-4000:]}",
-                    error_role=err.error_role,
-                ) from err
-        except BaseException:
-            self._teardown()
-            raise
+                    if exited is None:
+                        return True
+                    exit_code, oom_killed = exited
+                    # SIGKILL/SIGTERM or the host OOM killer means something
+                    # outside the image ended the process: infrastructure, not a
+                    # candidate crash.
+                    if oom_killed or exit_code in (137, 143):
+                        raise EngineError(
+                            f"engine container was killed before becoming healthy "
+                            f"(exit {exit_code}, oom_killed={oom_killed})"
+                        )
+                    return False
+
+                try:
+                    wait_until_healthy(
+                        base_url,
+                        timeout_s=self.health_timeout_s,
+                        poll_s=self.health_poll_s,
+                        is_alive=_alive,
+                    )
+                except EngineError as err:
+                    try:
+                        tail = fetch_container_logs(
+                            container_id,
+                            runner=self.runner,
+                            cmd_timeout_s=self.cmd_timeout_s,
+                            tail=200,
+                        )
+                    except EngineError:
+                        tail = ""
+                    # Keep the subclass: a crash must still read as a crash once
+                    # the log tail is attached.
+                    raise type(err)(
+                        f"{err}; container log tail:\n{tail[-4000:]}",
+                        error_role=err.error_role,
+                    ) from err
+                break
+            except EngineError as err:
+                if (
+                    "No accelerator" not in str(err)
+                    or attempt == _NO_ACCELERATOR_ATTEMPTS
+                ):
+                    self._teardown()
+                    raise
+                # The GPUs were not ready yet (the previous engine's teardown
+                # can lag behind its container's removal); nothing ran.
+                logger.warning(
+                    "engine found no accelerator (attempt %d of %d); retrying in %.0fs",
+                    attempt,
+                    _NO_ACCELERATOR_ATTEMPTS,
+                    _NO_ACCELERATOR_RETRY_S,
+                )
+                self._teardown(keep_env_file=True)
+                time.sleep(_NO_ACCELERATOR_RETRY_S)
+                self._wait_for_free_gpus()
+            except BaseException:
+                self._teardown()
+                raise
 
         self._handle = EngineHandle(
             base_url=base_url,
