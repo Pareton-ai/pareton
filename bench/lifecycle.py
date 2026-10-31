@@ -38,6 +38,11 @@ _DEFAULT_ENGINE_PORT = 8000
 _DEFAULT_PULL_TIMEOUT_S = 1800.0
 _DEFAULT_CMD_TIMEOUT_S = 120.0
 _PULL_ATTEMPTS = 3
+# A multi-GPU engine can leave a zombie that ``docker rm -f`` cannot kill for a
+# minute or so; its GPUs stay held until it is reaped, and the next engine
+# started on them sees no accelerator. Keep retrying the removal until then.
+_REMOVE_TIMEOUT_S = 300.0
+_REMOVE_RETRY_S = 5.0
 
 
 def ensure_listen_args(serve_args: Sequence[str], port: int) -> list[str]:
@@ -599,19 +604,29 @@ class EngineContainer:
                             self._container_name,
                             log_err,
                         )
-                try:
-                    rm = self.runner(
-                        ["docker", "rm", "-f", "-v", cid],
-                        timeout=self.cmd_timeout_s,
-                    )
-                    if rm.returncode != 0:
-                        logger.warning(
-                            "docker rm -f %s failed: %s",
-                            cid[:12],
-                            rm.stderr.strip() or rm.stdout,
+                deadline = time.monotonic() + _REMOVE_TIMEOUT_S
+                while True:
+                    try:
+                        rm = self.runner(
+                            ["docker", "rm", "-f", "-v", cid],
+                            timeout=self.cmd_timeout_s,
                         )
-                except (EngineError, HostEnvironmentError) as rm_err:
-                    logger.warning("docker rm -f %s error: %s", cid[:12], rm_err)
+                    except (EngineError, HostEnvironmentError) as rm_err:
+                        logger.warning("docker rm -f %s error: %s", cid[:12], rm_err)
+                        break
+                    detail = rm.stderr.strip() or rm.stdout
+                    if rm.returncode == 0 or "No such container" in detail:
+                        break
+                    if time.monotonic() >= deadline:
+                        logger.warning("docker rm -f %s failed: %s", cid[:12], detail)
+                        break
+                    logger.warning(
+                        "docker rm -f %s failed, retrying in %.0fs: %s",
+                        cid[:12],
+                        _REMOVE_RETRY_S,
+                        detail,
+                    )
+                    time.sleep(_REMOVE_RETRY_S)
         finally:
             self._container_id = None
             if self._env_file is not None:
