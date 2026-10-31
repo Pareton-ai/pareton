@@ -56,10 +56,6 @@ class SubmissionState(StrEnum):
 
 SUBMISSION_STATES: tuple[str, ...] = tuple(s.value for s in SubmissionState)
 
-# Event detail key for text that describes a patch (obfuscation snippets, LLM
-# review reasons). The public API withholds it until the patch is revealed.
-PRIVATE_DETAIL_KEY = "private_until_reveal"
-
 
 @dataclass(frozen=True)
 class GateResult:

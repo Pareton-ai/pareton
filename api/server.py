@@ -32,7 +32,7 @@ from campaign.store import (
 )
 from campaign.visibility import validate_patch_visibility
 from db.exceptions import DatabaseNotConfigured, DatabaseUnavailable
-from gate.types import PRIVATE_DETAIL_KEY, SubmissionState
+from gate.types import SubmissionState
 from round.store import (
     get_latest_weight_set,
     get_leader,
@@ -812,15 +812,6 @@ def _withhold_patch_url(value: Any, url: str) -> Any:
     return value
 
 
-def _event_detail(detail: dict, revealed: bool) -> dict:
-    """Withhold the text that describes a patch until the patch is revealed."""
-    if PRIVATE_DETAIL_KEY not in detail or revealed:
-        return detail
-    out = {k: v for k, v in detail.items() if k != PRIVATE_DETAIL_KEY}
-    out[PRIVATE_DETAIL_KEY] = "withheld"
-    return out
-
-
 def _submission_detail_payload(row: dict, response: Response) -> dict:
     events = list_events(row["id"])
     states = list_latest_states([row["id"]])
@@ -832,7 +823,6 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
     )
     response.headers["Cache-Control"] = _NO_STORE
     public = _public_submission(row, evaluated_at)
-    revealed = patch_is_revealed(evaluated_at, public["patch_visibility"])
     payload = {
         "submission": {
             **{
@@ -856,7 +846,7 @@ def _submission_detail_payload(row: dict, response: Response) -> dict:
             {
                 "state": e["state"],
                 "evidence_ref": e.get("evidence_ref"),
-                "detail": _event_detail(e.get("detail") or {}, revealed),
+                "detail": e.get("detail") or {},
                 "created_at": e["created_at"].isoformat()
                 if hasattr(e["created_at"], "isoformat")
                 else str(e["created_at"]),

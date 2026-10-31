@@ -78,13 +78,20 @@ _DTYPE_ENV = (
     r"|quant|e4m3|e5m2|nvfp4|mxfp)"
 )
 
+# __import__("os").environ.get( or __import__("os").getenv(, after the "(".
+_ENV_READ_IMPORT = (
+    r"\s*[rbu]?[\"']os[\"']\s*\)\s*\.\s*(?:environ\s*\.\s*get|getenv)\s*\("
+)
+
 # An attribute name that is not a plain string literal.
 _NON_LITERAL_ATTR = r"\s*,(?!\s*[\"'][\w.]*[\"']\s*[,)])"
 
 _PY_RULES = _rules(
     # Code built or loaded at runtime.
     ("dynamic_code", r"(?<![\w.])(?<!def )(?:exec|eval|compile)\s*\("),
-    ("dynamic_code", r"\b__import__\s*\("),
+    # __import__("os").environ.get(...) / .getenv(...) only reads the
+    # environment; any other __import__ still matches.
+    ("dynamic_code", r"\b__import__\s*\((?!" + _ENV_READ_IMPORT + r")"),
     (
         "dynamic_code",
         # import_module is allowed when its argument starts with a literal
@@ -93,7 +100,14 @@ _PY_RULES = _rules(
         r"|reload|util\s*\.\s*(?:spec_from|module_from))"
         r"|\bfrom\s+importlib(?:\.util)?\s+import\b",
     ),
-    ("dynamic_code", r"\b(?:marshal|pickle|dill|cloudpickle)\s*\.\s*loads?\b"),
+    # Unpickling a variable is ordinary IPC (scheduler <-> workers); unpickling
+    # a literal, a decoded blob, or an alias of loads still matches.
+    ("dynamic_code", r"\bmarshal\s*\.\s*loads?\b"),
+    (
+        "dynamic_code",
+        r"\b(?:pickle|dill|cloudpickle)\s*\.\s*loads?\b"
+        r"(?!\s*\(\s*[A-Za-z_][\w.]*\s*(?:,[^()]*)?\))",
+    ),
     ("dynamic_code", r"\btypes\s*\.\s*(?:CodeType|FunctionType)\b"),
     ("dynamic_code", r"\b(?:import\s+builtins|from\s+builtins\s+import)\b"),
     ("dynamic_code", r"\b__builtins__\b"),
@@ -129,7 +143,9 @@ _PY_RULES = _rules(
         r"\bsys\s*\.\s*modules\s*(?:\[|\.\s*(?:update|setdefault|pop)\b)",
     ),
     ("reflection", r"\.__(?:code|globals)__\s*=(?!=)|\.__globals__\b"),
-    ("reflection", r"\.__dict__\s*\["),
+    # A literal key names the attribute, like obj.name = ...; a computed key
+    # hides it.
+    ("reflection", r"\.__dict__\s*\[(?!\s*[rbu]?[\"'][\w.]*[\"']\s*\])"),
     ("reflection", r"\boperator\s*\.\s*(?:attrgetter|methodcaller)\b"),
     # Native code compiled or loaded at runtime, outside the hermetic build.
     (
@@ -296,6 +312,21 @@ def _non_ascii_code(path: str, code: str) -> bool:
     return "non_ascii_letter" in _char_findings(code)
 
 
+def _is_env_read_import(toks: list[tokenize.TokenInfo], i: int) -> bool:
+    """toks[i] is __import__ in __import__("os").environ.get( or .getenv(."""
+    rest = [t.string for t in toks[i + 1 : i + 9]]
+    if len(rest) < 4 or rest[0] != "(" or rest[2] != ")" or rest[3] != ".":
+        return False
+    if toks[i + 2].type != tokenize.STRING or toks[i + 2].string.strip(
+        "rbuRBU"
+    ) not in (
+        '"os"',
+        "'os'",
+    ):
+        return False
+    return rest[4:6] == ["getenv", "("] or rest[4:8] == ["environ", ".", "get", "("]
+
+
 def _python_token_findings(
     path: str, toks: list[tokenize.TokenInfo], added: dict[int, str]
 ) -> list[Finding]:
@@ -329,6 +360,8 @@ def _python_token_findings(
         if prev in (".", "def", "class"):
             continue
         if nxt == "=" and prev in ("(", ","):
+            continue
+        if tok.string == "__import__" and _is_env_read_import(significant, i):
             continue
         out.append(
             Finding(

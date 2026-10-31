@@ -30,7 +30,7 @@ from gate.llm_review import check_llm_review
 from gate.obfuscation import check_obfuscation
 from gate.source_view import SourceViewError, build_source_view
 from gate.surface import check_surface
-from gate.types import PRIVATE_DETAIL_KEY, GateResult, SubmissionState
+from gate.types import GateResult, SubmissionState
 from observability import events as obs
 from observability.events import Timer
 
@@ -359,7 +359,6 @@ def _apply_and_review(
             added_lines=view.added_lines,
         )
         if not obf_res.ok:
-            obf_res = _private_until_reveal(obf_res)
             obs.gate_failed(
                 submission_id=submission_id,
                 gate="obfuscation",
@@ -386,7 +385,6 @@ def _apply_and_review(
             if deferred is not None:
                 return deferred
         if not review_res.ok:
-            review_res = _private_until_reveal(review_res)
             obs.gate_failed(
                 submission_id=submission_id,
                 gate="llm_review",
@@ -399,38 +397,6 @@ def _apply_and_review(
             submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
         )
     return None
-
-
-def _private_until_reveal(result: GateResult) -> GateResult:
-    """Move text that describes the patch under PRIVATE_DETAIL_KEY.
-
-    Submission events are served by the public API and a patch can be private
-    until reveal, so d1 snippets and the d2 reviewer's reasons are withheld
-    until then (api.server). File, line, rule and hunk header stay public;
-    the miner has the patch.
-    """
-    ev = dict(result.evidence)
-    private: dict[str, Any] = {}
-    findings = ev.get("findings")
-    if findings:
-        private["findings"] = findings
-        ev["findings"] = [
-            {k: v for k, v in f.items() if k != "snippet"} for f in findings
-        ]
-    if "llm_reason" in ev:
-        private["llm_reason"] = ev.pop("llm_reason")
-    hunks = ev.get("offending_hunks")
-    if hunks:
-        private["offending_hunks"] = hunks
-        ev["offending_hunks"] = [
-            {k: v for k, v in h.items() if k in ("file", "hunk")} for h in hunks
-        ]
-    if not private:
-        return result
-    ev[PRIVATE_DETAIL_KEY] = private
-    return GateResult(
-        ok=result.ok, state=result.state, reason=result.reason, evidence=ev
-    )
 
 
 def _defer_llm_review(

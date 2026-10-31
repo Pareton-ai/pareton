@@ -63,14 +63,12 @@ installed.
 
 ## What the public API shows
 
-Submission events are public, and a patch can be private. Text that describes
-the patch goes under `detail.private_until_reveal` in the reject event: the
-d1 `findings` with their snippets, and the d2 `llm_reason` and
-`offending_hunks` with the model's `why`. The API replaces it with
-`"withheld"` until the patch is revealed, which never happens for a campaign in
-`private` patch mode or for a patch rejected before evaluation. The public
-part keeps file, line and rule for d1 and file and hunk header for d2, which
-the miner can match against their own patch.
+Submission events are public, including the full reason for a d1 or d2
+rejection: the d1 `findings` with their snippets, and the d2 `llm_reason` and
+`offending_hunks` with the model's `why`. This holds in every patch mode,
+including `private`, so a rejection discloses part of what the patch does.
+The patch itself stays withheld as before, and a patch that passes both gates
+discloses nothing.
 
 ## Obfuscation scan (d1)
 
@@ -91,11 +89,11 @@ caught when any of its lines is added. `token_splice` is checked per line only.
 
 | rule | files | catches |
 | --- | --- | --- |
-| `dynamic_code` | Python | `exec`/`eval`/builtin `compile`, `__import__`, `importlib.import_module` unless its argument starts with a literal module path, `pickle`/`marshal` loads, `builtins`, `types.CodeType`; also any bare reference to `exec`, `eval`, `compile`, `__import__`, `__builtins__` or `breakpoint` on an added line (an alias like `run = eval`, or a call split across lines), found on the token stream of the patched file |
+| `dynamic_code` | Python | `exec`/`eval`/builtin `compile`, `__import__` (except `__import__("os").environ.get(...)` / `.getenv(...)`), `importlib.import_module` unless its argument starts with a literal module path, `marshal` loads, `pickle`/`dill`/`cloudpickle` loads of anything but a variable (`pickle.loads(data)` is allowed), `builtins`, `types.CodeType`; also any bare reference to `exec`, `eval`, `compile`, `__import__`, `__builtins__` or `breakpoint` on an added line (an alias like `run = eval`, or a call split across lines), found on the token stream of the patched file |
 | `dynamic_code` | C family | `dlopen`, `dlsym`, `system`, `popen`, `exec*` |
 | `encoded_payload` | Python | base64/hex/codecs/rot13 decoding, `zlib`/`lzma`/`bz2`/`gzip` decompress |
 | `encoded_payload` | C family | universal character names (`\u0061`) outside string and character literals, trigraphs |
-| `reflection` | Python | `getattr`/`setattr` on `torch`, `sys`, `os`, `config`, `server_args` with a non-literal name; writes through `globals()`, `sys.modules[...]`, `__dict__[...]`, `__code__`, `operator.attrgetter` |
+| `reflection` | Python | `getattr`/`setattr` on `torch`, `sys`, `os`, `config`, `server_args` with a non-literal name; writes through `globals()`, `sys.modules[...]`, `__dict__[...]` with a non-literal key, `__code__`, `operator.attrgetter` |
 | `runtime_native_code` | Python | `load_inline`, `cpp_extension`, `ctypes.CDLL`, `cffi`, `nvrtc`, `cupy.RawKernel`, `torch.ops.load_library` |
 | `env_mutation` | Python | writing an environment variable whose name is about precision (`DTYPE`, `PRECISION`, `FP8`, `FP4`, `BF16`, `TF32`, `QUANT`, ...) through `os.environ[...] =`, `setdefault`, `update` or `os.putenv`; NCCL, logging and other tuning variables are allowed |
 | `dtype_rebinding` | Python | assigning into a framework module at the start of a statement: `torch.bfloat16 = ...`, `tl.float32 = ...`, `torch.bmm = ...`, `torch.backends...allow_tf32 = ...`, but not the compiler knobs under `torch._dynamo.config` or `torch._inductor.config` (also `T.`, `cute.`, `cutlass.`, `flashinfer.`, `deep_gemm.`) |
