@@ -343,3 +343,25 @@ def test_download_rejects_ambiguous_hash_and_missing_submission(revealing, monke
     assert response.status_code == 404
     assert response.headers["cache-control"] == "no-store"
     assert publications == []
+
+
+REJECT_DETAIL = {
+    "reason": "llm_review_rejected",
+    "llm_reason": "casts the KV cache to fp4",
+    "offending_hunks": [
+        {"file": "x.py", "hunk": "@@ -1 +1 @@", "why": "KV cast to fp4"}
+    ],
+}
+
+
+def _rejected_detail(client, path):
+    events = client.get(path).json()["events"]
+    return next(e["detail"] for e in events if e["state"] == "rejected")
+
+
+def test_rejection_reasons_are_public_even_for_private_campaigns(scenario):
+    client, row, events = scenario
+    row["_patch_visibility"] = {"mode": "private"}
+    events.append({"state": "rejected", "detail": REJECT_DETAIL, "created_at": NOW})
+    for path in (BASE, f"/v1/submissions/{HASH}"):
+        assert _rejected_detail(client, path) == REJECT_DETAIL
