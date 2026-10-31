@@ -47,6 +47,7 @@ _REMOVE_RETRY_S = 5.0
 # started meanwhile finds "No accelerator" and dies.
 _GPU_FREE_TIMEOUT_S = 300.0
 _GPU_FREE_POLL_S = 5.0
+_GPU_FREE_MIB = 1024.0
 
 
 def ensure_listen_args(serve_args: Sequence[str], port: int) -> list[str]:
@@ -641,9 +642,17 @@ class EngineContainer:
                 self._env_file = None
 
     def _wait_for_free_gpus(self) -> None:
-        """Wait until no compute process holds a GPU, if nvidia-smi can tell."""
+        """Wait until ``gpu_count`` GPUs hold no memory, if nvidia-smi can tell.
+
+        Memory, not the compute-process list: inside a container (Lium pods
+        run Docker in one) nvidia-smi often cannot see other PIDs.
+        """
         assert self.runner is not None
-        query = ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"]
+        query = [
+            "nvidia-smi",
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+        ]
         deadline = time.monotonic() + _GPU_FREE_TIMEOUT_S
         while True:
             try:
@@ -652,15 +661,24 @@ class EngineContainer:
                 return
             if result.returncode != 0:
                 return
-            pids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            if not pids:
+            try:
+                used = [
+                    float(line) for line in result.stdout.splitlines() if line.strip()
+                ]
+            except ValueError:
+                return
+            free = sum(mib < _GPU_FREE_MIB for mib in used)
+            if not used or free >= self.gpu_count:
                 return
             if time.monotonic() >= deadline:
                 logger.warning(
-                    "GPUs still busy (pids %s); starting anyway", ",".join(pids)
+                    "only %d of %d GPUs free (MiB used %s); starting anyway",
+                    free,
+                    self.gpu_count,
+                    used,
                 )
                 return
-            logger.info("waiting for GPU processes %s to exit", ",".join(pids))
+            logger.info("waiting for GPU memory to be released (MiB used %s)", used)
             time.sleep(_GPU_FREE_POLL_S)
 
     def __enter__(self) -> EngineHandle:

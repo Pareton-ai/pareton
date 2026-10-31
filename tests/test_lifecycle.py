@@ -501,7 +501,9 @@ def test_engine_start_waits_for_gpus_held_by_a_removed_container(tmp_path, monke
     spec = _spec(image="local:img")
     fake.image_digests[spec.image] = []
     fake.image_ids[spec.image] = "sha256:" + ("6" * 64)
-    holders = iter(["4242\n", "4242\n", ""])
+    eight = "\n".join(["0"] * 8) + "\n"
+    held = "\n".join(["73000"] * 8) + "\n"
+    holders = iter([held, held, eight])
     fake.add_handler(
         lambda argv: argv[0] == "nvidia-smi",
         lambda _argv: DockerResult(0, next(holders), ""),
@@ -526,6 +528,36 @@ def test_engine_start_waits_for_gpus_held_by_a_removed_container(tmp_path, monke
         i for i, n in enumerate(names) if n == "nvidia-smi"
     )
     assert sleeps == [life._GPU_FREE_POLL_S] * 2
+
+
+def test_engine_start_does_not_wait_when_enough_gpus_are_free(tmp_path, monkeypatch):
+    """Another engine on half the GPUs must not stall a 4-GPU start."""
+    import bench.lifecycle as life
+
+    fake = FakeDocker()
+    spec = _spec(image="local:img")
+    fake.image_digests[spec.image] = []
+    fake.image_ids[spec.image] = "sha256:" + ("8" * 64)
+    half = "\n".join(["73000"] * 4 + ["3"] * 4) + "\n"
+    fake.add_handler(
+        lambda argv: argv[0] == "nvidia-smi",
+        lambda _argv: DockerResult(0, half, ""),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(life.time, "sleep", sleeps.append)
+    monkeypatch.setattr(life, "wait_until_healthy", lambda *_a, **_k: None)
+    with BenchNetwork(run_id="gpuwait00002", runner=fake, cmd_timeout_s=30) as net:
+        with EngineContainer(
+            spec=spec,
+            network=net,
+            pull=False,
+            logs_dir=tmp_path,
+            cmd_timeout_s=30,
+            gpu_count=4,
+        ):
+            pass
+
+    assert sleeps == []
 
 
 def test_teardown_on_keyboard_interrupt(tmp_path: Path):
