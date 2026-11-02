@@ -204,6 +204,8 @@ def stream_one(url, request, *, label, temperature, seed, timeout):
         seed=seed,
         # Fixed-length rules force every output to max_tokens, as rounds do.
         ignore_eos=bool(request["sampling"].get("ignore_eos")),
+        # Score the exact token sequence, as rounds do for such rules.
+        keep_special_tokens=bool(request["sampling"].get("keep_special_tokens")),
         timeout=timeout,
         # Bound the whole stream at timeout from admission, as rounds do.
         absolute_deadline_s=time.monotonic() + timeout,

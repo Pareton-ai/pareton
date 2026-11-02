@@ -606,6 +606,48 @@ def test_fixed_length_exgentic_forces_every_request_to_max_tokens(tmp_path):
     assert "ignore_eos" not in natural.meta.sampling
 
 
+def test_keep_special_tokens_reaches_every_request_and_the_round_replay(tmp_path):
+    f = fixed_fields()
+    f["sampling_rule"]["keep_special_tokens"] = True
+    rule = parse_sampling_rule(f["sampling_rule"])
+    assert rule["keep_special_tokens"] is True
+    value = sample(f)
+    trace = validate_workload_trace_dict(json.loads(value.body))
+    assert all(r.sampling.keep_special_tokens for r in trace.requests)
+    assert trace.meta.sampling["keep_special_tokens"] is True
+    assert value.receipt["keep_special_tokens"] is True
+    path = materialize_round_trace(
+        {"sampled_trace_sha256": value.sha256, "sampling_receipt": value.receipt},
+        SimpleNamespace(bench=f["bench"], engine=f["engine"]),
+        tmp_path / "worker",
+        row_fetcher=snapshots().__getitem__,
+        prompt_formatter=formatter(),
+    )
+    assert path.read_bytes() == value.body
+    # Off by default: rules without it keep their traces and hashes.
+    plain = sample(fixed_fields())
+    assert "keep_special_tokens" not in plain.receipt
+    assert not any(
+        r.sampling.keep_special_tokens
+        for r in validate_workload_trace_dict(json.loads(plain.body)).requests
+    )
+    # Every request carries it, or none does.
+    body = json.loads(value.body)
+    body["requests"][0]["sampling"].pop("keep_special_tokens")
+    with pytest.raises(Exception, match="forced generation settings"):
+        validate_workload_trace_dict(body)
+
+
+def test_keep_special_tokens_is_a_v6_true_only_flag():
+    f = fixed_fields()
+    for bad in ("yes", 1, None):
+        with pytest.raises(SamplerError, match="keep_special_tokens"):
+            parse_sampling_rule({**f["sampling_rule"], "keep_special_tokens": bad})
+    assert "keep_special_tokens" not in parse_sampling_rule(
+        {**f["sampling_rule"], "keep_special_tokens": False}
+    )
+
+
 def test_fixed_length_needs_v6_and_a_floor_equal_to_the_allowance():
     f = fixed_fields()
     with pytest.raises(SamplerError, match="min_output_tokens equal to max_tokens"):

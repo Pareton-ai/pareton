@@ -75,6 +75,7 @@ def test_warmups_and_all_replays_use_pinned_temperature(monkeypatch, tmp_path, r
     assert len(calls) == 5
     assert all(c["temperature"] == 0.7 and c["top_p"] == 1.0 for c in calls)
     assert all(c["seed"] == 0 and c["ignore_eos"] is False for c in calls)
+    assert all(c["keep_special_tokens"] is False for c in calls)
     assert [r["rep"] for r in rows] == [1, 2, 3]
     assert (tmp_path / "warmup/requests.jsonl").exists()
     assert (tmp_path / "warmup_2/requests.jsonl").exists()
@@ -560,7 +561,7 @@ def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
         id="forced",
         arrival_offset_ms=0,
         max_tokens=5120,
-        sampling=TraceSampling(0.0, 1.0, ignore_eos=True),
+        sampling=TraceSampling(0.0, 1.0, ignore_eos=True, keep_special_tokens=True),
         prompt="solve this",
     )
     replay = SimpleNamespace(result=SimpleNamespace(timings={}), outputs={})
@@ -569,6 +570,8 @@ def test_ignore_eos_uses_a_baseline_only_natural_stop_probe(
         assert base_url == "http://baseline"
         assert len(requests) == 1
         assert requests[0].sampling.ignore_eos is False
+        # The probe decodes like the forced replay it is compared with.
+        assert requests[0].sampling.keep_special_tokens is True
         return (
             [
                 {

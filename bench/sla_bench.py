@@ -234,6 +234,7 @@ def _fire(
             top_p=req.sampling.top_p,
             seed=0,
             ignore_eos=req.sampling.ignore_eos,
+            keep_special_tokens=req.sampling.keep_special_tokens,
             timeout=timeout_s,
             **(
                 {
@@ -304,6 +305,11 @@ def _fire(
             "top_p": req.sampling.top_p,
             "seed": 0,
             "ignore_eos": req.sampling.ignore_eos,
+            **(
+                {"keep_special_tokens": True}
+                if req.sampling.keep_special_tokens
+                else {}
+            ),
         },
     )
     if not paced:

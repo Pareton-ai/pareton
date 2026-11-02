@@ -99,6 +99,29 @@ def test_stream_forwards_ignore_eos_only_when_enabled(
     assert captured[1]["ignore_eos"] is True
 
 
+def test_stream_keeps_special_tokens_only_when_asked(monkeypatch: pytest.MonkeyPatch):
+    captured: list[dict[str, Any]] = []
+
+    def fake_urlopen(req, timeout=60):
+        captured.append(json.loads(req.data.decode("utf-8")))
+        return _FakeResp(
+            _sse(
+                {
+                    "choices": [{"index": 0, "text": "x", "finish_reason": "length"}],
+                    "usage": {"completion_tokens": 1},
+                }
+            )
+        )
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    post_completion_stream("http://example", prompt="p", max_tokens=1)
+    post_completion_stream(
+        "http://example", prompt="p", max_tokens=1, keep_special_tokens=True
+    )
+    assert "skip_special_tokens" not in captured[0]
+    assert captured[1]["skip_special_tokens"] is False
+
+
 def test_stream_usage_only_chunk_without_choices(monkeypatch: pytest.MonkeyPatch):
     def fake_urlopen(req, timeout=60):
         body = _sse(

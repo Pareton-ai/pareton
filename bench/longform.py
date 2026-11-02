@@ -180,6 +180,14 @@ def parse_longform_fields(rule, parsed):
     if fixed and minimum != parsed["max_tokens"]:
         raise SamplerError("ignore_eos requires min_output_tokens equal to max_tokens")
     result = {"min_output_tokens": minimum, "followup_prompt": prompt}
+    keep = rule.get("keep_special_tokens", False)
+    if keep is not False and (keep is not True or not exgentic):
+        raise SamplerError(
+            "keep_special_tokens must be true, and requires algo_version 6"
+        )
+    if keep:
+        # Off by default and absent from older rules, so their hashes hold.
+        result["keep_special_tokens"] = True
     # Do not add a default field to old rules: their receipts and qualification
     # hashes must continue to reproduce exactly.
     result.update(generation_fields(rule))
@@ -379,6 +387,8 @@ def request_for_candidate(candidate, rule, index, *, generation_seed=""):
     )
     if rule.get("ignore_eos"):
         sampling["ignore_eos"] = True
+    if rule.get("keep_special_tokens"):
+        sampling["keep_special_tokens"] = True
     return {
         "id": f"hf-{index:03d}",
         "arrival_offset_ms": index * rule.get("request_interval_ms", 0),
@@ -499,6 +509,8 @@ def generate_longform_trace(
     }
     if rule.get("ignore_eos"):
         workload["ignore_eos"] = True
+    if rule.get("keep_special_tokens"):
+        workload["keep_special_tokens"] = True
     workload.update(generation_fields(rule))
     workload.update(tier_policy_fields(rule))
     if "temperature_range" in rule:
@@ -580,6 +592,9 @@ def validate_longform_trace(requests, sampling):
         or sampling["min_output_tokens"] != sampling["max_tokens"]
     ):
         raise SamplerError("invalid fixed-length long-form trace")
+    keep = sampling.get("keep_special_tokens", False)
+    if keep is not False and (keep is not True or sampling["algo_version"] != 6):
+        raise SamplerError("invalid keep_special_tokens long-form trace")
     policy = tier_policy_fields(sampling)
     tiers = input_tiers(policy.get("input_tiers"))
     groups = length_groups(len(requests), tiers)
@@ -594,6 +609,8 @@ def validate_longform_trace(requests, sampling):
         settings = generation_sampling(
             sampling, seed_key=f"{generation_seed}:{i}" if generation_seed else ""
         )
+        if keep:
+            settings["keep_special_tokens"] = True
         size = request.get("input_tokens")
         if (
             type(size) is not int

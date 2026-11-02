@@ -1471,6 +1471,10 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
     # Fixed 220-token outputs, and the largest tier still fits the context.
     assert rule["ignore_eos"] is True
     assert rule["max_tokens"] == rule["min_output_tokens"] == 220
+    # Muse emits <|message|> mid-output; keeping it lets the default token
+    # quantile bar stand.
+    assert rule["keep_special_tokens"] is True
+    assert bench["correctness"]["thresholds"]["min_token_quantile"] == 0.001
     top = length_groups(rule["n_prompts"], rule["input_tiers"])[-1]["max_tokens"]
     assert top + rule["max_tokens"] <= bench["model"]["max_model_len"]
 

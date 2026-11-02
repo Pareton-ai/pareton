@@ -363,6 +363,11 @@ def qualify(
                         "max_tokens": rule["max_tokens"],
                         **settings,
                         "ignore_eos": bool(rule.get("ignore_eos")),
+                        **(
+                            {"skip_special_tokens": False}
+                            if rule.get("keep_special_tokens")
+                            else {}
+                        ),
                         "stream": False,
                     },
                     timeout=timeout,

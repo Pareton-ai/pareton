@@ -125,6 +125,7 @@ def post_completion_stream(
     top_p: float | None = None,
     seed: int | None = 0,
     ignore_eos: bool = False,
+    keep_special_tokens: bool = False,
     timeout: float = 120.0,
     absolute_deadline_s: float | None = None,
     require_token_timing: bool = True,
@@ -145,6 +146,10 @@ def post_completion_stream(
         body["seed"] = seed
     if ignore_eos:
         body["ignore_eos"] = True
+    if keep_special_tokens:
+        # vLLM and SGLang both accept this; the default drops special tokens
+        # from the text, which the scorer then cannot reconstruct.
+        body["skip_special_tokens"] = False
     data = json.dumps(body).encode("utf-8")
     req = Request(
         url,
