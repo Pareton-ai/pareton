@@ -1631,6 +1631,8 @@ def test_muse_spark_okc_launch_helper_matches_the_fixture(monkeypatch, tmp_path)
         "emission_rule",
         "engine",
         "patch_visibility",
+        "priority_metric",
+        "success_threshold",
     ):
         assert getattr(manifest, key) == fields[key], key
     assert manifest.sampling_rule == rule

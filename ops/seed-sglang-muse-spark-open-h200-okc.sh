@@ -46,6 +46,8 @@ fi
 python -m campaign.seed \
   --submission-fee-tao "$fee_tao" \
   --engine sglang-okc \
+  --priority-metric throughput \
+  --success-threshold ">=10% completion speedup at C16 with TTFT within 2x stock" \
   --patch-visibility private \
   --baseline-repo https://github.com/sgl-project/sglang.git \
   --baseline-commit a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f \
