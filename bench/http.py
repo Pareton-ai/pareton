@@ -125,6 +125,7 @@ def post_completion_stream(
     top_p: float | None = None,
     seed: int | None = 0,
     ignore_eos: bool = False,
+    keep_special_tokens: bool = False,
     timeout: float = 120.0,
     absolute_deadline_s: float | None = None,
     require_token_timing: bool = True,
@@ -145,6 +146,10 @@ def post_completion_stream(
         body["seed"] = seed
     if ignore_eos:
         body["ignore_eos"] = True
+    if keep_special_tokens:
+        # vLLM and SGLang both accept this; the default drops special tokens
+        # from the text, which the scorer then cannot reconstruct.
+        body["skip_special_tokens"] = False
     data = json.dumps(body).encode("utf-8")
     req = Request(
         url,
@@ -190,6 +195,7 @@ def post_completion_stream(
     prompt_tokens: int | None = None
     ttft_s = 0.0
     last_chunk: float | None = None
+    first_empty_chunk: float | None = None
     saw_done = False
 
     try:
@@ -228,14 +234,20 @@ def post_completion_stream(
             except (IndexError, TypeError, AttributeError) as exc:
                 raise EngineError(f"malformed SSE chunk from {url}: {exc}") from exc
             now = time.monotonic()
+            text_parts.append(delta)
+            if fr is not None:
+                finish_reason = str(fr)
+            if last_chunk is None and not delta:
+                # TTFT is the first text, not the first chunk: an engine could
+                # otherwise send an empty choice on admission and zero its TTFT.
+                if first_empty_chunk is None:
+                    first_empty_chunk = now
+                continue
             if last_chunk is None:
                 ttft_s = now - send
             else:
                 itl_s.append(now - last_chunk)
             last_chunk = now
-            text_parts.append(delta)
-            if fr is not None:
-                finish_reason = str(fr)
     except TimeoutError as exc:
         raise EngineError(f"completions stream timed out for {url}") from exc
     finally:
@@ -250,6 +262,10 @@ def post_completion_stream(
         raise EngineError(f"completions stream from {url} exceeded absolute deadline")
     if not saw_done:
         raise EngineError(f"completions stream from {url} ended without [DONE]")
+    if last_chunk is None and first_empty_chunk is not None:
+        # No text at all (an empty completion): time its only chunks.
+        ttft_s = first_empty_chunk - send
+        last_chunk = first_empty_chunk
     if last_chunk is None:
         raise EngineError(
             f"completions stream from {url} produced no choice chunks "

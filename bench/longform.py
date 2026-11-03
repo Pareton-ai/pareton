@@ -1,4 +1,8 @@
-"""Tiered natural-EOS workloads: legacy LongWriter and v6 Exgentic snapshots."""
+"""Tiered natural-EOS workloads: legacy LongWriter and v6 Exgentic snapshots.
+
+An Exgentic rule may instead set ``ignore_eos`` to force every request to
+exactly ``max_tokens`` output tokens, so ``min_output_tokens`` equals it.
+"""
 
 from __future__ import annotations
 
@@ -138,7 +142,8 @@ def tier_policy_fields(rule):
 
 
 def parse_longform_fields(rule, parsed):
-    if parsed.get("ignore_eos"):
+    fixed = parsed.get("ignore_eos", False)
+    if fixed and parsed["algo_version"] != 6:
         raise SamplerError("long-form sampling requires normal EOS stopping")
     if parsed["enable_thinking"]:
         raise SamplerError("long-form sampling requires enable_thinking=false")
@@ -166,12 +171,23 @@ def parse_longform_fields(rule, parsed):
     prompt = rule.get("followup_prompt", DEFAULT_FOLLOWUP_PROMPT)
     if not isinstance(prompt, str) or not prompt.strip():
         raise SamplerError("followup_prompt must be nonempty text")
-    minimum = rule.get("min_output_tokens", 1500 if exgentic else 3000)
+    default = parsed["max_tokens"] if fixed else 1500 if exgentic else 3000
+    minimum = rule.get("min_output_tokens", default)
     if type(minimum) is not int or minimum < 1:
         raise SamplerError("min_output_tokens must be a positive integer")
     if minimum > parsed["max_tokens"]:
         raise SamplerError("min_output_tokens exceeds max_tokens")
+    if fixed and minimum != parsed["max_tokens"]:
+        raise SamplerError("ignore_eos requires min_output_tokens equal to max_tokens")
     result = {"min_output_tokens": minimum, "followup_prompt": prompt}
+    keep = rule.get("keep_special_tokens", False)
+    if keep is not False and (keep is not True or not exgentic):
+        raise SamplerError(
+            "keep_special_tokens must be true, and requires algo_version 6"
+        )
+    if keep:
+        # Off by default and absent from older rules, so their hashes hold.
+        result["keep_special_tokens"] = True
     # Do not add a default field to old rules: their receipts and qualification
     # hashes must continue to reproduce exactly.
     result.update(generation_fields(rule))
@@ -366,14 +382,19 @@ def scan_candidates(
 
 
 def request_for_candidate(candidate, rule, index, *, generation_seed=""):
+    sampling = generation_sampling(
+        rule, seed_key=f"{generation_seed}:{index}" if generation_seed else ""
+    )
+    if rule.get("ignore_eos"):
+        sampling["ignore_eos"] = True
+    if rule.get("keep_special_tokens"):
+        sampling["keep_special_tokens"] = True
     return {
         "id": f"hf-{index:03d}",
         "arrival_offset_ms": index * rule.get("request_interval_ms", 0),
         "prompt": candidate["prompt"],
         "max_tokens": rule["max_tokens"],
-        "sampling": generation_sampling(
-            rule, seed_key=f"{generation_seed}:{index}" if generation_seed else ""
-        ),
+        "sampling": sampling,
         "input_tokens": candidate["input_tokens"],
         "input_ids_sha256": candidate["input_ids_sha256"],
         "input_length_group": candidate["input_length_group"],
@@ -486,6 +507,10 @@ def generate_longform_trace(
         "min_output_tokens": rule["min_output_tokens"],
         "length_groups": groups,
     }
+    if rule.get("ignore_eos"):
+        workload["ignore_eos"] = True
+    if rule.get("keep_special_tokens"):
+        workload["keep_special_tokens"] = True
     workload.update(generation_fields(rule))
     workload.update(tier_policy_fields(rule))
     if "temperature_range" in rule:
@@ -560,6 +585,16 @@ def validate_longform_trace(requests, sampling):
             raise SamplerError(f"invalid long-form {key}")
     if sampling["min_output_tokens"] > sampling["max_tokens"]:
         raise SamplerError("long-form output threshold exceeds allowance")
+    fixed = sampling.get("ignore_eos", False)
+    if fixed is not False and (
+        fixed is not True
+        or sampling["algo_version"] != 6
+        or sampling["min_output_tokens"] != sampling["max_tokens"]
+    ):
+        raise SamplerError("invalid fixed-length long-form trace")
+    keep = sampling.get("keep_special_tokens", False)
+    if keep is not False and (keep is not True or sampling["algo_version"] != 6):
+        raise SamplerError("invalid keep_special_tokens long-form trace")
     policy = tier_policy_fields(sampling)
     tiers = input_tiers(policy.get("input_tiers"))
     groups = length_groups(len(requests), tiers)
@@ -574,6 +609,8 @@ def validate_longform_trace(requests, sampling):
         settings = generation_sampling(
             sampling, seed_key=f"{generation_seed}:{i}" if generation_seed else ""
         )
+        if keep:
+            settings["keep_special_tokens"] = True
         size = request.get("input_tokens")
         if (
             type(size) is not int
@@ -591,8 +628,9 @@ def validate_longform_trace(requests, sampling):
             )
             or request.get("sampling")
             not in (
-                settings,
-                {**settings, "ignore_eos": False},
+                ({**settings, "ignore_eos": True},)
+                if fixed
+                else (settings, {**settings, "ignore_eos": False})
             )
             or type(request.get("arrival_offset_ms")) is not int
             or request["arrival_offset_ms"]

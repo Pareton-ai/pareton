@@ -1258,6 +1258,55 @@ def test_weighted_report_preserves_penalty_and_output_ceiling(monkeypatch, clien
     assert body["prompts"][0]["max_tokens"] == 5120
 
 
+def test_fixed_length_exgentic_report_keeps_concurrency_and_ttft_cap(
+    monkeypatch, client
+):
+    from api import server
+
+    row = _score_report_row()
+    row["sampling_receipt"] = {
+        "type": "hf_rows",
+        "algo_version": 6,
+        "request_concurrency": 16,
+        "request_timeout_s": 600,
+        "ignore_eos": True,
+        "max_tokens": 220,
+        "requests": [
+            {"row_index": 7, "input_tokens": 2048, "input_length_group": "2k"}
+        ],
+    }
+    row["report"]["score_report"]["prompts"] = [
+        {"request_id": "hf-000", "speedup": 0.3, "aligned_tokens": 220}
+    ]
+    breakdown = {
+        "weighted_speedup": 0.3,
+        "eligible_speedup": 0.0,
+        "scheduled_requests": 32,
+        "failed_requests": 0,
+        "failure_rate": 0.0,
+        "failure_penalty": 0.1,
+        "penalty": 0.0,
+        "ttft_ratio": 2.5,
+        "max_ttft_ratio": 2.0,
+        "ttft_capped": True,
+        "tiers": {"2k": {"weight": 1.0, "speedup": 0.3}},
+    }
+    row["scoring_rule"] = {
+        "name": "weighted_tier_completion_speedup",
+        "max_ttft_ratio": 2.0,
+    }
+    row["report"]["score_report"]["score_breakdown"] = breakdown
+    monkeypatch.setattr(server, "get_round_entry_report", lambda *_: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    typed = server.RoundEntryReportModel.model_validate(body)
+    assert typed.score_breakdown.ttft_capped is True
+    assert body["workload"]["ignore_eos"] is True
+    assert body["workload"]["request_concurrency"] == 16
+    assert "request_interval_ms" not in body["workload"]
+    assert body["prompts"][0]["max_tokens"] == 220
+    assert body["prompts"][0]["input_length_group"] == "2k"
+
+
 @pytest.mark.parametrize("kind", ["baseline", "scored", "infra_failed"])
 @pytest.mark.parametrize(
     "input_tiers", [None, ["8k", "16k"], ["2k", "4k", "8k", "16k"]]

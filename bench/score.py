@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -141,6 +142,46 @@ def baseline_drift_ceiling(rule: Mapping[str, Any], default: float) -> float:
     ):
         raise ValueError("scoring_rule.baseline_drift_ceiling must be in (0, 1]")
     return float(value)
+
+
+def max_ttft_ratio(rule: Mapping[str, Any]) -> float | None:
+    """Optional cap on candidate TTFT as a multiple of the round's baseline.
+
+    Absent means no cap. A candidate over the cap keeps any slowdown but earns
+    no speed credit, so trading first-token latency for throughput can't win.
+    """
+    if "max_ttft_ratio" not in rule:
+        return None
+    value = rule["max_ttft_ratio"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        # A range check rejects NaN and inf, and math.isfinite would overflow
+        # on an int too large for a float.
+        or not 1 <= value <= sys.float_info.max
+    ):
+        raise ValueError("scoring_rule.max_ttft_ratio must be a finite number >= 1")
+    return float(value)
+
+
+def ttft_ratio(
+    baseline: Mapping[str, PromptTiming], candidate: Mapping[str, PromptTiming]
+) -> float | None:
+    """Median candidate TTFT over median baseline TTFT, on the baseline's prompts.
+
+    None when either side has no usable TTFT, so the cap is never applied to
+    a run that has nothing to compare.
+    """
+
+    def median_ttft(timings: Sequence[PromptTiming]) -> float | None:
+        values = [t.ttft_s for t in timings if math.isfinite(t.ttft_s) and t.ttft_s > 0]
+        return float(statistics.median(values)) if values else None
+
+    base = median_ttft(list(baseline.values()))
+    cand = median_ttft([candidate[rid] for rid in baseline if rid in candidate])
+    if base is None or cand is None:
+        return None
+    return cand / base
 
 
 def _min_aligned_tokens(baseline_tokens: int, tolerance: float) -> int:
@@ -422,15 +463,29 @@ def _weighted_tier_completion_speedup(
     if seen != set(baseline) or set(candidate) - seen:
         raise ValueError("tier membership does not match eligible request timings")
     raw = sum(d["weight"] * d["speedup"] for d in details.values())
+    eligible = raw
+    ttft_limit = max_ttft_ratio(rule)
+    ttft_fields = {}
+    if ttft_limit is not None:
+        ratio = ttft_ratio(baseline, candidate)
+        capped = ratio is not None and ratio > ttft_limit
+        if capped:
+            eligible = min(raw, 0.0)
+        ttft_fields = {
+            "ttft_ratio": ratio,
+            "max_ttft_ratio": ttft_limit,
+            "ttft_capped": capped,
+        }
     failed = sum(p.candidate_failed for p in per_prompt)
     rate = failed / len(per_prompt)
     return ScoreResult(
-        score=raw - coefficient * rate,
+        score=eligible - coefficient * rate,
         rule=WEIGHTED_RULE,
         per_prompt=per_prompt,
         breakdown={
             "weighted_speedup": raw,
-            "eligible_speedup": raw,
+            "eligible_speedup": eligible,
+            **ttft_fields,
             "tiers": details,
             "scheduled_requests": len(per_prompt),
             "failed_requests": failed,
