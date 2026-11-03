@@ -51,11 +51,21 @@ SGLANG_ENGINE: dict[str, Any] = {
     "cache_dir": "/root/.cache/sglang",
 }
 
+# OKC-matched SGLang: the trusted base (images/baseline-sglang-okc) already
+# carries the prebuilt sgl-kernel wheel, so only Python and Rust are rebuilt,
+# with the same install command the Open Kernel Challenge uses.
+SGLANG_OKC_ENGINE: dict[str, Any] = {
+    **SGLANG_ENGINE,
+    "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
+}
+
 DEFAULT_ENGINE: dict[str, Any] = VLLM_ENGINE
 
+# Keys are preset names; a preset's ``name`` is the engine it runs.
 ENGINE_PRESETS: dict[str, dict[str, Any]] = {
     "vllm": VLLM_ENGINE,
     "sglang": SGLANG_ENGINE,
+    "sglang-okc": SGLANG_OKC_ENGINE,
 }
 
 

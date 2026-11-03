@@ -99,6 +99,29 @@ def test_stream_forwards_ignore_eos_only_when_enabled(
     assert captured[1]["ignore_eos"] is True
 
 
+def test_stream_keeps_special_tokens_only_when_asked(monkeypatch: pytest.MonkeyPatch):
+    captured: list[dict[str, Any]] = []
+
+    def fake_urlopen(req, timeout=60):
+        captured.append(json.loads(req.data.decode("utf-8")))
+        return _FakeResp(
+            _sse(
+                {
+                    "choices": [{"index": 0, "text": "x", "finish_reason": "length"}],
+                    "usage": {"completion_tokens": 1},
+                }
+            )
+        )
+
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    post_completion_stream("http://example", prompt="p", max_tokens=1)
+    post_completion_stream(
+        "http://example", prompt="p", max_tokens=1, keep_special_tokens=True
+    )
+    assert "skip_special_tokens" not in captured[0]
+    assert captured[1]["skip_special_tokens"] is False
+
+
 def test_stream_usage_only_chunk_without_choices(monkeypatch: pytest.MonkeyPatch):
     def fake_urlopen(req, timeout=60):
         body = _sse(
@@ -282,3 +305,31 @@ def test_post_completion_clamps_zero_max_tokens(monkeypatch: pytest.MonkeyPatch)
     post_completion("http://example", prompt="probe", max_tokens=0, echo=True)
     assert captured["body"]["max_tokens"] == 1
     assert captured["body"]["echo"] is True
+
+
+def test_stream_ttft_starts_at_the_first_text_not_an_empty_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An empty choice sent on admission must not zero a patched engine's TTFT."""
+
+    def choice(text, fr=None):
+        return {"choices": [{"index": 0, "text": text, "finish_reason": fr}]}
+
+    def fake_urlopen(req, timeout=60):
+        return _FakeResp(
+            _sse(
+                choice(""),
+                choice("a"),
+                choice("b", "length"),
+                {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 2}},
+            )
+        )
+
+    clock = iter([0.0, 0.01, 5.0, 6.0, 7.0])
+    monkeypatch.setattr("bench.http.urlopen", fake_urlopen)
+    monkeypatch.setattr("bench.http.time.monotonic", lambda: next(clock))
+    res = post_completion_stream("http://example", prompt="p", max_tokens=2)
+    assert res.ttft_s == 5.0
+    assert res.itl_s == [1.0]
+    assert res.text == "ab"
+    assert res.finish_reason == "length"

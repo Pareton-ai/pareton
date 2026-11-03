@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from bench.concurrency import WEIGHTED_RULE, tier_weights
-from bench.score import baseline_drift_ceiling, failure_penalty
+from bench.score import baseline_drift_ceiling, failure_penalty, max_ttft_ratio
 
 # Priority metrics a campaign can optimize for (BD memo vocabulary).
 PRIORITY_METRICS = frozenset(
@@ -53,6 +53,7 @@ def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
             "tier_weights",
             "failure_penalty",
             "baseline_drift_ceiling",
+            "max_ttft_ratio",
         }
         if unknown:
             raise ValueError(f"unknown weighted scoring fields: {sorted(unknown)}")
@@ -64,6 +65,8 @@ def validate_scoring_rule(rule: dict[str, Any] | None) -> dict[str, Any]:
         # Only rules that pin a ceiling carry the key, so existing hashes hold.
         if "baseline_drift_ceiling" in rule:
             out["baseline_drift_ceiling"] = float(rule["baseline_drift_ceiling"])
+        if "max_ttft_ratio" in rule:
+            out["max_ttft_ratio"] = max_ttft_ratio(rule)
         return out
     out = {k: rule[k] for k in sorted(rule) if k != "name"}
     return {"name": name, **out}

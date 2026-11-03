@@ -17,16 +17,23 @@ class TraceSampling:
     temperature: float
     top_p: float
     ignore_eos: bool = False
+    # Return special tokens in the output text, so a model that emits them
+    # mid-output is scored on the exact token sequence it generated.
+    keep_special_tokens: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TraceSampling:
         ignore_eos = d.get("ignore_eos", False)
         if not isinstance(ignore_eos, bool):
             raise ValueError("sampling.ignore_eos must be a boolean")
+        keep_special_tokens = d.get("keep_special_tokens", False)
+        if not isinstance(keep_special_tokens, bool):
+            raise ValueError("sampling.keep_special_tokens must be a boolean")
         return cls(
             temperature=float(d["temperature"]),
             top_p=float(d["top_p"]),
             ignore_eos=ignore_eos,
+            keep_special_tokens=keep_special_tokens,
         )
 
 

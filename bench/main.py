@@ -1121,26 +1121,55 @@ def _should_pull_image(image: str) -> bool:
     return not image.strip().lower().startswith("sha256:")
 
 
+_NVIDIA_PROBE_TIMEOUT_S = 60.0
+_NVIDIA_PROBE_ATTEMPTS = 3
+_nvidia_runtime_seen = False
+
+
 def _effective_gpu_count(requested: int) -> int:
     """Honor hardware.gpu_count only when NVIDIA runtime is present.
 
     CPU/mock-engine CI hosts reject ``--gpus``; GPU pods have nvidia-smi.
+    A GPU host stays one for the whole run: between engines, a host without
+    persistence mode can take seconds to answer ``nvidia-smi -L``, and a
+    slow or failed probe then must not start the next engine without GPUs.
     """
+    global _nvidia_runtime_seen
     if requested <= 0:
         return 0
-    try:
-        import subprocess
+    if _nvidia_runtime_seen:
+        return requested
+    import subprocess
 
-        r = subprocess.run(
-            ["nvidia-smi", "-L"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
+    for attempt in range(1, _NVIDIA_PROBE_ATTEMPTS + 1):
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "-L"],
+                capture_output=True,
+                text=True,
+                timeout=_NVIDIA_PROBE_TIMEOUT_S,
+                check=False,
+            )
+        except FileNotFoundError:
+            return 0
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "nvidia-smi -L timed out (attempt %d of %d)",
+                attempt,
+                _NVIDIA_PROBE_ATTEMPTS,
+            )
+            continue
+        if r.returncode == 0:
+            _nvidia_runtime_seen = True
+            return requested
+        logger.warning(
+            "nvidia-smi -L failed (attempt %d of %d): %s",
+            attempt,
+            _NVIDIA_PROBE_ATTEMPTS,
+            (r.stderr or r.stdout).strip()[:200],
         )
-        return requested if r.returncode == 0 else 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 0
+    logger.warning("no NVIDIA runtime; starting engines without GPUs")
+    return 0
 
 
 def run_bench(

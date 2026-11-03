@@ -489,6 +489,71 @@ def test_sglang_seed_opens_zero_emission_campaign_with_valid_patch_surface(monke
         )
 
 
+def test_sglang_okc_defaults_to_okc_patch_rules(monkeypatch):
+    from gate.surface import check_surface
+
+    captured = _patch_store(monkeypatch)
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15",
+        engine="sglang-okc",
+        baseline_commit=SGLANG_COMMIT,
+        allow_placeholders=True,
+    )
+    m = captured["manifest"]
+    assert (
+        m.engine["install_cmd"]
+        == "pip install --no-deps --no-build-isolation -e python/"
+    )
+    assert m.bench["patch_limits"] == {
+        "max_patch_bytes": 737280,
+        "max_added_line_chars": 400,
+        "reject_renames": True,
+        "reject_mode_changes": True,
+    }
+    for path, allowed in [
+        ("python/sglang/__init__.py", True),
+        ("python/sglang/srt/layers/moe/fused_moe.py", True),
+        ("python/sglang/jit_kernel/csrc/moe/new_kernel.cu", True),
+        ("python/sglang/jit_kernel/include/new_kernel.cuh", True),
+        ("python/sglang/jit_kernel/include/util.hpp", True),
+        ("python/sglang/srt/layers/moe/configs/tuned.json", True),
+        ("python/sglang/srt/model_loader/loader.py", False),
+        ("python/sglang/test/test_utils.py", False),
+        ("python/sglang/kernels/aot/csrc/gemm/new_kernel.cu", False),
+        ("python/sglang/CMakeLists.txt", False),
+        ("python/sglang/srt/kernel.so", False),
+        ("python/sglang/srt/notes.txt", False),
+        ("rust/sglang-radix-tree/src/lib.rs", False),
+        ("python/pyproject.toml", False),
+    ]:
+        patch = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n".encode()
+        assert (
+            check_surface(
+                patch_bytes=patch,
+                allowed_paths=m.allowed_paths,
+                denied_paths=m.denied_paths,
+            ).ok
+            is allowed
+        ), path
+
+    seed_synthetic_campaign(
+        submission_fee_tao="0.15",
+        engine=" SGLANG-OKC ",
+        baseline_commit=SGLANG_COMMIT,
+        allow_placeholders=True,
+        bench_patch_limits={"max_patch_bytes": 1000},
+        force=True,
+    )
+    m = captured["manifest"]
+    assert "rust/**" in m.denied_paths
+    assert m.bench["patch_limits"] == {
+        "max_patch_bytes": 1000,
+        "max_added_line_chars": 400,
+        "reject_renames": True,
+        "reject_mode_changes": True,
+    }
+
+
 def test_sglang_requires_source_pin_before_writing(monkeypatch):
     captured = _patch_store(monkeypatch)
     with pytest.raises(ValueError, match="explicit --baseline-commit"):
@@ -1430,3 +1495,72 @@ def test_seed_cli_llm_review_flags_must_be_paired(monkeypatch):
         ]
     )
     assert rc != 0
+
+
+def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
+    """The Muse Spark Open fixture is what an sglang-okc seed of it produces."""
+    from types import SimpleNamespace
+
+    from bench.longform import length_groups, qualification_contract
+    from bench.sampler import parse_sampling_rule
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed,
+        "preflight_longform_campaign",
+        lambda *args: SimpleNamespace(row_indices=tuple(range(32))),
+    )
+    monkeypatch.setattr(seed, "require_qualification", lambda *args: None)
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_muse_spark_open_h200_okc"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    scoring = json.loads((fixture / "scoring_rule.json").read_text())
+    assert fields["scoring_rule"] == scoring
+    bench = fields["bench"]
+    rule = parse_sampling_rule({**fields["sampling_rule"], "n_rows": 64})
+    rule["eligible_row_indices"] = list(range(64))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(rule, bench, fields["engine"]),
+        "repetitions": 2,
+    }
+    # Fixed 220-token outputs, and the largest tier still fits the context.
+    assert rule["ignore_eos"] is True
+    assert rule["max_tokens"] == rule["min_output_tokens"] == 220
+    # Muse emits <|message|> mid-output; keeping it lets the default token
+    # quantile bar stand.
+    assert rule["keep_special_tokens"] is True
+    assert bench["correctness"]["thresholds"]["min_token_quantile"] == 0.001
+    top = length_groups(rule["n_prompts"], rule["input_tiers"])[-1]["max_tokens"]
+    assert top + rule["max_tokens"] <= bench["model"]["max_model_len"]
+
+    common = {
+        "submission_fee_tao": "0.15",
+        "engine": "sglang-okc",
+        "baseline_commit": fields["baseline_commit"],
+        "base_image_digest": fields["base_image_digest"],
+        "baseline_engine_image_digest": bench["baseline_engine_image_digest"],
+        "bench_model_repo": bench["model"]["hf_repo"],
+        "bench_model_revision": bench["model"]["hf_revision"],
+        "bench_dtype": bench["model"]["dtype"],
+        "bench_quantization": bench["model"]["quantization"],
+        "bench_max_model_len": bench["model"]["max_model_len"],
+        "bench_draft_model": bench["draft_model"],
+        "bench_gpu_count": bench["gpu_count"],
+        "bench_serve_args": bench["serve_args"],
+        "bench_correctness_num_prompts": bench["correctness"]["num_prompts"],
+        "bench_correctness_serve_args": bench["correctness"]["serve_args"],
+        "bench_correctness_thresholds": bench["correctness"]["thresholds"],
+        "sampling_rule": rule,
+        "scoring_rule": scoring,
+        "emission_rule": fields["emission_rule"],
+        "gpu_skus": fields["gpu_skus"],
+    }
+    # Both digests pin #216's engine image, as the Kimi fixtures do.
+    assert fields["base_image_digest"] == bench["baseline_engine_image_digest"]
+    seed_synthetic_campaign(**common)
+    m = captured["manifest"]
+    assert m.engine == fields["engine"]
+    assert m.allowed_paths == fields["allowed_paths"]
+    assert m.denied_paths == fields["denied_paths"]
+    assert m.bench == bench
+    assert m.scoring_rule["max_ttft_ratio"] == 2.0

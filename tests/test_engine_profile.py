@@ -179,9 +179,13 @@ def test_build_manifest_rejects_bad_engine():
 def test_presets_are_self_consistent():
     for name, profile in ENGINE_PRESETS.items():
         assert validate_engine(profile) == profile, name
-        assert profile["name"] == name
+        assert profile["name"] == name.split("-")[0]
     assert DEFAULT_ENGINE == VLLM_ENGINE
     assert preset("SGLang") == SGLANG_ENGINE
+    assert preset("sglang-okc") == {
+        **SGLANG_ENGINE,
+        "install_cmd": "pip install --no-deps --no-build-isolation -e python/",
+    }
 
 
 def test_each_engine_pins_its_own_compile_cache_dir():
