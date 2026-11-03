@@ -1,9 +1,13 @@
-"""Run gates a–e for one claimed submission job."""
+"""Run gates a–e (plus the optional d1/d2 reviews) for one claimed submission job."""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +18,7 @@ from builder.registry import baseline_build_image_ref, baseline_engine_image_ref
 from campaign.store import (
     append_event,
     complete_gates_job,
+    defer_job,
     get_campaign,
     set_engine_image,
     set_job_status,
@@ -21,6 +26,9 @@ from campaign.store import (
 from gate.base_apply import check_base_apply, check_base_apply_local
 from gate.identity import check_identity
 from gate.integrity import check_integrity
+from gate.llm_review import check_llm_review
+from gate.obfuscation import check_obfuscation
+from gate.source_view import SourceViewError, build_source_view
 from gate.surface import check_surface
 from gate.types import GateResult, SubmissionState
 from observability import events as obs
@@ -134,58 +142,20 @@ def process_submission(
         detail={"patch_hash": int_res.evidence.get("patch_hash"), "identity": "ok"},
     )
 
-    # c. Base apply
-    if local_repo is not None:
-        apply_res = check_base_apply_local(repo_dir=local_repo, patch_bytes=patch_bytes)
-    else:
-        apply_res = check_base_apply(
-            baseline_repo=row["baseline_repo"],
-            baseline_commit=campaign.baseline_commit,
+    # c to d2 read the baseline checkout, which is removed before the build.
+    with _apply_workspace(work_root) as apply_root:
+        stop = _apply_and_review(
+            submission_id=submission_id,
+            row=row,
+            campaign=campaign,
             patch_bytes=patch_bytes,
-            work_root=work_root,
+            patch_hash=patch_hash,
+            job_id=job_id,
+            local_repo=local_repo,
+            apply_root=apply_root,
         )
-    if not apply_res.ok:
-        obs.gate_failed(
-            submission_id=submission_id,
-            gate="base_apply",
-            error=apply_res.reason or "",
-            patch_sha256=patch_hash,
-        )
-        _fail(submission_id, apply_res, job_id=job_id)
-        return apply_res
-    obs.gate_passed(
-        submission_id=submission_id, gate="base_apply", patch_sha256=patch_hash
-    )
-    append_event(submission_id, SubmissionState.APPLIED, detail={"ok": True})
-
-    # d. Surface
-    patch_limits = (campaign.bench or {}).get("patch_limits") or {}
-    surface_res = check_surface(
-        patch_bytes=patch_bytes,
-        allowed_paths=list(campaign.allowed_paths),
-        denied_paths=list(campaign.denied_paths),
-        max_patch_bytes=patch_limits.get("max_patch_bytes"),
-        max_added_line_chars=patch_limits.get("max_added_line_chars"),
-        reject_renames=bool(patch_limits.get("reject_renames")),
-        reject_mode_changes=bool(patch_limits.get("reject_mode_changes")),
-    )
-    if not surface_res.ok:
-        obs.gate_failed(
-            submission_id=submission_id,
-            gate="surface",
-            error=surface_res.reason or "",
-            patch_sha256=patch_hash,
-        )
-        _fail(submission_id, surface_res, job_id=job_id)
-        return surface_res
-    obs.gate_passed(
-        submission_id=submission_id, gate="surface", patch_sha256=patch_hash
-    )
-    append_event(
-        submission_id,
-        SubmissionState.SURFACE_OK,
-        detail={"files": surface_res.evidence.get("files")},
-    )
+    if stop is not None:
+        return stop
 
     # e. Hermetic build
     append_event(submission_id, SubmissionState.BUILDING, detail={})
@@ -287,6 +257,181 @@ def process_submission(
     if enqueue_round:
         logger.info("queued submission %s for the next round", submission_id)
     return build_res
+
+
+@contextmanager
+def _apply_workspace(work_root: Path | None) -> Iterator[Path]:
+    """A caller's work_root is left in place; otherwise a temporary one is used."""
+    if work_root is not None:
+        yield work_root
+        return
+    root = Path(tempfile.mkdtemp(prefix="pareton-apply-"))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _apply_and_review(
+    *,
+    submission_id: str,
+    row: dict[str, Any],
+    campaign: Any,
+    patch_bytes: bytes,
+    patch_hash: str,
+    job_id: Any,
+    local_repo: Path | None,
+    apply_root: Path,
+) -> GateResult | None:
+    """Gates c to d2. Returns the result that stops the pipeline, else None."""
+    # c. Base apply
+    if local_repo is not None:
+        apply_res = check_base_apply_local(repo_dir=local_repo, patch_bytes=patch_bytes)
+    else:
+        apply_res = check_base_apply(
+            baseline_repo=row["baseline_repo"],
+            baseline_commit=campaign.baseline_commit,
+            patch_bytes=patch_bytes,
+            work_root=apply_root,
+        )
+    if not apply_res.ok:
+        obs.gate_failed(
+            submission_id=submission_id,
+            gate="base_apply",
+            error=apply_res.reason or "",
+            patch_sha256=patch_hash,
+        )
+        _fail(submission_id, apply_res, job_id=job_id)
+        return apply_res
+    obs.gate_passed(
+        submission_id=submission_id, gate="base_apply", patch_sha256=patch_hash
+    )
+    append_event(submission_id, SubmissionState.APPLIED, detail={"ok": True})
+
+    # d. Surface
+    patch_limits = (campaign.bench or {}).get("patch_limits") or {}
+    surface_res = check_surface(
+        patch_bytes=patch_bytes,
+        allowed_paths=list(campaign.allowed_paths),
+        denied_paths=list(campaign.denied_paths),
+        max_patch_bytes=patch_limits.get("max_patch_bytes"),
+        max_added_line_chars=patch_limits.get("max_added_line_chars"),
+        reject_renames=bool(patch_limits.get("reject_renames")),
+        reject_mode_changes=bool(patch_limits.get("reject_mode_changes")),
+    )
+    if not surface_res.ok:
+        obs.gate_failed(
+            submission_id=submission_id,
+            gate="surface",
+            error=surface_res.reason or "",
+            patch_sha256=patch_hash,
+        )
+        _fail(submission_id, surface_res, job_id=job_id)
+        return surface_res
+    obs.gate_passed(
+        submission_id=submission_id, gate="surface", patch_sha256=patch_hash
+    )
+    append_event(
+        submission_id,
+        SubmissionState.SURFACE_OK,
+        detail={"files": surface_res.evidence.get("files")},
+    )
+
+    bench = campaign.bench or {}
+    obfuscation = bench.get("obfuscation")
+    llm_review = bench.get("llm_review")
+    if not (obfuscation or llm_review):
+        return None
+
+    # Baseline and patched files, comments stripped, for d1 and d2.
+    try:
+        view = build_source_view(Path(apply_res.evidence["repo_dir"]), patch_bytes)
+    except (SourceViewError, KeyError, subprocess.TimeoutExpired) as exc:
+        result = GateResult.reject("source_view_failed", error=str(exc)[:500])
+        _fail(submission_id, result, job_id=job_id)
+        return result
+
+    # d1. Obfuscation scan (optional per campaign; deterministic)
+    if obfuscation:
+        obf_res = check_obfuscation(
+            patch_bytes=patch_bytes,
+            post_texts=view.post_texts,
+            added_lines=view.added_lines,
+        )
+        if not obf_res.ok:
+            obs.gate_failed(
+                submission_id=submission_id,
+                gate="obfuscation",
+                error=obf_res.reason or "",
+                patch_sha256=patch_hash,
+            )
+            _fail(submission_id, obf_res, job_id=job_id)
+            return obf_res
+        obs.gate_passed(
+            submission_id=submission_id, gate="obfuscation", patch_sha256=patch_hash
+        )
+
+    # d2. LLM review (optional, reject-only; never rewrites the patch). A
+    # provider outage defers the job; it never skips the review.
+    if llm_review:
+        review_res = check_llm_review(
+            review_text=view.review_diff,
+            patch_hash=patch_hash,
+            spec=llm_review,
+            strip_summary=view.strip_summary(),
+        )
+        if not review_res.ok and review_res.evidence.get("retryable"):
+            deferred = _defer_llm_review(submission_id, row, review_res)
+            if deferred is not None:
+                return deferred
+        if not review_res.ok:
+            obs.gate_failed(
+                submission_id=submission_id,
+                gate="llm_review",
+                error=review_res.reason or "",
+                patch_sha256=patch_hash,
+            )
+            _fail(submission_id, review_res, job_id=job_id)
+            return review_res
+        obs.gate_passed(
+            submission_id=submission_id, gate="llm_review", patch_sha256=patch_hash
+        )
+    return None
+
+
+def _defer_llm_review(
+    submission_id: str, row: dict[str, Any], result: GateResult
+) -> GateResult | None:
+    """Requeue the job after a provider outage. None means attempts ran out.
+
+    The submission gets no event: it stays at surface_ok until the retry.
+    """
+    job_id = row.get("job_id")
+    attempt = int(row.get("job_attempt") or 1)
+    if job_id is None or attempt >= config.LLM_REVIEW_MAX_ATTEMPTS:
+        return None
+    detail = f"{result.reason}: {result.evidence.get('detail', '')}"
+    if not defer_job(job_id=int(job_id), attempt=attempt, last_error=detail):
+        # Superseded attempt; whoever holds the job now settles it.
+        logger.warning("submission %s: deferral did not land", submission_id)
+    logger.warning(
+        "submission %s: llm review unavailable (%s); retry %d/%d in %.0fs",
+        submission_id,
+        result.evidence.get("detail"),
+        attempt + 1,
+        config.LLM_REVIEW_MAX_ATTEMPTS,
+        config.LLM_REVIEW_RETRY_AFTER_S,
+    )
+    return GateResult(
+        ok=False,
+        state=SubmissionState.SURFACE_OK,
+        reason="llm_review_deferred",
+        evidence={
+            **result.evidence,
+            "retry_in_s": config.LLM_REVIEW_RETRY_AFTER_S,
+            "attempt": attempt,
+        },
+    )
 
 
 def _fail(

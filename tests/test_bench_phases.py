@@ -489,3 +489,31 @@ def test_harness_reports_engine_start_then_hands_back_to_the_module(tmp_path: Pa
             "role": "baseline",
             "plan_version": 2,
         }
+
+
+def test_claim_skips_recently_deferred_jobs(monkeypatch):
+    import config
+    from campaign import store
+
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_AFTER_S", 600)
+    sqls, args = _patch_db(monkeypatch)
+    store.claim_next_job()
+    i = next(i for i, s in enumerate(sqls) if "FOR UPDATE SKIP LOCKED" in s)
+    assert "coalesce(j.last_error, '') LIKE %s" in sqls[i]
+    assert "j.updated_at > now() - make_interval(secs => %s)" in sqls[i]
+    assert args[i] == ("llm_review_deferred:%", 600.0)
+
+
+def test_defer_job_requeues_only_the_running_attempt(monkeypatch):
+    from campaign import store
+
+    sqls, args = _patch_db(monkeypatch)
+    assert store.defer_job(job_id=7, attempt=2, last_error="x") is True
+    sql = sqls[-1]
+    assert "SET status = 'pending'" in sql
+    assert "updated_at = now()" in sql
+    assert "retry_after" not in sql
+    assert "WHERE id = %s AND attempts = %s AND status = 'running'" in sql
+    assert args[-1] == ("llm_review_deferred: x", 7, 2)
+    _patch_db(monkeypatch, rowcount=0)
+    assert store.defer_job(job_id=7, attempt=1, last_error="x") is False
