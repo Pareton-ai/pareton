@@ -251,11 +251,16 @@ def validate_context(context):
         raise SamplerError("invalid long-form context contract")
 
 
+# Patch review gates (#214) decide which patches are built, never how the
+# baseline serves, so adding one must not void a qualified rule.
+_REVIEW_GATE_KEYS = frozenset({"obfuscation", "llm_review"})
+
+
 def qualification_contract(rule, bench, engine):
     return digest(
         {
             "sampling_rule": {k: v for k, v in rule.items() if k != "qualification"},
-            "bench": bench,
+            "bench": {k: v for k, v in bench.items() if k not in _REVIEW_GATE_KEYS},
             "engine": engine,
         }
     )

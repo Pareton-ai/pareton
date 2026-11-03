@@ -1564,3 +1564,97 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
     assert m.denied_paths == fields["denied_paths"]
     assert m.bench == bench
     assert m.scoring_rule["max_ttft_ratio"] == 2.0
+
+
+def test_muse_spark_okc_launch_helper_matches_the_fixture(monkeypatch, tmp_path):
+    """The seed script produces the qualified fixture, plus both review gates."""
+    from types import SimpleNamespace
+
+    from bench.longform import qualification_contract
+    from bench.sampler import parse_sampling_rule
+
+    captured = _patch_store(monkeypatch)
+    monkeypatch.setattr(
+        seed,
+        "preflight_longform_campaign",
+        lambda *args: SimpleNamespace(row_indices=tuple(range(32))),
+    )
+    root = Path(__file__).resolve().parents[1]
+    fixture = root / "fixtures/campaigns/sglang_muse_spark_open_h200_okc"
+    fields = json.loads((fixture / "campaign-fields.json").read_text())
+    rule = parse_sampling_rule({**fields["sampling_rule"], "n_rows": 64})
+    rule["eligible_row_indices"] = list(range(64))
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(
+            rule, fields["bench"], fields["engine"]
+        ),
+        "repetitions": 2,
+    }
+    rule_path = tmp_path / "qualified.json"
+    rule_path.write_text(json.dumps(rule))
+    engine_ref = fields["base_image_digest"]
+    argv = (
+        subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                'python() { printf "%s\\0" "$@"; }; export -f python; bash "$1" "${@:2}"',
+                "capture",
+                str(root / "ops/seed-sglang-muse-spark-open-h200-okc.sh"),
+                engine_ref,
+                str(rule_path),
+                "0.15",
+            ],
+            cwd=root,
+            env={**os.environ, "PARETON_BENCH_HEALTH_TIMEOUT_S": "3600"},
+        )
+        .decode()
+        .rstrip("\0")
+        .split("\0")
+    )
+    # The real qualification check runs: the rule must match the seeded bench.
+    assert main(argv[2:]) == 0
+    manifest = captured["manifest"]
+    gates = {
+        "obfuscation": {"rules": "v1"},
+        "llm_review": {"policy": "dtype_precision_v1", "model": "kimi-k3"},
+    }
+    assert manifest.bench == {**fields["bench"], **gates}
+    for key in (
+        "baseline_repo",
+        "baseline_commit",
+        "base_image_digest",
+        "gpu_skus",
+        "allowed_paths",
+        "denied_paths",
+        "scoring_rule",
+        "emission_rule",
+        "engine",
+        "patch_visibility",
+        "priority_metric",
+        "success_threshold",
+    ):
+        assert getattr(manifest, key) == fields[key], key
+    assert manifest.sampling_rule == rule
+    assert manifest.status == "open"
+    assert manifest.submission_fee["amount_tao"] == "0.15"
+
+
+def test_review_gates_do_not_change_the_qualification_contract():
+    """A rule qualified before a campaign adds d1/d2 gates still matches."""
+    from bench.longform import qualification_contract
+
+    rule = {"algo_version": 6, "qualification": {"contract_sha256": "x"}}
+    bench = {"gpu_count": 8, "serve_args": ["--tp-size", "8"]}
+    engine = {"name": "sglang"}
+    gated = {
+        **bench,
+        "obfuscation": {"rules": "v1"},
+        "llm_review": {"policy": "dtype_precision_v1", "model": "kimi-k3"},
+    }
+    assert qualification_contract(rule, gated, engine) == qualification_contract(
+        rule, bench, engine
+    )
+    assert qualification_contract(
+        rule, {**bench, "gpu_count": 4}, engine
+    ) != qualification_contract(rule, bench, engine)
