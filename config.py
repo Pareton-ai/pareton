@@ -365,3 +365,38 @@ DEFAULT_DENIED_PATHS: list[str] = [
     "**/requirements*.txt",
     "**/CMakeLists.txt",
 ]
+
+# Optional LLM review gate (campaign bench.llm_review). Any OpenAI-style
+# /chat/completions endpoint; the base URL is the part before /chat/completions
+# (Engy: https://api.engy.ai/v1, model id kimi-k3).
+LLM_REVIEW_BASE_URL: str = os.environ.get("PARETON_LLM_REVIEW_BASE_URL", "").strip()
+LLM_REVIEW_API_KEY: str = os.environ.get("PARETON_LLM_REVIEW_API_KEY", "")
+LLM_REVIEW_TIMEOUT_S: float = float(
+    os.environ.get("PARETON_LLM_REVIEW_TIMEOUT_S", "300")
+)
+LLM_REVIEW_MAX_OUTPUT_TOKENS: int = int(
+    os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "16384")
+)
+# Patches longer than this are rejected rather than truncated, since a
+# truncated review would miss the tail.
+LLM_REVIEW_MAX_INPUT_CHARS: int = int(
+    os.environ.get("PARETON_LLM_REVIEW_MAX_INPUT_CHARS", "1000000")
+)
+# response_format to request: off, json_object, or json_schema (the strict
+# verdict schema). Off until the provider is confirmed to honour it; the
+# verdict is validated either way.
+LLM_REVIEW_RESPONSE_FORMAT: str = (
+    os.environ.get("PARETON_LLM_REVIEW_RESPONSE_FORMAT", "off").strip().lower()
+)
+# A provider outage defers the gates job instead of skipping the review. The
+# job is claimable again RETRY_AFTER_S after it was deferred, and the
+# submission is rejected once MAX_ATTEMPTS claims have failed this way.
+LLM_REVIEW_MAX_ATTEMPTS: int = int(
+    os.environ.get("PARETON_LLM_REVIEW_MAX_ATTEMPTS", "6")
+)
+LLM_REVIEW_RETRY_AFTER_S: float = float(
+    os.environ.get("PARETON_LLM_REVIEW_RETRY_AFTER_S", "600")
+)
+LLM_REVIEW_CACHE_DIR: Path = Path(
+    os.environ.get("PARETON_LLM_REVIEW_CACHE_DIR", str(WORK_DIR / "llm-review"))
+)
