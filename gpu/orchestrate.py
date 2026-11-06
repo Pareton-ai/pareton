@@ -31,11 +31,11 @@ from bench.validate import (
 
 from gpu.bootstrap import (
     REMOTE_ENGINE_CACHE,
-    REMOTE_HF_CACHE,
     REMOTE_REPO,
     REMOTE_VENV,
     bootstrap_pod,
     pull_engine_images,
+    remote_hf_cache,
 )
 from gpu.errors import DestroyError, GpuError, NoCapacityError, ProvisionError
 
@@ -157,7 +157,7 @@ def _write_remote_env(
     pod: Pod, *, runner: SshRunner | None, state_dir: Path | None
 ) -> None:
     lines: list[str] = [
-        f"PARETON_BENCH_HF_CACHE_DIR={REMOTE_HF_CACHE}",
+        f"PARETON_BENCH_HF_CACHE_DIR={remote_hf_cache(pod)}",
         f"PARETON_BENCH_ENGINE_CACHE_DIR={REMOTE_ENGINE_CACHE}",
         # Harness reads config on the pod, which has no .env; forward the
         # worker-side value so large models get the same health window.

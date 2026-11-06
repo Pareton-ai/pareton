@@ -29,6 +29,7 @@ class FakeExecutor:
     docker_in_docker: bool = True
     effective_download_speed_mbps: float | None = None
     specs: dict[str, Any] | None = None
+    tier: str | None = None
 
 
 @dataclass
@@ -310,6 +311,31 @@ def test_search_prefers_fastest_download(provider: LiumProvider, client: FakeCli
     assert offers[-1].raw["download_mbps"] == 0.0
 
 
+def test_search_skips_spot_and_split_disk_nodes(
+    provider: LiumProvider, client: FakeClient
+):
+    client.executors = [
+        FakeExecutor("spot-tier", "n", "H200", 8, 30.0, tier="spot"),
+        FakeExecutor("spot-flag", "n", "H200", 8, 30.0, specs={"is_spot": True}),
+        FakeExecutor(
+            "split", "n", "H200", 8, 30.0, specs={"split_disk": {"free_split_count": 3}}
+        ),
+        FakeExecutor(
+            "whole",
+            "n",
+            "H200",
+            8,
+            45.0,
+            specs={"is_spot": False, "split_disk": None},
+            tier="secure",
+        ),
+    ]
+    offers = provider.search(
+        PodSpec(gpu_count=8, gpu_type="H200", max_hourly_cents=7500)
+    )
+    assert [o.instance_id for o in offers] == ["whole"]
+
+
 def test_search_price_cap_still_filters_fast_executor(
     provider: LiumProvider, client: FakeClient
 ):
@@ -340,6 +366,7 @@ def test_provision_and_destroy(
     assert pod.raw["volume_name"] == name
     assert client.up_calls[0]["executor_id"] == "e1"
     assert client.up_calls[0]["volume_id"] == "vol-1"
+    assert client.up_calls[0]["enable_volume_encryption"] is False
     assert client.registered[0][0] == "pareton-gpu"
     assert pod.key_path.is_file() or pod.key_path.exists()
 
