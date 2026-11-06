@@ -2225,3 +2225,90 @@ def test_image_cleanup_retry_defers_without_blocking_or_paging_static_round(
     assert len(alerts) == 2
     assert failures == []
     assert all("image in use" in alert["error"] for alert in alerts)
+
+
+def _pod_for(provider: str, key_dir: Path) -> Pod:
+    return Pod(
+        provider=provider,
+        pod_id="wl",
+        name="n",
+        ssh=SshTarget(host="h", port=22, user="u"),
+        key_path=key_dir / "pareton-gpu-ed25519",
+        hourly_price_cents=1,
+        created_utc=datetime.now(timezone.utc),
+        ttl_hours=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "provider,expected",
+    [
+        ("lium", "/root/pareton/hf-cache"),
+        ("static_ssh", "/workspace/hf-cache"),
+        ("targon", "/workspace/hf-cache"),
+        ("shadeform", "/workspace/hf-cache"),
+    ],
+)
+def test_remote_hf_cache_dir_per_provider(
+    tmp_path: Path, monkeypatch, provider, expected
+):
+    from gpu.bootstrap import remote_hf_cache
+    from gpu.orchestrate import _write_remote_env
+
+    ensure_durable_keypair(tmp_path / "st")
+    pod = _pod_for(provider, tmp_path / "st" / "keys")
+    assert remote_hf_cache(pod) == expected
+
+    pushed: list[str] = []
+
+    def capturing_push(pod, local, remote, **kwargs):
+        pushed.append(Path(local).read_text(encoding="utf-8"))
+
+    monkeypatch.setattr("gpu.orchestrate.push", capturing_push)
+    monkeypatch.setattr(
+        "gpu.orchestrate.ssh_exec",
+        lambda *a, **k: SshResult(0, "", ""),
+    )
+    _write_remote_env(pod, runner=None, state_dir=tmp_path / "st")
+    env = dict(line.split("=", 1) for line in pushed[0].splitlines() if "=" in line)
+    assert env["PARETON_BENCH_HF_CACHE_DIR"] == expected
+
+
+def test_bootstrap_script_hf_cache_dir(tmp_path: Path):
+    from gpu.bootstrap import bootstrap_script
+
+    default = bootstrap_script(with_nvidia_toolkit_install=False)
+    assert (
+        "mkdir -p /opt/pareton /workspace/hf-cache /workspace/engine-cache" in default
+    )
+    custom = bootstrap_script(
+        with_nvidia_toolkit_install=False, hf_cache_dir="/root/pareton/hf-cache"
+    )
+    assert (
+        "mkdir -p /opt/pareton /root/pareton/hf-cache /workspace/engine-cache" in custom
+    )
+    assert (
+        "chown -R" in custom and "/root/pareton/hf-cache" in custom.split("chown -R")[1]
+    )
+
+
+def test_bootstrap_pod_lium_uses_root_hf_cache(tmp_path: Path, monkeypatch):
+    from gpu import bootstrap
+
+    ensure_durable_keypair(tmp_path / "st")
+    scripts: list[str] = []
+
+    def fake_exec(pod, cmd, **kwargs):
+        if "PARETON_BOOTSTRAP" in str(cmd):
+            scripts.append(str(cmd))
+        return SshResult(0, "", "")
+
+    monkeypatch.setattr(bootstrap, "ssh_exec", fake_exec)
+    monkeypatch.setattr(bootstrap, "push", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap, "authorize_extra_keys", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap, "local_code_sha", lambda *a, **k: "sha")
+    pod = _pod_for("lium", tmp_path / "st" / "keys")
+    bootstrap.bootstrap_pod(pod, repo_root=tmp_path, state_dir=tmp_path / "st")
+    assert scripts
+    assert "/root/pareton/hf-cache" in scripts[0]
+    assert "/workspace/hf-cache" not in scripts[0]

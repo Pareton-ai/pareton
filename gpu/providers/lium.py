@@ -169,6 +169,14 @@ class LiumProvider:
         for ex in executors:
             if not bool(_attr(ex, "docker_in_docker", False)):
                 continue
+            specs = _attr(ex, "specs", None) or {}
+            # Spot nodes can be reclaimed mid-round. A split_disk node carves
+            # its disk into per-GPU slices; a full 8x H200 Muse pod on one saw
+            # under 700 GiB on /root, short of the ~543 GB model snapshot.
+            if _attr(ex, "tier", None) == "spot" or specs.get("is_spot"):
+                continue
+            if specs.get("split_disk"):
+                continue
             gpu_count = int(_attr(ex, "gpu_count", 0) or 0)
             if gpu_count < want:
                 continue
@@ -267,6 +275,9 @@ class LiumProvider:
                 volume_id=volume_id,
                 ssh_keys=[ssh_pub],
                 ssh_name=SSH_KEY_NAME,
+                # Encryption mounts /root as gocryptfs FUSE, which the pod's
+                # inner docker cannot bind-mount into the engine container.
+                enable_volume_encryption=False,
             )
             if isinstance(created, dict):
                 pod_id = str(created.get("id") or created.get("pod_id") or "")

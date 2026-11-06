@@ -19,6 +19,14 @@ REMOTE_HF_CACHE = "/workspace/hf-cache"
 REMOTE_ENGINE_CACHE = "/workspace/engine-cache"
 
 
+def remote_hf_cache(pod: Pod) -> str:
+    # Lium mounts its large local volume at /root, not /workspace; the pod's
+    # /workspace container disk is too small for the model snapshot.
+    if pod.provider == "lium":
+        return "/root/pareton/hf-cache"
+    return REMOTE_HF_CACHE
+
+
 def local_code_sha(repo_root: Path) -> str:
     try:
         proc = subprocess.run(
@@ -61,7 +69,11 @@ fi
 """
 
 
-def bootstrap_script(*, with_nvidia_toolkit_install: bool = True) -> str:
+def bootstrap_script(
+    *,
+    with_nvidia_toolkit_install: bool = True,
+    hf_cache_dir: str = REMOTE_HF_CACHE,
+) -> str:
     """Generate a verify-first bootstrap shell script (no secrets)."""
     toolkit = ""
     if with_nvidia_toolkit_install:
@@ -126,8 +138,8 @@ python3 -c "import ensurepip" || {{
   exit 1
 }}
 
-$SUDO mkdir -p {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE}
-$SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {REMOTE_HF_CACHE} {REMOTE_ENGINE_CACHE} || true
+$SUDO mkdir -p {REMOTE_REPO} {shlex.quote(hf_cache_dir)} {REMOTE_ENGINE_CACHE}
+$SUDO chown -R "$(id -u):$(id -g)" {REMOTE_REPO} {shlex.quote(hf_cache_dir)} {REMOTE_ENGINE_CACHE} || true
 """
 
 
@@ -191,7 +203,7 @@ def bootstrap_pod(
 ) -> str:
     """Bootstrap remote host and ship the repo. Returns local git SHA."""
     del image_refs  # pulled later after env file is written (orchestrate)
-    script = bootstrap_script()
+    script = bootstrap_script(hf_cache_dir=remote_hf_cache(pod))
     ssh_exec(
         pod,
         f"bash -s <<'PARETON_BOOTSTRAP'\n{script}\nPARETON_BOOTSTRAP",
