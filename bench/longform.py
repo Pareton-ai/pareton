@@ -2,6 +2,8 @@
 
 An Exgentic rule may instead set ``ignore_eos`` to force every request to
 exactly ``max_tokens`` output tokens, so ``min_output_tokens`` equals it.
+With ``output_tokens_range`` such a rule forces each request to its own
+length, drawn from the round's seed and ending at ``max_tokens``.
 """
 
 from __future__ import annotations
@@ -110,6 +112,50 @@ def generation_sampling(rule, *, seed_key=""):
     return {"temperature": temperature, "top_p": 1.0}
 
 
+def output_length_fields(rule):
+    """Optional per-request forced output lengths, absent from older rules.
+
+    ``rule`` is a parsed rule or a trace's sampling block: both carry
+    ``algo_version``, ``max_tokens`` and ``ignore_eos``.
+    """
+    if "output_tokens_range" not in rule:
+        return {}
+    bounds = rule["output_tokens_range"]
+    if (
+        rule.get("ignore_eos") is not True
+        or rule.get("algo_version") != 6
+        or not isinstance(bounds, list)
+        or len(bounds) != 2
+        or any(type(value) is not int for value in bounds)
+        or not 1 <= bounds[0] < bounds[1]
+        or bounds[1] != rule.get("max_tokens")
+    ):
+        raise SamplerError(
+            "output_tokens_range requires ignore_eos, algo_version 6 and two "
+            "increasing positive integers ending at max_tokens"
+        )
+    return {"output_tokens_range": list(bounds)}
+
+
+def request_output_tokens(rule, *, seed_key=""):
+    """The output allowance of one request: ``max_tokens``, or a seeded draw.
+
+    A rule with ``output_tokens_range`` gives every request of a round its own
+    forced length, uniform over the range and fixed by the round's seed, so
+    the baseline and every candidate serve the same lengths.
+    """
+    fields = output_length_fields(rule)
+    if not fields:
+        return rule["max_tokens"]
+    if not seed_key:
+        raise SamplerError("randomized output length requires a pinned generation seed")
+    low, high = fields["output_tokens_range"]
+    value = int.from_bytes(
+        hashlib.sha256(f"output_tokens:{seed_key}".encode()).digest()[:8], "big"
+    )
+    return low + value % (high - low + 1)
+
+
 def tier_policy_fields(rule):
     """Optional v5 pins, deliberately absent from legacy rules and receipts."""
     fields = {}
@@ -191,6 +237,7 @@ def parse_longform_fields(rule, parsed):
     # Do not add a default field to old rules: their receipts and qualification
     # hashes must continue to reproduce exactly.
     result.update(generation_fields(rule))
+    result.update(output_length_fields({**rule, **parsed, "ignore_eos": fixed}))
     result.update(policy)
     if "eligible_row_indices" in rule:
         rows = rule["eligible_row_indices"]
@@ -387,9 +434,8 @@ def scan_candidates(
 
 
 def request_for_candidate(candidate, rule, index, *, generation_seed=""):
-    sampling = generation_sampling(
-        rule, seed_key=f"{generation_seed}:{index}" if generation_seed else ""
-    )
+    seed_key = f"{generation_seed}:{index}" if generation_seed else ""
+    sampling = generation_sampling(rule, seed_key=seed_key)
     if rule.get("ignore_eos"):
         sampling["ignore_eos"] = True
     if rule.get("keep_special_tokens"):
@@ -398,7 +444,7 @@ def request_for_candidate(candidate, rule, index, *, generation_seed=""):
         "id": f"hf-{index:03d}",
         "arrival_offset_ms": index * rule.get("request_interval_ms", 0),
         "prompt": candidate["prompt"],
-        "max_tokens": rule["max_tokens"],
+        "max_tokens": request_output_tokens(rule, seed_key=seed_key),
         "sampling": sampling,
         "input_tokens": candidate["input_tokens"],
         "input_ids_sha256": candidate["input_ids_sha256"],
@@ -517,8 +563,9 @@ def generate_longform_trace(
     if rule.get("keep_special_tokens"):
         workload["keep_special_tokens"] = True
     workload.update(generation_fields(rule))
+    workload.update(output_length_fields(rule))
     workload.update(tier_policy_fields(rule))
-    if "temperature_range" in rule:
+    if "temperature_range" in rule or "output_tokens_range" in rule:
         workload["generation_seed"] = seed
     validate_longform_trace(requests, workload)
     body = encode_trace(
@@ -541,7 +588,16 @@ def generate_longform_trace(
         "seed_hex": seed,
         "row_indices": [p["row_index"] for p in selected],
         "requests": [
-            {k: v for k, v in item.items() if k != "prompt"} for item in selected
+            {
+                **{k: v for k, v in item.items() if k != "prompt"},
+                # A drawn length is per request, so the receipt records it.
+                **(
+                    {"max_tokens": request["max_tokens"]}
+                    if "output_tokens_range" in rule
+                    else {}
+                ),
+            }
+            for item, request in zip(selected, requests, strict=True)
         ],
         "sampled_trace_sha256": sha,
     }
@@ -568,9 +624,9 @@ def validate_longform_trace(requests, sampling):
     validate_context(context)
     generation_fields(sampling)
     generation_seed = sampling.get("generation_seed", "")
-    if "temperature_range" in sampling and not re.fullmatch(
-        r"[0-9a-f]{64}", str(generation_seed)
-    ):
+    if (
+        "temperature_range" in sampling or "output_tokens_range" in sampling
+    ) and not re.fullmatch(r"[0-9a-f]{64}", str(generation_seed)):
         raise SamplerError("invalid long-form generation seed")
     if sampling["algo_version"] in (5, 6):
         from bench.concurrency import validate_concurrency, validate_request_timeout
@@ -600,6 +656,7 @@ def validate_longform_trace(requests, sampling):
     keep = sampling.get("keep_special_tokens", False)
     if keep is not False and (keep is not True or sampling["algo_version"] != 6):
         raise SamplerError("invalid keep_special_tokens long-form trace")
+    output_length_fields(sampling)
     policy = tier_policy_fields(sampling)
     tiers = input_tiers(policy.get("input_tiers"))
     groups = length_groups(len(requests), tiers)
@@ -611,9 +668,9 @@ def validate_longform_trace(requests, sampling):
         raise SamplerError("invalid long-form input tier contract")
     counts = {g["name"]: 0 for g in groups}
     for i, request in enumerate(requests):
-        settings = generation_sampling(
-            sampling, seed_key=f"{generation_seed}:{i}" if generation_seed else ""
-        )
+        seed_key = f"{generation_seed}:{i}" if generation_seed else ""
+        settings = generation_sampling(sampling, seed_key=seed_key)
+        allowance = request_output_tokens(sampling, seed_key=seed_key)
         if keep:
             settings["keep_special_tokens"] = True
         size = request.get("input_tokens")
@@ -622,7 +679,7 @@ def validate_longform_trace(requests, sampling):
             or size < 1
             or size > context["max_input_tokens"]
             or type(request.get("max_tokens")) is not int
-            or request["max_tokens"] != sampling["max_tokens"]
+            or request["max_tokens"] != allowance
             or size + request["max_tokens"] + context["engine_reserve"]
             > context["max_model_len"]
             or not isinstance(request.get("prompt"), str)

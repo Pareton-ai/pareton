@@ -38,6 +38,7 @@ LONGFORM_RULE_FIELDS = frozenset(
         "temperature",
         "temperature_range",
         "keep_special_tokens",
+        "output_tokens_range",
     }
 )
 MAX_PROMPT_CHARS = 8000

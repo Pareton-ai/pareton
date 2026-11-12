@@ -667,6 +667,119 @@ def test_fixed_length_trace_rejects_mixed_eos_requests():
         validate_workload_trace_dict(natural)
 
 
+def ranged_fields():
+    f = fixed_fields()
+    f["sampling_rule"]["output_tokens_range"] = [20, 220]
+    return f
+
+
+def test_output_tokens_range_draws_a_forced_length_for_each_request(tmp_path):
+    f = ranged_fields()
+    rule = parse_sampling_rule(f["sampling_rule"])
+    assert rule["output_tokens_range"] == [20, 220]
+    assert rule["max_tokens"] == rule["min_output_tokens"] == 220
+    value = sample(f)
+    trace = validate_workload_trace_dict(json.loads(value.body))
+    lengths = [r.max_tokens for r in trace.requests]
+    assert all(r.sampling.ignore_eos for r in trace.requests)
+    assert all(20 <= n <= 220 for n in lengths) and len(set(lengths)) > 1
+    assert trace.meta.sampling["output_tokens_range"] == [20, 220]
+    assert trace.meta.sampling["generation_seed"] == "a" * 64
+    # The receipt records each drawn length and reproduces the same trace.
+    assert [r["max_tokens"] for r in value.receipt["requests"]] == lengths
+    assert sample(f, sampling_receipt=value.receipt).body == value.body
+    path = materialize_round_trace(
+        {"sampled_trace_sha256": value.sha256, "sampling_receipt": value.receipt},
+        SimpleNamespace(bench=f["bench"], engine=f["engine"]),
+        tmp_path / "worker",
+        row_fetcher=snapshots().__getitem__,
+        prompt_formatter=formatter(),
+    )
+    assert path.read_bytes() == value.body
+    # Another round's seed draws other lengths.
+    other = generate_trace(
+        rule=f["sampling_rule"],
+        seed_hex="b" * 64,
+        row_fetcher=snapshots().__getitem__,
+        prompt_formatter=formatter(),
+        sampling_context=sampling_context_for_campaign(f["bench"], f["engine"]),
+    )
+    assert [r["max_tokens"] for r in other.receipt["requests"]] != lengths
+    # A rule without a range keeps one length and a receipt without lengths.
+    plain = sample(fixed_fields())
+    assert "output_tokens_range" not in plain.receipt
+    assert all("max_tokens" not in r for r in plain.receipt["requests"])
+
+
+def test_output_tokens_range_trace_rejects_any_other_length():
+    body = json.loads(sample(ranged_fields()).body)
+    drawn = body["requests"][0]["max_tokens"]
+    body["requests"][0]["max_tokens"] = 220 if drawn != 220 else 219
+    with pytest.raises(Exception, match="forced generation settings"):
+        validate_workload_trace_dict(body)
+    body = json.loads(sample(ranged_fields()).body)
+    body["meta"]["sampling"].pop("generation_seed")
+    with pytest.raises(Exception, match="generation seed"):
+        validate_workload_trace_dict(body)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"output_tokens_range": [20, 200]},  # must end at max_tokens
+        {"output_tokens_range": [220, 220]},
+        {"output_tokens_range": [0, 220]},
+        {"output_tokens_range": [20.0, 220]},
+        {"output_tokens_range": [20, 120, 220]},
+        {"output_tokens_range": "20-220"},
+        {"ignore_eos": False, "min_output_tokens": 1},  # natural stops
+    ],
+)
+def test_output_tokens_range_needs_a_forced_v6_rule_ending_at_max_tokens(change):
+    rule = {**ranged_fields()["sampling_rule"], **change}
+    with pytest.raises(SamplerError, match="output_tokens_range"):
+        parse_sampling_rule(rule)
+
+
+def test_output_tokens_range_qualifies_every_row_at_the_full_allowance(
+    tmp_path, monkeypatch
+):
+    f = ranged_fields()
+    fake_baseline(monkeypatch, f)
+    sent = []
+
+    def post(base_url, path, body, timeout):
+        sent.append(body)
+        return {
+            "choices": [{"text": "A valid response", "finish_reason": "length"}],
+            "usage": {
+                "prompt_tokens": len(formatter().encode(body["prompt"])),
+                "completion_tokens": body["max_tokens"],
+            },
+        }
+
+    monkeypatch.setattr("bench.qualify_longform.post_json", post)
+    qualified = qualify(
+        fields=f,
+        base_url="http://127.0.0.1:8000",
+        container="baseline",
+        engine_ref=f["bench"]["baseline_engine_image_digest"],
+        output_dir=tmp_path / "qualified",
+        pool_size=4,
+        row_fetcher=snapshots().__getitem__,
+        formatter=formatter(),
+    )
+    # A row must fill the longest length a round can draw.
+    assert sent and all(b["max_tokens"] == 220 and b["ignore_eos"] for b in sent)
+    assert qualified["output_tokens_range"] == [20, 220]
+    require_qualification(qualified, f["bench"], f["engine"])
+    # The range is part of the qualified contract.
+    with pytest.raises(SamplerError, match="baseline qualification"):
+        require_qualification(
+            {**qualified, "output_tokens_range": [21, 220]}, f["bench"], f["engine"]
+        )
+
+
 def test_fixed_length_qualification_accepts_forced_tails_but_not_short_or_empty():
     from bench.qualify_longform import evaluate_response
 

@@ -381,6 +381,8 @@ class ReportWorkloadModel(BaseModel):
     enable_thinking: bool | None = None
     max_model_len: int | None = None
     ignore_eos: bool | None = None
+    # Present only when the rule draws a forced output length per request.
+    output_tokens_range: list[int] | None = None
 
 
 class PromptSummaryModel(BaseModel):
@@ -419,6 +421,10 @@ class RoundEntryReportModel(BaseModel):
     score: float | None = None
     reason: str | None = None
     engine_crashed: bool = False
+    # Present only when the scoring rule sets max_extra_gpu_memory_mib:
+    # baseline_peak_mib and candidate_peak_mib (per GPU), extra_mib (largest
+    # per-GPU excess), max_extra_gpu_memory_mib and over_cap.
+    gpu_memory: dict[str, Any] | None = None
     scoring_rule: dict[str, Any]
     prompt_summary: PromptSummaryModel
     score_breakdown: ScoreBreakdownModel | None = None
@@ -677,6 +683,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
                     "temperature_range",
                     "input_tiers",
                     "ignore_eos",
+                    "output_tokens_range",
                 )
                 if key in receipt
             },
@@ -695,7 +702,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         }
         # Long-form receipts store selections without ids; the trace names
         # them hf-NNN by position and gives every request the rule's
-        # max_tokens.
+        # max_tokens, or its own drawn length under output_tokens_range.
         metadata = {
             request.get("request_id", f"hf-{index:03d}"): {
                 "input_tokens": request.get("input_tokens"),
@@ -738,6 +745,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         # into for every non-scored status, infra_failed included.
         "reason": row["disqualify_reason"] or raw.get("reason"),
         "engine_crashed": bool(raw.get("engine_crashed", False)),
+        "gpu_memory": raw.get("gpu_memory"),
         "scoring_rule": row["scoring_rule"] or {},
         "prompt_summary": summarize_prompt_scores(
             prompts, rule=(row["scoring_rule"] or {}).get("name")

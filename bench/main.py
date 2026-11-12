@@ -66,6 +66,12 @@ from bench.lifecycle import (
     HostEnvironmentError,
     new_run_id,
 )
+from bench.gpu_memory import (
+    FixedGpuMemory,
+    GpuMemorySampler,
+    gpu_memory_report,
+    merge_peaks,
+)
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.output import JsonlFileHandler, OutputLayout
 from bench.phases import BenchPhase
@@ -79,7 +85,11 @@ from bench.schemas import (
     RoundEntryReport,
     WorkloadTrace,
 )
-from bench.score import extrapolate_short_completions, score_candidate
+from bench.score import (
+    extrapolate_short_completions,
+    max_extra_gpu_memory_mib,
+    score_candidate,
+)
 from bench.sla_bench import (
     REPRO_BAR_MAX_REL_RANGE,
     EngineReplay,
@@ -389,6 +399,9 @@ class MockCandidatePlan:
     garbage: bool = False
     infra_fail: bool = False
     crash: bool = False
+    # Peak MiB per GPU the mock reports to a rule with a memory cap; None
+    # means the same as the mock baseline.
+    gpu_memory_mib: list[float] | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> MockCandidatePlan:
@@ -397,6 +410,11 @@ class MockCandidatePlan:
             garbage=bool(d.get("garbage", False)),
             infra_fail=bool(d.get("infra_fail", False)),
             crash=bool(d.get("crash", False)),
+            gpu_memory_mib=(
+                None
+                if d.get("gpu_memory_mib") is None
+                else [float(v) for v in d["gpu_memory_mib"]]
+            ),
         )
 
 
@@ -404,6 +422,7 @@ class MockCandidatePlan:
 class MockPlan:
     baseline_token_latency_s: float = 0.0
     candidates: list[MockCandidatePlan] = field(default_factory=list)
+    baseline_gpu_memory_mib: list[float] = field(default_factory=lambda: [0.0])
 
     def candidate(self, index: int) -> MockCandidatePlan:
         if index < len(self.candidates):
@@ -428,6 +447,7 @@ class _EngineProvider:
         weights_dir: Path | None = None,
         phase_sink: Callable[..., None] | None = None,
         docker_runner=None,
+        gpu_memory_sampler: Callable[[], Any] | None = None,
     ) -> None:
         self._req = req
         self._mock = mock
@@ -435,6 +455,8 @@ class _EngineProvider:
         self._logs_dir = logs_dir or Path(".")
         # Test seam: a fake runner exercises the real docker argv without a daemon.
         self._docker_runner = docker_runner
+        # Test seam: a fake sampler stands in for nvidia-smi.
+        self._gpu_memory_sampler = gpu_memory_sampler
         self.weights_dir = weights_dir
         self.draft_dir: Path | None = None
         self._phase_sink = phase_sink
@@ -472,6 +494,22 @@ class _EngineProvider:
             speed_factor=plan.speed_factor,
             garbage=plan.garbage,
         )
+
+    def gpu_memory(self, start: EngineStart):
+        """A context manager whose ``peak_mib`` is this engine's peak GPU memory.
+
+        Enter it inside ``start`` and leave it before the engine stops. Only a
+        round whose scoring rule caps GPU memory asks for one.
+        """
+        if self._gpu_memory_sampler is not None:
+            return self._gpu_memory_sampler()
+        if self._mock:
+            peak = self._mock_plan.baseline_gpu_memory_mib
+            if start.candidate_index is not None:
+                peak = self._mock_plan.candidate(start.candidate_index).gpu_memory_mib
+                peak = self._mock_plan.baseline_gpu_memory_mib if peak is None else peak
+            return FixedGpuMemory(peak)
+        return GpuMemorySampler()
 
     @contextmanager
     def start(self, start: EngineStart, *, phase: BenchPhase) -> Iterator[str]:
@@ -539,6 +577,8 @@ class _CandidateRun:
     status: str
     replay: EngineReplay | None = None
     reason: str | None = None
+    # Set only when the scoring rule caps GPU memory (bench/gpu_memory.py).
+    gpu_memory: dict[str, Any] | None = None
 
 
 def _natural_stop_tier_workload(req: BenchRequest, trace: WorkloadTrace | None) -> bool:
@@ -606,6 +646,18 @@ def run_round(
     excluded_prompts: dict[str, str] = {}
     relative_correctness = req.correctness.thresholds.max_mean_logprob_drop is not None
 
+    # Optional cap on candidate GPU memory above the baseline's. Both baseline
+    # runs are sampled and the larger peak per GPU is the reference.
+    memory_cap = max_extra_gpu_memory_mib(req.scoring_rule)
+    baseline_memory: list[float] | None = None
+
+    def gpu_memory(start: EngineStart):
+        # Without a cap the provider is never asked, so those rounds run no
+        # nvidia-smi and behave exactly as before.
+        if memory_cap is None:
+            return FixedGpuMemory()
+        return provider.gpu_memory(start)
+
     leader_index = req.leader_candidate_index
     leader_failed = False
     # Live per-entry progress, streamed to the worker through
@@ -658,15 +710,33 @@ def run_round(
             try:
                 with provider.start(start, phase=phase) as url:
                     preflight(url, start)
-                    replay = run_sla_engine(
-                        url,
-                        role=start.role,
-                        requests=requests,
-                        cfg=req.sla_bench,
-                        evidence_dir=layout.sla_bench_dir,
-                        engine_name=start.spec.name,
-                        **replay_kwargs,
-                    )
+                    with gpu_memory(start) as memory:
+                        replay = run_sla_engine(
+                            url,
+                            role=start.role,
+                            requests=requests,
+                            cfg=req.sla_bench,
+                            evidence_dir=layout.sla_bench_dir,
+                            engine_name=start.spec.name,
+                            **replay_kwargs,
+                        )
+                    if memory_cap is not None:
+                        baseline_memory = merge_peaks(baseline_memory, memory.peak_mib)
+                        if baseline_memory is None:
+                            # The cap is part of the ranking contract, so a
+                            # round that can't measure its reference can't
+                            # judge anyone.
+                            raise EngineError(
+                                f"GPU memory of {start.role} could not be sampled, "
+                                "and the scoring rule caps it"
+                            )
+                        layout.append_log(
+                            {
+                                "event": "gpu_memory",
+                                "role": start.role,
+                                "peak_mib": memory.peak_mib,
+                            }
+                        )
                     excluded_prompts = baseline_prompt_drops(
                         trace, replay, dropped=excluded_prompts
                     )
@@ -791,18 +861,39 @@ def run_round(
             index = start.candidate_index
             assert index is not None
             note(str(index), "running")
+            memory_report: dict[str, Any] | None = None
             try:
                 with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
                     preflight(url, start)
-                    replay = run_sla_engine(
-                        url,
-                        role=start.role,
-                        requests=requests,
-                        cfg=req.sla_bench,
-                        evidence_dir=layout.sla_bench_dir,
-                        engine_name=start.spec.name,
-                        **replay_kwargs,
+                    with gpu_memory(start) as memory:
+                        replay = run_sla_engine(
+                            url,
+                            role=start.role,
+                            requests=requests,
+                            cfg=req.sla_bench,
+                            evidence_dir=layout.sla_bench_dir,
+                            engine_name=start.spec.name,
+                            **replay_kwargs,
+                        )
+                if memory_cap is not None:
+                    layout.append_log(
+                        {
+                            "event": "gpu_memory",
+                            "role": start.role,
+                            "peak_mib": memory.peak_mib,
+                        }
                     )
+                    memory_report = gpu_memory_report(
+                        baseline_memory, memory.peak_mib, memory_cap
+                    )
+                    if memory_report is None:
+                        # Not the candidate's fault: nvidia-smi gave nothing
+                        # comparable. Same path as any other infra failure.
+                        raise EngineError(
+                            f"GPU memory of {start.role} could not be sampled, "
+                            "and the scoring rule caps it",
+                            error_role=start.role,
+                        )
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and
                 # its own code died. That is the candidate's fault, so the
@@ -839,6 +930,26 @@ def run_round(
                         index,
                     )
                 continue
+            if memory_report is not None and memory_report["over_cap"]:
+                # A rule the candidate broke, like a correctness failure: it
+                # is disqualified with its evidence and never graded.
+                reason = (
+                    f"gpu_memory_over_cap: peak GPU memory is "
+                    f"{memory_report['extra_mib']:.0f} MiB above the baseline's "
+                    f"on one GPU; the campaign allows {memory_cap:.0f} MiB"
+                )
+                logger.warning("candidate %d %s", index, reason)
+                runs.append(
+                    _CandidateRun(
+                        index=index,
+                        status="disqualified",
+                        replay=replay,
+                        reason=reason,
+                        gpu_memory=memory_report,
+                    )
+                )
+                note(str(index), "disqualified", reason)
+                continue
             if concurrent:
                 replay.result.tier_completion = _charged_tier_completion(
                     replay,
@@ -847,7 +958,14 @@ def run_round(
                     repetitions=req.sla_bench.repetitions,
                     input_tiers=workload.get("input_tiers"),
                 )
-            runs.append(_CandidateRun(index=index, status="scored", replay=replay))
+            runs.append(
+                _CandidateRun(
+                    index=index,
+                    status="scored",
+                    replay=replay,
+                    gpu_memory=memory_report,
+                )
+            )
             pending.append(
                 PendingCorrectness(
                     candidate_index=index,
@@ -963,14 +1081,18 @@ def _build_entries(
         # branch must precede the replay-None fallback below, which maps to
         # infra_failed.
         if run.status == "disqualified":
-            # Engine crashed at startup: no SLA, no correctness, no score.
+            # Either the engine crashed at startup (no replay: no SLA, no
+            # correctness, no score), or it served the replay over the
+            # campaign's GPU memory cap (its SLA and memory are evidence).
             entries.append(
                 RoundEntryReport(
                     index=run.index,
                     image_digest=digest,
                     status="disqualified",
                     reason=run.reason,
-                    engine_crashed=True,
+                    engine_crashed=run.replay is None,
+                    sla=None if run.replay is None else run.replay.result,
+                    gpu_memory=run.gpu_memory,
                 )
             )
             continue
@@ -1075,6 +1197,7 @@ def _build_entries(
                 score_report=score_report,
                 sla=run.replay.result,
                 correctness=corr,
+                gpu_memory=run.gpu_memory,
             )
         )
     return entries

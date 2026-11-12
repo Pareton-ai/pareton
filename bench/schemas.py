@@ -579,6 +579,9 @@ class RoundEntryReport:
     # crash from a missing correctness block would conflate fixtures and any
     # future disqualified payload that omits it.
     engine_crashed: bool = False
+    # Peak GPU memory against the baseline's, present only when the scoring
+    # rule sets max_extra_gpu_memory_mib (bench/gpu_memory.gpu_memory_report).
+    gpu_memory: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -590,6 +593,8 @@ class RoundEntryReport:
         }
         if self.engine_crashed:
             out["engine_crashed"] = True
+        if self.gpu_memory is not None:
+            out["gpu_memory"] = self.gpu_memory
         if self.score_report is not None:
             out["score_report"] = self.score_report
         if self.sla is not None:

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Seeds the Meta Muse Spark Open campaign that mirrors the Open Kernel Challenge
-# serving track (fixture fixtures/campaigns/sglang_muse_spark_open_h200_okc).
+# serving track (fixture fixtures/campaigns/sglang_muse_spark_open_h200_okc),
+# under OKC's rules of 2026-11-11: SGLang v0.5.23 (297e54fd) with its stock
+# launch flags, 400 KB patches, lossless patches only, and at most 2 GB more
+# GPU memory per GPU than stock (the scoring rule's max_extra_gpu_memory_mib).
 # Run once, on the validator, with /opt/pareton/.env loaded. Running it twice
 # creates two campaigns. PARETON_DATABASE_URL must be configured. This creates
 # a public open campaign.
@@ -8,8 +11,8 @@
 # Pass the rule qualified by ops/campaign_preflight.py at the fixture's
 # settings (keep_special_tokens, 0.001 token quantile); seed refuses a rule
 # whose qualification contract does not match.
-# Both review gates (#214) are on: d1 obfuscation v1 and the d2 dtype LLM review
-# with kimi-k3. pareton-worker needs PARETON_LLM_REVIEW_BASE_URL,
+# Both review gates (#214) are on: d1 obfuscation v1 and the d2 LLM review
+# okc_serving_v1 with kimi-k3. pareton-worker needs PARETON_LLM_REVIEW_BASE_URL,
 # PARETON_LLM_REVIEW_API_KEY and PARETON_LLM_REVIEW_RESPONSE_FORMAT=json_schema,
 # or every submission is rejected at d2.
 # Patches stay private with no timed public reveal.
@@ -50,7 +53,7 @@ python -m campaign.seed \
   --success-threshold ">=10% completion speedup at C16 with TTFT within 2x stock" \
   --patch-visibility private \
   --baseline-repo https://github.com/sgl-project/sglang.git \
-  --baseline-commit a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f \
+  --baseline-commit 297e54fd105e974cdf401e5b4d20253a22c16f90 \
   --base-image-digest "$engine_ref" \
   --baseline-engine-image-digest "$engine_ref" \
   --gpu-skus H200 --bench-gpu-count 8 \
@@ -68,7 +71,10 @@ python -m campaign.seed \
   --bench-serve-args=--mem-fraction-static --bench-serve-args=0.85 \
   --bench-serve-args=--speculative-algorithm --bench-serve-args=DFLASH \
   --bench-serve-args=--speculative-num-draft-tokens --bench-serve-args=8 \
+  --bench-serve-args=--speculative-draft-attention-backend --bench-serve-args=fa4 \
+  --bench-serve-args=--mm-feature-transport --bench-serve-args=cpu \
   --bench-serve-args=--enable-hierarchical-cache \
+  --bench-serve-args=--hicache-size --bench-serve-args=160 \
   --bench-serve-args=--chunked-prefill-size --bench-serve-args=16384 \
   --bench-serve-args=--enable-cache-report \
   --bench-serve-args=--incremental-streaming-output \
@@ -83,7 +89,7 @@ python -m campaign.seed \
   --bench-correctness-min-coverage-ratio=0.5 \
   --bench-correctness-max-mean-logprob-drop=2.5 \
   --obfuscation v1 \
-  --llm-review dtype_precision_v1 --llm-review-model kimi-k3 \
+  --llm-review okc_serving_v1 --llm-review-model kimi-k3 \
   --sampling-rule-json "$sampling_rule" \
   --scoring-rule-json "$scoring_rule" \
   --status open --emission-start-weight 0.50 --emission-floor-weight 0 \

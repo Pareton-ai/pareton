@@ -85,6 +85,41 @@ def test_validate_rejects_bad_specs(spec):
         validate_llm_review(spec)
 
 
+@pytest.mark.parametrize("policy", llm_review.POLICIES)
+def test_validate_accepts_every_policy(policy):
+    assert validate_llm_review({"policy": policy, "model": " kimi-k3 "}) == {
+        "policy": policy,
+        "model": "kimi-k3",
+    }
+
+
+def test_okc_serving_policy_has_its_own_prompt_and_cache(tmp_path):
+    """okc_serving_v1 sends its own prompt, and never reuses a dtype verdict."""
+    okc = {"policy": "okc_serving_v1", "model": "kimi-k3"}
+    dtype_client = FakeClient(_verdict())
+    assert _check(tmp_path, dtype_client).ok
+    reject = _verdict("reject", [{"file": FILE, "hunk": HUNK, "why": "top-k"}])
+    client = FakeClient(reject)
+    result = _check(tmp_path, client, spec=okc)
+    assert not result.ok
+    assert result.reason == "llm_review_rejected"
+    system = client.calls[0][0]["content"]
+    assert system != dtype_client.calls[0][0]["content"]
+    # One phrase per OKC rule the policy stands for.
+    for rule in (
+        "approximation",
+        "skips work",
+        "replaces the draft model",
+        "Fixed launch options",
+        "context length and prompt truncation",
+        "external or remote cache",
+        "special-cases the benchmark",
+        "tampers with what is measured",
+        "other models, GPUs or features",
+    ):
+        assert rule in system, rule
+
+
 # -- Verdict parsing ---------------------------------------------------------
 
 

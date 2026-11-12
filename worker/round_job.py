@@ -178,6 +178,7 @@ def materialize_round_trace(
                             "temperature",
                             "temperature_range",
                             "keep_special_tokens",
+                            "output_tokens_range",
                         )
                         if key in receipt
                     },

@@ -505,7 +505,7 @@ def test_sglang_okc_defaults_to_okc_patch_rules(monkeypatch):
         == "pip install --no-deps --no-build-isolation -e python/"
     )
     assert m.bench["patch_limits"] == {
-        "max_patch_bytes": 737280,
+        "max_patch_bytes": 409600,
         "max_added_line_chars": 400,
         "reject_renames": True,
         "reject_mode_changes": True,
@@ -1523,9 +1523,11 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
         "contract_sha256": qualification_contract(rule, bench, fields["engine"]),
         "repetitions": 2,
     }
-    # Fixed 220-token outputs, and the largest tier still fits the context.
+    # Forced outputs, as OKC forces its own, at a length each round draws for
+    # every request; the largest tier still fits the context at the longest.
     assert rule["ignore_eos"] is True
-    assert rule["max_tokens"] == rule["min_output_tokens"] == 220
+    assert rule["output_tokens_range"] == [220, 5120]
+    assert rule["max_tokens"] == rule["min_output_tokens"] == 5120
     # Muse emits <|message|> mid-output; keeping it lets the default token
     # quantile bar stand.
     assert rule["keep_special_tokens"] is True
@@ -1555,7 +1557,7 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
         "emission_rule": fields["emission_rule"],
         "gpu_skus": fields["gpu_skus"],
     }
-    # Both digests pin #216's engine image, as the Kimi fixtures do.
+    # Both digests pin the same engine image, as the Kimi fixtures do.
     assert fields["base_image_digest"] == bench["baseline_engine_image_digest"]
     seed_synthetic_campaign(**common)
     m = captured["manifest"]
@@ -1564,6 +1566,20 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
     assert m.denied_paths == fields["denied_paths"]
     assert m.bench == bench
     assert m.scoring_rule["max_ttft_ratio"] == 2.0
+    # OKC's rules of 2026-11-11: SGLang v0.5.23 with its stock launch flags,
+    # 400 KB patches, and at most 2 GB more GPU memory per GPU than stock.
+    assert m.baseline_commit == "297e54fd105e974cdf401e5b4d20253a22c16f90"
+    assert m.bench["patch_limits"]["max_patch_bytes"] == 409600
+    assert m.scoring_rule["max_extra_gpu_memory_mib"] == 2048.0
+    # OKC samples greedily, which is DFlash's all-greedy verification path.
+    assert rule["temperature"] == 0.0 and "temperature_range" not in rule
+    args = bench["serve_args"]
+    for flag, value in [
+        ("--speculative-draft-attention-backend", "fa4"),
+        ("--mm-feature-transport", "cpu"),
+        ("--hicache-size", "160"),
+    ]:
+        assert args[args.index(flag) + 1] == value
 
 
 def test_muse_spark_okc_launch_helper_matches_the_fixture(monkeypatch, tmp_path):
@@ -1617,7 +1633,7 @@ def test_muse_spark_okc_launch_helper_matches_the_fixture(monkeypatch, tmp_path)
     manifest = captured["manifest"]
     gates = {
         "obfuscation": {"rules": "v1"},
-        "llm_review": {"policy": "dtype_precision_v1", "model": "kimi-k3"},
+        "llm_review": {"policy": "okc_serving_v1", "model": "kimi-k3"},
     }
     assert manifest.bench == {**fields["bench"], **gates}
     for key in (
