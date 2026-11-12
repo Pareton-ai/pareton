@@ -362,6 +362,20 @@ def test_short_outputs_are_reported_against_the_floor(tmp_path, harness):
     assert set(summary["below_min_output"].values()) == {10}
 
 
+def test_a_forced_length_request_is_held_to_its_own_allowance():
+    """A rule with output_tokens_range draws lengths below its max_tokens."""
+    forced = {
+        **request(),
+        "max_tokens": 300,
+        "sampling": {"temperature": 0.0, "top_p": 1.0, "ignore_eos": True},
+    }
+    state = {}
+    check.describe(state, {"min_output_tokens": 5120}, "64k", forced, 16)
+    assert state["min_output_tokens"] == 300
+    check.describe(state, {"min_output_tokens": 1500}, "64k", request(), 16)
+    assert state["min_output_tokens"] == 1500
+
+
 def test_saved_outputs_are_regraded_without_a_baseline(tmp_path, harness):
     assert run(tmp_path, name="first")[0] == 0
     first_streams = len(harness.streams)

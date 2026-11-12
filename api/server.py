@@ -381,6 +381,8 @@ class ReportWorkloadModel(BaseModel):
     enable_thinking: bool | None = None
     max_model_len: int | None = None
     ignore_eos: bool | None = None
+    # Present only when the rule draws a forced output length per request.
+    output_tokens_range: list[int] | None = None
 
 
 class PromptSummaryModel(BaseModel):
@@ -681,6 +683,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
                     "temperature_range",
                     "input_tiers",
                     "ignore_eos",
+                    "output_tokens_range",
                 )
                 if key in receipt
             },
@@ -699,7 +702,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         }
         # Long-form receipts store selections without ids; the trace names
         # them hf-NNN by position and gives every request the rule's
-        # max_tokens.
+        # max_tokens, or its own drawn length under output_tokens_range.
         metadata = {
             request.get("request_id", f"hf-{index:03d}"): {
                 "input_tokens": request.get("input_tokens"),

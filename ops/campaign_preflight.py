@@ -374,7 +374,13 @@ def describe(state, rule, tier, request, concurrency):
         source_request_id=request["id"],
         input_tokens=request["input_tokens"],
         max_tokens=request["max_tokens"],
-        min_output_tokens=rule.get("min_output_tokens"),
+        # A forced-length request has to return exactly its own allowance,
+        # which a rule with output_tokens_range draws below max_tokens.
+        min_output_tokens=(
+            request["max_tokens"]
+            if request["sampling"].get("ignore_eos")
+            else rule.get("min_output_tokens")
+        ),
         temperatures=temperature_extremes(rule),
         concurrency=concurrency,
     )

@@ -1305,6 +1305,14 @@ def test_fixed_length_exgentic_report_keeps_concurrency_and_ttft_cap(
     assert "request_interval_ms" not in body["workload"]
     assert body["prompts"][0]["max_tokens"] == 220
     assert body["prompts"][0]["input_length_group"] == "2k"
+    assert "output_tokens_range" not in body["workload"]
+    # A rule that draws lengths reports its range and each request's length.
+    row["sampling_receipt"].update(max_tokens=5120, output_tokens_range=[220, 5120])
+    row["sampling_receipt"]["requests"][0]["max_tokens"] = 1337
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    server.RoundEntryReportModel.model_validate(body)
+    assert body["workload"]["output_tokens_range"] == [220, 5120]
+    assert body["prompts"][0]["max_tokens"] == 1337
 
 
 @pytest.mark.parametrize("kind", ["baseline", "scored", "infra_failed"])
