@@ -419,6 +419,10 @@ class RoundEntryReportModel(BaseModel):
     score: float | None = None
     reason: str | None = None
     engine_crashed: bool = False
+    # Present only when the scoring rule sets max_extra_gpu_memory_mib:
+    # baseline_peak_mib and candidate_peak_mib (per GPU), extra_mib (largest
+    # per-GPU excess), max_extra_gpu_memory_mib and over_cap.
+    gpu_memory: dict[str, Any] | None = None
     scoring_rule: dict[str, Any]
     prompt_summary: PromptSummaryModel
     score_breakdown: ScoreBreakdownModel | None = None
@@ -738,6 +742,7 @@ def round_entry_report(round_id: UUID, entry_id: int, response: Response):
         # into for every non-scored status, infra_failed included.
         "reason": row["disqualify_reason"] or raw.get("reason"),
         "engine_crashed": bool(raw.get("engine_crashed", False)),
+        "gpu_memory": raw.get("gpu_memory"),
         "scoring_rule": row["scoring_rule"] or {},
         "prompt_summary": summarize_prompt_scores(
             prompts, rule=(row["scoring_rule"] or {}).get("name")

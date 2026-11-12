@@ -164,6 +164,30 @@ def max_ttft_ratio(rule: Mapping[str, Any]) -> float | None:
     return float(value)
 
 
+def max_extra_gpu_memory_mib(rule: Mapping[str, Any]) -> float | None:
+    """Optional cap on a candidate's GPU memory above the round's baseline.
+
+    In MiB, per GPU. Absent means no cap. A candidate whose peak on any GPU
+    exceeds the baseline's peak on that GPU by more than this is disqualified:
+    memory the baseline does not need is not a speedup the campaign pays for.
+    The round measures both sides (bench/gpu_memory.py).
+    """
+    if "max_extra_gpu_memory_mib" not in rule:
+        return None
+    value = rule["max_extra_gpu_memory_mib"]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        # A range check rejects NaN and inf, and math.isfinite would overflow
+        # on an int too large for a float.
+        or not 0 <= value <= sys.float_info.max
+    ):
+        raise ValueError(
+            "scoring_rule.max_extra_gpu_memory_mib must be a finite number >= 0"
+        )
+    return float(value)
+
+
 def ttft_ratio(
     baseline: Mapping[str, PromptTiming], candidate: Mapping[str, PromptTiming]
 ) -> float | None:

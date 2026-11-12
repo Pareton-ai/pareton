@@ -1391,6 +1391,47 @@ def test_entry_report_carries_the_reason_for_a_non_scored_entry(
     assert body["correctness"]["verdict"] == "fail_correctness"
 
 
+def test_entry_report_carries_gpu_memory_for_a_capped_campaign(
+    monkeypatch, client: TestClient
+):
+    """A candidate over the memory cap is disqualified, with the measurement."""
+    from api import server
+
+    memory = {
+        "baseline_peak_mib": [120000.0],
+        "candidate_peak_mib": [123000.0],
+        "extra_mib": 3000.0,
+        "max_extra_gpu_memory_mib": 2048.0,
+        "over_cap": True,
+    }
+    reason = "gpu_memory_over_cap: peak GPU memory is 3000 MiB above the baseline's"
+    row = _score_report_row(
+        status="disqualified",
+        score=None,
+        disqualify_reason=reason,
+        report={
+            "index": 0,
+            "image_digest": "sha256:" + "2" * 64,
+            "status": "disqualified",
+            "score": None,
+            "reason": reason,
+            "gpu_memory": memory,
+        },
+    )
+    monkeypatch.setattr(server, "get_round_entry_report", lambda _rid, _eid: row)
+    body = client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()
+    typed = server.RoundEntryReportModel.model_validate(body)
+    assert typed.gpu_memory == memory
+    assert body["reason"] == reason
+    assert body["engine_crashed"] is False
+    # Campaigns without the cap keep a null field.
+    row["report"].pop("gpu_memory")
+    assert (
+        client.get(f"/v1/rounds/{ROUND_ID}/entries/2/report").json()["gpu_memory"]
+        is None
+    )
+
+
 def test_entry_report_reads_the_baseline_row_as_an_sla_replay(
     monkeypatch, client: TestClient
 ):
