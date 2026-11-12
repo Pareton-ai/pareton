@@ -1523,9 +1523,10 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
         "contract_sha256": qualification_contract(rule, bench, fields["engine"]),
         "repetitions": 2,
     }
-    # Fixed 220-token outputs, and the largest tier still fits the context.
-    assert rule["ignore_eos"] is True
-    assert rule["max_tokens"] == rule["min_output_tokens"] == 220
+    # Outputs stop naturally under a 5120-token allowance, as in the earlier
+    # campaigns, and the largest tier still fits the context.
+    assert "ignore_eos" not in rule
+    assert (rule["max_tokens"], rule["min_output_tokens"]) == (5120, 1500)
     # Muse emits <|message|> mid-output; keeping it lets the default token
     # quantile bar stand.
     assert rule["keep_special_tokens"] is True
