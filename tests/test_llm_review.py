@@ -524,11 +524,12 @@ def test_stream_deadline_is_retryable_outage(streaming, monkeypatch):
     assert "deadline" in exc.value.detail
 
 
-def test_stream_bad_chunk_is_invalid_output(streaming, monkeypatch):
+@pytest.mark.parametrize("line", [b"data: {not json", b'data: {"choices": 1}'])
+def test_stream_bad_chunk_is_invalid_output(streaming, monkeypatch, line):
     monkeypatch.setattr(
         llm_review.requests,
         "post",
-        lambda *_, **__: _StreamResp([b"data: {not json"]),
+        lambda *_, **__: _StreamResp([line]),
     )
     with pytest.raises(llm_review.LLMReviewError) as exc:
         llm_review.openai_chat_client("kimi-k3")([])

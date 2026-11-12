@@ -426,7 +426,10 @@ def _read_stream(resp: Any, deadline: float) -> tuple[str, Any, dict | None]:
                 raise LLMReviewError("llm_review_invalid_output", "bad stream chunk")
             if isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
-            for choice in chunk.get("choices") or []:
+            choices = chunk.get("choices") or []
+            if not isinstance(choices, list):
+                raise LLMReviewError("llm_review_invalid_output", "bad stream chunk")
+            for choice in choices:
                 if not isinstance(choice, dict) or choice.get("index", 0) != 0:
                     continue
                 delta = choice.get("delta") or {}
