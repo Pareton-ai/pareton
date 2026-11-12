@@ -1569,6 +1569,8 @@ def test_muse_spark_okc_fixture_matches_the_sglang_okc_seed(monkeypatch):
     assert m.baseline_commit == "297e54fd105e974cdf401e5b4d20253a22c16f90"
     assert m.bench["patch_limits"]["max_patch_bytes"] == 409600
     assert m.scoring_rule["max_extra_gpu_memory_mib"] == 2048.0
+    # OKC samples greedily, which is DFlash's all-greedy verification path.
+    assert rule["temperature"] == 0.0 and "temperature_range" not in rule
     args = bench["serve_args"]
     for flag, value in [
         ("--speculative-draft-attention-backend", "fa4"),
@@ -1629,7 +1631,7 @@ def test_muse_spark_okc_launch_helper_matches_the_fixture(monkeypatch, tmp_path)
     manifest = captured["manifest"]
     gates = {
         "obfuscation": {"rules": "v1"},
-        "llm_review": {"policy": "lossless_v1", "model": "kimi-k3"},
+        "llm_review": {"policy": "okc_serving_v1", "model": "kimi-k3"},
     }
     assert manifest.bench == {**fields["bench"], **gates}
     for key in (

@@ -12,11 +12,12 @@ request builder and the harness's planned baseline, with ``/model`` and any
    Exgentic) is used for the rest of the run.
 3. **Temperature extremes.** That prompt is generated ``--repetitions`` times
    at each end of ``temperature_range`` with natural EOS, in waves of the
-   campaign's ``request_concurrency``.
+   campaign's ``request_concurrency``. A rule with one fixed ``temperature``
+   (a greedy campaign pins 0) is generated at that temperature only.
 4. **Greedy repeatability.** One greedy reference, then a full concurrent wave
    of the same greedy request, compared token by token with the reference.
-   This is reported, not enforced: rounds never sample at temperature 0, and
-   a batched near-tie can flip one early token (Kimi K3 under DCP and
+   This is reported, not enforced: rounds grade logprobs, not token matches,
+   and a batched near-tie can flip one early token (Kimi K3 under DCP and
    speculative decoding), after which every position differs.
 5. **SLA.** Every streamed request above counts toward p99 TTFT and p99
    inter-chunk latency against the campaign's ``sla``. Rounds only report the
@@ -188,9 +189,11 @@ def highest_tier_request(fields, rule, request_index):
 
 
 def temperature_extremes(rule):
+    """Both ends of the rule's range, or its one fixed temperature."""
     bounds = rule.get("temperature_range")
     if bounds is None:
-        raise ValueError("sampling rule has no temperature_range")
+        # Rounds sample a rule without a range at its temperature, 0 if unset.
+        return [float(rule.get("temperature", 0.0))]
     return [float(bounds[0]), float(bounds[1])]
 
 

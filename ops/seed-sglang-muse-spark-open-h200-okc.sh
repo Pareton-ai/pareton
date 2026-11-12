@@ -11,8 +11,8 @@
 # Pass the rule qualified by ops/campaign_preflight.py at the fixture's
 # settings (keep_special_tokens, 0.001 token quantile); seed refuses a rule
 # whose qualification contract does not match.
-# Both review gates (#214) are on: d1 obfuscation v1 and the d2 lossless LLM
-# review with kimi-k3. pareton-worker needs PARETON_LLM_REVIEW_BASE_URL,
+# Both review gates (#214) are on: d1 obfuscation v1 and the d2 LLM review
+# okc_serving_v1 with kimi-k3. pareton-worker needs PARETON_LLM_REVIEW_BASE_URL,
 # PARETON_LLM_REVIEW_API_KEY and PARETON_LLM_REVIEW_RESPONSE_FORMAT=json_schema,
 # or every submission is rejected at d2.
 # Patches stay private with no timed public reveal.
@@ -89,7 +89,7 @@ python -m campaign.seed \
   --bench-correctness-min-coverage-ratio=0.5 \
   --bench-correctness-max-mean-logprob-drop=2.5 \
   --obfuscation v1 \
-  --llm-review lossless_v1 --llm-review-model kimi-k3 \
+  --llm-review okc_serving_v1 --llm-review-model kimi-k3 \
   --sampling-rule-json "$sampling_rule" \
   --scoring-rule-json "$scoring_rule" \
   --status open --emission-start-weight 0.50 --emission-floor-weight 0 \

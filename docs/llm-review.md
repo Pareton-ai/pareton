@@ -10,11 +10,22 @@ build (e). Neither rewrites the patch.
   patch with comments removed. Two policies exist:
   - `dtype_precision_v1`: reject a patch that lowers activation or KV-cache
     precision.
-  - `lossless_v1`: reject any lossy patch, meaning lower precision anywhere
-    in the model's computation, an approximation the baseline does not use,
-    or skipped work. It matches the Open Kernel Challenge serving rule added
-    on 2026-11-11 ("no lower precision, approximations or skipped work beyond
-    what stock SGLang does").
+  - `okc_serving_v1`: the Open Kernel Challenge serving rules of 2026-11-11
+    that a patch can break. It rejects a patch that:
+    - is lossy: lower precision anywhere in the model's computation, an
+      approximation the baseline does not use, or skipped work;
+    - changes the model, or changes, retrains or replaces the drafter, or
+      drafts from anything but the drafter and the request itself;
+    - undoes a launch option OKC fixes. OKC lets entrants edit launch flags
+      except a fixed list. Pareton starts every engine with the campaign's
+      flags, so the review looks for code that changes the default of such
+      an option or ignores its value: precision and quantization, model and
+      drafter identity, speculative acceptance, sampling defaults, context
+      length and prompt truncation;
+    - keeps state outside the server or sends data out of it;
+    - games the benchmark (special-cases its prompts, loads or output
+      lengths, tampers with timing or token counts) or breaks other models
+      or GPUs.
 
 d1 forces a dtype change to be written plainly, and d2 looks for it. Both are
 pinned in the campaign manifest like every other acceptance rule; the dtype
@@ -219,8 +230,8 @@ python -m campaign.seed ... \
   --llm-review-model kimi-k3
 ```
 
-A campaign that requires lossless patches passes `--llm-review lossless_v1`
-instead. A policy's prompt is part of the verdict cache key, and a new policy
+A campaign that mirrors the OKC serving track passes
+`--llm-review okc_serving_v1` instead. A policy's prompt is part of the verdict cache key, and a new policy
 is a new value, so a live campaign's review does not change under it.
 
 `v1` names d1's rule set. A later change to the rules ships as a new value

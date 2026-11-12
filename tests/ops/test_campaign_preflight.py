@@ -292,6 +292,33 @@ def test_highest_tier_request_uses_the_last_tier(monkeypatch):
         check.highest_tier_request(fields(), qualified_rule(), 2)
 
 
+def test_fixed_temperature_rule_is_checked_at_that_temperature(tmp_path, harness):
+    """A greedy campaign pins temperature 0 and has no range to take ends of."""
+    assert check.temperature_extremes({"temperature_range": [0.1, 1.01]}) == [0.1, 1.01]
+    assert check.temperature_extremes({"temperature": 0.7}) == [0.7]
+    assert check.temperature_extremes({}) == [0.0]
+    data = fields()
+    del data["sampling_rule"]["temperature_range"]
+    data["sampling_rule"]["temperature"] = 0.0
+    (tmp_path / "campaign-fields.json").write_text(json.dumps(data))
+    rule = dict(
+        parse_sampling_rule(data["sampling_rule"]),
+        eligible_row_indices=list(range(32)),
+    )
+    rule["qualification"] = {
+        "contract_sha256": qualification_contract(rule, data["bench"], data["engine"]),
+        "repetitions": 2,
+    }
+    saved = tmp_path / "rule.json"
+    saved.write_text(json.dumps(rule))
+    harness.greedy_text = lambda label: "word " * 10
+    code, summary = run(tmp_path, "--qualified-rule", str(saved))
+    assert code == 0, summary
+    assert summary["temperatures"] == [0.0]
+    assert summary["by_temperature"]["0.0"]["passed"] == 10
+    assert {s["temperature"] for s in harness.streams} == {0.0}
+
+
 def test_gpu_check_requires_the_campaign_sku_and_nothing_else():
     def smi(names):
         return lambda *a, **k: SimpleNamespace(stdout="\n".join(names) + "\n")
