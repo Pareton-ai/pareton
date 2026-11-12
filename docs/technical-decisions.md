@@ -118,3 +118,22 @@ hotkeys, non-private URLs and duplicates are skipped). Each patch is copied
 under the new campaign, the source commit
 block keeps on-chain order for cohorts and ties, and no payment, image or score
 moves. A dry run prints the plan and its hash; `--apply` requires that hash.
+
+## 2026-11-07: Lium model cache lives on an unencrypted, whole-disk /root
+
+Muse Spark Open needs about 543 GB of pinned weights on an 8x H200 node. The
+Lium pod's `/workspace` container disk holds about 545 GiB, so the HF cache
+for Lium pods moves to `/root/pareton/hf-cache`, where Lium mounts its large
+local volume. Other providers keep `/workspace/hf-cache`.
+
+Lium encrypts that volume by default and mounts `/root` as gocryptfs FUSE. The
+pod's inner docker cannot bind-mount a FUSE path into the engine container
+(runc fails with "no such file or directory"), so Pareton rents with
+`enable_volume_encryption=False`. `/root` is then plain xfs. Weights are public
+pinned snapshots, so encryption at rest protects nothing the round needs.
+
+Lium search skips spot nodes (`tier == "spot"` or `specs.is_spot`) because they
+can be reclaimed mid-round. It also skips `split_disk` nodes: one such 8x H200
+node gave a full pod less than 700 GiB on `/root`. That cause is inferred from
+the node metadata, not proven inside the pod. A whole-disk secure node gave
+2.1 TB free and completed Muse round 4.
