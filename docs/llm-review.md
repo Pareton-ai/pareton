@@ -6,8 +6,15 @@ build (e). Neither rewrites the patch.
 - **d1, obfuscation scan** (`bench.obfuscation`, optional per campaign): a
   deterministic scan that rejects added code which hides what it does.
 - **d2, LLM review** (`bench.llm_review`, optional per campaign): asks an
-  LLM whether a patch lowers activation or KV-cache precision. It reads the
-  patch with comments removed.
+  LLM whether a patch breaks the campaign's review policy. It reads the
+  patch with comments removed. Two policies exist:
+  - `dtype_precision_v1`: reject a patch that lowers activation or KV-cache
+    precision.
+  - `lossless_v1`: reject any lossy patch, meaning lower precision anywhere
+    in the model's computation, an approximation the baseline does not use,
+    or skipped work. It matches the Open Kernel Challenge serving rule added
+    on 2026-11-11 ("no lower precision, approximations or skipped work beyond
+    what stock SGLang does").
 
 d1 forces a dtype change to be written plainly, and d2 looks for it. Both are
 pinned in the campaign manifest like every other acceptance rule; the dtype
@@ -211,6 +218,10 @@ python -m campaign.seed ... \
   --llm-review dtype_precision_v1 \
   --llm-review-model kimi-k3
 ```
+
+A campaign that requires lossless patches passes `--llm-review lossless_v1`
+instead. A policy's prompt is part of the verdict cache key, and a new policy
+is a new value, so a live campaign's review does not change under it.
 
 `v1` names d1's rule set. A later change to the rules ships as a new value
 that a new campaign opts into, so a live campaign's acceptance rules don't

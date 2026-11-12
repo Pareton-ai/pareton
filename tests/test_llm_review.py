@@ -85,6 +85,30 @@ def test_validate_rejects_bad_specs(spec):
         validate_llm_review(spec)
 
 
+@pytest.mark.parametrize("policy", llm_review.POLICIES)
+def test_validate_accepts_every_policy(policy):
+    assert validate_llm_review({"policy": policy, "model": " kimi-k3 "}) == {
+        "policy": policy,
+        "model": "kimi-k3",
+    }
+
+
+def test_lossless_policy_has_its_own_prompt_and_cache(tmp_path):
+    """lossless_v1 sends its own prompt, and never reuses a dtype verdict."""
+    lossless = {"policy": "lossless_v1", "model": "kimi-k3"}
+    dtype_client = FakeClient(_verdict())
+    assert _check(tmp_path, dtype_client).ok
+    reject = _verdict("reject", [{"file": FILE, "hunk": HUNK, "why": "top-k"}])
+    client = FakeClient(reject)
+    result = _check(tmp_path, client, spec=lossless)
+    assert not result.ok
+    assert result.reason == "llm_review_rejected"
+    system = client.calls[0][0]["content"]
+    assert system != dtype_client.calls[0][0]["content"]
+    for rule in ("lossless", "approximation", "skips work"):
+        assert rule in system
+
+
 # -- Verdict parsing ---------------------------------------------------------
 
 
