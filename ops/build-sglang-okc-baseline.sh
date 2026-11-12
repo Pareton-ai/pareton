@@ -16,7 +16,7 @@ export PARETON_BUILD_LOG_DIR="${PARETON_BUILD_LOG_DIR:-$output_dir/logs}"
 build_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix"
 engine_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-engine"
 probe_tag="ghcr.io/pareton-ai/pareton-baseline:$suffix-probe"
-commit=297e54fd105e974cdf401e5b4d20253a22c16f90
+commit=a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f
 repo=https://github.com/sgl-project/sglang.git
 
 docker buildx build --builder "${PARETON_BUILDER_NAME:-default}" --platform linux/amd64 --load \
@@ -62,7 +62,7 @@ python -m builder --engine sglang-okc --baseline-repo "$repo" \
   --image-ref "$probe_tag" --patch-file "$output_dir/probe.diff" --push --stream-build-logs \
   2>&1 | tee "$output_dir/miner-build.txt"
 docker run --rm --network none --entrypoint python3 "$probe_tag" -c \
-  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; print("offline OKC miner build: OK")' \
+  'import torch; from sglang.srt.mem_cache.rust_tree_core import mem_cache; import sglang.pareton_probe as p; assert p.PARETON_OKC_PROBE == 41; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch(); print("offline OKC miner build: OK")' \
   | tee "$output_dir/miner-import.txt"
 # JIT kernels compile with nvcc on first use, which needs no GPU. Compile the
 # probe kernel offline for H200 (sm_90) through SGLang's own load_jit, skipping
