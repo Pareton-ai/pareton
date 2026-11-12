@@ -80,6 +80,8 @@ class GpuMemorySampler:
         self._read = read
         self._interval_s = interval_s
         self._clock = clock
+        # When the current stretch without a usable sample began: the start
+        # of the window, then the time of each usable sample.
         self._last_usable: float | None = None
         self._blind = False
         self._peak: list[float] | None = None
@@ -132,6 +134,7 @@ class GpuMemorySampler:
             self._sample()
 
     def __enter__(self) -> GpuMemorySampler:
+        self._last_usable = self._clock()
         self._sample()
         self._thread = threading.Thread(
             target=self._loop, name="gpu-memory-sampler", daemon=True

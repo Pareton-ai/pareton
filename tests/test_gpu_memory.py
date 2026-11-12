@@ -125,6 +125,8 @@ def test_sampler_tolerates_a_short_gap_between_usable_samples():
         [(0, [10]), (2, None), (40, [30]), (42, [20])],
         # Blind to the end: only the entry sample was ever usable.
         [(0, [10]), (2, None), (20, None), (40, None)],
+        # Blind from the start: the first usable sample comes too late.
+        [(0, None), (20, None), (40, [30]), (42, [20])],
         # A changed GPU count is as blind as no answer.
         [(0, [10]), (2, [1, 2]), (20, [1, 2]), (40, [1, 2])],
     ],
