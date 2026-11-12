@@ -1,7 +1,7 @@
 {
   "baseline_repo": "https://github.com/sgl-project/sglang.git",
   "baseline_commit": "297e54fd105e974cdf401e5b4d20253a22c16f90",
-  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:626ae56dc6fb46e491718590ca609515d0ddd85db3ccd7b1bc53439a5283a0a1",
   "gpu_skus": [
     "H200"
   ],
@@ -54,7 +54,7 @@
       "hf_repo": "RadixArk/Muse-Spark-Open-DFlash2",
       "hf_revision": "46c90f412549c472941a68382d91a99e5e6372a0"
     },
-    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:626ae56dc6fb46e491718590ca609515d0ddd85db3ccd7b1bc53439a5283a0a1",
     "gpu_count": 8,
     "patch_limits": {
       "max_patch_bytes": 409600,
