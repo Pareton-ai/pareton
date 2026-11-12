@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -380,6 +381,87 @@ def _response_format(mode: str) -> dict[str, Any] | None:
     raise LLMReviewError("llm_review_unconfigured", f"unknown response format {mode!r}")
 
 
+def _read_json(resp: Any) -> tuple[Any, Any, dict | None]:
+    try:
+        payload = resp.json()
+        choice = payload["choices"][0]
+        content = choice["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise LLMReviewError("llm_review_invalid_output", "bad response") from exc
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    return content, choice.get("finish_reason"), usage
+
+
+def _read_stream(resp: Any, deadline: float) -> tuple[str, Any, dict | None]:
+    """Collect an OpenAI-style SSE stream: content, finish_reason, usage.
+
+    Reasoning deltas (``reasoning_content``/``reasoning``) are not part of
+    the answer; they only keep the stream alive.
+    """
+    parts: list[str] = []
+    finish_reason = None
+    usage: dict | None = None
+    try:
+        for raw in resp.iter_lines():
+            if time.monotonic() > deadline:
+                raise LLMReviewError(
+                    "llm_review_unavailable",
+                    f"review exceeded {config.LLM_REVIEW_DEADLINE_S:.0f}s deadline",
+                )
+            if not raw:
+                continue
+            line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError as exc:
+                raise LLMReviewError(
+                    "llm_review_invalid_output", "bad stream chunk"
+                ) from exc
+            if not isinstance(chunk, dict):
+                raise LLMReviewError("llm_review_invalid_output", "bad stream chunk")
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                    continue
+                delta = choice.get("delta") or {}
+                piece = delta.get("content") if isinstance(delta, dict) else None
+                if isinstance(piece, str):
+                    parts.append(piece)
+                if choice.get("finish_reason") is not None:
+                    finish_reason = choice["finish_reason"]
+    except requests.RequestException as exc:
+        # A dropped stream says nothing about the patch.
+        raise LLMReviewError("llm_review_unavailable", type(exc).__name__) from exc
+    if finish_reason is None:
+        # The stream ended without saying why: an outage, not a verdict.
+        raise LLMReviewError("llm_review_unavailable", "stream ended early")
+    return "".join(parts), finish_reason, usage
+
+
+def _log_usage(
+    usage: dict | None, max_tokens: int, finish_reason: Any, elapsed_s: float
+) -> None:
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("completion_tokens_details")
+    reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    logger.info(
+        "llm review usage: prompt_tokens=%s completion_tokens=%s "
+        "reasoning_tokens=%s max_tokens=%d finish_reason=%s elapsed_s=%.1f",
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        reasoning,
+        max_tokens,
+        finish_reason,
+        elapsed_s,
+    )
+
+
 def openai_chat_client(model: str) -> ChatClient:
     """A tool-free call to an OpenAI-style ``/chat/completions`` endpoint."""
     base_url = config.LLM_REVIEW_BASE_URL.rstrip("/")
@@ -403,10 +485,12 @@ def openai_chat_client(model: str) -> ChatClient:
         budgets = [config.LLM_REVIEW_MAX_OUTPUT_TOKENS]
         if config.LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS > budgets[0]:
             budgets.append(config.LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS)
+        # One wall-clock budget for the whole review, both attempts included.
+        deadline = time.monotonic() + config.LLM_REVIEW_DEADLINE_S
         for i, max_tokens in enumerate(budgets):
             last = i == len(budgets) - 1
             try:
-                return _call_once(messages, max_tokens)
+                return _call_once(messages, max_tokens, deadline)
             except LLMReviewError as exc:
                 if exc.reason == "llm_review_truncated" and not last:
                     logger.warning(
@@ -427,48 +511,67 @@ def openai_chat_client(model: str) -> ChatClient:
                 raise
         raise AssertionError("unreachable")
 
-    def _call_once(messages: list[dict[str, str]], max_tokens: int) -> str:
+    def _call_once(
+        messages: list[dict[str, str]], max_tokens: int, deadline: float
+    ) -> str:
+        stream = config.LLM_REVIEW_STREAM
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": 0,
             "max_tokens": max_tokens,
         }
+        if stream:
+            # Streamed, a long reasoning run keeps the connection busy, so
+            # neither our read timeout nor the provider's no-output limit
+            # cuts it off; LLM_REVIEW_DEADLINE_S bounds the total.
+            body["stream"] = True
+            body["stream_options"] = {"include_usage": True}
         response_format = _response_format(config.LLM_REVIEW_RESPONSE_FORMAT)
         if response_format is not None:
             body["response_format"] = response_format
+        started = time.monotonic()
         try:
             resp = requests.post(
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=body,
+                # Streamed, this is the longest gap between two chunks.
                 timeout=config.LLM_REVIEW_TIMEOUT_S,
                 # A 307/308 would resend the private diff to wherever it points.
                 allow_redirects=False,
+                **({"stream": True} if stream else {}),
             )
         except requests.RequestException as exc:
             raise LLMReviewError("llm_review_unavailable", type(exc).__name__) from exc
-        if resp.status_code in _REQUEST_REJECTED_STATUSES:
-            raise LLMReviewError(
-                "llm_review_request_rejected", f"HTTP {resp.status_code}"
-            )
-        if resp.status_code != 200:
-            raise LLMReviewError("llm_review_unavailable", f"HTTP {resp.status_code}")
         try:
-            choice = resp.json()["choices"][0]
-            content = choice["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise LLMReviewError("llm_review_invalid_output", "bad response") from exc
-        if choice.get("finish_reason") == "length":
+            if resp.status_code in _REQUEST_REJECTED_STATUSES:
+                raise LLMReviewError(
+                    "llm_review_request_rejected", f"HTTP {resp.status_code}"
+                )
+            if resp.status_code != 200:
+                raise LLMReviewError(
+                    "llm_review_unavailable", f"HTTP {resp.status_code}"
+                )
+            if stream:
+                content, finish_reason, usage = _read_stream(resp, deadline)
+            else:
+                content, finish_reason, usage = _read_json(resp)
+        finally:
+            close = getattr(resp, "close", None)
+            if close is not None:
+                close()
+        _log_usage(usage, max_tokens, finish_reason, time.monotonic() - started)
+        if finish_reason == "length":
             # Out of output budget (reasoning included) before the verdict:
             # the patch was not reviewed, so this is not a verdict on it.
             raise LLMReviewError(
                 "llm_review_truncated",
                 f"finish_reason=length at max_tokens={max_tokens}",
             )
-        if choice.get("finish_reason") not in (None, "stop"):
+        if finish_reason not in (None, "stop"):
             raise LLMReviewError(
-                "llm_review_invalid_output", f"finish_reason={choice['finish_reason']}"
+                "llm_review_invalid_output", f"finish_reason={finish_reason}"
             )
         if not isinstance(content, str):
             raise LLMReviewError("llm_review_invalid_output", "no content")

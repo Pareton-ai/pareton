@@ -198,6 +198,16 @@ deferred as above and, after `MAX_ATTEMPTS` claims, rejected with
 `llm_review_truncated`. A truncated call is not a verdict on the patch, so it
 never rejects at once.
 
+The call is streamed by default (`PARETON_LLM_REVIEW_STREAM=1`). Kimi K3 on
+Engy writes about 135 tokens/s, so a 65k-token review takes about 8 minutes.
+Unstreamed, the model sends nothing until it is done, and Engy drops a request
+that sends nothing for 600 s. Streamed, `PARETON_LLM_REVIEW_TIMEOUT_S` (300)
+is the longest gap between two chunks and `PARETON_LLM_REVIEW_DEADLINE_S`
+(1800) bounds the whole review, both budgets included. A dropped stream, a
+stream that ends without a `finish_reason`, and a review past the deadline
+count as an outage and defer. Every call logs `llm review usage:` with prompt,
+completion and reasoning tokens, the budget and the elapsed time.
+
 Everything else rejects at once:
 
 | reason | cause |

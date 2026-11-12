@@ -57,6 +57,8 @@ def review(args: argparse.Namespace) -> int:
     print(f"  model / policy  = {spec['model']} / {spec['policy']}")
     print(f"  response_format = {config.LLM_REVIEW_RESPONSE_FORMAT}")
     print(f"  timeout_s       = {config.LLM_REVIEW_TIMEOUT_S}")
+    print(f"  stream          = {config.LLM_REVIEW_STREAM}")
+    print(f"  deadline_s      = {config.LLM_REVIEW_DEADLINE_S}")
     print(f"  max_output_tok  = {config.LLM_REVIEW_MAX_OUTPUT_TOKENS}")
     print(f"  retry_max_tok   = {config.LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS}")
     ok &= _ok(

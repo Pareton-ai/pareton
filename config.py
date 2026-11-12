@@ -371,8 +371,19 @@ DEFAULT_DENIED_PATHS: list[str] = [
 # (Engy: https://api.engy.ai/v1, model id kimi-k3).
 LLM_REVIEW_BASE_URL: str = os.environ.get("PARETON_LLM_REVIEW_BASE_URL", "").strip()
 LLM_REVIEW_API_KEY: str = os.environ.get("PARETON_LLM_REVIEW_API_KEY", "")
+# Streamed (the default), TIMEOUT_S is the longest gap between two chunks
+# and DEADLINE_S bounds the whole review, retry at the larger budget
+# included. Not streamed, TIMEOUT_S bounds each call, and providers drop a
+# request that sends nothing for too long (Engy: 600 s), which a long
+# reasoning run does.
 LLM_REVIEW_TIMEOUT_S: float = float(
     os.environ.get("PARETON_LLM_REVIEW_TIMEOUT_S", "300")
+)
+LLM_REVIEW_STREAM: bool = os.environ.get(
+    "PARETON_LLM_REVIEW_STREAM", "1"
+).strip().lower() not in ("0", "false", "no", "off")
+LLM_REVIEW_DEADLINE_S: float = float(
+    os.environ.get("PARETON_LLM_REVIEW_DEADLINE_S", "1800")
 )
 # Output budget per review call, reasoning tokens included (Kimi K3 counts
 # its thinking against max_tokens). A call cut off by the budget

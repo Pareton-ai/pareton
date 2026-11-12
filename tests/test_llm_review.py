@@ -395,6 +395,155 @@ def test_client_first_call_400_is_not_masked(endpoint, monkeypatch):
     assert exc.value.reason == "llm_review_request_rejected"
 
 
+# -- Streaming ---------------------------------------------------------------
+
+
+def _sse(*chunks, done=True):
+    lines = [b"data: " + json.dumps(c).encode() for c in chunks]
+    lines = [x for line in lines for x in (line, b"")]
+    if done:
+        lines.append(b"data: [DONE]")
+    return lines
+
+
+class _StreamResp:
+    def __init__(self, lines, status=200, raise_after=None):
+        self.status_code = status
+        self._lines = lines
+        self._raise_after = raise_after
+        self.closed = False
+
+    def iter_lines(self):
+        for i, line in enumerate(self._lines):
+            if self._raise_after is not None and i == self._raise_after:
+                raise requests.exceptions.ChunkedEncodingError()
+            yield line
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def streaming(endpoint, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_STREAM", True)
+
+
+def _delta(content=None, reasoning=None, finish=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning is not None:
+        delta["reasoning_content"] = reasoning
+    return {"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def test_stream_collects_content_and_ignores_reasoning(streaming, monkeypatch):
+    seen = {}
+    resp = _StreamResp(
+        _sse(
+            _delta(reasoning="thinking..."),
+            _delta(content='{"verdict": '),
+            _delta(content='"pass"}', finish="stop"),
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": {"reasoning_tokens": 15},
+                },
+            },
+        )
+    )
+
+    def post(url, headers, json, timeout, allow_redirects=True, stream=False):
+        seen.update(body=json, stream=stream)
+        return resp
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    out = llm_review.openai_chat_client("kimi-k3")([])
+    assert out == '{"verdict": "pass"}'
+    assert seen["stream"] is True
+    assert seen["body"]["stream"] is True
+    assert seen["body"]["stream_options"] == {"include_usage": True}
+    assert resp.closed
+
+
+def test_stream_length_is_truncation(streaming, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", 0)
+    monkeypatch.setattr(
+        llm_review.requests,
+        "post",
+        lambda *_, **__: _StreamResp(_sse(_delta(reasoning="x", finish="length"))),
+    )
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_truncated"
+
+
+def test_stream_retries_truncation_at_larger_budget(streaming, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_OUTPUT_TOKENS", 100)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", 400)
+    budgets = []
+
+    def post(url, headers, json, timeout, allow_redirects=True, stream=False):
+        budgets.append(json["max_tokens"])
+        finish = "length" if len(budgets) == 1 else "stop"
+        return _StreamResp(_sse(_delta(content="ok", finish=finish)))
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    assert llm_review.openai_chat_client("kimi-k3")([]) == "ok"
+    assert budgets == [100, 400]
+
+
+@pytest.mark.parametrize(
+    "resp",
+    [
+        # Dropped mid-stream.
+        lambda: _StreamResp(_sse(_delta(content="x")), raise_after=1),
+        # Ended without a finish_reason.
+        lambda: _StreamResp(_sse(_delta(content="x"), done=False)),
+    ],
+)
+def test_stream_cut_off_is_retryable_outage(streaming, monkeypatch, resp):
+    monkeypatch.setattr(llm_review.requests, "post", lambda *_, **__: resp())
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_unavailable"
+
+
+def test_stream_deadline_is_retryable_outage(streaming, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_DEADLINE_S", -1)
+    monkeypatch.setattr(
+        llm_review.requests,
+        "post",
+        lambda *_, **__: _StreamResp(_sse(_delta(content="x", finish="stop"))),
+    )
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_unavailable"
+    assert "deadline" in exc.value.detail
+
+
+def test_stream_bad_chunk_is_invalid_output(streaming, monkeypatch):
+    monkeypatch.setattr(
+        llm_review.requests,
+        "post",
+        lambda *_, **__: _StreamResp([b"data: {not json"]),
+    )
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_invalid_output"
+
+
+def test_stream_http_error_closes_response(streaming, monkeypatch):
+    resp = _StreamResp([], status=503)
+    monkeypatch.setattr(llm_review.requests, "post", lambda *_, **__: resp)
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_unavailable"
+    assert resp.closed
+
+
 def test_other_failures_are_not_retryable(tmp_path):
     res = _check(tmp_path, FakeClient("not json"))
     assert not res.evidence.get("retryable")
@@ -429,6 +578,7 @@ def endpoint(monkeypatch):
     monkeypatch.setattr(config, "LLM_REVIEW_BASE_URL", "https://llm.test/v1/")
     monkeypatch.setattr(config, "LLM_REVIEW_API_KEY", "sk-test")
     monkeypatch.setattr(config, "LLM_REVIEW_RESPONSE_FORMAT", "off")
+    monkeypatch.setattr(config, "LLM_REVIEW_STREAM", False)
 
 
 def test_client_posts_tool_free_chat_completion(endpoint, monkeypatch):
