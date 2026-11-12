@@ -1,7 +1,7 @@
 {
   "baseline_repo": "https://github.com/sgl-project/sglang.git",
-  "baseline_commit": "a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f",
-  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:c149606817764a29a820fa74a7cf1f0c7d7ea1dae784613ec17fef32ee8760f4",
+  "baseline_commit": "297e54fd105e974cdf401e5b4d20253a22c16f90",
+  "base_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "gpu_skus": [
     "H200"
   ],
@@ -54,10 +54,10 @@
       "hf_repo": "RadixArk/Muse-Spark-Open-DFlash2",
       "hf_revision": "46c90f412549c472941a68382d91a99e5e6372a0"
     },
-    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:c149606817764a29a820fa74a7cf1f0c7d7ea1dae784613ec17fef32ee8760f4",
+    "baseline_engine_image_digest": "ghcr.io/pareton-ai/pareton-baseline@sha256:0000000000000000000000000000000000000000000000000000000000000000",
     "gpu_count": 8,
     "patch_limits": {
-      "max_patch_bytes": 737280,
+      "max_patch_bytes": 409600,
       "max_added_line_chars": 400,
       "reject_renames": true,
       "reject_mode_changes": true
@@ -79,7 +79,13 @@
       "DFLASH",
       "--speculative-num-draft-tokens",
       "8",
+      "--speculative-draft-attention-backend",
+      "fa4",
+      "--mm-feature-transport",
+      "cpu",
       "--enable-hierarchical-cache",
+      "--hicache-size",
+      "160",
       "--chunked-prefill-size",
       "16384",
       "--enable-cache-report",
@@ -126,7 +132,8 @@
       "64k": 0.25
     },
     "baseline_drift_ceiling": 0.15,
-    "max_ttft_ratio": 2.0
+    "max_ttft_ratio": 2.0,
+    "max_extra_gpu_memory_mib": 2048.0
   },
   "emission_rule": {
     "name": "linear_decay",

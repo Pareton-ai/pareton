@@ -8,5 +8,6 @@
     "64k": 0.25
   },
   "baseline_drift_ceiling": 0.15,
-  "max_ttft_ratio": 2.0
+  "max_ttft_ratio": 2.0,
+  "max_extra_gpu_memory_mib": 2048.0
 }

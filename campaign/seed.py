@@ -211,8 +211,9 @@ OKC_DENIED_PATHS = (
     "python/sglang/kernels/aot/**",
     "rust/**",
 )
+# 400 KB since OKC's 2026-11-11 rules (720 KB before).
 OKC_PATCH_LIMITS = {
-    "max_patch_bytes": 737280,
+    "max_patch_bytes": 409600,
     "max_added_line_chars": 400,
     "reject_renames": True,
     "reject_mode_changes": True,

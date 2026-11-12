@@ -1,16 +1,18 @@
 # Trusted SGLang build base that matches the Open Kernel Challenge (OKC) engine.
-# It starts from OKC's own image, so sglang-kernel 0.4.9, NCCL 2.30.7, the Muse
-# DeepGEMM and FlashInfer 0.7 are exactly what OKC runs. Only the Python
-# package and its Rust extensions are rebuilt, by the sglang-okc engine preset:
+# It starts from OKC's own serving image, the SGLang v0.5.23 release OKC moved
+# to on 2026-11-11 (openkernelchallenge.dev/updates), so the prebuilt
+# sglang-kernel wheel, NCCL, DeepGEMM and FlashInfer are exactly what OKC runs.
+# Only the Python package and its Rust extensions are rebuilt, by the
+# sglang-okc engine preset:
 #   pip install --no-deps --no-build-isolation -e python/
 # Every SGLang build runs with --network=none, so this image stages what that
 # command needs offline: the build backend, the Rust toolchain and the Cargo
 # registry for every Cargo workspace under rust/ (sglang-radix-tree is its
-# own), plus a warm Cargo target directory for the a55ab7d5 workspace.
+# own), plus a warm Cargo target directory for the 297e54fd workspace.
 # Build on linux/amd64, then use python -m builder --engine sglang-okc.
-FROM lmsysorg/sglang:dev-muse-spark-open@sha256:8cfc5a72cb296771f5f8a4a4688cb6d05685610a830cbb616fa4ab0eb7bb2b0a
+FROM lmsysorg/sglang:v0.5.23@sha256:f832b5c39559c9caa900b22ad37c76fcce66470676855c42052102c537812f1f
 
-ARG SGLANG_COMMIT=a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f
+ARG SGLANG_COMMIT=297e54fd105e974cdf401e5b4d20253a22c16f90
 ARG MAX_JOBS=8
 
 # OKC installed SGLang with build isolation, so the backend from
@@ -52,13 +54,19 @@ RUN --network=none CARGO_BUILD_JOBS="$MAX_JOBS" \
         pip install --no-deps --no-build-isolation -e python/ \
     && python3 -c "from pathlib import Path; assert list(Path('/src/python/sglang').rglob('*.so')), 'Rust extensions missing'" \
     && python3 -c "import torch; assert torch.__version__.startswith('2.14.1'), torch.__version__" \
-    && python3 -c "import sglang; from sglang.srt.layers.moe.muse_spark_megamoe import require_muse_megamoe_patch; require_muse_megamoe_patch()" \
+    && python3 -c "import sglang" \
     && rm -rf /src /tmp/pip-* /root/.cache/pip
 
-# OKC's image sets SGLANG_RUST_BUILD_MODE=never: the runtime trusts the
-# extensions pip built and never invokes Cargo in the offline bench container.
-RUN test "$SGLANG_RUST_BUILD_MODE" = never
+# The runtime must trust the extensions pip built and never invoke Cargo in the
+# offline bench container. OKC's a55ab7d5 image set this itself; set it here
+# so the release image behaves the same whether or not it does.
+ENV SGLANG_RUST_BUILD_MODE=never
+
+# The environment OKC's judge launches the server with (launch.env in
+# openkernelchallenge.dev/api/v1/serving). Engine and miner images inherit it.
+ENV SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 \
+    SGLANG_TIMEOUT_KEEP_ALIVE=1800
 
 LABEL org.opencontainers.image.source="https://github.com/Pareton-ai/pareton" \
       org.opencontainers.image.description="Pareton hermetic SGLang base matching the OKC engine" \
-      ai.pareton.sglang.commit="a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f"
+      ai.pareton.sglang.commit="297e54fd105e974cdf401e5b4d20253a22c16f90"
