@@ -4,17 +4,26 @@ A campaign can cap how much more GPU memory a candidate may use than the
 round's baseline (``scoring_rule.max_extra_gpu_memory_mib``). The harness is
 the only trusted witness: anything the candidate engine reports about itself
 comes from code the miner can patch. So the round polls ``nvidia-smi`` on the
-host while each engine serves the timed replay and keeps every GPU's peak.
+host while each engine serves its replay and keeps every GPU's peak.
 
 Sampling starts once the engine is healthy and ends before it is torn down,
-so the previous engine's memory, still being released, is never counted.
+so the previous engine's memory, still being released, is never counted. The
+window is the engine's whole replay, warmup included, for the baseline and the
+candidates alike: the cap is on the peak, whenever it happens.
+
+This is a sampled limit, not an instantaneous one. A spike that comes and goes
+between two polls is not seen. A window with a stretch longer than
+``MAX_BLIND_S`` without a usable sample has no peak at all, so a cap is never
+judged on what was seen before the sampler went blind.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -23,6 +32,9 @@ logger = logging.getLogger(__name__)
 _QUERY = ("nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits")
 _QUERY_TIMEOUT_S = 10.0
 SAMPLE_INTERVAL_S = 2.0
+# One missed poll is noise. Longer than this without a usable sample and the
+# peak could have happened unseen, so the window counts as unmeasured.
+MAX_BLIND_S = 30.0
 
 MemoryReader = Callable[[], "list[float] | None"]
 
@@ -31,7 +43,8 @@ def read_gpu_memory_mib() -> list[float] | None:
     """Memory in use on each GPU, in MiB and in nvidia-smi's order.
 
     None when nvidia-smi is missing, fails, times out or prints something
-    else: a sample that can't be trusted is dropped, never guessed.
+    else, including a negative or non-finite number: a sample that can't be
+    trusted is dropped, never guessed.
     """
     try:
         result = subprocess.run(
@@ -49,6 +62,8 @@ def read_gpu_memory_mib() -> list[float] | None:
         used = [float(line) for line in result.stdout.splitlines() if line.strip()]
     except ValueError:
         return None
+    if any(not math.isfinite(value) or value < 0 for value in used):
+        return None
     return used or None
 
 
@@ -60,9 +75,13 @@ class GpuMemorySampler:
         *,
         read: MemoryReader = read_gpu_memory_mib,
         interval_s: float = SAMPLE_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._read = read
         self._interval_s = interval_s
+        self._clock = clock
+        self._last_usable: float | None = None
+        self._blind = False
         self._peak: list[float] | None = None
         self._samples = 0
         self._stop = threading.Event()
@@ -70,8 +89,12 @@ class GpuMemorySampler:
 
     @property
     def peak_mib(self) -> list[float] | None:
-        """Per-GPU peak over every sample, or None when no sample was usable."""
-        return None if self._peak is None else list(self._peak)
+        """Per-GPU peak over every sample.
+
+        None when no sample was usable, or when the sampler was blind for
+        longer than ``MAX_BLIND_S`` at any point of the window.
+        """
+        return None if self._peak is None or self._blind else list(self._peak)
 
     @property
     def samples(self) -> int:
@@ -79,6 +102,14 @@ class GpuMemorySampler:
 
     def _sample(self) -> None:
         used = self._read()
+        now = self._clock()
+        if self._last_usable is not None and now - self._last_usable > MAX_BLIND_S:
+            if not self._blind:
+                logger.warning(
+                    "no usable GPU memory sample for %.0f s; the window is unmeasured",
+                    now - self._last_usable,
+                )
+            self._blind = True
         if used is None:
             return
         if self._peak is None:
@@ -93,6 +124,7 @@ class GpuMemorySampler:
             return
         else:
             self._peak = [max(a, b) for a, b in zip(self._peak, used, strict=True)]
+        self._last_usable = now
         self._samples += 1
 
     def _loop(self) -> None:
@@ -112,7 +144,9 @@ class GpuMemorySampler:
         if self._thread is not None:
             self._thread.join(timeout=_QUERY_TIMEOUT_S + self._interval_s)
             if self._thread.is_alive():
-                # A hung nvidia-smi: leave the daemon thread, skip the last sample.
+                # A hung nvidia-smi: leave the daemon thread. Nothing was
+                # sampled while it hung, so the window is unmeasured.
+                self._blind = True
                 return
         # The engine is still up here, so one last sample closes the window.
         self._sample()

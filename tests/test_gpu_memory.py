@@ -39,6 +39,9 @@ GIB2 = 2048
         ("  7 \n\n", 0, [7.0]),
         ("", 0, None),
         ("[N/A]\n", 0, None),
+        ("120500\nnan\n", 0, None),
+        ("inf\n", 0, None),
+        ("-1\n", 0, None),
         ("120500\n", 9, None),
     ],
 )
@@ -90,6 +93,48 @@ def test_sampler_drops_a_sample_with_a_different_gpu_count():
     with sampler:
         sampler._sample()
     assert sampler.peak_mib == [20, 50]
+
+
+def _timed_sampler(samples):
+    """Readings paired with the time each one is taken at."""
+    feed = iter(samples)
+    now = [0.0]
+
+    def read():
+        now[0], value = next(feed)
+        return value
+
+    return GpuMemorySampler(read=read, interval_s=3600, clock=lambda: now[0])
+
+
+def test_sampler_tolerates_a_short_gap_between_usable_samples():
+    limit = gpu_memory.MAX_BLIND_S
+    sampler = _timed_sampler(
+        [(0, [10]), (2, None), (4, [999, 1]), (limit, [30]), (limit + 2, [20])]
+    )
+    with sampler:
+        for _ in range(3):
+            sampler._sample()
+    assert sampler.peak_mib == [30]
+
+
+@pytest.mark.parametrize(
+    "samples",
+    [
+        # Blind in the middle: the next usable sample comes too late.
+        [(0, [10]), (2, None), (40, [30]), (42, [20])],
+        # Blind to the end: only the entry sample was ever usable.
+        [(0, [10]), (2, None), (20, None), (40, None)],
+        # A changed GPU count is as blind as no answer.
+        [(0, [10]), (2, [1, 2]), (20, [1, 2]), (40, [1, 2])],
+    ],
+)
+def test_sampler_has_no_peak_after_a_long_blind_stretch(samples):
+    sampler = _timed_sampler(samples)
+    with sampler:
+        for _ in range(len(samples) - 2):
+            sampler._sample()
+    assert sampler.peak_mib is None
 
 
 def test_sampler_has_no_peak_when_nvidia_smi_never_answers():

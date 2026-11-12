@@ -147,7 +147,9 @@ No gaming, nothing special-cased
 - detects or special-cases the benchmark: particular prompts, datasets,
   request or conversation counts, concurrency levels (for example 1, 4, 16
   or 32), output lengths, launch flags or environment that identify the
-  judge;
+  judge. Picking a kernel, batch plan or schedule from the batch size or
+  queue depth the server sees at that moment is not detection when it works
+  the same way for any workload;
 - tampers with what is measured: timing, timestamps, token counts, usage
   reports or the stream of chunks, or precomputes results for expected
   prompts before the requests arrive;
