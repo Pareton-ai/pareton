@@ -168,6 +168,24 @@ def test_outage_defers_job_and_never_builds(run, monkeypatch):
     assert all(state != SubmissionState.REJECTED for state, _ in calls["events"])
 
 
+def test_truncated_review_defers_job(run, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_ATTEMPTS", 6)
+    deferred = []
+    monkeypatch.setattr(pipeline, "defer_job", lambda **kw: deferred.append(kw) or True)
+    truncated = GateResult.reject(
+        "llm_review_truncated",
+        retryable=True,
+        detail="finish_reason=length at max_tokens=65536",
+    )
+    res, calls = run({"llm_review": SPEC}, truncated, job=(7, 1))
+    assert res.reason == "llm_review_deferred"
+    assert calls["build"] == 0
+    assert deferred[0]["last_error"].startswith("llm_review_truncated:")
+    assert all(state != SubmissionState.REJECTED for state, _ in calls["events"])
+
+
 def test_outage_rejects_once_attempts_run_out(run, monkeypatch):
     import config
 

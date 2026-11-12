@@ -400,11 +400,39 @@ def openai_chat_client(model: str) -> ChatClient:
         )
 
     def _call(messages: list[dict[str, str]]) -> str:
+        budgets = [config.LLM_REVIEW_MAX_OUTPUT_TOKENS]
+        if config.LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS > budgets[0]:
+            budgets.append(config.LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS)
+        for i, max_tokens in enumerate(budgets):
+            last = i == len(budgets) - 1
+            try:
+                return _call_once(messages, max_tokens)
+            except LLMReviewError as exc:
+                if exc.reason == "llm_review_truncated" and not last:
+                    logger.warning(
+                        "llm review hit max_tokens=%d; retrying at %d",
+                        max_tokens,
+                        budgets[i + 1],
+                    )
+                    continue
+                if exc.reason == "llm_review_request_rejected" and i > 0:
+                    # The provider refused the larger budget. The patch was
+                    # still never reviewed: report the truncation, which the
+                    # gate defers, not a request error, which it rejects.
+                    raise LLMReviewError(
+                        "llm_review_truncated",
+                        f"finish_reason=length at max_tokens={budgets[i - 1]}; "
+                        f"retry at {max_tokens} refused ({exc.detail})",
+                    ) from exc
+                raise
+        raise AssertionError("unreachable")
+
+    def _call_once(messages: list[dict[str, str]], max_tokens: int) -> str:
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": config.LLM_REVIEW_MAX_OUTPUT_TOKENS,
+            "max_tokens": max_tokens,
         }
         response_format = _response_format(config.LLM_REVIEW_RESPONSE_FORMAT)
         if response_format is not None:
@@ -431,6 +459,13 @@ def openai_chat_client(model: str) -> ChatClient:
             content = choice["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise LLMReviewError("llm_review_invalid_output", "bad response") from exc
+        if choice.get("finish_reason") == "length":
+            # Out of output budget (reasoning included) before the verdict:
+            # the patch was not reviewed, so this is not a verdict on it.
+            raise LLMReviewError(
+                "llm_review_truncated",
+                f"finish_reason=length at max_tokens={max_tokens}",
+            )
         if choice.get("finish_reason") not in (None, "stop"):
             raise LLMReviewError(
                 "llm_review_invalid_output", f"finish_reason={choice['finish_reason']}"
@@ -500,6 +535,10 @@ def _cache_write(cache_dir: Path, key: str, verdict: dict[str, Any]) -> None:
 
 # -- Gate --------------------------------------------------------------------
 
+# Failures that say nothing about the patch: the job is deferred and retried,
+# and only rejected once LLM_REVIEW_MAX_ATTEMPTS claims have failed this way.
+_RETRYABLE_REASONS = frozenset({"llm_review_unavailable", "llm_review_truncated"})
+
 
 def check_llm_review(
     *,
@@ -548,10 +587,13 @@ def check_llm_review(
             content = call(build_messages(spec["policy"], patch_hash, review_text))
             verdict = parse_verdict(content, _diff_hunks(review_text))
         except LLMReviewError as exc:
-            if exc.reason == "llm_review_unavailable":
+            if exc.reason in _RETRYABLE_REASONS:
                 # Not cached: the retry gets a fresh call.
                 logger.warning(
-                    "llm review unavailable for %s (retryable): %s", patch_hash, exc
+                    "llm review %s for %s (retryable): %s",
+                    exc.reason,
+                    patch_hash,
+                    exc,
                 )
                 return GateResult.reject(
                     exc.reason, retryable=True, detail=exc.detail, **evidence

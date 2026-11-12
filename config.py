@@ -374,8 +374,16 @@ LLM_REVIEW_API_KEY: str = os.environ.get("PARETON_LLM_REVIEW_API_KEY", "")
 LLM_REVIEW_TIMEOUT_S: float = float(
     os.environ.get("PARETON_LLM_REVIEW_TIMEOUT_S", "300")
 )
+# Output budget per review call, reasoning tokens included (Kimi K3 counts
+# its thinking against max_tokens). A call cut off by the budget
+# (finish_reason=length) is retried once at RETRY_MAX_OUTPUT_TOKENS; if that
+# is cut off too, the job is deferred like a provider outage instead of
+# rejecting a patch that was never reviewed. 0 disables the in-call retry.
 LLM_REVIEW_MAX_OUTPUT_TOKENS: int = int(
-    os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "16384")
+    os.environ.get("PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS", "32768")
+)
+LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS: int = int(
+    os.environ.get("PARETON_LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", "65536")
 )
 # Patches longer than this are rejected rather than truncated, since a
 # truncated review would miss the tail.

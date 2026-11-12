@@ -58,6 +58,7 @@ def review(args: argparse.Namespace) -> int:
     print(f"  response_format = {config.LLM_REVIEW_RESPONSE_FORMAT}")
     print(f"  timeout_s       = {config.LLM_REVIEW_TIMEOUT_S}")
     print(f"  max_output_tok  = {config.LLM_REVIEW_MAX_OUTPUT_TOKENS}")
+    print(f"  retry_max_tok   = {config.LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS}")
     ok &= _ok(
         bool(config.LLM_REVIEW_BASE_URL and config.LLM_REVIEW_API_KEY),
         "endpoint and key are set",
@@ -222,7 +223,7 @@ def review(args: argparse.Namespace) -> int:
 
     _step(8, "Verdict validation")
     if result.evidence.get("retryable"):
-        _ok(False, "provider unavailable; the worker would defer and retry")
+        _ok(False, f"{result.reason}; the worker would defer and retry")
     elif result.ok or result.reason == "llm_review_rejected":
         ok &= _ok(True, "verdict passed schema and hunk checks")
     else:

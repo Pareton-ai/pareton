@@ -310,6 +310,91 @@ def test_provider_outage_is_a_retryable_reject_and_not_cached(tmp_path):
     assert len(client.calls) == 1
 
 
+def test_truncated_review_is_retryable_and_not_cached(tmp_path):
+    cut = llm_review.LLMReviewError(
+        "llm_review_truncated", "finish_reason=length at max_tokens=65536"
+    )
+    res = _check(tmp_path, FakeClient(cut))
+    assert not res.ok
+    assert res.reason == "llm_review_truncated"
+    assert res.evidence["retryable"] is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def _choice(finish_reason, content="x"):
+    return _resp(
+        body={
+            "choices": [
+                {"message": {"content": content}, "finish_reason": finish_reason}
+            ]
+        }
+    )
+
+
+def test_client_retries_truncation_at_larger_budget(endpoint, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_OUTPUT_TOKENS", 100)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", 400)
+    budgets = []
+
+    def post(url, headers, json, timeout, allow_redirects=True):
+        budgets.append(json["max_tokens"])
+        return _choice("length" if len(budgets) == 1 else "stop", "ok")
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    assert llm_review.openai_chat_client("kimi-k3")([]) == "ok"
+    assert budgets == [100, 400]
+
+
+def test_client_truncated_at_both_budgets(endpoint, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_OUTPUT_TOKENS", 100)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", 400)
+    budgets = []
+
+    def post(url, headers, json, timeout, allow_redirects=True):
+        budgets.append(json["max_tokens"])
+        return _choice("length")
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_truncated"
+    assert "max_tokens=400" in exc.value.detail
+    assert budgets == [100, 400]
+
+
+def test_client_larger_budget_refused_is_still_truncation(endpoint, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_OUTPUT_TOKENS", 100)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", 400)
+    replies = iter([_choice("length"), _resp(status=400)])
+    monkeypatch.setattr(llm_review.requests, "post", lambda *_, **__: next(replies))
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_truncated"
+
+
+def test_client_retry_disabled(endpoint, monkeypatch):
+    monkeypatch.setattr(config, "LLM_REVIEW_MAX_OUTPUT_TOKENS", 100)
+    monkeypatch.setattr(config, "LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS", 0)
+    budgets = []
+
+    def post(url, headers, json, timeout, allow_redirects=True):
+        budgets.append(json["max_tokens"])
+        return _choice("length")
+
+    monkeypatch.setattr(llm_review.requests, "post", post)
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_truncated"
+    assert budgets == [100]
+
+
+def test_client_first_call_400_is_not_masked(endpoint, monkeypatch):
+    monkeypatch.setattr(llm_review.requests, "post", lambda *_, **__: _resp(status=400))
+    with pytest.raises(llm_review.LLMReviewError) as exc:
+        llm_review.openai_chat_client("kimi-k3")([])
+    assert exc.value.reason == "llm_review_request_rejected"
+
+
 def test_other_failures_are_not_retryable(tmp_path):
     res = _check(tmp_path, FakeClient("not json"))
     assert not res.evidence.get("retryable")
@@ -390,6 +475,16 @@ def test_client_posts_tool_free_chat_completion(endpoint, monkeypatch):
                 body={
                     "choices": [
                         {"message": {"content": "x"}, "finish_reason": "length"}
+                    ]
+                }
+            ),
+            "llm_review_truncated",
+        ),
+        (
+            lambda *_, **__: _resp(
+                body={
+                    "choices": [
+                        {"message": {"content": "x"}, "finish_reason": "content_filter"}
                     ]
                 }
             ),

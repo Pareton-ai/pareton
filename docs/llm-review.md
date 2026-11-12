@@ -188,15 +188,26 @@ column, so no migration is needed. After `PARETON_LLM_REVIEW_MAX_ATTEMPTS`
 claims the submission is rejected with `llm_review_unavailable`. Deferrals are
 not cached.
 
+Running out of output budget is handled the same way. Kimi K3 counts its
+reasoning against `max_tokens`, so a large patch can use up
+`PARETON_LLM_REVIEW_MAX_OUTPUT_TOKENS` (32768 by default) before it writes a
+verdict (`finish_reason=length`). The client then retries once at
+`PARETON_LLM_REVIEW_RETRY_MAX_OUTPUT_TOKENS` (65536; 0 turns the retry off).
+If that is cut off too, or the provider refuses the larger budget, the job is
+deferred as above and, after `MAX_ATTEMPTS` claims, rejected with
+`llm_review_truncated`. A truncated call is not a verdict on the patch, so it
+never rejects at once.
+
 Everything else rejects at once:
 
 | reason | cause |
 | --- | --- |
 | `llm_review_unavailable` | provider still down after `MAX_ATTEMPTS` claims |
+| `llm_review_truncated` | every call still hit the output budget after `MAX_ATTEMPTS` claims |
 | `llm_review_rejected` | the model returned `reject`; `llm_reason` and `offending_hunks` are in the event detail |
 | `llm_review_unconfigured` | base URL or API key is not set (a deploy error, not an outage) |
 | `llm_review_request_rejected` | HTTP 400, 413 or 422 on the request |
-| `llm_review_invalid_output` | off-schema JSON, a reject whose cited hunks are all unknown, or `finish_reason` other than `stop` |
+| `llm_review_invalid_output` | off-schema JSON, a reject whose cited hunks are all unknown, or `finish_reason` other than `stop` or `length` |
 | `llm_review_patch_too_large` | review diff longer than `PARETON_LLM_REVIEW_MAX_INPUT_CHARS` |
 
 Valid verdicts are cached on disk, keyed by patch hash, policy, model, a hash

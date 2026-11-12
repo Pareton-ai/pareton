@@ -402,7 +402,9 @@ def _apply_and_review(
 def _defer_llm_review(
     submission_id: str, row: dict[str, Any], result: GateResult
 ) -> GateResult | None:
-    """Requeue the job after a provider outage. None means attempts ran out.
+    """Requeue the job after a provider outage or a truncated review.
+
+    None means attempts ran out.
 
     The submission gets no event: it stays at surface_ok until the retry.
     """
@@ -415,8 +417,9 @@ def _defer_llm_review(
         # Superseded attempt; whoever holds the job now settles it.
         logger.warning("submission %s: deferral did not land", submission_id)
     logger.warning(
-        "submission %s: llm review unavailable (%s); retry %d/%d in %.0fs",
+        "submission %s: %s (%s); retry %d/%d in %.0fs",
         submission_id,
+        result.reason,
         result.evidence.get("detail"),
         attempt + 1,
         config.LLM_REVIEW_MAX_ATTEMPTS,
