@@ -38,18 +38,22 @@ need no model, outside d2:
   (`empty_new_file_forbidden`) or has one of OKC's forbidden words in an
   added line or a changed path (`forbidden_word`). The words are matched as
   written: `KC_RESULT`, `KC_SERVING`, `/kc-root`, `result_secret`,
-  `serviceaccount` (`gate.llm_review.SURFACE_RULES`).
+  `serviceaccount` (`gate.llm_review.SURFACE_RULES`). For every campaign,
+  the gate also rejects a `diff --git` header with quoted paths
+  (`unparseable_diff_header`): Git accepts one for any file, and the
+  per-file checks could not read it.
 - A round compares each candidate's running server with the baseline's
   (`bench/launch_settings.py`). The harness reads SGLang's `/server_info`
   from both baseline runs and from the candidate, keeps the settings behind
   OKC's denied launch flags, and disqualifies a candidate whose value differs
   from the baseline's (`launch_setting_denied`), before it serves the replay.
   Both engines start with the same flags, so a difference comes from the
-  patch. A value derived from a denied flag, such as
-  `cuda_graph_config.decode.bs`, may differ, as it may at OKC. A setting the
-  two baseline runs disagree on is not compared. A candidate whose server
-  cannot be asked is disqualified too, and a round whose baseline reports
-  none of the fixed settings fails rather than pass every patch.
+  patch. A setting that is itself a mapping is compared whole.
+  `cuda_graph_config` is left out: SGLang resolves it from other settings,
+  so it may differ, as `cuda_graph_config.decode.bs` may at OKC. A setting
+  the two baseline runs disagree on is not compared. A candidate whose
+  server cannot be asked is disqualified too, and a round whose baseline
+  reports none of the fixed settings fails rather than pass every patch.
 
 d1 forces a dtype change to be written plainly, and d2 looks for it. Both are
 pinned in the campaign manifest like every other acceptance rule; the dtype

@@ -90,17 +90,40 @@ def test_only_settings_behind_denied_flags_are_kept():
     }
 
 
-def test_a_value_derived_from_a_fixed_flag_is_not_fixed():
+def test_a_resolved_setting_is_not_fixed():
     """OKC lets ``cuda_graph_config.decode.bs`` move as a new default."""
     kept = fixed_settings(SERVER_INFO, POLICY)
     assert not any(name.startswith("cuda_graph_config") for name in kept)
-    # A plain value under the flag's own name is the flag's setting.
-    assert fixed_settings({"cuda_graph_config": "decode.bs=1"}, POLICY) == {
-        "cuda_graph_config": "decode.bs=1"
+    # Whatever shape the server reports it in.
+    for value in ("decode.bs=1", {}, None, {"decode": {"dtype": "x"}}):
+        assert fixed_settings({"cuda_graph_config": value}, POLICY) == {}
+
+
+def test_a_mapping_valued_setting_is_compared_whole():
+    """A change under a denied flag's own mapping is a change of the flag."""
+    info = dict(SERVER_INFO, preferred_sampling_params={"temperature": 0.7})
+    baseline = fixed_settings(info, POLICY)
+    assert baseline["preferred_sampling_params"] == {"temperature": 0.7}
+    patched = dict(info, preferred_sampling_params={"temperature": 1.0})
+    assert changed_settings(baseline, fixed_settings(patched, POLICY)) == {
+        "preferred_sampling_params": {
+            "baseline": "{'temperature': 0.7}",
+            "candidate": "{'temperature': 1.0}",
+        }
     }
-    assert fixed_settings({"cuda_graph_config": {}}, POLICY) == {
-        "cuda_graph_config": {}
-    }
+    # A setting emptied out, or filled in from nothing, differs too.
+    for other in ({}, None, {"temperature": 0.7, "top_p": 0.9}):
+        patched = dict(info, preferred_sampling_params=other)
+        assert list(changed_settings(baseline, fixed_settings(patched, POLICY))) == [
+            "preferred_sampling_params"
+        ]
+
+
+def test_patterns_match_dotted_names_under_an_unfixed_mapping():
+    """SGLang reports its arguments flat; a nested name matches as written."""
+    assert fixed_settings({"serving": {"dtype": "bfloat16"}}, POLICY) == {}
+    kept = fixed_settings({"serving": {"lora_paths": ["/a"], "x": 1}}, POLICY)
+    assert kept == {"serving.lora_paths": ["/a"]}
 
 
 # -- Comparison --------------------------------------------------------------
@@ -167,6 +190,49 @@ def test_long_values_and_long_lists_are_cut_in_the_reason():
     reason = denied_reason(changed)
     assert "and 12 more" in reason
     assert len(reason) < 2500
+
+
+# -- Reading the settings ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # A body shorter than its Content-Length: http.client.IncompleteRead.
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        b'Content-Length: 100\r\n\r\n{"dty',
+        # Closed without an answer: http.client.RemoteDisconnected.
+        b"",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\n{x}",
+    ],
+)
+def test_a_broken_server_info_answer_is_an_engine_error(response):
+    """Every way the read fails must reach the round as an EngineError."""
+    import socket
+    import threading
+
+    from bench.http import get_json
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def serve():
+        conn, _ = server.accept()
+        with conn:
+            conn.recv(65536)
+            conn.sendall(response)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.getsockname()[1]}"
+        with pytest.raises(EngineError):
+            get_json(url, "/server_info", timeout=10)
+    finally:
+        thread.join(5)
+        server.close()
 
 
 # -- The round ---------------------------------------------------------------

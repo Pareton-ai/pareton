@@ -8,9 +8,9 @@ The harness does the same against the round's own baseline: both engines are
 started with identical flags, so any difference in a fixed setting comes from
 the patch.
 
-Only the settings behind the denied flags are compared. A value derived from
-them (the resolved CUDA-graph batch list, memory figures) may differ, as it
-may at OKC.
+Only the settings behind the denied flags are compared. A value the server
+resolves from other settings (``cuda_graph_config``, memory figures) may
+differ, as it may at OKC.
 """
 
 from __future__ import annotations
@@ -112,6 +112,15 @@ POLICIES: dict[str, dict[str, tuple[str, ...]]] = {
     "okc_serving_v1": OKC_SERVING_DENIED_FLAGS,
 }
 
+# Settings behind a denied flag whose reported value is not the flag's own.
+# SGLang folds the CUDA-graph convenience flags and its own defaults into
+# ``cuda_graph_config``, so what /server_info shows there is derived: OKC
+# passes a run whose ``cuda_graph_config.decode.bs`` moved as a new default,
+# and fails one whose ``cuda_graph_bs_decode`` did.
+RESOLVED_SETTINGS: dict[str, tuple[str, ...]] = {
+    "okc_serving_v1": ("cuda_graph_config",),
+}
+
 _MISSING = object()
 _UNSTABLE = object()
 _MAX_SHOWN = 120
@@ -135,31 +144,33 @@ def _setting_pattern(flag: str) -> str:
     return flag.removeprefix("--").replace("-", "_")
 
 
-def _leaves(value: Any, prefix: str = "") -> dict[str, Any]:
-    if isinstance(value, Mapping) and value:
-        out: dict[str, Any] = {}
-        for key, item in value.items():
-            out.update(_leaves(item, f"{prefix}.{key}" if prefix else str(key)))
-        return out
-    return {prefix: value}
-
-
 def fixed_settings(server_info: Mapping[str, Any], policy: str) -> dict[str, Any]:
     """The settings of one running server that the policy fixes.
 
     ``server_info`` is SGLang's ``/server_info``: the resolved server
-    arguments by flag name, nested ones flattened to dotted names. A pattern
-    matches whole names, so ``cuda_graph_config`` fixes that setting when it
-    is a plain value, and not ``cuda_graph_config.decode.bs`` under it.
+    arguments by flag name. A setting is kept whole, so one that is itself a
+    mapping (``preferred_sampling_params``) differs when any key under it
+    does. A mapping no pattern matches is searched by dotted name. A setting
+    in ``RESOLVED_SETTINGS`` is left out with everything under it.
     """
     patterns = [
         _setting_pattern(flag) for flags in POLICIES[policy].values() for flag in flags
     ]
-    return {
-        name: value
-        for name, value in _leaves(server_info).items()
-        if any(fnmatchcase(name, pattern) for pattern in patterns)
-    }
+    resolved = RESOLVED_SETTINGS.get(policy, ())
+    kept: dict[str, Any] = {}
+
+    def walk(value: Mapping[str, Any], prefix: str) -> None:
+        for key, item in value.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            if name in resolved:
+                continue
+            if any(fnmatchcase(name, pattern) for pattern in patterns):
+                kept[name] = item
+            elif isinstance(item, Mapping):
+                walk(item, name)
+
+    walk(server_info, "")
+    return kept
 
 
 def stable_settings(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict:

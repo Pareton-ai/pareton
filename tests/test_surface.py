@@ -431,3 +431,22 @@ def test_okc_policy_carries_the_okc_surface_rules():
             "forbidden_words": _OKC_WORDS,
         }
     }
+
+
+def test_rejects_a_quoted_diff_header_the_parser_cannot_read():
+    """Git resolves a C-quoted header; the per-file checks must not skip it."""
+    quoted = (
+        _ok_diff()
+        + b'diff --git "a/vllm/\\163erviceaccount.py" "b/vllm/\\163erviceaccount.py"\n'
+        + b"new file mode 120000\nindex 0000000..e69de29\n"
+    )
+    for extra in (
+        {},
+        {"reject_empty_new_files": True, "forbidden_words": _OKC_WORDS},
+        {"reject_mode_changes": True},
+    ):
+        res = check_surface(
+            patch_bytes=quoted, allowed_paths=ALLOW, denied_paths=DENY, **extra
+        )
+        assert res.reason == "unparseable_diff_header"
+        assert res.evidence["header"].startswith('diff --git "a/vllm/')

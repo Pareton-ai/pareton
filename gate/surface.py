@@ -256,6 +256,13 @@ def check_surface(
     if ".gitmodules" in text or "Subproject commit" in text:
         return GateResult.reject("submodule_change_forbidden")
 
+    # Git also accepts a header with C-quoted paths, for any path at all. The
+    # parser below does not read those, so every per-file check (symlink,
+    # mode, rename, empty file, forbidden word) would skip that file.
+    for line in text.splitlines():
+        if line.startswith("diff --git ") and not _DIFF_GIT_RE.match(line):
+            return GateResult.reject("unparseable_diff_header", header=line[:200])
+
     changes = parse_diff_paths(text)
     if not changes:
         # fallback: still reject binary markers even without parseable headers
