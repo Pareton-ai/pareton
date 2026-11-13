@@ -257,6 +257,12 @@ def _run(tmp_path: Path, candidates: list[dict], **overrides) -> tuple[int, dict
     report = json.loads((out / "bench_report.json").read_text(encoding="utf-8"))
     statuses = json.loads((out / "entry_status.json").read_text(encoding="utf-8"))
     report["_statuses"] = statuses.get("entries", statuses)
+    report["_log"] = [
+        record
+        for line in (out / "harness.log").read_text(encoding="utf-8").splitlines()
+        if line.startswith("{")
+        and (record := json.loads(line)).get("event") == "launch_settings"
+    ]
     return code, report
 
 
@@ -304,6 +310,19 @@ def test_round_disqualifies_a_candidate_that_changed_a_fixed_setting(tmp_path: P
     assert tuned["status"] == "scored"
     assert "launch_settings" not in tuned
     assert plain["status"] == "scored"
+    # The round's log says the check ran, and on what, for every engine.
+    assert report.pop("_log") == [
+        {"event": "launch_settings", "role": "baseline", "fixed": 3},
+        {"event": "launch_settings", "role": "baseline-drift", "fixed": 3},
+        {
+            "event": "launch_settings",
+            "role": "candidate-0",
+            "fixed": 3,
+            "changed": ["cuda_graph_bs_decode"],
+        },
+        {"event": "launch_settings", "role": "candidate-1", "fixed": 3, "changed": []},
+        {"event": "launch_settings", "role": "candidate-2", "fixed": 3, "changed": []},
+    ]
 
 
 def test_round_without_the_policy_never_asks_for_settings(tmp_path: Path, monkeypatch):

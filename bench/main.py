@@ -768,6 +768,13 @@ def run_round(
                                 f"{start.role} reports none of the launch "
                                 "settings the campaign fixes"
                             )
+                        layout.append_log(
+                            {
+                                "event": "launch_settings",
+                                "role": start.role,
+                                "fixed": len(reported),
+                            }
+                        )
                         baseline_settings = (
                             reported
                             if baseline_settings is None
@@ -937,6 +944,14 @@ def run_round(
                                 unreadable_settings(str(exc))
                             ) from exc
                         changed = changed_settings(baseline_settings, reported)
+                        layout.append_log(
+                            {
+                                "event": "launch_settings",
+                                "role": start.role,
+                                "fixed": len(reported),
+                                "changed": sorted(changed),
+                            }
+                        )
                         if changed:
                             raise _LaunchSettingDenied(changed)
                     with gpu_memory(start) as memory:
