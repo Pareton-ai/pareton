@@ -19,13 +19,41 @@ build (e). Neither rewrites the patch.
     - undoes a launch option OKC fixes. OKC lets entrants edit launch flags
       except a fixed list. Pareton starts every engine with the campaign's
       flags, so the review looks for code that changes the default of such
-      an option or ignores its value: precision and quantization, model and
-      drafter identity, speculative acceptance, sampling defaults, context
-      length and prompt truncation;
+      an option, fills it in when the server was started without it, or
+      ignores its value: precision and quantization, model and drafter
+      identity, speculative acceptance, sampling defaults, context length
+      and prompt truncation, and the options OKC's judge sets itself (max
+      running requests, `cuda_graph_bs_decode`, `cuda_graph_max_bs_decode`,
+      `cuda_graph_config`, and the rest of that group). It also rejects a
+      patch that changes what the server reports about its own settings;
     - keeps state outside the server or sends data out of it;
     - games the benchmark (special-cases its prompts, loads or output
       lengths, tampers with timing or token counts) or breaks other models
       or GPUs.
+
+A campaign reviewed under `okc_serving_v1` is also held to the OKC rules that
+need no model, outside d2:
+
+- The surface gate rejects a patch that adds an empty new file
+  (`empty_new_file_forbidden`) or has one of OKC's forbidden words in an
+  added line or a changed path (`forbidden_word`). The words are matched as
+  written: `KC_RESULT`, `KC_SERVING`, `/kc-root`, `result_secret`,
+  `serviceaccount` (`gate.llm_review.SURFACE_RULES`). For every campaign,
+  the gate also rejects a `diff --git` header with quoted paths
+  (`unparseable_diff_header`): Git accepts one for any file, and the
+  per-file checks could not read it.
+- A round compares each candidate's running server with the baseline's
+  (`bench/launch_settings.py`). The harness reads SGLang's `/server_info`
+  from both baseline runs and from the candidate, keeps the settings behind
+  OKC's denied launch flags, and disqualifies a candidate whose value differs
+  from the baseline's (`launch_setting_denied`), before it serves the replay.
+  Both engines start with the same flags, so a difference comes from the
+  patch. A setting that is itself a mapping is compared whole.
+  `cuda_graph_config` is left out: SGLang resolves it from other settings,
+  so it may differ, as `cuda_graph_config.decode.bs` may at OKC. A setting
+  the two baseline runs disagree on is not compared. A candidate whose
+  server cannot be asked is disqualified too, and a round whose baseline
+  reports none of the fixed settings fails rather than pass every patch.
 
 d1 forces a dtype change to be written plainly, and d2 looks for it. Both are
 pinned in the campaign manifest like every other acceptance rule; the dtype
@@ -233,6 +261,14 @@ python -m campaign.seed ... \
 A campaign that mirrors the OKC serving track passes
 `--llm-review okc_serving_v1` instead. A policy's prompt is part of the verdict cache key, and a new policy
 is a new value, so a live campaign's review does not change under it.
+
+`okc_serving_v1` is the one exception so far. It stands for OKC's published
+rules, and on 2026-11-13 it was tightened in place, for the campaign already
+running under it: OKC had failed that campaign's round-1 leader for a
+judge-set flag (`cuda_graph_bs_decode`) that the policy let through. The
+change added the judge-set options to d2 and the two checks above. A
+submission that had already passed the gates is not reviewed again; the round
+check applies to every candidate from the next round on.
 
 `v1` names d1's rule set. A later change to the rules ships as a new value
 that a new campaign opts into, so a live campaign's acceptance rules don't

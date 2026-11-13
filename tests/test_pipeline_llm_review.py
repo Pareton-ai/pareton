@@ -24,6 +24,7 @@ VIEW = SimpleNamespace(
 def run(monkeypatch):
     def _run(bench, review_result=None, job=(None, None), obfuscation=None, view=None):
         calls = {"review": [], "obfuscation": [], "view": [], "build": 0, "events": []}
+        calls["surface"] = []
         campaign = SimpleNamespace(
             campaign_id="c1",
             bench=bench,
@@ -66,11 +67,12 @@ def run(monkeypatch):
             return obfuscation or GateResult.success(SubmissionState.SURFACE_OK)
 
         monkeypatch.setattr(pipeline, "check_obfuscation", _obfuscation)
-        monkeypatch.setattr(
-            pipeline,
-            "check_surface",
-            lambda **_: GateResult.success(SubmissionState.SURFACE_OK, files=[]),
-        )
+
+        def _surface(**kwargs):
+            calls["surface"].append(kwargs)
+            return GateResult.success(SubmissionState.SURFACE_OK, files=[])
+
+        monkeypatch.setattr(pipeline, "check_surface", _surface)
 
         def _review(**kwargs):
             calls["review"].append(kwargs)
@@ -237,3 +239,18 @@ def test_llm_reasons_are_public_on_reject(run):
     _state, detail = calls["events"][-1]
     assert detail["llm_reason"] == "lowers KV to fp4"
     assert detail["offending_hunks"] == [hunk]
+
+
+def test_surface_gate_takes_the_review_policys_rules(run):
+    """OKC's forbidden words and empty-file rule ride on its review policy."""
+    okc = {"llm_review": {"policy": "okc_serving_v1", "model": "kimi-k3"}}
+    _res, calls = run(okc, review_result=GateResult.success(SubmissionState.SURFACE_OK))
+    surface = calls["surface"][0]
+    assert surface["reject_empty_new_files"] is True
+    assert "KC_RESULT" in surface["forbidden_words"]
+    for bench in ({}, {"llm_review": {"policy": "dtype_precision_v1", "model": "m"}}):
+        _res, calls = run(
+            bench, review_result=GateResult.success(SubmissionState.SURFACE_OK)
+        )
+        assert "forbidden_words" not in calls["surface"][0]
+        assert "reject_empty_new_files" not in calls["surface"][0]

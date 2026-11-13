@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 import config
+from bench.launch_settings import POLICIES as LAUNCH_SETTING_POLICIES
 from bench.main import MockCandidatePlan, MockPlan, run_bench
 from bench.sampler import (
     CHAT_TEMPLATE_ALGO_VERSION,
@@ -434,6 +435,13 @@ def build_round_request(
         "hf_token_env": "HF_TOKEN",
         "leader_candidate_index": leader_candidate_index,
     }
+    # A campaign reviewed under a policy that fixes launch settings has its
+    # rounds hold candidates to them as well (bench/launch_settings.py).
+    # SGLang only: the check reads /server_info.
+    review = bench.get("llm_review")
+    review_policy = review.get("policy") if isinstance(review, dict) else None
+    if engine_profile["name"] == "sglang" and review_policy in LAUNCH_SETTING_POLICIES:
+        req["fixed_launch_settings"] = review_policy
     draft = bench.get("draft_model")
     if draft is not None:
         req["draft_model"] = {

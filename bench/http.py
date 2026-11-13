@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
+from http.client import HTTPException
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -91,7 +92,9 @@ def get_json(base_url: str, path: str, *, timeout: float = 60.0) -> dict[str, An
     try:
         with urlopen(Request(url, method="GET"), timeout=timeout) as response:
             payload = json.load(response)
-    except (URLError, TimeoutError, UnicodeDecodeError, ValueError) as exc:
+    except (OSError, HTTPException, UnicodeDecodeError, ValueError) as exc:
+        # OSError covers URLError, timeouts and a reset while reading;
+        # HTTPException a body cut short or a connection closed unanswered.
         raise EngineError(
             f"cannot read engine metadata at {url}: {type(exc).__name__}"
         ) from exc
