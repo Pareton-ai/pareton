@@ -58,6 +58,13 @@ from bench.env import (
     collect_environment,
     warn_gpu_sku_mismatch,
 )
+from bench.launch_settings import (
+    changed_settings,
+    denied_reason,
+    fixed_settings,
+    stable_settings,
+    unreadable_settings,
+)
 from bench.lifecycle import (
     BenchNetwork,
     EngineContainer,
@@ -72,6 +79,7 @@ from bench.gpu_memory import (
     gpu_memory_report,
     merge_peaks,
 )
+from bench.http import get_json
 from bench.mock_engine import MockEngine, MockEngineConfig
 from bench.output import JsonlFileHandler, OutputLayout
 from bench.phases import BenchPhase
@@ -402,6 +410,9 @@ class MockCandidatePlan:
     # Peak MiB per GPU the mock reports to a rule with a memory cap; None
     # means the same as the mock baseline.
     gpu_memory_mib: list[float] | None = None
+    # Server settings this candidate reports over the mock baseline's, as a
+    # patch that changed a default would.
+    server_info: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> MockCandidatePlan:
@@ -415,6 +426,9 @@ class MockCandidatePlan:
                 if d.get("gpu_memory_mib") is None
                 else [float(v) for v in d["gpu_memory_mib"]]
             ),
+            server_info=(
+                None if d.get("server_info") is None else dict(d["server_info"])
+            ),
         )
 
 
@@ -423,6 +437,16 @@ class MockPlan:
     baseline_token_latency_s: float = 0.0
     candidates: list[MockCandidatePlan] = field(default_factory=list)
     baseline_gpu_memory_mib: list[float] = field(default_factory=lambda: [0.0])
+    # What every mock engine answers on /server_info, as SGLang would.
+    baseline_server_info: dict[str, Any] = field(
+        default_factory=lambda: {
+            "max_running_requests": 32,
+            "cuda_graph_bs_decode": None,
+            "cuda_graph_config": {"decode": {"bs": [1, 2, 4, 8]}},
+            "dtype": "bfloat16",
+            "enable_layernorm_sp": False,
+        }
+    )
 
     def candidate(self, index: int) -> MockCandidatePlan:
         if index < len(self.candidates):
@@ -478,14 +502,17 @@ class _EngineProvider:
 
     def _mock_config(self, start: EngineStart) -> MockEngineConfig:
         latency = self._mock_plan.baseline_token_latency_s
+        info = dict(self._mock_plan.baseline_server_info)
         if start.candidate_index is None:
             return MockEngineConfig(
                 model=f"mock-{start.role}",
                 host="127.0.0.1",
                 port=0,
                 token_latency_s=latency,
+                server_info=info,
             )
         plan = self._mock_plan.candidate(start.candidate_index)
+        info.update(plan.server_info or {})
         return MockEngineConfig(
             model=f"mock-{start.role}",
             host="127.0.0.1",
@@ -493,6 +520,7 @@ class _EngineProvider:
             token_latency_s=latency,
             speed_factor=plan.speed_factor,
             garbage=plan.garbage,
+            server_info=info,
         )
 
     def gpu_memory(self, start: EngineStart):
@@ -579,6 +607,17 @@ class _CandidateRun:
     reason: str | None = None
     # Set only when the scoring rule caps GPU memory (bench/gpu_memory.py).
     gpu_memory: dict[str, Any] | None = None
+    # Fixed launch settings found changed from the baseline's; set only on a
+    # run disqualified for it (bench/launch_settings.py).
+    launch_settings: dict[str, Any] | None = None
+
+
+class _LaunchSettingDenied(Exception):
+    """A candidate's server runs with a fixed launch setting changed."""
+
+    def __init__(self, changed: dict[str, Any]) -> None:
+        super().__init__(denied_reason(changed))
+        self.changed = changed
 
 
 def _natural_stop_tier_workload(req: BenchRequest, trace: WorkloadTrace | None) -> bool:
@@ -658,6 +697,16 @@ def run_round(
             return FixedGpuMemory()
         return provider.gpu_memory(start)
 
+    # Optional: launch settings the candidate must leave as the baseline has
+    # them. The reference is what the baseline runs report and agree on.
+    settings_policy = req.fixed_launch_settings
+    baseline_settings: dict[str, Any] | None = None
+
+    def launch_settings(url: str) -> dict[str, Any]:
+        assert settings_policy is not None
+        info = get_json(url, "/server_info", timeout=600)
+        return fixed_settings(info, settings_policy)
+
     leader_index = req.leader_candidate_index
     leader_failed = False
     # Live per-entry progress, streamed to the worker through
@@ -710,6 +759,20 @@ def run_round(
             try:
                 with provider.start(start, phase=phase) as url:
                     preflight(url, start)
+                    if settings_policy is not None:
+                        reported = launch_settings(url)
+                        if not reported:
+                            # Nothing to hold a candidate to: the check would
+                            # pass every patch without saying so.
+                            raise EngineError(
+                                f"{start.role} reports none of the launch "
+                                "settings the campaign fixes"
+                            )
+                        baseline_settings = (
+                            reported
+                            if baseline_settings is None
+                            else stable_settings(baseline_settings, reported)
+                        )
                     with gpu_memory(start) as memory:
                         replay = run_sla_engine(
                             url,
@@ -865,6 +928,17 @@ def run_round(
             try:
                 with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
                     preflight(url, start)
+                    if settings_policy is not None:
+                        assert baseline_settings is not None
+                        try:
+                            reported = launch_settings(url)
+                        except EngineError as exc:
+                            raise _LaunchSettingDenied(
+                                unreadable_settings(str(exc))
+                            ) from exc
+                        changed = changed_settings(baseline_settings, reported)
+                        if changed:
+                            raise _LaunchSettingDenied(changed)
                     with gpu_memory(start) as memory:
                         replay = run_sla_engine(
                             url,
@@ -894,6 +968,21 @@ def run_round(
                             "and the scoring rule caps it",
                             error_role=start.role,
                         )
+            except _LaunchSettingDenied as exc:
+                # A rule the candidate broke before serving anything: it is
+                # disqualified without a replay. Not a crash, so a leader
+                # caught here loses the crown instead of voiding the round.
+                logger.warning("candidate %d %s", index, exc)
+                runs.append(
+                    _CandidateRun(
+                        index=index,
+                        status="disqualified",
+                        reason=str(exc),
+                        launch_settings=exc.changed,
+                    )
+                )
+                note(str(index), "disqualified", str(exc))
+                continue
             except EngineCrashedError as exc:
                 # The engine process exited during startup: the image ran and
                 # its own code died. That is the candidate's fault, so the
@@ -1081,18 +1170,20 @@ def _build_entries(
         # branch must precede the replay-None fallback below, which maps to
         # infra_failed.
         if run.status == "disqualified":
-            # Either the engine crashed at startup (no replay: no SLA, no
-            # correctness, no score), or it served the replay over the
-            # campaign's GPU memory cap (its SLA and memory are evidence).
+            # The engine crashed at startup or ran with a fixed launch setting
+            # changed (no replay: no SLA, no correctness, no score), or it
+            # served the replay over the campaign's GPU memory cap (its SLA
+            # and memory are evidence).
             entries.append(
                 RoundEntryReport(
                     index=run.index,
                     image_digest=digest,
                     status="disqualified",
                     reason=run.reason,
-                    engine_crashed=run.replay is None,
+                    engine_crashed=run.replay is None and run.launch_settings is None,
                     sla=None if run.replay is None else run.replay.result,
                     gpu_memory=run.gpu_memory,
+                    launch_settings=run.launch_settings,
                 )
             )
             continue

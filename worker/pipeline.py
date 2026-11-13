@@ -26,7 +26,7 @@ from campaign.store import (
 from gate.base_apply import check_base_apply, check_base_apply_local
 from gate.identity import check_identity
 from gate.integrity import check_integrity
-from gate.llm_review import check_llm_review
+from gate.llm_review import SURFACE_RULES, check_llm_review
 from gate.obfuscation import check_obfuscation
 from gate.source_view import SourceViewError, build_source_view
 from gate.surface import check_surface
@@ -310,7 +310,10 @@ def _apply_and_review(
 
     # d. Surface
     patch_limits = (campaign.bench or {}).get("patch_limits") or {}
+    review = (campaign.bench or {}).get("llm_review")
+    review_policy = review.get("policy") if isinstance(review, dict) else None
     surface_res = check_surface(
+        **SURFACE_RULES.get(review_policy, {}),
         patch_bytes=patch_bytes,
         allowed_paths=list(campaign.allowed_paths),
         denied_paths=list(campaign.denied_paths),

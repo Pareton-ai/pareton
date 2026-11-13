@@ -256,6 +256,38 @@ def test_build_round_request_pins_sglang_launch_and_scorer(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "engine,review,expected",
+    [
+        (
+            preset("sglang"),
+            {"policy": "okc_serving_v1", "model": "m"},
+            "okc_serving_v1",
+        ),
+        (preset("sglang"), {"policy": "dtype_precision_v1", "model": "m"}, None),
+        (preset("sglang"), None, None),
+        # The check reads SGLang's /server_info.
+        (None, {"policy": "okc_serving_v1", "model": "m"}, None),
+    ],
+)
+def test_build_round_request_fixes_launch_settings_under_the_okc_policy(
+    tmp_path, engine, review, expected
+):
+    from bench.validate import validate_bench_request_dict
+
+    trace = tmp_path / "trace.json"
+    raw = _write_trace(trace)
+    row = _round_row(sampled_trace_sha256=sha256_bytes(raw))
+    campaign = _campaign(engine=engine)
+    if review is not None:
+        campaign.bench["llm_review"] = review
+    req = build_round_request(
+        row, campaign, _entries(), task_id=str(uuid4()), trace_path=str(trace)
+    )
+    assert req.get("fixed_launch_settings") == expected
+    assert validate_bench_request_dict(req).fixed_launch_settings == expected
+
+
+@pytest.mark.parametrize(
     "engine,cache_dir",
     [(None, "/root/.cache/vllm"), (preset("sglang"), "/root/.cache/sglang")],
 )

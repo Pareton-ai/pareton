@@ -336,3 +336,98 @@ def test_reject_mode_changes_allows_plain_edits_and_new_files():
             reject_mode_changes=True,
         )
         assert res.ok, res.reason
+
+
+# -- Rules of a review policy (gate.llm_review.SURFACE_RULES) ----------------
+
+_EMPTY_NEW_FILE = b"""diff --git a/vllm/__init__.py b/vllm/__init__.py
+new file mode 100644
+index 0000000..e69de29
+"""
+
+_OKC_WORDS = ("KC_RESULT", "KC_SERVING", "/kc-root", "result_secret", "serviceaccount")
+
+
+def _added(line: str, path: str = "vllm/foo.py") -> bytes:
+    return _ok_diff(path).replace(b"+new\n", f"+{line}\n".encode())
+
+
+def test_empty_new_file_passes_when_unset():
+    patch = _ok_diff() + _EMPTY_NEW_FILE
+    assert check_surface(patch_bytes=patch, allowed_paths=ALLOW, denied_paths=DENY).ok
+
+
+def test_reject_empty_new_files_blocks_a_new_file_without_content():
+    kwargs = {
+        "allowed_paths": ALLOW,
+        "denied_paths": DENY,
+        "reject_empty_new_files": True,
+    }
+    res = check_surface(patch_bytes=_ok_diff() + _EMPTY_NEW_FILE, **kwargs)
+    assert res.reason == "empty_new_file_forbidden"
+    assert res.evidence == {"path": "vllm/__init__.py"}
+    # A new file with content, an edit and a deletion all still pass.
+    deleted = b"""diff --git a/vllm/old.py b/vllm/old.py
+deleted file mode 100644
+index 2222222..0000000
+--- a/vllm/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-old
+"""
+    for patch in (_NEW_REGULAR, _ok_diff(), deleted):
+        assert check_surface(patch_bytes=patch, **kwargs).ok
+
+
+@pytest.mark.parametrize("word", _OKC_WORDS)
+def test_forbidden_word_in_an_added_line(word):
+    kwargs = {"allowed_paths": ALLOW, "denied_paths": DENY}
+    patch = _added(f'x = os.environ.get("{word}_PATH")')
+    assert check_surface(patch_bytes=patch, **kwargs).ok
+    res = check_surface(patch_bytes=patch, forbidden_words=_OKC_WORDS, **kwargs)
+    assert res.reason == "forbidden_word"
+    assert res.evidence == {"word": word}
+
+
+def test_forbidden_word_in_a_path():
+    res = check_surface(
+        patch_bytes=_ok_diff("vllm/serviceaccount/token.py"),
+        allowed_paths=ALLOW,
+        denied_paths=DENY,
+        forbidden_words=_OKC_WORDS,
+    )
+    assert res.reason == "forbidden_word"
+    assert res.evidence == {
+        "word": "serviceaccount",
+        "path": "vllm/serviceaccount/token.py",
+    }
+
+
+def test_forbidden_words_ignore_removed_lines_context_and_case():
+    patch = b"""diff --git a/vllm/foo.py b/vllm/foo.py
+index 1111111..2222222 100644
+--- a/vllm/foo.py
++++ b/vllm/foo.py
+@@ -1,2 +1,2 @@
+ keep = "KC_RESULT"
+-old = "result_secret"
++new = "kc_result"
+"""
+    res = check_surface(
+        patch_bytes=patch,
+        allowed_paths=ALLOW,
+        denied_paths=DENY,
+        forbidden_words=_OKC_WORDS,
+    )
+    assert res.ok, res.reason
+
+
+def test_okc_policy_carries_the_okc_surface_rules():
+    from gate.llm_review import POLICY_OKC_SERVING_V1, SURFACE_RULES
+
+    assert SURFACE_RULES == {
+        POLICY_OKC_SERVING_V1: {
+            "reject_empty_new_files": True,
+            "forbidden_words": _OKC_WORDS,
+        }
+    }

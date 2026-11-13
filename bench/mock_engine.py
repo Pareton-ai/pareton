@@ -102,6 +102,8 @@ class MockEngineConfig:
     """Fixed greedy continuation when generating (not echoing)."""
     greedy_text: str = " OK"
     top_logprobs_k: int = 1
+    """What GET /server_info answers; None means the endpoint is absent."""
+    server_info: dict | None = None
     host: str = "127.0.0.1"
     port: int = 0  # 0 = ephemeral
 
@@ -356,6 +358,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "data": [{"id": self.server.cfg.model, "object": "model"}],
                 },
             )
+            return
+        if path == "/server_info" and self.server.cfg.server_info is not None:
+            self._write_json(200, self.server.cfg.server_info)
             return
         self._write_json(404, {"error": {"message": f"not found: {path}"}})
 

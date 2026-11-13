@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from bench.launch_settings import validate_policy
 from bench.score import PromptTiming
 
 # ---------------------------------------------------------------------------
@@ -331,6 +332,10 @@ class BenchRequest:
     # behavior: every candidate is benched.
     leader_candidate_index: int | None = None
     draft_model: DraftModelSpec | None = None
+    # Name of a bench/launch_settings policy: a candidate whose server reports
+    # a fixed launch setting changed from the baseline's is disqualified. None
+    # compares nothing.
+    fixed_launch_settings: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchRequest:
@@ -365,6 +370,7 @@ class BenchRequest:
                 if d.get("draft_model") is not None
                 else None
             ),
+            fixed_launch_settings=validate_policy(d.get("fixed_launch_settings")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -582,6 +588,10 @@ class RoundEntryReport:
     # Peak GPU memory against the baseline's, present only when the scoring
     # rule sets max_extra_gpu_memory_mib (bench/gpu_memory.gpu_memory_report).
     gpu_memory: dict[str, Any] | None = None
+    # Fixed launch settings the candidate's server reported changed from the
+    # baseline's, each as {"baseline", "candidate"}; set only on an entry
+    # disqualified for it (bench/launch_settings.py).
+    launch_settings: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -595,6 +605,8 @@ class RoundEntryReport:
             out["engine_crashed"] = True
         if self.gpu_memory is not None:
             out["gpu_memory"] = self.gpu_memory
+        if self.launch_settings is not None:
+            out["launch_settings"] = self.launch_settings
         if self.score_report is not None:
             out["score_report"] = self.score_report
         if self.sla is not None:

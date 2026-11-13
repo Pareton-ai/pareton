@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from typing import Sequence
 
 from gate.types import GateResult, SubmissionState
 
@@ -36,6 +37,9 @@ class DiffFileChange:
     # Set by an ``old mode``/``new mode`` pair, a new file not created 100644,
     # or a copy (it takes the source's mode, which the diff alone can't show).
     mode_change: str | None = None
+    # Whether the file's section carries any hunk; a new file without one is
+    # an empty file.
+    has_hunk: bool = False
 
 
 def _normalize_path(path: str) -> str:
@@ -132,9 +136,12 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
         rename_to: str | None = None
         is_copy = False
         mode_change: str | None = None
+        has_hunk = False
         j = i + 1
         while j < len(lines) and not lines[j].startswith("diff --git "):
             l2 = lines[j]
+            if _HUNK_RE.match(l2):
+                has_hunk = True
             if _BINARY_RE.match(l2):
                 is_binary = True
             nm = _NEW_FILE_RE.match(l2)
@@ -183,6 +190,7 @@ def parse_diff_paths(patch_text: str) -> list[DiffFileChange]:
                 is_deleted=is_deleted,
                 is_copy=is_copy,
                 mode_change=mode_change,
+                has_hunk=has_hunk,
             )
         )
         i = j
@@ -224,8 +232,15 @@ def check_surface(
     max_added_line_chars: int | None = None,
     reject_renames: bool = False,
     reject_mode_changes: bool = False,
+    reject_empty_new_files: bool = False,
+    forbidden_words: Sequence[str] = (),
 ) -> GateResult:
-    """The optional limits come from ``bench.patch_limits``; unset is unlimited."""
+    """The optional limits come from ``bench.patch_limits``; unset is unlimited.
+
+    ``reject_empty_new_files`` and ``forbidden_words`` come from the
+    campaign's review policy (gate.llm_review.SURFACE_RULES). A forbidden word
+    is matched as written, anywhere in an added line or a changed path.
+    """
     if max_patch_bytes is not None and len(patch_bytes) > max_patch_bytes:
         return GateResult.reject(
             "patch_too_large", size=len(patch_bytes), limit=max_patch_bytes
@@ -267,6 +282,11 @@ def check_surface(
             return GateResult.reject(
                 "mode_change_forbidden", path=final, mode=ch.mode_change
             )
+        if reject_empty_new_files and ch.is_new and not ch.has_hunk:
+            return GateResult.reject("empty_new_file_forbidden", path=final)
+        for word in forbidden_words:
+            if any(word in p for p in filter(None, [final, ch.old_path])):
+                return GateResult.reject("forbidden_word", word=word, path=final)
         if _match_globs(final, denied_paths):
             return GateResult.reject("path_denied", path=final)
         if not _match_globs(final, allowed_paths):
@@ -277,6 +297,12 @@ def check_surface(
                 return GateResult.reject("rename_from_denied", path=ch.old_path)
             if not _match_globs(ch.old_path, allowed_paths):
                 return GateResult.reject("rename_from_not_allowed", path=ch.old_path)
+
+    if forbidden_words:
+        for added in _added_lines(text):
+            for word in forbidden_words:
+                if word in added:
+                    return GateResult.reject("forbidden_word", word=word)
 
     if max_added_line_chars is not None:
         for added in _added_lines(text):
