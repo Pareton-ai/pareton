@@ -364,6 +364,42 @@ def test_a_candidate_that_cannot_be_asked_its_settings_is_disqualified(
     assert reads == ["/server_info"] * 4
 
 
+def test_a_silent_candidate_is_disqualified_before_the_workload_preflight(
+    tmp_path: Path, monkeypatch
+):
+    """Preflight reads /server_info too. Its failure is an infra failure, which
+    would void the round for a leader, so the settings read has to come first."""
+    import bench.workload_preflight as wp
+
+    real = bm.get_json
+    reads = []
+
+    def get_json(url, path, **kwargs):
+        reads.append(path)
+        if len(reads) == 3:  # baseline, baseline-drift, then candidate 0
+            raise EngineError("cannot read engine metadata")
+        return real(url, path, **kwargs)
+
+    def preflight(url, trace, *, evidence_dir, **kwargs):
+        if evidence_dir.name == "candidate-0":
+            raise EngineError("cannot read engine metadata")
+
+    monkeypatch.setattr(bm, "get_json", get_json)
+    monkeypatch.setattr(wp, "validate_engine_workload", preflight)
+    code, report = _run(
+        tmp_path,
+        [{"speed_factor": 2.0}, {"speed_factor": 1.5}],
+        fixed_launch_settings=POLICY,
+        leader_candidate_index=0,
+    )
+    assert code == EXIT_OK
+    silent, other = report["entries"]
+    assert silent["status"] == "disqualified"
+    assert list(silent["launch_settings"]) == [UNREADABLE]
+    assert "engine_crashed" not in silent
+    assert other["status"] == "scored"
+
+
 def test_round_fails_when_the_baseline_cannot_be_asked(tmp_path: Path, monkeypatch):
     """No reference, no verdicts: the round fails as the harness's own."""
 

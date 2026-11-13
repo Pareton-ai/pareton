@@ -934,7 +934,9 @@ def run_round(
             memory_report: dict[str, Any] | None = None
             try:
                 with provider.start(start, phase=BenchPhase.SLA_BENCH) as url:
-                    preflight(url, start)
+                    # Before preflight, which reads /server_info too: an
+                    # engine that cannot answer must fail here, as the
+                    # patch's breach, not there as an infra failure.
                     if settings_policy is not None:
                         assert baseline_settings is not None
                         try:
@@ -954,6 +956,7 @@ def run_round(
                         )
                         if changed:
                             raise _LaunchSettingDenied(changed)
+                    preflight(url, start)
                     with gpu_memory(start) as memory:
                         replay = run_sla_engine(
                             url,
