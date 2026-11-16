@@ -120,6 +120,7 @@ def test_okc_serving_policy_has_its_own_prompt_and_cache(tmp_path):
         "special-cases the benchmark",
         "tampers with what is measured",
         "other models, GPUs or features",
+        "redundant copies of experts",
     ):
         assert rule in system, rule
 
