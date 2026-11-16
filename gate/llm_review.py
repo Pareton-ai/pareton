@@ -193,7 +193,11 @@ repacking or compression of weights, compute in higher precision, exact
 algebraic rewrites, reordering of floating-point operations that keeps the
 dtypes, reuse of the prefix KV cache the baseline already reuses, a faster
 draft model path whose tokens are still verified exactly, or code that keeps
-the existing dtypes and does the same work. Weight quantization that the
+the existing dtypes and does the same work. Expert placement across
+expert-parallel ranks and redundant copies of experts (as in SGLang's EPLB)
+are memory layout, not a change to how weights are loaded, when every expert
+holds its checkpoint weights unchanged and every token still runs the same
+routed experts. Weight quantization that the
 campaign already configures is out of scope. A changed default for a launch
 option that is not of a fixed kind above is allowed.
 

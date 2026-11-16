@@ -270,6 +270,14 @@ change added the judge-set options to d2 and the two checks above. A
 submission that had already passed the gates is not reviewed again; the round
 check applies to every candidate from the next round on.
 
+On 2026-11-16 it was loosened in place. The same expert-placement and
+redundant-expert code passed d2 in four entries and was rejected in a fifth
+as a change to how weights are loaded. The policy now lists expert placement
+and redundant experts as allowed memory layout when every expert keeps its
+checkpoint weights and every token runs the same routed experts. A rejected
+submission stays rejected; the miner resubmits with a code change, since the
+copy check ignores comments and whitespace.
+
 `v1` names d1's rule set. A later change to the rules ships as a new value
 that a new campaign opts into, so a live campaign's acceptance rules don't
 move under it.
