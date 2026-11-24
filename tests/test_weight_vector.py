@@ -250,3 +250,18 @@ def test_a_weight_outside_zero_to_one_raises() -> None:
     campaigns = [seated("c1", "5Alice", emission_rule=rule(0.1, floor=-0.2))]
     with pytest.raises(WeightVectorError, match=r"outside \[0, 1\]"):
         build(campaigns, current_block=10_000_000, uids={"5Alice": 7})
+
+
+def test_burn_all_sends_everything_to_the_burn_uid() -> None:
+    vector = build_weight_vector(
+        [seated("c1", "hk1")],
+        current_block=1_000,
+        hotkey_uids={"hk1": 5},
+        uid_count=64,
+        burn_uid=BURN_UID,
+        burn_all=True,
+    )
+    assert vector.weights[5] == 0.0
+    assert vector.weights[BURN_UID] == 1.0
+    assert vector.breakdown[0]["note"] == "burn_all"
+    assert vector.breakdown[0]["uid"] is None

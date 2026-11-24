@@ -149,6 +149,7 @@ def run_cycle(
             hotkey_uids=hotkey_uids,
             uid_count=uid_count,
             burn_uid=config.BURN_UID,
+            burn_all=config.BURN_ALL,
         )
     except WeightVectorError:
         logger.exception("weight vector failed structural guards; not stored")

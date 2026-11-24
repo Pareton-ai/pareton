@@ -20,6 +20,13 @@ WALLET_HOTKEY: str = os.environ.get("PARETON_WALLET_HOTKEY", "default")
 VERSION_KEY: int = int(os.environ.get("PARETON_VERSION_KEY", "2032"))
 # Emission not claimed by a seated leader goes here.
 BURN_UID: int = int(os.environ.get("PARETON_BURN_UID", "201"))
+# Send 100% of emission to BURN_UID and pay no leader. Set to false to resume
+# paying seated leaders by their campaign's emission rule.
+BURN_ALL: bool = os.environ.get("PARETON_BURN_ALL", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 # How often pareton-weights recomputes. 360 blocks is about 72 minutes.
 WEIGHTS_CADENCE_BLOCKS: int = int(
     os.environ.get("PARETON_WEIGHTS_CADENCE_BLOCKS", "360")

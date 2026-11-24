@@ -137,3 +137,10 @@ can be reclaimed mid-round. It also skips `split_disk` nodes: one such 8x H200
 node gave a full pod less than 700 GiB on `/root`. That cause is inferred from
 the node metadata, not proven inside the pod. A whole-disk secure node gave
 2.1 TB free and completed Muse round 4.
+
+## 2026-11-24: All emission burns to the owner UID
+
+`PARETON_BURN_ALL` defaults to true. The weight builder withholds every
+leader's share with note `burn_all`, so `PARETON_BURN_UID` (201, the owner)
+gets 1.0. Leaders and rounds are unchanged. Set `PARETON_BURN_ALL=false` to
+resume paying leaders by their campaign's emission rule.

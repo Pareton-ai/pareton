@@ -112,6 +112,7 @@ def build_weight_vector(
     hotkey_uids: Mapping[str, int],
     uid_count: int,
     burn_uid: int = config.BURN_UID,
+    burn_all: bool = False,
 ) -> WeightVector:
     """The dense weight vector plus its per-campaign breakdown.
 
@@ -128,6 +129,8 @@ def build_weight_vector(
     a vector, so a bad vector is never signed. Structural only: an
     economically lopsided but valid vector is signed, because a second place
     deciding what is payable can disagree with the formula.
+
+    `burn_all` withholds every leader's share, so `burn_uid` gets 1.0.
     """
     if not 0 <= burn_uid < uid_count:
         raise WeightVectorError(
@@ -150,6 +153,11 @@ def build_weight_vector(
         if campaign.status != "open":
             breakdown.append(
                 _withheld(campaign, hotkey=campaign.leader_hotkey, note="closed")
+            )
+            continue
+        if burn_all:
+            breakdown.append(
+                _withheld(campaign, hotkey=campaign.leader_hotkey, note="burn_all")
             )
             continue
         uid = hotkey_uids.get(campaign.leader_hotkey)
